@@ -25,34 +25,39 @@ Flags:
 | --- | --- | --- |
 - `target` (positional): path to the target codebase
 - `iterations` (positional): number of cumulative iterations
-- `--output`: output directory (default `./result/<target_dir_name>/<utc-timestamp>/` next to `run_experiment.py`; `target_dir_name` is the last segment of the target path if it is a directory, otherwise the parent directory’s name)
+- `--output`: optional override — if path ends with `.csv`, writes that file; otherwise treats it as a directory and writes `<stamp>-<model-slug>-log.csv` inside. Default: `./result/<target_repo_name>/<stamp>-<model-slug>-log.csv` next to `run_experiment.py` (`target_repo_name` = target dir basename, or parent dir when target is a file)
 - `--model`: forwarded to `codex exec --model`
 - `--timeout`: per-iteration timeout seconds (default 600)
-- `--branch`: experiment branch (default `codex-exp/<utc-timestamp>`)
+- `--branch`: experiment branch (default `codex-exp/<utc-timestamp>-<model-slug>`)
 
 The prompt is read from `prompt.env` (`CODEX_PROMPT=...`) or from the `CODEX_PROMPT` environment variable if already set.
 
 ## What it does
 
-1. **Bootstrap git.** If `--target` is not a git repo, it runs `git init`. It then
-   checks out an experiment branch and commits a baseline snapshot if the repo has
-   no commits yet or has uncommitted changes.
+1. **Bootstrap git.** If `--target` is not a git repo, it runs `git init`. If the
+   working tree is **clean** and a prior commit with message **`codex-exp: baseline`**
+   exists, it **`git checkout`**s that snapshot (not `main`), then creates the new
+   `codex-exp/...` branch from it. Otherwise it branches from the current `HEAD`.
+   If the repo had no commits yet **or** there are uncommitted changes, it commits
+   **`codex-exp: baseline`** once on the experiment branch (after branching).
 2. **For each iteration:**
    - Invoke `codex exec --full-auto --skip-git-repo-check --cd <target> [--model ...] <prompt>`.
    - `git add -A`, compute totals from `git diff --cached --numstat <prev_sha>`.
-   - Append one row to `results.csv`.
+   - Append one row to `<stamp>-<model>-log.csv` under `result/<target_repo_name>/`.
    - Commit (`--allow-empty`) so the next iteration diffs against this state.
 
 ## Output layout
 
-Under `--output` (default `./result/<target_dir_name>/<utc-timestamp>/`):
+Default log path layout:
 
 ```
-results.csv          # one row per iteration (totals)
+result/<target_repo_name>/<timestamp>-<model-slug>-log.csv
 ```
 
-`results.csv` columns:
-`run, files_changed, lines_added, lines_deleted, lines_total, duration_s, exit_code, timed_out, commit_sha, commit_message`.
+`...-log.csv` columns:
+`run, files_changed, lines_added, lines_deleted, lines_total, duration_s, exit_code, timed_out, commit_sha, commit_message, model, git_branch`.
+
+The **`model`** column is the resolved model (`--model` if set; otherwise read from `~/.codex/config.toml` when possible, else `default`). **`git_branch`** is the experiment branch created in the target repo (includes timestamp and model slug in the default name).
 
 ## Cleaning up the experiment branch
 
