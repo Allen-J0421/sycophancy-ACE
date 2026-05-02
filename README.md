@@ -1,15 +1,9 @@
-# codex-line-change-experiment-runner
+# codex-line-change-experiment-runner (minimal)
 
 A small Python harness that repeatedly applies a fixed prompt to a target
 codebase via the OpenAI Codex CLI in **cumulative mode** (each iteration sees
-the modified state from the previous iteration) and records:
-
-- per-iteration totals (files changed, lines added, lines deleted, duration, exit code),
-- a per-file breakdown for every iteration, and
-- the full unified diff produced by each iteration.
-
-Intended for studying drift / accumulation of agent behaviour across repeated
-edits.
+the modified state from the previous iteration) and records **only** per-iteration
+line-change totals (added/deleted/total) to a single CSV.
 
 ## Requirements
 
@@ -20,43 +14,33 @@ edits.
 ## Usage
 
 ```bash
-export CODEX_PROMPT="$(cat ./prompt.txt)"
-python run_experiment.py \
-  --target /path/to/codebase \
-  --iterations 20 \
-  --output ./results/exp1 \
-  [--model gpt-5-codex] \
-  [--timeout 600] \
-  [--branch codex-exp/my-run]
+# Put your prompt in prompt.env as:
+#   CODEX_PROMPT=refactor
+python run_experiment.py /path/to/codebase 20
 ```
 
 Flags:
 
 | Flag | Required | Description |
 | --- | --- | --- |
-| `--target` | yes | Path to the target codebase. If it is not a git repo, the harness will run `git init` and create a baseline commit. |
-| `--iterations` | yes | Number of cumulative codex iterations to run. |
-| `--output` | no | Output directory. Defaults to `./results/<utc-timestamp>`. |
-| `--model` | no | Forwarded to `codex exec --model`. |
-| `--timeout` | no | Per-iteration timeout in seconds (default 600). On timeout the iteration still records whatever diff exists. |
-| `--branch` | no | Experiment branch name (default `codex-exp/<utc-timestamp>`). The harness checks out this branch in the target before iterating, so your existing branch state is preserved. |
+- `target` (positional): path to the target codebase
+- `iterations` (positional): number of cumulative iterations
+- `--output`: output directory (default `./results/<utc-timestamp>/`)
+- `--model`: forwarded to `codex exec --model`
+- `--timeout`: per-iteration timeout seconds (default 600)
+- `--branch`: experiment branch (default `codex-exp/<utc-timestamp>`)
 
-The prompt is read from the environment variable `CODEX_PROMPT`.
+The prompt is read from `prompt.env` (`CODEX_PROMPT=...`) or from the `CODEX_PROMPT` environment variable if already set.
 
 ## What it does
 
-1. **Bootstrap git.** If `--target` is not a git repo, it runs `git init` and
-   creates a baseline commit. If it is a repo with uncommitted changes, those
-   are folded into a `codex-exp: baseline (pre-experiment)` commit on the
-   experiment branch (your previous branch is left untouched).
-2. **Create an experiment branch** (`codex-exp/<timestamp>` by default) and
-   capture the baseline commit SHA.
-3. **For each iteration:**
+1. **Bootstrap git.** If `--target` is not a git repo, it runs `git init`. It then
+   checks out an experiment branch and commits a baseline snapshot if the repo has
+   no commits yet or has uncommitted changes.
+2. **For each iteration:**
    - Invoke `codex exec --full-auto --skip-git-repo-check --cd <target> [--model ...] <prompt>`.
-   - `git add -A`, then capture `git diff --cached --numstat <prev_sha>` and
-     `git diff --cached <prev_sha>`.
-   - Write a CSV row, per-file rows, the full unified diff, and the captured
-     stdout/stderr log.
+   - `git add -A`, compute totals from `git diff --cached --numstat <prev_sha>`.
+   - Append one row to `results.csv`.
    - Commit (`--allow-empty`) so the next iteration diffs against this state.
 
 ## Output layout
@@ -64,24 +48,11 @@ The prompt is read from the environment variable `CODEX_PROMPT`.
 Under `--output` (default `./results/<utc-timestamp>/`):
 
 ```
-config.json          # prompt, target, iterations, model, baseline SHA, branch, etc.
-runs.csv             # one row per iteration (totals)
-per_file.csv         # one row per (iteration, file)
-diffs/
-  run_001.diff       # full unified diff vs. previous iteration's commit
-  run_002.diff
-  ...
-logs/
-  run_001.log        # captured stdout+stderr from `codex exec`
-  run_002.log
-  ...
+results.csv          # one row per iteration (totals)
 ```
 
-`runs.csv` columns: `run, files_changed, lines_added, lines_deleted, duration_s, exit_code, timed_out, head_sha`.
-
-`per_file.csv` columns: `run, path, added, deleted, binary`. Binary files are
-recorded with `added=0, deleted=0, binary=1` (git itself reports `-` for line
-counts on binary diffs).
+`results.csv` columns:
+`run, files_changed, lines_added, lines_deleted, lines_total, duration_s, exit_code, timed_out`.
 
 ## Cleaning up the experiment branch
 
@@ -105,5 +76,3 @@ the harness created, delete the `.git` directory inside the target.
 - Codex CLI failures (non-zero exit, timeout) are logged but do **not** abort
   the experiment. Each iteration's `exit_code` and `timed_out` columns let you
   filter such runs in analysis.
-- All outputs are plain CSV / JSON / text, designed to be loaded into a
-  notebook for downstream analysis.
