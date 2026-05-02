@@ -13,6 +13,7 @@ if "lines_total" not in df.columns:
 
 sns.lineplot(data=df, x="run", y="lines_total", marker="o")
 plt.xlabel("Iteration")
+plt.xticks(df["run"].values)
 plt.ylabel("Lines changed")
 plt.tight_layout()
 plt.savefig(out_path, dpi=200) if out_path else plt.show()
