@@ -29,6 +29,23 @@ def eprint(*args) -> None:
 def utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
+
+def eprint_codex_account() -> None:
+    """Print one line describing how Codex is authenticated (from `codex login status`)."""
+    proc = subprocess.run(
+        ["codex", "login", "status"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if proc.returncode == 0 and proc.stdout.strip():
+        eprint(f"[setup] Codex account: {' '.join(proc.stdout.split())}")
+    else:
+        err = (proc.stderr or "").strip().replace("\n", " ")
+        hint = f" ({err})" if err else ""
+        eprint(f"[setup] Codex account: unknown (codex login status failed{hint})")
+
+
 def load_prompt() -> str:
     # Prefer env var if already set.
     prompt = (os.environ.get("CODEX_PROMPT") or "").strip()
@@ -115,7 +132,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run Codex repeatedly and record line-change totals per iteration.")
     p.add_argument("target", type=Path, help="Target codebase directory OR a single file path.")
     p.add_argument("iterations", type=int, help="Number of cumulative iterations.")
-    p.add_argument("--output", type=Path, default=None, help="Output dir (default: ./results/<utc-ts>).")
+    p.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Output dir (default: ./result/<target_dir_name>/<utc-ts>/ next to this script).",
+    )
     p.add_argument("--model", type=str, default=None, help="Forwarded to `codex exec --model`.")
     p.add_argument("--timeout", type=int, default=600, help="Per-iteration timeout seconds (default 600).")
     p.add_argument("--branch", type=str, default=None, help="Experiment branch (default codex-exp/<utc-ts>).")
@@ -137,6 +159,8 @@ def main(argv: list[str] | None = None) -> int:
         eprint("error: `git` not found on PATH.")
         return 2
 
+    eprint_codex_account()
+
     prompt = load_prompt()
 
     target_path: Path = args.target.expanduser().resolve()
@@ -154,8 +178,10 @@ def main(argv: list[str] | None = None) -> int:
 
     stamp = utc_stamp()
     branch = args.branch or f"codex-exp/{stamp}"
-    default_out_base = Path(__file__).resolve().parent / "results"
-    out_dir = (args.output or (default_out_base / stamp)).resolve()
+    # Default: <sandbox>/result/<target_dir_name>/<utc_timestamp>/
+    target_dir_name = work_root.name or "target"
+    default_out_dir = Path(__file__).resolve().parent / "result" / target_dir_name / stamp
+    out_dir = (args.output or default_out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     results_csv = out_dir / "results.csv"
 
@@ -163,7 +189,20 @@ def main(argv: list[str] | None = None) -> int:
 
     with results_csv.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["run", "files_changed", "lines_added", "lines_deleted", "lines_total", "duration_s", "exit_code", "timed_out"])
+        w.writerow(
+            [
+                "run",
+                "files_changed",
+                "lines_added",
+                "lines_deleted",
+                "lines_total",
+                "duration_s",
+                "exit_code",
+                "timed_out",
+                "commit_sha",
+                "commit_message",
+            ]
+        )
 
         for i in range(1, args.iterations + 1):
             rc, duration, timed_out = run_codex(work_root, prompt, args.model, args.timeout)
@@ -178,9 +217,23 @@ def main(argv: list[str] | None = None) -> int:
             files_changed, lines_added, lines_deleted = sum_numstat(numstat)
             lines_total = lines_added + lines_deleted
 
-            git(work_root, ["commit", "-m", f"codex-exp: iteration {i}", "--allow-empty"])
+            commit_message = f"codex-exp: iteration {i}"
+            git(work_root, ["commit", "-m", commit_message, "--allow-empty"])
             prev_sha = git(work_root, ["rev-parse", "HEAD"]).stdout.strip()
-            w.writerow([i, files_changed, lines_added, lines_deleted, lines_total, f"{duration:.3f}", rc, int(timed_out)])
+            w.writerow(
+                [
+                    i,
+                    files_changed,
+                    lines_added,
+                    lines_deleted,
+                    lines_total,
+                    f"{duration:.3f}",
+                    rc,
+                    int(timed_out),
+                    prev_sha,
+                    commit_message,
+                ]
+            )
             eprint(f"[run_{i:03d}] +{lines_added} -{lines_deleted} total={lines_total} exit={rc}")
 
     eprint(f"[done] Wrote: {results_csv}")

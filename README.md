@@ -25,7 +25,7 @@ Flags:
 | --- | --- | --- |
 - `target` (positional): path to the target codebase
 - `iterations` (positional): number of cumulative iterations
-- `--output`: output directory (default `./results/<utc-timestamp>/`)
+- `--output`: output directory (default `./result/<target_dir_name>/<utc-timestamp>/` next to `run_experiment.py`; `target_dir_name` is the last segment of the target path if it is a directory, otherwise the parent directory’s name)
 - `--model`: forwarded to `codex exec --model`
 - `--timeout`: per-iteration timeout seconds (default 600)
 - `--branch`: experiment branch (default `codex-exp/<utc-timestamp>`)
@@ -45,14 +45,14 @@ The prompt is read from `prompt.env` (`CODEX_PROMPT=...`) or from the `CODEX_PRO
 
 ## Output layout
 
-Under `--output` (default `./results/<utc-timestamp>/`):
+Under `--output` (default `./result/<target_dir_name>/<utc-timestamp>/`):
 
 ```
 results.csv          # one row per iteration (totals)
 ```
 
 `results.csv` columns:
-`run, files_changed, lines_added, lines_deleted, lines_total, duration_s, exit_code, timed_out`.
+`run, files_changed, lines_added, lines_deleted, lines_total, duration_s, exit_code, timed_out, commit_sha, commit_message`.
 
 ## Cleaning up the experiment branch
 
