@@ -13,22 +13,162 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+CSV_COLUMNS = (
+    "run",
+    "files_changed",
+    "lines_added",
+    "lines_deleted",
+    "lines_total",
+    "duration_s",
+    "exit_code",
+    "timed_out",
+    "commit_sha",
+    "commit_message",
+    "model",
+    "git_branch",
+)
+CODEX_AUTO_FLAGS = ("--full-auto", "--skip-git-repo-check")
+
+
+@dataclass(frozen=True)
+class TargetScope:
+    root: Path
+    rel_path: str
+    pathspec: list[str] | None
+    codex_cd: Path
+
+    @property
+    def repo_name(self) -> str:
+        return self.root.name or "target"
+
+
+@dataclass(frozen=True)
+class LineStats:
+    files_changed: int
+    lines_added: int
+    lines_deleted: int
+
+    @classmethod
+    def empty(cls) -> LineStats:
+        return cls(files_changed=0, lines_added=0, lines_deleted=0)
+
+    @property
+    def lines_total(self) -> int:
+        return self.lines_added + self.lines_deleted
+
+    def plus(self, other: LineStats) -> LineStats:
+        return LineStats(
+            files_changed=self.files_changed + other.files_changed,
+            lines_added=self.lines_added + other.lines_added,
+            lines_deleted=self.lines_deleted + other.lines_deleted,
+        )
+
+
+@dataclass(frozen=True)
+class CodexResult:
+    exit_code: int
+    duration_s: float
+    timed_out: bool
+    session_id: str | None = None
+
+
+def codex_run_ok(codex: CodexResult) -> bool:
+    """True only if Codex exited 0 and did not time out."""
+    return codex.exit_code == 0 and not codex.timed_out
+
+
+@dataclass(frozen=True)
+class IterationResult:
+    number: int
+    stats: LineStats
+    codex: CodexResult
+    commit_sha: str
+    commit_message: str
+
+    def as_csv_row(self, *, model: str, branch: str) -> list[object]:
+        return [
+            self.number,
+            self.stats.files_changed,
+            self.stats.lines_added,
+            self.stats.lines_deleted,
+            self.stats.lines_total,
+            f"{self.codex.duration_s:.3f}",
+            self.codex.exit_code,
+            int(self.codex.timed_out),
+            self.commit_sha,
+            self.commit_message,
+            model,
+            branch,
+        ]
+
+
+@dataclass(frozen=True)
+class ExperimentConfig:
+    target: TargetScope
+    prompt: str
+    requested_model: str | None
+    effective_model: str
+    branch: str
+    results_csv: Path
+    start_commit: str
+    iterations: int
+    timeout: int
+
+
+@dataclass(frozen=True)
+class CliArgs:
+    target: Path
+    iterations: int
+    commit: str
+    output: Path | None
+    model: str | None
+    timeout: int
+    branch: str | None
+
+
+@dataclass(frozen=True)
+class ModelInfo:
+    effective: str
+    slug: str
 
 
 def eprint(*args) -> None:
     print(*args, file=sys.stderr)
 
 
+def run_text_command(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd is not None else None,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
 def utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def script_dir() -> Path:
+    return Path(__file__).resolve().parent
 
 
 def sanitize_slug(s: str, *, max_len: int = 64) -> str:
@@ -41,200 +181,433 @@ def sanitize_slug(s: str, *, max_len: int = 64) -> str:
     return t[:max_len]
 
 
+def codex_config_path() -> Path:
+    return Path.home() / ".codex" / "config.toml"
+
+
+def load_codex_config() -> dict[str, object] | None:
+    config_path = codex_config_path()
+    if sys.version_info < (3, 11) or not config_path.exists():
+        return None
+
+    try:
+        import tomllib
+
+        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    return data if isinstance(data, dict) else None
+
+
+def non_empty_string(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def model_from_codex_config(data: dict[str, object], profile: str | None) -> str | None:
+    model = non_empty_string(data.get("model"))
+    if model:
+        return model
+
+    profile_name = non_empty_string(profile)
+    profiles = data.get("profiles")
+    if not profile_name or not isinstance(profiles, dict):
+        return None
+
+    selected = profiles.get(profile_name)
+    if not isinstance(selected, dict):
+        return None
+    return non_empty_string(selected.get("model"))
+
+
 def resolve_effective_model(cli_model: str | None) -> str:
     """Model string passed to codex (--model); if unset, try ~/.codex/config.toml."""
-    if cli_model and cli_model.strip():
-        return cli_model.strip()
-    config_path = Path.home() / ".codex" / "config.toml"
-    if sys.version_info >= (3, 11) and config_path.exists():
-        try:
-            import tomllib
+    model = non_empty_string(cli_model)
+    if model:
+        return model
 
-            data = tomllib.loads(config_path.read_text(encoding="utf-8"))
-            m = data.get("model") if isinstance(data, dict) else None
-            if isinstance(m, str) and m.strip():
-                return m.strip()
-            prof = os.environ.get("CODEX_PROFILE")
-            if isinstance(prof, str) and prof.strip():
-                profiles = data.get("profiles") if isinstance(data, dict) else None
-                if isinstance(profiles, dict) and isinstance(profiles.get(prof.strip()), dict):
-                    mp = profiles[prof.strip()].get("model")
-                    if isinstance(mp, str) and mp.strip():
-                        return mp.strip()
-        except Exception:
-            pass
+    config_model = model_from_codex_config(load_codex_config() or {}, os.environ.get("CODEX_PROFILE"))
+    if config_model:
+        return config_model
     return "default"
+
+
+def resolve_model_info(cli_model: str | None) -> ModelInfo:
+    effective = resolve_effective_model(cli_model)
+    return ModelInfo(effective=effective, slug=sanitize_slug(effective))
+
+
+def non_warning_lines(text: str) -> list[str]:
+    out: list[str] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("WARNING:") or line.startswith("WARNING "):
+            continue
+        out.append(line)
+    return out
+
+
+def codex_status_line(lines: list[str]) -> str | None:
+    for line in lines:
+        low = line.lower()
+        if "logged in" in low or "not logged" in low:
+            return line
+    if lines:
+        return " ".join(lines)
+    return None
 
 
 def eprint_codex_account() -> None:
     """Print one line describing how Codex is authenticated (from `codex login status`)."""
-    proc = subprocess.run(
+    proc = run_text_command(
         ["codex", "login", "status"],
-        capture_output=True,
-        text=True,
         timeout=15,
     )
 
-    def _non_warning_lines(text: str) -> list[str]:
-        out: list[str] = []
-        for raw in (text or "").splitlines():
-            s = raw.strip()
-            if not s:
-                continue
-            if s.startswith("WARNING:") or s.startswith("WARNING "):
-                continue
-            out.append(s)
-        return out
-
     # Codex may print the real status on stderr; stdout can be empty.
-    lines = _non_warning_lines(proc.stdout) + _non_warning_lines(proc.stderr)
-    status_line = None
-    for line in lines:
-        low = line.lower()
-        if "logged in" in low or "not logged" in low:
-            status_line = line
-            break
-    if status_line is None and lines:
-        status_line = " ".join(lines)
+    lines = non_warning_lines(proc.stdout) + non_warning_lines(proc.stderr)
+    status_line = codex_status_line(lines)
 
     if status_line:
         eprint(f"[setup] Codex account: {status_line}")
     elif proc.returncode == 0:
         eprint("[setup] Codex account: (no text from `codex login status`)")
     else:
-        tail = " ".join(_non_warning_lines((proc.stderr or "") + (proc.stdout or "")))
-        eprint(f"[setup] Codex account: unknown (exit {proc.returncode}){(' — ' + tail) if tail else ''}")
+        tail = " ".join(lines)
+        detail = f" — {tail}" if tail else ""
+        eprint(f"[setup] Codex account: unknown (exit {proc.returncode}){detail}")
+
+
+def prompt_file_candidates() -> list[Path]:
+    return [Path.cwd() / "prompt.env", script_dir() / "prompt.env"]
+
+
+def prompt_from_env_line(raw: str) -> str | None:
+    line = raw.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        return None
+
+    key, value = line.split("=", 1)
+    if key.strip() != "CODEX_PROMPT":
+        return None
+
+    prompt = value.strip().strip('"').strip("'").strip()
+    return prompt or None
+
+
+def load_prompt_file(path: Path) -> str | None:
+    if not path.exists():
+        return None
+
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        prompt = prompt_from_env_line(raw)
+        if prompt:
+            return prompt
+    return None
 
 
 def load_prompt() -> str:
     # Prefer env var if already set.
-    prompt = (os.environ.get("CODEX_PROMPT") or "").strip()
+    prompt = non_empty_string(os.environ.get("CODEX_PROMPT"))
     if prompt:
         return prompt
 
     # Otherwise load from prompt.env (cwd first, then alongside this script).
-    candidates = [Path.cwd() / "prompt.env", Path(__file__).resolve().parent / "prompt.env"]
-    for p in candidates:
-        if not p.exists():
-            continue
-        for raw in p.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            if k.strip() == "CODEX_PROMPT":
-                val = v.strip().strip('"').strip("'").strip()
-                if val:
-                    return val
+    for path in prompt_file_candidates():
+        prompt = load_prompt_file(path)
+        if prompt:
+            return prompt
 
     raise SystemExit("Missing CODEX_PROMPT (set it in prompt.env or export CODEX_PROMPT).")
 
 
-def git(target: Path, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(
+def run_git(target: Path, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+    proc = run_text_command(
         ["git", *args],
-        cwd=str(target),
-        capture_output=True,
-        text=True,
+        cwd=target,
     )
     if check and proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed:\n{proc.stderr}")
     return proc
 
 
-BASELINE_MESSAGE = "codex-exp: baseline"
-
-
-def latest_baseline_sha(target: Path) -> str | None:
-    """Most recent matching commit reachable from `--all` (subject line equals BASELINE_MESSAGE)."""
-    proc = git(
-        target,
-        [
-            "log",
-            "--all",
-            "--format=%H",
-            "--grep",
-            f"^{BASELINE_MESSAGE}$",
-            "-n",
-            "1",
-        ],
-        check=False,
+def find_git_root(path: Path) -> Path:
+    """Find the git repository root containing the given path."""
+    cwd = path if path.is_dir() else path.parent
+    proc = run_text_command(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=cwd,
     )
-    if proc.returncode != 0 or not proc.stdout.strip():
+    if proc.returncode != 0:
+        raise RuntimeError(f"Not inside a git repository: {path}")
+    return Path(proc.stdout.strip())
+
+
+def setup_branch(repo_root: Path, commit: str, branch: str) -> str:
+    """Checkout commit and create experiment branch."""
+    run_git(repo_root, ["checkout", commit])
+    run_git(repo_root, ["checkout", "-b", branch])
+    return run_git(repo_root, ["rev-parse", "HEAD"]).stdout.strip()
+
+
+def parse_numstat_line(line: str) -> LineStats | None:
+    parts = line.split("\t", 2)
+    if len(parts) != 3:
         return None
-    return proc.stdout.strip().splitlines()[0]
+
+    added, deleted, _path = parts
+    if added == "-" or deleted == "-":
+        return LineStats(files_changed=1, lines_added=0, lines_deleted=0)
+
+    return LineStats(
+        files_changed=1,
+        lines_added=int(added),
+        lines_deleted=int(deleted),
+    )
 
 
-def ensure_git_baseline(target: Path, branch: str) -> str:
-    if git(target, ["rev-parse", "--is-inside-work-tree"], check=False).returncode != 0:
-        eprint(f"[setup] {target} is not a git repo; running `git init`.")
-        git(target, ["init"])
-
-    has_head = git(target, ["rev-parse", "--verify", "HEAD"], check=False).returncode == 0
-    dirty = bool(git(target, ["status", "--porcelain"], check=False).stdout.strip())
-
-    # If clean, detach to latest `codex-exp: baseline` commit (globally newest), then branch from there.
-    if has_head and not dirty:
-        sha = latest_baseline_sha(target)
-        if sha:
-            co = git(target, ["checkout", sha], check=False)
-            if co.returncode == 0:
-                eprint(f"[setup] Baseline commit:   {sha[:12]} ({BASELINE_MESSAGE})")
-            else:
-                eprint("[setup] Baseline checkout: (failed; branching from HEAD)\n" + co.stderr.strip())
-        else:
-            eprint("[setup] Baseline commit:   none yet (branch from current HEAD)")
-    elif dirty:
-        eprint("[setup] Baseline checkout:   skipped (dirty working tree)")
-
-    git(target, ["checkout", "-b", branch])
-
-    tip_has_commit = git(target, ["rev-parse", "--verify", "HEAD"], check=False).returncode == 0
-    tip_subj = ""
-    if tip_has_commit:
-        tip_subj = git(target, ["log", "-1", "--format=%s"], check=False).stdout.strip()
-
-    if (not tip_has_commit) or tip_subj != BASELINE_MESSAGE:
-        git(target, ["add", "-A"])
-        git(target, ["commit", "-m", BASELINE_MESSAGE, "--allow-empty"])
-
-    return git(target, ["rev-parse", "HEAD"]).stdout.strip()
-
-
-def sum_numstat(numstat_text: str) -> tuple[int, int, int]:
-    files = 0
-    added = 0
-    deleted = 0
+def sum_numstat(numstat_text: str) -> LineStats:
+    total = LineStats.empty()
     for line in numstat_text.splitlines():
-        parts = line.split("\t", 2)
-        if len(parts) != 3:
-            continue
-        a_str, d_str, _path = parts
-        files += 1
-        if a_str != "-" and d_str != "-":
-            added += int(a_str)
-            deleted += int(d_str)
-    return files, added, deleted
+        stats = parse_numstat_line(line)
+        if stats is not None:
+            total = total.plus(stats)
+    return total
 
 
-def run_codex(target: Path, prompt: str, model: str | None, timeout: int) -> tuple[int, float, bool]:
-    cmd = ["codex", "exec", "--full-auto", "--skip-git-repo-check", "--cd", str(target)]
+def resolve_existing_path(target: Path) -> Path:
+    target_path = target.expanduser().resolve()
+    if not target_path.exists():
+        raise FileNotFoundError(f"target does not exist: {target_path}")
+    return target_path
+
+
+def target_pathspec(repo_root: Path, target_path: Path) -> tuple[str, list[str] | None]:
+    if target_path.is_dir() and target_path == repo_root:
+        return "", None
+
+    rel_path = str(target_path.relative_to(repo_root))
+    return rel_path, [rel_path]
+
+
+def codex_cd_for_target(target_path: Path) -> Path:
+    if target_path.is_dir():
+        return target_path
+    return target_path.parent
+
+
+def resolve_target_scope(target: Path) -> TargetScope:
+    target_path = resolve_existing_path(target)
+    repo_root = find_git_root(target_path)
+    rel_path, pathspec = target_pathspec(repo_root, target_path)
+    return TargetScope(
+        root=repo_root,
+        rel_path=rel_path,
+        pathspec=pathspec,
+        codex_cd=codex_cd_for_target(target_path),
+    )
+
+
+def default_branch_name(stamp: str, model_slug: str, target_rel: str) -> str:
+    branch = f"codex-exp/{stamp}-{model_slug}"
+    if target_rel:
+        branch += f"-{sanitize_slug(target_rel)}"
+    return branch
+
+
+def result_log_filename(stamp: str, model_slug: str) -> str:
+    return f"{stamp}-{model_slug}-log.csv"
+
+
+def default_results_dir(repo_name: str) -> Path:
+    return script_dir() / "result" / repo_name
+
+
+def resolve_results_csv(
+    output: Path | None,
+    *,
+    repo_name: str,
+    stamp: str,
+    model_slug: str,
+) -> Path:
+    filename = result_log_filename(stamp, model_slug)
+    if output is None:
+        return (default_results_dir(repo_name) / filename).resolve()
+
+    out = output.expanduser().resolve()
+    if out.suffix.lower() == ".csv":
+        return out
+    return out / filename
+
+
+def diff_stats(
+    repo_root: Path,
+    previous_sha: str,
+    pathspec: list[str] | None,
+) -> LineStats:
+    diff_args = ["diff", "--cached", "--numstat", previous_sha]
+    if pathspec is not None:
+        diff_args += ["--", *pathspec]
+    return sum_numstat(run_git(repo_root, diff_args).stdout)
+
+
+def with_model_arg(cmd: list[str], model: str | None) -> list[str]:
     if model:
-        cmd += ["--model", model]
+        return [*cmd, "--model", model]
+    return cmd
+
+
+def build_codex_command(
+    codex_cd: Path,
+    prompt: str,
+    model: str | None,
+    *,
+    is_first: bool,
+    session_id: str | None = None,
+) -> list[str]:
+    if is_first:
+        cmd = ["codex", "exec", "--json", *CODEX_AUTO_FLAGS, "--cd", str(codex_cd)]
+    else:
+        if not session_id:
+            raise RuntimeError("Missing Codex session id for resume.")
+        # `codex exec resume` does not accept `--cd` in some Codex CLI versions.
+        # We enforce the working directory via `subprocess.run(..., cwd=...)` instead.
+        cmd = ["codex", "exec", "resume", session_id, "--json", *CODEX_AUTO_FLAGS]
+
+    cmd = with_model_arg(cmd, model)
     cmd.append(prompt)
+    return cmd
 
-    t0 = time.time()
+
+def parse_codex_session_id(jsonl_text: str) -> str | None:
+    """
+    Extract the Codex resume id from `codex exec --json` output.
+
+    We look for an event like:
+      {"type":"session_meta","payload":{"id":"..."}}
+
+    Some Codex versions emit:
+      {"type":"thread.started","thread_id":"..."}
+    """
+    for raw in jsonl_text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        if obj.get("type") == "thread.started":
+            tid = obj.get("thread_id")
+            if isinstance(tid, str) and tid.strip():
+                return tid.strip()
+
+        if obj.get("type") != "session_meta":
+            continue
+
+        payload = obj.get("payload")
+        if isinstance(payload, dict):
+            sid = payload.get("id")
+            if isinstance(sid, str) and sid.strip():
+                return sid.strip()
+    return None
+
+
+def run_codex(
+    *,
+    codex_cd: Path,
+    prompt: str,
+    model: str | None,
+    timeout: int,
+    is_first: bool = True,
+    session_id: str | None = None,
+) -> CodexResult:
+    cmd = build_codex_command(codex_cd, prompt, model, is_first=is_first, session_id=session_id)
+    t0 = time.monotonic()
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return proc.returncode, time.time() - t0, False
+        proc = run_text_command(cmd, cwd=codex_cd, timeout=timeout)
+        out = proc.stdout or ""
+        err = proc.stderr or ""
+        sid: str | None = None
+        if is_first:
+            # Different Codex versions may emit JSONL to stdout, stderr, or both.
+            sid = parse_codex_session_id("\n".join([out, err]))
+            if not sid:
+                preview: list[str] = []
+                if out.strip():
+                    preview.append("stdout (first 10 lines):\n" + "\n".join(out.splitlines()[:10]))
+                if err.strip():
+                    preview.append("stderr (first 10 lines):\n" + "\n".join(err.splitlines()[:10]))
+                detail = ("\n\n" + "\n\n".join(preview)) if preview else ""
+                raise RuntimeError(
+                    "Could not parse Codex session id from `codex exec --json` output. "
+                    "Try running with a longer timeout, or run `codex exec --json ...` manually to inspect output."
+                    f"{detail}"
+                )
+        return CodexResult(
+            exit_code=proc.returncode,
+            duration_s=time.monotonic() - t0,
+            timed_out=False,
+            session_id=sid,
+        )
     except subprocess.TimeoutExpired:
-        return 124, time.time() - t0, True
+        return CodexResult(
+            exit_code=124,
+            duration_s=time.monotonic() - t0,
+            timed_out=True,
+        )
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def run_iteration(
+    repo_root: Path,
+    *,
+    iteration: int,
+    codex_cd: Path,
+    prompt: str,
+    model: str | None,
+    timeout: int,
+    session_id: str | None,
+    previous_sha: str,
+    pathspec: list[str] | None,
+) -> IterationResult:
+    codex = run_codex(
+        codex_cd=codex_cd,
+        prompt=prompt,
+        model=model,
+        timeout=timeout,
+        is_first=(iteration == 1),
+        session_id=session_id,
+    )
+
+    # Always stage the whole repo; pathspec only scopes the recorded diff stats.
+    run_git(repo_root, ["add", "-A"])
+    stats = diff_stats(repo_root, previous_sha, pathspec)
+
+    commit_message = f"codex-exp: iteration {iteration}"
+    if not codex_run_ok(codex):
+        commit_message += f" [codex failed exit={codex.exit_code} timed_out={int(codex.timed_out)}]"
+    run_git(repo_root, ["commit", "-m", commit_message, "--allow-empty"])
+    commit_sha = run_git(repo_root, ["rev-parse", "HEAD"]).stdout.strip()
+
+    return IterationResult(
+        number=iteration,
+        stats=stats,
+        codex=codex,
+        commit_sha=commit_sha,
+        commit_message=commit_message,
+    )
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Run Codex repeatedly and record line-change totals per iteration.")
     p.add_argument("target", type=Path, help="Target codebase directory OR a single file path.")
     p.add_argument("iterations", type=int, help="Number of cumulative iterations.")
+    p.add_argument("commit", type=str, help="Commit hash to branch from.")
     p.add_argument(
         "--output",
         type=Path,
@@ -252,121 +625,155 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Experiment branch (default codex-exp/<utc-ts>-<model-slug>).",
     )
-    args = p.parse_args(argv)
-    if args.iterations < 1:
+    return p
+
+
+def parse_args(argv: list[str] | None = None) -> CliArgs:
+    p = build_arg_parser()
+    namespace = p.parse_args(argv)
+    if namespace.iterations < 1:
         p.error("iterations must be >= 1")
-    if args.timeout < 1:
+    if namespace.timeout < 1:
         p.error("--timeout must be >= 1")
-    return args
+    return CliArgs(
+        target=namespace.target,
+        iterations=namespace.iterations,
+        commit=namespace.commit,
+        output=namespace.output,
+        model=namespace.model,
+        timeout=namespace.timeout,
+        branch=namespace.branch,
+    )
+
+
+def require_tools(*tools: str) -> bool:
+    missing_tools = [tool for tool in tools if shutil.which(tool) is None]
+    if missing_tools:
+        for tool in missing_tools:
+            eprint(f"error: `{tool}` not found on PATH.")
+        return False
+    return True
+
+
+def build_experiment_config(args: CliArgs) -> ExperimentConfig:
+    target = resolve_target_scope(args.target)
+    stamp = utc_stamp()
+    model = resolve_model_info(args.model)
+    branch = args.branch or default_branch_name(stamp, model.slug, target.rel_path)
+    results_csv = resolve_results_csv(
+        args.output,
+        repo_name=target.repo_name,
+        stamp=stamp,
+        model_slug=model.slug,
+    )
+    return ExperimentConfig(
+        target=target,
+        prompt=load_prompt(),
+        requested_model=args.model,
+        effective_model=model.effective,
+        branch=branch,
+        results_csv=results_csv,
+        start_commit=args.commit,
+        iterations=args.iterations,
+        timeout=args.timeout,
+    )
+
+
+def eprint_setup(config: ExperimentConfig) -> None:
+    eprint(f"[setup] Model (effective): {config.effective_model}")
+    eprint(f"[setup] Experiment branch:  {config.branch}")
+    eprint(f"[setup] CSV log:            {config.results_csv}")
+
+
+def iter_experiment_results(
+    config: ExperimentConfig,
+    initial_sha: str,
+) -> Iterator[IterationResult]:
+    prev_sha = initial_sha
+    session_id: str | None = None
+    for i in range(1, config.iterations + 1):
+        result = run_iteration(
+            config.target.root,
+            iteration=i,
+            codex_cd=config.target.codex_cd,
+            prompt=config.prompt,
+            model=config.requested_model,
+            timeout=config.timeout,
+            session_id=session_id,
+            previous_sha=prev_sha,
+            pathspec=config.target.pathspec,
+        )
+        if i == 1:
+            session_id = result.codex.session_id
+        prev_sha = result.commit_sha
+        yield result
+
+
+def write_iteration_row(
+    writer: csv.writer,
+    result: IterationResult,
+    config: ExperimentConfig,
+) -> None:
+    writer.writerow(result.as_csv_row(model=config.effective_model, branch=config.branch))
+
+
+def eprint_iteration_result(result: IterationResult) -> None:
+    c = result.codex
+    if not codex_run_ok(c):
+        eprint(
+            f"[run_{result.number:03d}] ERROR: Codex did not complete successfully "
+            f"(exit={c.exit_code}, timed_out={int(c.timed_out)}). "
+            f"Line-change stats are not reported for this iteration (see CSV row if needed)."
+        )
+        return
+    eprint(
+        f"[run_{result.number:03d}] "
+        f"+{result.stats.lines_added} -{result.stats.lines_deleted} "
+        f"total={result.stats.lines_total} exit={c.exit_code}"
+    )
+
+
+def write_experiment_log(config: ExperimentConfig) -> int:
+    """Returns the number of iterations where Codex did not complete successfully."""
+    config.results_csv.parent.mkdir(parents=True, exist_ok=True)
+    eprint_setup(config)
+
+    prev_sha = setup_branch(config.target.root, config.start_commit, config.branch)
+    codex_failures = 0
+
+    with config.results_csv.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(CSV_COLUMNS)
+
+        for result in iter_experiment_results(config, prev_sha):
+            write_iteration_row(w, result, config)
+            eprint_iteration_result(result)
+            if not codex_run_ok(result.codex):
+                codex_failures += 1
+
+    eprint(f"[done] Wrote: {config.results_csv}")
+    return codex_failures
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
-    if shutil.which("codex") is None:
-        eprint("error: `codex` CLI not found on PATH.")
-        return 2
-    if shutil.which("git") is None:
-        eprint("error: `git` not found on PATH.")
+    if not require_tools("codex", "git"):
         return 2
 
     eprint_codex_account()
 
-    prompt = load_prompt()
-
-    target_path: Path = args.target.expanduser().resolve()
-    if not target_path.exists():
-        eprint(f"error: target does not exist: {target_path}")
+    try:
+        config = build_experiment_config(args)
+        codex_failures = write_experiment_log(config)
+    except (FileNotFoundError, RuntimeError) as exc:
+        eprint(f"error: {exc}")
         return 2
 
-    # Allow either a whole codebase directory or a single file within a codebase.
-    if target_path.is_dir():
-        work_root = target_path
-        pathspec: list[str] | None = None
-    else:
-        work_root = target_path.parent
-        pathspec = [str(target_path.relative_to(work_root))]
+    if codex_failures:
+        eprint(f"error: {codex_failures} iteration(s) failed: Codex did not exit successfully.")
+        return 1
 
-    stamp = utc_stamp()
-    effective_model = resolve_effective_model(args.model)
-    model_slug = sanitize_slug(effective_model)
-    target_repo_name = work_root.name or "target"
-
-    branch = args.branch or f"codex-exp/{stamp}-{model_slug}"
-
-    sandbox_dir = Path(__file__).resolve().parent
-    default_csv = sandbox_dir / "result" / target_repo_name / f"{stamp}-{model_slug}-log.csv"
-    if args.output is None:
-        results_csv = default_csv.resolve()
-    else:
-        out = args.output.expanduser().resolve()
-        if out.suffix.lower() == ".csv":
-            results_csv = out
-        else:
-            results_csv = out / f"{stamp}-{model_slug}-log.csv"
-
-    results_csv.parent.mkdir(parents=True, exist_ok=True)
-
-    eprint(f"[setup] Model (effective): {effective_model}")
-    eprint(f"[setup] Experiment branch:  {branch}")
-    eprint(f"[setup] CSV log:            {results_csv}")
-
-    prev_sha = ensure_git_baseline(work_root, branch)
-
-    with results_csv.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(
-            [
-                "run",
-                "files_changed",
-                "lines_added",
-                "lines_deleted",
-                "lines_total",
-                "duration_s",
-                "exit_code",
-                "timed_out",
-                "commit_sha",
-                "commit_message",
-                "model",
-                "git_branch",
-            ]
-        )
-
-        for i in range(1, args.iterations + 1):
-            rc, duration, timed_out = run_codex(work_root, prompt, args.model, args.timeout)
-
-            # Always stage the whole repo.
-            git(work_root, ["add", "-A"])
-
-            diff_args = ["diff", "--cached", "--numstat", prev_sha]
-            if pathspec is not None:
-                diff_args += ["--", *pathspec]
-            numstat = git(work_root, diff_args).stdout
-            files_changed, lines_added, lines_deleted = sum_numstat(numstat)
-            lines_total = lines_added + lines_deleted
-
-            commit_message = f"codex-exp: iteration {i}"
-            git(work_root, ["commit", "-m", commit_message, "--allow-empty"])
-            prev_sha = git(work_root, ["rev-parse", "HEAD"]).stdout.strip()
-            w.writerow(
-                [
-                    i,
-                    files_changed,
-                    lines_added,
-                    lines_deleted,
-                    lines_total,
-                    f"{duration:.3f}",
-                    rc,
-                    int(timed_out),
-                    prev_sha,
-                    commit_message,
-                    effective_model,
-                    branch,
-                ]
-            )
-            eprint(f"[run_{i:03d}] +{lines_added} -{lines_deleted} total={lines_total} exit={rc}")
-
-    eprint(f"[done] Wrote: {results_csv}")
     return 0
 
 
