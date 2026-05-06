@@ -1,0 +1,62 @@
+import glob
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+
+# Paper-friendly style settings
+plt.rcParams.update({
+    "font.family": "serif",
+    "font.size": 11,
+    "axes.linewidth": 0.8,
+    "xtick.direction": "in",
+    "ytick.direction": "in",
+    "xtick.major.size": 4,
+    "ytick.major.size": 4,
+    "legend.frameon": True,
+    "legend.framealpha": 0.9,
+    "legend.edgecolor": "0.8",
+    "figure.dpi": 150,
+})
+
+MARKERS = {"gpt-5.4-mini": "o", "gpt-5.2": "s", "gpt-5.5": "^"}
+COLORS  = {"gpt-5.4-mini": "#1f77b4", "gpt-5.2": "#d62728", "gpt-5.5": "#2ca02c"}
+LABELS  = {"gpt-5.4-mini": "GPT-5.4-mini", "gpt-5.2": "GPT-5.2", "gpt-5.5": "GPT-5.5"}
+
+base = os.path.dirname(os.path.abspath(__file__))
+
+for exp in sorted(os.listdir(base)):
+    exp_dir = os.path.join(base, exp)
+    if not os.path.isdir(exp_dir):
+        continue
+    csv_files = glob.glob(os.path.join(exp_dir, "*-log.csv"))
+    if not csv_files:
+        continue
+
+    fig, ax = plt.subplots(figsize=(5.5, 3.5))
+
+    for csv_path in sorted(csv_files):
+        df = pd.read_csv(csv_path)
+        model = df["model"].iloc[0]
+        color  = COLORS.get(model, None)
+        marker = MARKERS.get(model, "D")
+        label  = LABELS.get(model, model)
+        ax.plot(df["run"], df["lines_total"],
+                marker=marker, markersize=5, linewidth=1.2,
+                color=color, label=label)
+
+    ax.set_xlabel("Refactoring Iteration (run)")
+    ax.set_ylabel("Lines Total Changed")
+    ax.set_title(f"Lines Changed per Refactoring Run — {exp.upper()}")
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+    ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+
+    out_path = os.path.join(exp_dir, f"{exp}_lines_total.pdf")
+    fig.savefig(out_path, bbox_inches="tight")
+    png_path = out_path.replace(".pdf", ".png")
+    fig.savefig(png_path, bbox_inches="tight")
+    print(f"Saved: {out_path}")
+    print(f"Saved: {png_path}")
+    plt.close(fig)
