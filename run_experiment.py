@@ -6,7 +6,7 @@ Set a fixed prompt in `prompt.env` as `CODEX_PROMPT=...` (or export CODEX_PROMPT
 Each iteration:
 - runs `codex exec` on the target codebase
 - computes total line changes via `git diff --cached --numstat <prev_sha>`
-- appends one row to `./result/<target_repo>/<stamp>-<model>-log.csv` (see `--output`).
+- appends one row to `./result/<target_repo>/<stamp>-<model>-log.csv`.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ CSV_COLUMNS = (
     "git_branch",
 )
 CODEX_AUTO_FLAGS = ("--full-auto", "--skip-git-repo-check")
+DEFAULT_TIMEOUT = 600
 
 
 @dataclass(frozen=True)
@@ -124,7 +125,6 @@ class ExperimentConfig:
     results_csv: Path
     start_commit: str
     iterations: int
-    timeout: int
 
 
 @dataclass(frozen=True)
@@ -132,10 +132,7 @@ class CliArgs:
     target: Path
     iterations: int
     commit: str
-    output: Path | None
     model: str | None
-    timeout: int
-    branch: str | None
 
 
 @dataclass(frozen=True)
@@ -181,105 +178,23 @@ def sanitize_slug(s: str, *, max_len: int = 64) -> str:
     return t[:max_len]
 
 
-def codex_config_path() -> Path:
-    return Path.home() / ".codex" / "config.toml"
-
-
-def load_codex_config() -> dict[str, object] | None:
-    config_path = codex_config_path()
-    if sys.version_info < (3, 11) or not config_path.exists():
-        return None
-
-    try:
-        import tomllib
-
-        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-    return data if isinstance(data, dict) else None
-
-
 def non_empty_string(value: object) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
 
 
-def model_from_codex_config(data: dict[str, object], profile: str | None) -> str | None:
-    model = non_empty_string(data.get("model"))
-    if model:
-        return model
-
-    profile_name = non_empty_string(profile)
-    profiles = data.get("profiles")
-    if not profile_name or not isinstance(profiles, dict):
-        return None
-
-    selected = profiles.get(profile_name)
-    if not isinstance(selected, dict):
-        return None
-    return non_empty_string(selected.get("model"))
-
-
 def resolve_effective_model(cli_model: str | None) -> str:
-    """Model string passed to codex (--model); if unset, try ~/.codex/config.toml."""
+    """Model string passed to codex (--model); if unset, Codex uses its own default."""
     model = non_empty_string(cli_model)
     if model:
         return model
-
-    config_model = model_from_codex_config(load_codex_config() or {}, os.environ.get("CODEX_PROFILE"))
-    if config_model:
-        return config_model
     return "default"
 
 
 def resolve_model_info(cli_model: str | None) -> ModelInfo:
     effective = resolve_effective_model(cli_model)
     return ModelInfo(effective=effective, slug=sanitize_slug(effective))
-
-
-def non_warning_lines(text: str) -> list[str]:
-    out: list[str] = []
-    for raw in (text or "").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.startswith("WARNING:") or line.startswith("WARNING "):
-            continue
-        out.append(line)
-    return out
-
-
-def codex_status_line(lines: list[str]) -> str | None:
-    for line in lines:
-        low = line.lower()
-        if "logged in" in low or "not logged" in low:
-            return line
-    if lines:
-        return " ".join(lines)
-    return None
-
-
-def eprint_codex_account() -> None:
-    """Print one line describing how Codex is authenticated (from `codex login status`)."""
-    proc = run_text_command(
-        ["codex", "login", "status"],
-        timeout=15,
-    )
-
-    # Codex may print the real status on stderr; stdout can be empty.
-    lines = non_warning_lines(proc.stdout) + non_warning_lines(proc.stderr)
-    status_line = codex_status_line(lines)
-
-    if status_line:
-        eprint(f"[setup] Codex account: {status_line}")
-    elif proc.returncode == 0:
-        eprint("[setup] Codex account: (no text from `codex login status`)")
-    else:
-        tail = " ".join(lines)
-        detail = f" — {tail}" if tail else ""
-        eprint(f"[setup] Codex account: unknown (exit {proc.returncode}){detail}")
 
 
 def prompt_file_candidates() -> list[Path]:
@@ -419,31 +334,6 @@ def default_branch_name(stamp: str, model_slug: str, target_rel: str) -> str:
     return branch
 
 
-def result_log_filename(stamp: str, model_slug: str) -> str:
-    return f"{stamp}-{model_slug}-log.csv"
-
-
-def default_results_dir(repo_name: str) -> Path:
-    return script_dir() / "result" / repo_name
-
-
-def resolve_results_csv(
-    output: Path | None,
-    *,
-    repo_name: str,
-    stamp: str,
-    model_slug: str,
-) -> Path:
-    filename = result_log_filename(stamp, model_slug)
-    if output is None:
-        return (default_results_dir(repo_name) / filename).resolve()
-
-    out = output.expanduser().resolve()
-    if out.suffix.lower() == ".csv":
-        return out
-    return out / filename
-
-
 def diff_stats(
     repo_root: Path,
     previous_sha: str,
@@ -485,7 +375,7 @@ def build_codex_command(
 
 def parse_codex_session_id(jsonl_text: str) -> str | None:
     """
-    Extract the Codex resume id from `codex exec --json` output.
+    Extract the Codex resume id from `codex exec --json` output (session fields only).
 
     We look for an event like:
       {"type":"session_meta","payload":{"id":"..."}}
@@ -501,7 +391,8 @@ def parse_codex_session_id(jsonl_text: str) -> str | None:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-
+        if not isinstance(obj, dict):
+            continue
         if obj.get("type") == "thread.started":
             tid = obj.get("thread_id")
             if isinstance(tid, str) and tid.strip():
@@ -533,10 +424,11 @@ def run_codex(
         proc = run_text_command(cmd, cwd=codex_cd, timeout=timeout)
         out = proc.stdout or ""
         err = proc.stderr or ""
+        jsonl = "\n".join([out, err])
         sid: str | None = None
         if is_first:
             # Different Codex versions may emit JSONL to stdout, stderr, or both.
-            sid = parse_codex_session_id("\n".join([out, err]))
+            sid = parse_codex_session_id(jsonl)
             if not sid:
                 preview: list[str] = []
                 if out.strip():
@@ -563,6 +455,16 @@ def run_codex(
         )
 
 
+def _stage_all_and_diff_stats(
+    repo_root: Path,
+    previous_sha: str,
+    pathspec: list[str] | None,
+) -> LineStats:
+    """Stage the whole repo, then return scoped ``git diff --cached`` stats vs ``previous_sha``."""
+    run_git(repo_root, ["add", "-A"])
+    return diff_stats(repo_root, previous_sha, pathspec)
+
+
 def run_iteration(
     repo_root: Path,
     *,
@@ -570,27 +472,28 @@ def run_iteration(
     codex_cd: Path,
     prompt: str,
     model: str | None,
-    timeout: int,
     session_id: str | None,
     previous_sha: str,
     pathspec: list[str] | None,
 ) -> IterationResult:
+    """Run Codex once for one logged iteration, then stage, diff, and commit."""
+    is_first_codex = iteration == 1 and session_id is None
+
     codex = run_codex(
         codex_cd=codex_cd,
         prompt=prompt,
         model=model,
-        timeout=timeout,
-        is_first=(iteration == 1),
-        session_id=session_id,
+        timeout=DEFAULT_TIMEOUT,
+        is_first=is_first_codex,
+        session_id=session_id if not is_first_codex else None,
     )
 
-    # Always stage the whole repo; pathspec only scopes the recorded diff stats.
-    run_git(repo_root, ["add", "-A"])
-    stats = diff_stats(repo_root, previous_sha, pathspec)
+    stats = _stage_all_and_diff_stats(repo_root, previous_sha, pathspec)
 
     commit_message = f"codex-exp: iteration {iteration}"
     if not codex_run_ok(codex):
         commit_message += f" [codex failed exit={codex.exit_code} timed_out={int(codex.timed_out)}]"
+
     run_git(repo_root, ["commit", "-m", commit_message, "--allow-empty"])
     commit_sha = run_git(repo_root, ["rev-parse", "HEAD"]).stdout.strip()
 
@@ -608,23 +511,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("target", type=Path, help="Target codebase directory OR a single file path.")
     p.add_argument("iterations", type=int, help="Number of cumulative iterations.")
     p.add_argument("commit", type=str, help="Commit hash to branch from.")
-    p.add_argument(
-        "--output",
-        type=Path,
-        default=None,
-        help=(
-            "Override CSV path: if it ends with .csv, use as file; otherwise a directory "
-            "and writes <stamp>-<model>-log.csv there. Default: ./result/<target_repo>/<stamp>-<model>-log.csv"
-        ),
-    )
     p.add_argument("--model", type=str, default=None, help="Forwarded to `codex exec --model`.")
-    p.add_argument("--timeout", type=int, default=600, help="Per-iteration timeout seconds (default 600).")
-    p.add_argument(
-        "--branch",
-        type=str,
-        default=None,
-        help="Experiment branch (default codex-exp/<utc-ts>-<model-slug>).",
-    )
     return p
 
 
@@ -633,16 +520,11 @@ def parse_args(argv: list[str] | None = None) -> CliArgs:
     namespace = p.parse_args(argv)
     if namespace.iterations < 1:
         p.error("iterations must be >= 1")
-    if namespace.timeout < 1:
-        p.error("--timeout must be >= 1")
     return CliArgs(
         target=namespace.target,
         iterations=namespace.iterations,
         commit=namespace.commit,
-        output=namespace.output,
         model=namespace.model,
-        timeout=namespace.timeout,
-        branch=namespace.branch,
     )
 
 
@@ -659,13 +541,8 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
     target = resolve_target_scope(args.target)
     stamp = utc_stamp()
     model = resolve_model_info(args.model)
-    branch = args.branch or default_branch_name(stamp, model.slug, target.rel_path)
-    results_csv = resolve_results_csv(
-        args.output,
-        repo_name=target.repo_name,
-        stamp=stamp,
-        model_slug=model.slug,
-    )
+    branch = default_branch_name(stamp, model.slug, target.rel_path)
+    results_csv = (script_dir() / "result" / target.repo_name / f"{stamp}-{model.slug}-log.csv").resolve()
     return ExperimentConfig(
         target=target,
         prompt=load_prompt(),
@@ -675,7 +552,6 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
         results_csv=results_csv,
         start_commit=args.commit,
         iterations=args.iterations,
-        timeout=args.timeout,
     )
 
 
@@ -698,7 +574,6 @@ def iter_experiment_results(
             codex_cd=config.target.codex_cd,
             prompt=config.prompt,
             model=config.requested_model,
-            timeout=config.timeout,
             session_id=session_id,
             previous_sha=prev_sha,
             pathspec=config.target.pathspec,
@@ -723,7 +598,7 @@ def eprint_iteration_result(result: IterationResult) -> None:
         eprint(
             f"[run_{result.number:03d}] ERROR: Codex did not complete successfully "
             f"(exit={c.exit_code}, timed_out={int(c.timed_out)}). "
-            f"Line-change stats are not reported for this iteration (see CSV row if needed)."
+            "CSV line-change totals reflect the staged diff at commit time and may be partial."
         )
         return
     eprint(
@@ -760,8 +635,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if not require_tools("codex", "git"):
         return 2
-
-    eprint_codex_account()
 
     try:
         config = build_experiment_config(args)

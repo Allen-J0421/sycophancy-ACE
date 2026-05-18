@@ -26,10 +26,7 @@ Flags:
 - `target` (positional): path to a target directory or file within a git repo
 - `iterations` (positional): number of cumulative iterations
 - `commit` (positional): commit hash/ref to branch from (e.g. `HEAD`, a SHA, or a tag)
-- `--output`: optional override — if path ends with `.csv`, writes that file; otherwise treats it as a directory and writes `<stamp>-<model-slug>-log.csv` inside. Default: `./result/<target_repo_name>/<stamp>-<model-slug>-log.csv` next to `run_experiment.py` (`target_repo_name` = target dir basename, or parent dir when target is a file)
 - `--model`: forwarded to `codex exec --model`
-- `--timeout`: per-iteration timeout seconds (default 600)
-- `--branch`: experiment branch (default `codex-exp/<utc-timestamp>-<model-slug>[-<target-slug>]`)
 
 The prompt is read from `prompt.env` (`CODEX_PROMPT=...`) or from the `CODEX_PROMPT` environment variable if already set.
 
