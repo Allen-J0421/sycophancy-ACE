@@ -119,7 +119,7 @@ class IterationResult:
 class ExperimentConfig:
     target: TargetScope
     prompt: str
-    requested_model: str | None
+    requested_model: str
     effective_model: str
     branch: str
     results_csv: Path
@@ -132,7 +132,8 @@ class CliArgs:
     target: Path
     iterations: int
     commit: str
-    model: str | None
+    model: str
+    label: str | None
 
 
 @dataclass(frozen=True)
@@ -184,17 +185,16 @@ def non_empty_string(value: object) -> str | None:
     return None
 
 
-def resolve_effective_model(cli_model: str | None) -> str:
-    """Model string passed to codex (--model); if unset, Codex uses its own default."""
-    model = non_empty_string(cli_model)
-    if model:
-        return model
-    return "default"
+def resolve_label_slug(label: str | None) -> str | None:
+    """Sanitized label slug for branch/result paths, or None if no label was given."""
+    text = non_empty_string(label)
+    if not text:
+        return None
+    return sanitize_slug(text)
 
 
-def resolve_model_info(cli_model: str | None) -> ModelInfo:
-    effective = resolve_effective_model(cli_model)
-    return ModelInfo(effective=effective, slug=sanitize_slug(effective))
+def resolve_model_info(model: str) -> ModelInfo:
+    return ModelInfo(effective=model, slug=sanitize_slug(model))
 
 
 def prompt_file_candidates() -> list[Path]:
@@ -327,8 +327,16 @@ def resolve_target_scope(target: Path) -> TargetScope:
     )
 
 
-def default_branch_name(stamp: str, model_slug: str, target_rel: str) -> str:
+def default_branch_name(
+    stamp: str,
+    model_slug: str,
+    target_rel: str,
+    *,
+    label_slug: str | None = None,
+) -> str:
     branch = f"codex-exp/{stamp}-{model_slug}"
+    if label_slug:
+        branch += f"-{label_slug}"
     if target_rel:
         branch += f"-{sanitize_slug(target_rel)}"
     return branch
@@ -345,16 +353,10 @@ def diff_stats(
     return sum_numstat(run_git(repo_root, diff_args).stdout)
 
 
-def with_model_arg(cmd: list[str], model: str | None) -> list[str]:
-    if model:
-        return [*cmd, "--model", model]
-    return cmd
-
-
 def build_codex_command(
     codex_cd: Path,
     prompt: str,
-    model: str | None,
+    model: str,
     *,
     is_first: bool,
     session_id: str | None = None,
@@ -368,8 +370,7 @@ def build_codex_command(
         # We enforce the working directory via `subprocess.run(..., cwd=...)` instead.
         cmd = ["codex", "exec", "resume", session_id, "--json", *CODEX_AUTO_FLAGS]
 
-    cmd = with_model_arg(cmd, model)
-    cmd.append(prompt)
+    cmd = [*cmd, "--model", model, prompt]
     return cmd
 
 
@@ -413,7 +414,7 @@ def run_codex(
     *,
     codex_cd: Path,
     prompt: str,
-    model: str | None,
+    model: str,
     timeout: int,
     is_first: bool = True,
     session_id: str | None = None,
@@ -471,7 +472,7 @@ def run_iteration(
     iteration: int,
     codex_cd: Path,
     prompt: str,
-    model: str | None,
+    model: str,
     session_id: str | None,
     previous_sha: str,
     pathspec: list[str] | None,
@@ -511,7 +512,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("target", type=Path, help="Target codebase directory OR a single file path.")
     p.add_argument("iterations", type=int, help="Number of cumulative iterations.")
     p.add_argument("commit", type=str, help="Commit hash to branch from.")
-    p.add_argument("--model", type=str, default=None, help="Forwarded to `codex exec --model`.")
+    p.add_argument(
+        "--model",
+        type=str,
+        required=True,
+        help="Model for codex exec and log naming (e.g. gpt-5.5).",
+    )
+    p.add_argument(
+        "--label",
+        type=str,
+        default=None,
+        help="Optional tag appended to experiment branch and result/<repo>-<label>/ folder.",
+    )
     return p
 
 
@@ -520,11 +532,17 @@ def parse_args(argv: list[str] | None = None) -> CliArgs:
     namespace = p.parse_args(argv)
     if namespace.iterations < 1:
         p.error("iterations must be >= 1")
+    model = non_empty_string(namespace.model)
+    if not model:
+        p.error("--model must be non-empty")
+    if namespace.label is not None and not non_empty_string(namespace.label):
+        p.error("--label must be non-empty")
     return CliArgs(
         target=namespace.target,
         iterations=namespace.iterations,
         commit=namespace.commit,
-        model=namespace.model,
+        model=model,
+        label=namespace.label,
     )
 
 
@@ -541,8 +559,12 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
     target = resolve_target_scope(args.target)
     stamp = utc_stamp()
     model = resolve_model_info(args.model)
-    branch = default_branch_name(stamp, model.slug, target.rel_path)
-    results_csv = (script_dir() / "result" / target.repo_name / f"{stamp}-{model.slug}-log.csv").resolve()
+    label_slug = resolve_label_slug(args.label)
+    branch = default_branch_name(stamp, model.slug, target.rel_path, label_slug=label_slug)
+    result_dir = target.repo_name
+    if label_slug:
+        result_dir = f"{target.repo_name}-{label_slug}"
+    results_csv = (script_dir() / "result" / result_dir / f"{stamp}-{model.slug}-log.csv").resolve()
     return ExperimentConfig(
         target=target,
         prompt=load_prompt(),
