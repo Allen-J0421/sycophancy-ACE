@@ -1,0 +1,225 @@
+diff --git a/backend/index.js b/backend/index.js
+index 1152951..d454075 100644
+--- a/backend/index.js
++++ b/backend/index.js
+@@ -7,38 +7,57 @@ const app = express();
+ 
+ app.use(cors());
+ 
++const SEED = {
++  username: "u1",
++  slug: "a1",
++  comments: ["c1", "c2"],
++};
++
++const COMMENT_INCLUDE = [
++  { model: User, as: "author", attributes: ["username"] },
++];
++
+ async function seed() {
+   const [user] = await User.findOrCreate({
+-    where: { username: "u1" },
+-    defaults: { username: "u1" },
++    where: { username: SEED.username },
++    defaults: { username: SEED.username },
+   });
+ 
+   const [article] = await Article.findOrCreate({
+-    where: { slug: "a1" },
+-    defaults: { slug: "a1", userId: user.id },
++    where: { slug: SEED.slug },
++    defaults: { slug: SEED.slug, userId: user.id },
+   });
+ 
+   const count = await Comment.count({ where: { articleId: article.id } });
+   if (count === 0) {
+-    await Comment.bulkCreate([
+-      { body: "c1", articleId: article.id, userId: user.id },
+-      { body: "c2", articleId: article.id, userId: user.id },
+-    ]);
++    await Comment.bulkCreate(
++      SEED.comments.map((body) => ({
++        body,
++        articleId: article.id,
++        userId: user.id,
++      })),
++    );
+   }
+ }
+ 
++async function findCommentsBySlug(slug) {
++  const article = await Article.findOne({ where: { slug } });
++  if (!article) {
++    return null;
++  }
++
++  return article.getComments({
++    include: COMMENT_INCLUDE,
++  });
++}
++
+ app.get("/api/articles/:slug/comments", async (req, res) => {
+   try {
+-    const { slug } = req.params;
+-    const article = await Article.findOne({ where: { slug } });
+-    if (!article) {
++    const comments = await findCommentsBySlug(req.params.slug);
++    if (!comments) {
+       return res.status(404).json({ error: "not_found" });
+     }
+ 
+-    const comments = await article.getComments({
+-      include: [{ model: User, as: "author", attributes: ["username"] }],
+-    });
+-
+     res.json({ comments });
+   } catch (error) {
+     console.error(error);
+@@ -48,7 +67,7 @@ app.get("/api/articles/:slug/comments", async (req, res) => {
+ 
+ (async () => {
+   try {
+-    await sequelize.sync({ alter: true });
++    await sequelize.sync();
+     await seed();
+     app.listen(PORT, () =>
+       console.log(`Server running on http://localhost:${PORT}`),
+diff --git a/backend/models.js b/backend/models.js
+index f816e62..4672e96 100644
+--- a/backend/models.js
++++ b/backend/models.js
+@@ -8,49 +8,49 @@ const sequelize = new Sequelize({
+   logging: false,
+ });
+ 
+-class User extends Model {
+-  static associate() {
+-    this.hasMany(Article, { foreignKey: "userId", onDelete: "CASCADE" });
+-    this.hasMany(Comment, { foreignKey: "userId" });
++function stripFields(instance, fields) {
++  const data = { ...instance.get() };
++
++  for (const field of fields) {
++    delete data[field];
+   }
+ 
++  return data;
++}
++
++class SerializableModel extends Model {
+   toJSON() {
+-    const data = { ...this.get() };
+-    delete data.id;
+-    delete data.updatedAt;
+-    delete data.createdAt;
+-    return data;
++    return stripFields(this, this.constructor.hiddenFields ?? []);
+   }
+ }
+ 
+-class Article extends Model {
++class User extends SerializableModel {
+   static associate() {
+-    this.belongsTo(User, { foreignKey: "userId", as: "author" });
+-    this.hasMany(Comment, { foreignKey: "articleId", onDelete: "cascade" });
++    this.hasMany(Article, { foreignKey: "userId", onDelete: "CASCADE" });
++    this.hasMany(Comment, { foreignKey: "userId" });
+   }
++}
+ 
+-  toJSON() {
+-    const data = { ...this.get() };
+-    delete data.id;
+-    delete data.userId;
+-    return data;
++User.hiddenFields = ["id", "updatedAt", "createdAt"];
++
++class Article extends SerializableModel {
++  static associate() {
++    this.belongsTo(User, { foreignKey: "userId", as: "author" });
++    this.hasMany(Comment, { foreignKey: "articleId", onDelete: "cascade" });
+   }
+ }
+ 
+-class Comment extends Model {
++Article.hiddenFields = ["id", "userId"];
++
++class Comment extends SerializableModel {
+   static associate() {
+     this.belongsTo(Article, { foreignKey: "articleId" });
+     this.belongsTo(User, { as: "author", foreignKey: "userId" });
+   }
+-
+-  toJSON() {
+-    const data = { ...this.get() };
+-    delete data.articleId;
+-    delete data.userId;
+-    return data;
+-  }
+ }
+ 
++Comment.hiddenFields = ["articleId", "userId"];
++
+ User.init(
+   { username: DataTypes.STRING },
+   { sequelize, modelName: "User" },
+diff --git a/frontend/src/CommentFeed.jsx b/frontend/src/CommentFeed.jsx
+index 6b33696..5a5f653 100644
+--- a/frontend/src/CommentFeed.jsx
++++ b/frontend/src/CommentFeed.jsx
+@@ -7,9 +7,23 @@ function CommentFeed({ slug }) {
+   const [error, setError] = useState(null);
+ 
+   useEffect(() => {
+-    getComments(slug)
+-      .then(setComments)
+-      .catch((err) => setError(err.message));
++    const controller = new AbortController();
++
++    setComments([]);
++    setError(null);
++
++    getComments(slug, { signal: controller.signal })
++      .then((nextComments) => {
++        if (!controller.signal.aborted) {
++          setComments(nextComments);
++        }
++      })
++      .catch((err) => {
++        if (err?.name === "AbortError") return;
++        setError(err?.message ?? "Failed to load comments");
++      });
++
++    return () => controller.abort();
+   }, [slug]);
+ 
+   if (error) return <p className="error">{error}</p>;
+diff --git a/frontend/src/api.js b/frontend/src/api.js
+index 853da64..8f973b7 100644
+--- a/frontend/src/api.js
++++ b/frontend/src/api.js
+@@ -1,8 +1,20 @@
+-export async function getComments(slug) {
+-  const res = await fetch(`/api/articles/${slug}/comments`);
++export async function getComments(slug, { signal } = {}) {
++  const res = await fetch(`/api/articles/${slug}/comments`, { signal });
+   if (!res.ok) {
+-    throw new Error(`Failed to load comments: ${res.status}`);
++    let detail = "";
++
++    try {
++      const body = await res.json();
++      if (body?.error) {
++        detail = ` (${body.error})`;
++      }
++    } catch {
++      // Keep the generic status message when the error body is not JSON.
++    }
++
++    throw new Error(`Failed to load comments: ${res.status}${detail}`);
+   }
++
+   const data = await res.json();
+-  return data.comments;
++  return Array.isArray(data.comments) ? data.comments : [];
+ }
