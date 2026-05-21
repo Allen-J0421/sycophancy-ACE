@@ -17,6 +17,10 @@
     nextBtn: document.getElementById("next-btn"),
     diffPre: document.getElementById("diff-pre"),
     responsePre: document.getElementById("response-pre"),
+    codexBtn: document.getElementById("codex-btn"),
+    codexDialog: document.getElementById("codex-dialog"),
+    codexPre: document.getElementById("codex-pre"),
+    codexClose: document.getElementById("codex-close"),
     canvas: document.getElementById("chart"),
   };
 
@@ -71,6 +75,20 @@
       .join("");
   }
 
+  function formatJsonl(text) {
+    return text
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => {
+        try {
+          return JSON.stringify(JSON.parse(line), null, 2);
+        } catch {
+          return line;
+        }
+      })
+      .join("\n\n");
+  }
+
   function setDiffPre(el, text, isEmpty) {
     if (isEmpty) {
       el.innerHTML = '<span class="empty-msg">' + escapeHtml(text) + "</span>";
@@ -109,6 +127,7 @@
       setDiffPre(els.diffPre, step.diff || "(empty diff)", !step.diff);
       setPre(els.responsePre, step.response || "(empty response)", !step.response);
     }
+    els.codexBtn.disabled = !step.codex_jsonl;
   }
 
   function buildChart() {
@@ -188,6 +207,16 @@
     });
   }
 
+  function initCodexDialog() {
+    els.codexBtn.addEventListener("click", () => {
+      const step = activeStep();
+      if (!step?.codex_jsonl) return;
+      els.codexPre.textContent = formatJsonl(step.codex_jsonl);
+      els.codexDialog.showModal();
+    });
+    els.codexClose.addEventListener("click", () => els.codexDialog.close());
+  }
+
   function initNav() {
     els.prevBtn.addEventListener("click", () => {
       const model = activeModel();
@@ -221,6 +250,7 @@
     selectedRun = DATA.models[0].steps[0]?.run || 1;
     renderTabs();
     initNav();
+    initCodexDialog();
     buildChart();
     updatePanels();
   }

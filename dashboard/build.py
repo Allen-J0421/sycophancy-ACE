@@ -61,12 +61,16 @@ def load_steps_from_csv(csv_path: Path) -> list[dict]:
             run_dir = artifacts_dir / f"run_{run:03d}"
             diff_path = run_dir / "diff.patch"
             response_path = run_dir / "response.txt"
+            codex_path = run_dir / "codex.jsonl"
             has_artifacts = (
-                diff_path.exists() or response_path.exists() or (run_dir / "codex.jsonl").exists()
+                diff_path.exists() or response_path.exists() or codex_path.exists()
             )
             diff = truncate_text(read_artifact_file(diff_path)) if diff_path.exists() else ""
             response = (
                 truncate_text(read_artifact_file(response_path)) if response_path.exists() else ""
+            )
+            codex_jsonl = (
+                truncate_text(read_artifact_file(codex_path)) if codex_path.exists() else ""
             )
 
             steps.append(
@@ -82,6 +86,7 @@ def load_steps_from_csv(csv_path: Path) -> list[dict]:
                     "commit_sha": row["commit_sha"],
                     "diff": diff,
                     "response": response,
+                    "codex_jsonl": codex_jsonl,
                     "has_artifacts": has_artifacts,
                 }
             )
