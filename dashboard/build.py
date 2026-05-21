@@ -139,26 +139,22 @@ def render_dashboard(data: dict) -> str:
     return html
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Build static dashboard HTML for an experiment.")
-    parser.add_argument(
-        "--exp",
-        required=True,
-        help="Experiment folder name under result/ (e.g. target, bubble_sort).",
-    )
-    parser.add_argument(
-        "--result-dir",
-        type=Path,
-        default=_REPO_ROOT / "result",
-        help="Path to result/ directory (default: repo result/).",
-    )
-    args = parser.parse_args(argv)
+def experiment_dirs_with_logs(result_dir: Path) -> list[Path]:
+    """Return experiment subdirs under result/ that contain at least one *-log.csv."""
+    dirs: list[Path] = []
+    if not result_dir.is_dir():
+        return dirs
+    for exp_dir in sorted(result_dir.iterdir()):
+        if not exp_dir.is_dir() or exp_dir.name.startswith("."):
+            continue
+        if exp_dir.name == "__pycache__":
+            continue
+        if list(exp_dir.glob("*-log.csv")):
+            dirs.append(exp_dir)
+    return dirs
 
-    exp_dir = (args.result_dir / args.exp).resolve()
-    if not exp_dir.is_dir():
-        print(f"error: experiment directory not found: {exp_dir}", file=sys.stderr)
-        return 2
 
+def build_one_experiment(exp_dir: Path) -> int:
     try:
         data = build_experiment_data(exp_dir)
     except FileNotFoundError as exc:
@@ -168,6 +164,64 @@ def main(argv: list[str] | None = None) -> int:
     out_path = exp_dir / "dashboard.html"
     out_path.write_text(render_dashboard(data), encoding="utf-8")
     print(f"Wrote: {out_path}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Build static dashboard HTML for an experiment.")
+    parser.add_argument(
+        "--exp",
+        help="Experiment folder name under result/ (e.g. target, bubble_sort).",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Build dashboards for every result/ subdir that has *-log.csv.",
+    )
+    parser.add_argument(
+        "--result-dir",
+        type=Path,
+        default=_REPO_ROOT / "result",
+        help="Path to result/ directory (default: repo result/).",
+    )
+    parser.add_argument(
+        "--no-index",
+        action="store_true",
+        help="Do not regenerate the root landing page (index.html).",
+    )
+    args = parser.parse_args(argv)
+
+    if not args.all and not args.exp:
+        parser.error("one of --exp or --all is required")
+
+    result_dir = args.result_dir.resolve()
+
+    if args.all:
+        exp_dirs = experiment_dirs_with_logs(result_dir)
+        if not exp_dirs:
+            print(f"error: no experiment directories with *-log.csv in {result_dir}", file=sys.stderr)
+            return 2
+        for exp_dir in exp_dirs:
+            rc = build_one_experiment(exp_dir)
+            if rc != 0:
+                return rc
+    else:
+        exp_dir = (result_dir / args.exp).resolve()
+        if not exp_dir.is_dir():
+            print(f"error: experiment directory not found: {exp_dir}", file=sys.stderr)
+            return 2
+        rc = build_one_experiment(exp_dir)
+        if rc != 0:
+            return rc
+
+    if not args.no_index:
+        if str(_SCRIPT_DIR) not in sys.path:
+            sys.path.insert(0, str(_SCRIPT_DIR))
+        from build_index import build_landing_page
+
+        index_path = build_landing_page(result_dir)
+        print(f"Wrote: {index_path}")
+
     return 0
 
 
