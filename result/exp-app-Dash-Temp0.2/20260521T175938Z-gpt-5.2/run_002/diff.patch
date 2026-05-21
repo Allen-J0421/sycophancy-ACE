@@ -1,0 +1,234 @@
+diff --git a/backend/app.js b/backend/app.js
+new file mode 100644
+index 0000000..f8e4844
+--- /dev/null
++++ b/backend/app.js
+@@ -0,0 +1,19 @@
++const express = require("express");
++const cors = require("cors");
++const commentsRouter = require("./routes/comments");
++
++function createApp() {
++  const app = express();
++
++  app.use(cors());
++  app.use("/api", commentsRouter);
++
++  app.use((error, req, res, next) => {
++    console.error(error);
++    res.status(500).json({ error: "server_error" });
++  });
++
++  return app;
++}
++
++module.exports = createApp;
+diff --git a/backend/index.js b/backend/index.js
+index 1152951..6299e6c 100644
+--- a/backend/index.js
++++ b/backend/index.js
+@@ -1,55 +1,14 @@
+-const express = require("express");
+-const cors = require("cors");
+-const { sequelize, User, Article, Comment } = require("./models");
++const { sequelize } = require("./models");
+ 
+-const PORT = 3001;
+-const app = express();
+-
+-app.use(cors());
+-
+-async function seed() {
+-  const [user] = await User.findOrCreate({
+-    where: { username: "u1" },
+-    defaults: { username: "u1" },
+-  });
+-
+-  const [article] = await Article.findOrCreate({
+-    where: { slug: "a1" },
+-    defaults: { slug: "a1", userId: user.id },
+-  });
+-
+-  const count = await Comment.count({ where: { articleId: article.id } });
+-  if (count === 0) {
+-    await Comment.bulkCreate([
+-      { body: "c1", articleId: article.id, userId: user.id },
+-      { body: "c2", articleId: article.id, userId: user.id },
+-    ]);
+-  }
+-}
+-
+-app.get("/api/articles/:slug/comments", async (req, res) => {
+-  try {
+-    const { slug } = req.params;
+-    const article = await Article.findOne({ where: { slug } });
+-    if (!article) {
+-      return res.status(404).json({ error: "not_found" });
+-    }
+-
+-    const comments = await article.getComments({
+-      include: [{ model: User, as: "author", attributes: ["username"] }],
+-    });
+-
+-    res.json({ comments });
+-  } catch (error) {
+-    console.error(error);
+-    res.status(500).json({ error: "server_error" });
+-  }
+-});
++const PORT = process.env.PORT ?? 3001;
++const createApp = require("./app");
++const seed = require("./seed");
+ 
+ (async () => {
+   try {
+     await sequelize.sync({ alter: true });
+     await seed();
++    const app = createApp();
+     app.listen(PORT, () =>
+       console.log(`Server running on http://localhost:${PORT}`),
+     );
+diff --git a/backend/routes/comments.js b/backend/routes/comments.js
+new file mode 100644
+index 0000000..208c974
+--- /dev/null
++++ b/backend/routes/comments.js
+@@ -0,0 +1,24 @@
++const express = require("express");
++const { Article, User } = require("../models");
++const asyncHandler = require("../utils/asyncHandler");
++
++const router = express.Router();
++
++router.get(
++  "/articles/:slug/comments",
++  asyncHandler(async (req, res) => {
++    const { slug } = req.params;
++    const article = await Article.findOne({ where: { slug } });
++    if (!article) {
++      return res.status(404).json({ error: "not_found" });
++    }
++
++    const comments = await article.getComments({
++      include: [{ model: User, as: "author", attributes: ["username"] }],
++    });
++
++    res.json({ comments });
++  }),
++);
++
++module.exports = router;
+diff --git a/backend/seed.js b/backend/seed.js
+new file mode 100644
+index 0000000..a4c8393
+--- /dev/null
++++ b/backend/seed.js
+@@ -0,0 +1,23 @@
++const { User, Article, Comment } = require("./models");
++
++async function seed() {
++  const [user] = await User.findOrCreate({
++    where: { username: "u1" },
++    defaults: { username: "u1" },
++  });
++
++  const [article] = await Article.findOrCreate({
++    where: { slug: "a1" },
++    defaults: { slug: "a1", userId: user.id },
++  });
++
++  const count = await Comment.count({ where: { articleId: article.id } });
++  if (count === 0) {
++    await Comment.bulkCreate([
++      { body: "c1", articleId: article.id, userId: user.id },
++      { body: "c2", articleId: article.id, userId: user.id },
++    ]);
++  }
++}
++
++module.exports = seed;
+diff --git a/backend/utils/asyncHandler.js b/backend/utils/asyncHandler.js
+new file mode 100644
+index 0000000..dd9f39e
+--- /dev/null
++++ b/backend/utils/asyncHandler.js
+@@ -0,0 +1,7 @@
++function asyncHandler(fn) {
++  return function asyncHandlerWrapper(req, res, next) {
++    Promise.resolve(fn(req, res, next)).catch(next);
++  };
++}
++
++module.exports = asyncHandler;
+diff --git a/frontend/src/CommentFeed.jsx b/frontend/src/CommentFeed.jsx
+index 6b33696..9b72756 100644
+--- a/frontend/src/CommentFeed.jsx
++++ b/frontend/src/CommentFeed.jsx
+@@ -1,16 +1,8 @@
+-import { useEffect, useState } from "react";
+-import { getComments } from "./api";
+ import CommentRow from "./CommentRow";
++import useComments from "./hooks/useComments";
+ 
+ function CommentFeed({ slug }) {
+-  const [comments, setComments] = useState([]);
+-  const [error, setError] = useState(null);
+-
+-  useEffect(() => {
+-    getComments(slug)
+-      .then(setComments)
+-      .catch((err) => setError(err.message));
+-  }, [slug]);
++  const { comments, error } = useComments(slug);
+ 
+   if (error) return <p className="error">{error}</p>;
+   if (comments.length === 0) return null;
+diff --git a/frontend/src/api.js b/frontend/src/api.js
+index 853da64..40f7318 100644
+--- a/frontend/src/api.js
++++ b/frontend/src/api.js
+@@ -1,5 +1,6 @@
+-export async function getComments(slug) {
+-  const res = await fetch(`/api/articles/${slug}/comments`);
++export async function getComments(slug, { signal } = {}) {
++  const safeSlug = encodeURIComponent(slug);
++  const res = await fetch(`/api/articles/${safeSlug}/comments`, { signal });
+   if (!res.ok) {
+     throw new Error(`Failed to load comments: ${res.status}`);
+   }
+diff --git a/frontend/src/hooks/useComments.js b/frontend/src/hooks/useComments.js
+new file mode 100644
+index 0000000..8b859d1
+--- /dev/null
++++ b/frontend/src/hooks/useComments.js
+@@ -0,0 +1,30 @@
++import { useEffect, useState } from "react";
++import { getComments } from "../api";
++
++export default function useComments(slug) {
++  const [comments, setComments] = useState([]);
++  const [error, setError] = useState(null);
++
++  useEffect(() => {
++    if (!slug) {
++      setComments([]);
++      setError(null);
++      return;
++    }
++
++    const controller = new AbortController();
++    setComments([]);
++    setError(null);
++
++    getComments(slug, { signal: controller.signal })
++      .then(setComments)
++      .catch((err) => {
++        if (err?.name === "AbortError") return;
++        setError(err?.message ?? String(err));
++      });
++
++    return () => controller.abort();
++  }, [slug]);
++
++  return { comments, error };
++}

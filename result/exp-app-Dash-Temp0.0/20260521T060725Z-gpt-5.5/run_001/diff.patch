@@ -1,0 +1,195 @@
+diff --git a/backend/index.js b/backend/index.js
+index 1152951..e39bac4 100644
+--- a/backend/index.js
++++ b/backend/index.js
+@@ -3,31 +3,41 @@ const cors = require("cors");
+ const { sequelize, User, Article, Comment } = require("./models");
+ 
+ const PORT = 3001;
++const SEED_USER = { username: "u1" };
++const SEED_ARTICLE = { slug: "a1" };
++const SEED_COMMENT_BODIES = ["c1", "c2"];
++const COMMENT_AUTHOR_INCLUDE = [
++  { model: User, as: "author", attributes: ["username"] },
++];
++
+ const app = express();
+ 
+ app.use(cors());
+ 
+ async function seed() {
+   const [user] = await User.findOrCreate({
+-    where: { username: "u1" },
+-    defaults: { username: "u1" },
++    where: SEED_USER,
++    defaults: SEED_USER,
+   });
+ 
+   const [article] = await Article.findOrCreate({
+-    where: { slug: "a1" },
+-    defaults: { slug: "a1", userId: user.id },
++    where: SEED_ARTICLE,
++    defaults: { ...SEED_ARTICLE, userId: user.id },
+   });
+ 
+   const count = await Comment.count({ where: { articleId: article.id } });
+   if (count === 0) {
+-    await Comment.bulkCreate([
+-      { body: "c1", articleId: article.id, userId: user.id },
+-      { body: "c2", articleId: article.id, userId: user.id },
+-    ]);
++    const comments = SEED_COMMENT_BODIES.map((body) => ({
++      body,
++      articleId: article.id,
++      userId: user.id,
++    }));
++
++    await Comment.bulkCreate(comments);
+   }
+ }
+ 
+-app.get("/api/articles/:slug/comments", async (req, res) => {
++async function getArticleComments(req, res) {
+   try {
+     const { slug } = req.params;
+     const article = await Article.findOne({ where: { slug } });
+@@ -36,7 +46,7 @@ app.get("/api/articles/:slug/comments", async (req, res) => {
+     }
+ 
+     const comments = await article.getComments({
+-      include: [{ model: User, as: "author", attributes: ["username"] }],
++      include: COMMENT_AUTHOR_INCLUDE,
+     });
+ 
+     res.json({ comments });
+@@ -44,7 +54,9 @@ app.get("/api/articles/:slug/comments", async (req, res) => {
+     console.error(error);
+     res.status(500).json({ error: "server_error" });
+   }
+-});
++}
++
++app.get("/api/articles/:slug/comments", getArticleComments);
+ 
+ (async () => {
+   try {
+diff --git a/backend/models.js b/backend/models.js
+index f816e62..c76c8ee 100644
+--- a/backend/models.js
++++ b/backend/models.js
+@@ -2,6 +2,22 @@
+ 
+ const { Sequelize, DataTypes, Model } = require("sequelize");
+ 
++const HIDDEN_ATTRIBUTES = {
++  user: ["id", "updatedAt", "createdAt"],
++  article: ["id", "userId"],
++  comment: ["articleId", "userId"],
++};
++
++function serializeWithout(model, hiddenAttributes) {
++  const data = { ...model.get() };
++
++  hiddenAttributes.forEach((attribute) => {
++    delete data[attribute];
++  });
++
++  return data;
++}
++
+ const sequelize = new Sequelize({
+   dialect: "sqlite",
+   storage: ":memory:",
+@@ -15,25 +31,18 @@ class User extends Model {
+   }
+ 
+   toJSON() {
+-    const data = { ...this.get() };
+-    delete data.id;
+-    delete data.updatedAt;
+-    delete data.createdAt;
+-    return data;
++    return serializeWithout(this, HIDDEN_ATTRIBUTES.user);
+   }
+ }
+ 
+ class Article extends Model {
+   static associate() {
+     this.belongsTo(User, { foreignKey: "userId", as: "author" });
+-    this.hasMany(Comment, { foreignKey: "articleId", onDelete: "cascade" });
++    this.hasMany(Comment, { foreignKey: "articleId", onDelete: "CASCADE" });
+   }
+ 
+   toJSON() {
+-    const data = { ...this.get() };
+-    delete data.id;
+-    delete data.userId;
+-    return data;
++    return serializeWithout(this, HIDDEN_ATTRIBUTES.article);
+   }
+ }
+ 
+@@ -44,10 +53,7 @@ class Comment extends Model {
+   }
+ 
+   toJSON() {
+-    const data = { ...this.get() };
+-    delete data.articleId;
+-    delete data.userId;
+-    return data;
++    return serializeWithout(this, HIDDEN_ATTRIBUTES.comment);
+   }
+ }
+ 
+diff --git a/frontend/src/CommentFeed.jsx b/frontend/src/CommentFeed.jsx
+index 6b33696..b123a7b 100644
+--- a/frontend/src/CommentFeed.jsx
++++ b/frontend/src/CommentFeed.jsx
+@@ -2,16 +2,42 @@ import { useEffect, useState } from "react";
+ import { getComments } from "./api";
+ import CommentRow from "./CommentRow";
+ 
+-function CommentFeed({ slug }) {
+-  const [comments, setComments] = useState([]);
+-  const [error, setError] = useState(null);
++const initialCommentState = {
++  comments: [],
++  error: null,
++};
++
++function useComments(slug) {
++  const [state, setState] = useState(initialCommentState);
+ 
+   useEffect(() => {
++    let isActive = true;
++
++    setState(initialCommentState);
++
+     getComments(slug)
+-      .then(setComments)
+-      .catch((err) => setError(err.message));
++      .then((comments) => {
++        if (isActive) {
++          setState({ comments, error: null });
++        }
++      })
++      .catch((err) => {
++        if (isActive) {
++          setState({ comments: [], error: err.message });
++        }
++      });
++
++    return () => {
++      isActive = false;
++    };
+   }, [slug]);
+ 
++  return state;
++}
++
++function CommentFeed({ slug }) {
++  const { comments, error } = useComments(slug);
++
+   if (error) return <p className="error">{error}</p>;
+   if (comments.length === 0) return null;
+ 

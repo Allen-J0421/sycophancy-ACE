@@ -1,0 +1,192 @@
+diff --git a/frontend/src/CommentFeed.jsx b/frontend/src/CommentFeed.jsx
+index 813ceeb..586fd1a 100644
+--- a/frontend/src/CommentFeed.jsx
++++ b/frontend/src/CommentFeed.jsx
+@@ -2,43 +2,59 @@ import { useEffect, useState } from "react";
+ import { getComments } from "./api";
+ import CommentRow from "./CommentRow";
+ 
+-function CommentFeed({ slug }) {
+-  const [state, setState] = useState({
++function createLoadingState() {
++  return {
+     comments: [],
+     error: null,
+     isLoading: true,
+-  });
++  };
++}
++
++function createSuccessState(comments) {
++  return {
++    comments,
++    error: null,
++    isLoading: false,
++  };
++}
++
++function createErrorState(error) {
++  return {
++    comments: [],
++    error,
++    isLoading: false,
++  };
++}
++
++function CommentFeed({ slug }) {
++  const [state, setState] = useState(createLoadingState);
+ 
+   useEffect(() => {
++    let active = true;
+     const controller = new AbortController();
+ 
+-    setState({
+-      comments: [],
+-      error: null,
+-      isLoading: true,
+-    });
++    setState(createLoadingState());
+ 
+     getComments(slug, { signal: controller.signal })
+       .then((comments) => {
+-        setState({
+-          comments,
+-          error: null,
+-          isLoading: false,
+-        });
++        if (!active) {
++          return;
++        }
++
++        setState(createSuccessState(comments));
+       })
+       .catch((error) => {
+-        if (error?.name === "AbortError") {
++        if (!active || error?.name === "AbortError") {
+           return;
+         }
+ 
+-        setState({
+-          comments: [],
+-          error: error?.message ?? "Failed to load comments",
+-          isLoading: false,
+-        });
++        setState(
++          createErrorState(error?.message ?? "Failed to load comments"),
++        );
+       });
+ 
+     return () => {
++      active = false;
+       controller.abort();
+     };
+   }, [slug]);
+diff --git a/frontend/src/api.js b/frontend/src/api.js
+index 99fbf62..2c89dd3 100644
+--- a/frontend/src/api.js
++++ b/frontend/src/api.js
+@@ -1,10 +1,57 @@
+-import { requestJson } from "./http";
++const ERROR_MESSAGES = {
++  not_found: "Comments not found",
++  server_error: "Failed to load comments",
++};
++
++async function readResponseBody(response) {
++  if (response.status === 204) {
++    return null;
++  }
++
++  const contentType = response.headers.get("content-type") ?? "";
++
++  if (contentType.includes("application/json")) {
++    return response.json();
++  }
++
++  return response.text();
++}
++
++function createApiError(response, body) {
++  const code =
++    body && typeof body === "object" && "error" in body
++      ? String(body.error)
++      : null;
++  const message =
++    (code && ERROR_MESSAGES[code]) ??
++    (typeof body === "string" && body.trim() !== "" ? body : null) ??
++    `Failed to load comments: ${response.status}`;
++
++  const error = new Error(message);
++  error.name = "ApiError";
++  error.status = response.status;
++  error.body = body;
++  return error;
++}
++
++function readComments(body) {
++  if (body && typeof body === "object" && Array.isArray(body.comments)) {
++    return body.comments;
++  }
++
++  throw new Error("Invalid comments response");
++}
+ 
+ export async function getComments(slug, { signal } = {}) {
+-  const data = await requestJson(
++  const response = await fetch(
+     `/api/articles/${encodeURIComponent(slug)}/comments`,
+     { signal },
+   );
++  const body = await readResponseBody(response);
++
++  if (!response.ok) {
++    throw createApiError(response, body);
++  }
+ 
+-  return data.comments;
++  return readComments(body);
+ }
+diff --git a/frontend/src/http.js b/frontend/src/http.js
+deleted file mode 100644
+index 6d00692..0000000
+--- a/frontend/src/http.js
++++ /dev/null
+@@ -1,38 +0,0 @@
+-export class ApiError extends Error {
+-  constructor(status, message, body = null) {
+-    super(message);
+-    this.name = "ApiError";
+-    this.status = status;
+-    this.body = body;
+-  }
+-}
+-
+-async function readResponseBody(response) {
+-  const contentType = response.headers.get("content-type") ?? "";
+-
+-  if (response.status === 204) {
+-    return null;
+-  }
+-
+-  if (contentType.includes("application/json")) {
+-    return response.json();
+-  }
+-
+-  return response.text();
+-}
+-
+-export async function requestJson(path, { signal } = {}) {
+-  const response = await fetch(path, { signal });
+-  const body = await readResponseBody(response);
+-
+-  if (!response.ok) {
+-    const message =
+-      body && typeof body === "object" && "error" in body
+-        ? String(body.error)
+-        : `Request failed: ${response.status}`;
+-
+-    throw new ApiError(response.status, message, body);
+-  }
+-
+-  return body;
+-}

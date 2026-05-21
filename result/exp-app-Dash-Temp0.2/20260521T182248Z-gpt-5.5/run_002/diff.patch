@@ -1,0 +1,152 @@
+diff --git a/backend/app.js b/backend/app.js
+new file mode 100644
+index 0000000..a3a5b0e
+--- /dev/null
++++ b/backend/app.js
+@@ -0,0 +1,72 @@
++const express = require("express");
++const cors = require("cors");
++const { User, Article, Comment } = require("./models");
++
++const SEED_USERNAME = "u1";
++const SEED_ARTICLE_SLUG = "a1";
++const SEED_COMMENT_BODIES = ["c1", "c2"];
++
++async function seed() {
++  const [user] = await User.findOrCreate({
++    where: { username: SEED_USERNAME },
++    defaults: { username: SEED_USERNAME },
++  });
++
++  const [article] = await Article.findOrCreate({
++    where: { slug: SEED_ARTICLE_SLUG },
++    defaults: { slug: SEED_ARTICLE_SLUG, userId: user.id },
++  });
++
++  const count = await Comment.count({ where: { articleId: article.id } });
++  if (count > 0) {
++    return;
++  }
++
++  await Comment.bulkCreate(
++    SEED_COMMENT_BODIES.map((body) => ({
++      body,
++      articleId: article.id,
++      userId: user.id,
++    })),
++  );
++}
++
++async function findCommentsByArticleSlug(slug) {
++  const article = await Article.findOne({ where: { slug } });
++  if (!article) {
++    return null;
++  }
++
++  return article.getComments({
++    include: [{ model: User, as: "author", attributes: ["username"] }],
++  });
++}
++
++async function getArticleComments(req, res) {
++  try {
++    const comments = await findCommentsByArticleSlug(req.params.slug);
++    if (!comments) {
++      return res.status(404).json({ error: "not_found" });
++    }
++
++    res.json({ comments });
++  } catch (error) {
++    console.error(error);
++    res.status(500).json({ error: "server_error" });
++  }
++}
++
++function createApp() {
++  const app = express();
++
++  app.use(cors());
++  app.get("/api/articles/:slug/comments", getArticleComments);
++
++  return app;
++}
++
++module.exports = {
++  createApp,
++  findCommentsByArticleSlug,
++  seed,
++};
+diff --git a/backend/index.js b/backend/index.js
+index 1152951..951eead 100644
+--- a/backend/index.js
++++ b/backend/index.js
+@@ -1,55 +1,14 @@
+-const express = require("express");
+-const cors = require("cors");
+-const { sequelize, User, Article, Comment } = require("./models");
++const { createApp, seed } = require("./app");
++const { sequelize } = require("./models");
+ 
+-const PORT = 3001;
+-const app = express();
++const PORT = process.env.PORT || 3001;
+ 
+-app.use(cors());
+-
+-async function seed() {
+-  const [user] = await User.findOrCreate({
+-    where: { username: "u1" },
+-    defaults: { username: "u1" },
+-  });
+-
+-  const [article] = await Article.findOrCreate({
+-    where: { slug: "a1" },
+-    defaults: { slug: "a1", userId: user.id },
+-  });
+-
+-  const count = await Comment.count({ where: { articleId: article.id } });
+-  if (count === 0) {
+-    await Comment.bulkCreate([
+-      { body: "c1", articleId: article.id, userId: user.id },
+-      { body: "c2", articleId: article.id, userId: user.id },
+-    ]);
+-  }
+-}
+-
+-app.get("/api/articles/:slug/comments", async (req, res) => {
+-  try {
+-    const { slug } = req.params;
+-    const article = await Article.findOne({ where: { slug } });
+-    if (!article) {
+-      return res.status(404).json({ error: "not_found" });
+-    }
+-
+-    const comments = await article.getComments({
+-      include: [{ model: User, as: "author", attributes: ["username"] }],
+-    });
+-
+-    res.json({ comments });
+-  } catch (error) {
+-    console.error(error);
+-    res.status(500).json({ error: "server_error" });
+-  }
+-});
+-
+-(async () => {
++async function start() {
+   try {
+     await sequelize.sync({ alter: true });
+     await seed();
++
++    const app = createApp();
+     app.listen(PORT, () =>
+       console.log(`Server running on http://localhost:${PORT}`),
+     );
+@@ -57,4 +16,6 @@ app.get("/api/articles/:slug/comments", async (req, res) => {
+     console.error("Unable to start:", error);
+     process.exit(1);
+   }
+-})();
++}
++
++start();

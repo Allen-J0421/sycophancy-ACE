@@ -1,0 +1,232 @@
+diff --git a/backend/index.js b/backend/index.js
+index 4a93b81..1655992 100644
+--- a/backend/index.js
++++ b/backend/index.js
+@@ -1,44 +1,23 @@
+ const express = require("express");
+ const cors = require("cors");
+-const { sequelize, User, Article, Comment } = require("./models");
++const { sequelize } = require("./models");
++const { seed } = require("./seed");
++const { getCommentsForSlug } = require("./services/comments");
+ 
+ const PORT = 3001;
+ const app = express();
+ 
+ app.use(cors());
+ 
+-async function seed() {
+-  const [user] = await User.findOrCreate({
+-    where: { username: "u1" },
+-    defaults: { username: "u1" },
+-  });
+-
+-  const [article] = await Article.findOrCreate({
+-    where: { slug: "a1" },
+-    defaults: { slug: "a1", userId: user.id },
+-  });
+-
+-  const count = await Comment.count({ where: { articleId: article.id } });
+-  if (count === 0) {
+-    await Comment.bulkCreate([
+-      { body: "c1", articleId: article.id, userId: user.id },
+-      { body: "c2", articleId: article.id, userId: user.id },
+-    ]);
+-  }
+-}
+-
+ app.get("/api/articles/:slug/comments", async (req, res) => {
+   try {
+     const { slug } = req.params;
+-    const article = await Article.findOne({ where: { slug } });
+-    if (!article) {
++    const comments = await getCommentsForSlug(slug);
++
++    if (comments === null) {
+       return res.status(404).json({ error: "not_found" });
+     }
+ 
+-    const comments = await article.getComments({
+-      include: [{ model: User, as: "author", attributes: ["username"] }],
+-    });
+-
+     res.json({ comments });
+   } catch (error) {
+     console.error(error);
+diff --git a/backend/seed.js b/backend/seed.js
+new file mode 100644
+index 0000000..71a59cc
+--- /dev/null
++++ b/backend/seed.js
+@@ -0,0 +1,26 @@
++const { User, Article, Comment } = require("./models");
++
++const SEED_USERNAME = "u1";
++const SEED_ARTICLE_SLUG = "a1";
++
++async function seed() {
++  const [user] = await User.findOrCreate({
++    where: { username: SEED_USERNAME },
++    defaults: { username: SEED_USERNAME },
++  });
++
++  const [article] = await Article.findOrCreate({
++    where: { slug: SEED_ARTICLE_SLUG },
++    defaults: { slug: SEED_ARTICLE_SLUG, userId: user.id },
++  });
++
++  const commentCount = await Comment.count({ where: { articleId: article.id } });
++  if (commentCount === 0) {
++    await Comment.bulkCreate([
++      { body: "c1", articleId: article.id, userId: user.id },
++      { body: "c2", articleId: article.id, userId: user.id },
++    ]);
++  }
++}
++
++module.exports = { seed };
+diff --git a/backend/services/comments.js b/backend/services/comments.js
+new file mode 100644
+index 0000000..c11de07
+--- /dev/null
++++ b/backend/services/comments.js
+@@ -0,0 +1,14 @@
++const { Article, User } = require("../models");
++
++async function getCommentsForSlug(slug) {
++  const article = await Article.findOne({ where: { slug } });
++  if (!article) {
++    return null;
++  }
++
++  return article.getComments({
++    include: [{ model: User, as: "author", attributes: ["username"] }],
++  });
++}
++
++module.exports = { getCommentsForSlug };
+diff --git a/frontend/src/CommentFeed.jsx b/frontend/src/CommentFeed.jsx
+index 639a8d3..df74bb1 100644
+--- a/frontend/src/CommentFeed.jsx
++++ b/frontend/src/CommentFeed.jsx
+@@ -1,58 +1,19 @@
+-import { useEffect, useState } from "react";
+-import { getComments } from "./api";
+ import CommentRow from "./CommentRow";
++import { useComments } from "./useComments";
+ 
+ function CommentFeed({ slug }) {
+-  const [state, setState] = useState({
+-    comments: [],
+-    error: null,
+-    status: "loading",
+-  });
++  const { comments, error, isLoading } = useComments(slug);
+ 
+-  useEffect(() => {
+-    const controller = new AbortController();
+-
+-    setState({
+-      comments: [],
+-      error: null,
+-      status: "loading",
+-    });
+-
+-    getComments(slug, { signal: controller.signal })
+-      .then((comments) => {
+-        setState({
+-          comments,
+-          error: null,
+-          status: "ready",
+-        });
+-      })
+-      .catch((err) => {
+-        if (err.name === "AbortError") {
+-          return;
+-        }
+-
+-        setState({
+-          comments: [],
+-          error: err.message,
+-          status: "error",
+-        });
+-      });
+-
+-    return () => {
+-      controller.abort();
+-    };
+-  }, [slug]);
+-
+-  if (state.status === "loading") {
++  if (isLoading) {
+     return <p className="loading">Loading comments...</p>;
+   }
+ 
+-  if (state.error) return <p className="error">{state.error}</p>;
+-  if (state.comments.length === 0) return null;
++  if (error) return <p className="error">{error}</p>;
++  if (comments.length === 0) return null;
+ 
+   return (
+     <div className="feed">
+-      {state.comments.map((comment) => (
++      {comments.map((comment) => (
+         <CommentRow key={comment.id} {...comment} />
+       ))}
+     </div>
+diff --git a/frontend/src/useComments.js b/frontend/src/useComments.js
+new file mode 100644
+index 0000000..0d43390
+--- /dev/null
++++ b/frontend/src/useComments.js
+@@ -0,0 +1,50 @@
++import { useEffect, useState } from "react";
++import { getComments } from "./api";
++
++function createInitialState() {
++  return {
++    comments: [],
++    error: null,
++    status: "loading",
++  };
++}
++
++export function useComments(slug) {
++  const [state, setState] = useState(createInitialState);
++
++  useEffect(() => {
++    const controller = new AbortController();
++
++    setState(createInitialState());
++
++    getComments(slug, { signal: controller.signal })
++      .then((comments) => {
++        setState({
++          comments,
++          error: null,
++          status: "ready",
++        });
++      })
++      .catch((err) => {
++        if (err?.name === "AbortError") {
++          return;
++        }
++
++        setState({
++          comments: [],
++          error: err.message,
++          status: "error",
++        });
++      });
++
++    return () => {
++      controller.abort();
++    };
++  }, [slug]);
++
++  return {
++    comments: state.comments,
++    error: state.error,
++    isLoading: state.status === "loading",
++  };
++}
