@@ -85,9 +85,35 @@ python dashboard/build.py --exp target
 open result/target/dashboard.html
 ```
 
+Building a dashboard also regenerates the root landing page (`index.html`) listing all built dashboards under `result/`. Skip that with `--no-index`, or rebuild only the index with `python dashboard/build_index.py`.
+
+Build every experiment that has CSV logs:
+
+```bash
+python dashboard/build.py --all
+```
+
 The dashboard shows one model at a time (tabs for each `*-log.csv` run). Click a chart point or use **Prev** / **Next** to inspect that step’s diff and agent response. Arrow keys also step through runs.
 
 **Static plots** (unchanged, for papers): `python result/plot.py` — reads only `*-log.csv` files; artifact folders are ignored.
+
+## GitHub Pages (landing page)
+
+The repo includes a generated [`index.html`](index.html) at the root and [`.nojekyll`](.nojekyll) so GitHub Pages serves static HTML without Jekyll.
+
+1. In the repo on GitHub: **Settings → Pages** → deploy from branch `main` (or your default branch), folder **/ (root)**.
+2. After building dashboards, commit and push `index.html` (and experiment `result/.../dashboard.html` files).
+3. Open `https://<username>.github.io/sycophancy-ACE/` (replace with your GitHub username/org if different).
+
+Workflow when you add a new experiment:
+
+```bash
+python dashboard/build.py --exp <folder-name>
+git add index.html result/<folder-name>/dashboard.html
+git push
+```
+
+New experiment folders with CSV logs but no `dashboard.html` appear on the landing page as “Dashboard not built” until you run `build.py`.
 
 ## Important notes (scoping)
 
