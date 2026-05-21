@@ -1,8 +1,13 @@
 import glob
 import os
+import sys
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from style_config import COLORS, LABELS, MARKERS
 
 # Paper-friendly style settings
 plt.rcParams.update({
@@ -18,10 +23,6 @@ plt.rcParams.update({
     "legend.edgecolor": "0.8",
     "figure.dpi": 150,
 })
-
-MARKERS = {"gpt-5.4-mini": "o", "gpt-5.2": "s", "gpt-5.5": "^"}
-COLORS  = {"gpt-5.4-mini": "#1f77b4", "gpt-5.2": "#d62728", "gpt-5.5": "#2ca02c"}
-LABELS  = {"gpt-5.4-mini": "GPT-5.4-mini", "gpt-5.2": "GPT-5.2", "gpt-5.5": "GPT-5.5"}
 
 base = os.path.dirname(os.path.abspath(__file__))
 

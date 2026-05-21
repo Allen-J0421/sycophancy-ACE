@@ -2,8 +2,9 @@
 
 A small Python harness that repeatedly applies a fixed prompt to a target
 codebase via the OpenAI Codex CLI in **cumulative mode** (each iteration sees
-the modified state from the previous iteration) and records **only** per-iteration
-line-change totals (added/deleted/total) to a single CSV.
+the modified state from the previous iteration), records per-iteration
+line-change totals to a CSV, and saves per-step artifacts for the interactive
+dashboard.
 
 ## Requirements
 
@@ -16,9 +17,11 @@ line-change totals (added/deleted/total) to a single CSV.
 ```bash
 # Put your prompt in prompt.env as:
 #   CODEX_PROMPT=refactor
-python run_experiment.py /path/to/codebase 20 <commit>
+python run_experiment.py /path/to/codebase 20 <commit> --model gpt-5.5
 # Example:
-python run_experiment.py /path/to/codebase 20 HEAD
+python run_experiment.py /path/to/codebase 20 HEAD --model gpt-5.5
+# With a run label (suffix on branch and result folder):
+python run_experiment.py /path/to/codebase 20 HEAD --model gpt-5.5 --label trial2
 ```
 
 Flags:
@@ -26,7 +29,8 @@ Flags:
 - `target` (positional): path to a target directory or file within a git repo
 - `iterations` (positional): number of cumulative iterations
 - `commit` (positional): commit hash/ref to branch from (e.g. `HEAD`, a SHA, or a tag)
-- `--model`: forwarded to `codex exec --model`
+- `--model` (required): model for `codex exec --model` and for log/branch naming (e.g. `gpt-5.5`)
+- `--label`: optional tag appended to the experiment git branch (`codex-exp/...-<label>`) and result directory (`result/<repo>-<label>/`)
 
 The prompt is read from `prompt.env` (`CODEX_PROMPT=...`) or from the `CODEX_PROMPT` environment variable if already set.
 
@@ -39,7 +43,8 @@ The prompt is read from `prompt.env` (`CODEX_PROMPT=...`) or from the `CODEX_PRO
    - Iteration 1: invoke `codex exec --json --full-auto --skip-git-repo-check --cd <codex_cd> [--model ...] <prompt>` with `cwd=<codex_cd>`, then parse a resume id from JSONL (`thread_id` from `thread.started`, or `session_meta.payload.id` if present).
    - Iteration 2+: invoke `codex exec resume <id> --json --full-auto --skip-git-repo-check [--model ...] <prompt>` with **`cwd=<codex_cd>`** (your Codex CLI does not accept `--cd` on `resume`, so the harness sets the process working directory instead).
    - `git add -A` (stages the whole repo), compute totals from `git diff --cached --numstat <prev_sha> [-- <pathspec>]`.
-   - Append one row to `<stamp>-<model>-log.csv` under `result/<target_repo_name>/`.
+   - Append one row to `<stamp>-<model>-log.csv` under `result/<target_repo_name>/` (or `result/<target_repo_name>-<label>/` when `--label` is set).
+   - Write step artifacts under `<stamp>-<model>/run_NNN/` (diff, Codex JSONL, parsed response).
    - Commit (`--allow-empty`) so the next iteration diffs against this state.
 
 ## Output layout
@@ -47,13 +52,42 @@ The prompt is read from `prompt.env` (`CODEX_PROMPT=...`) or from the `CODEX_PRO
 Default log path layout:
 
 ```
-result/<target_repo_name>/<timestamp>-<model-slug>-log.csv
+result/<target_repo_name>[-<label>]/<timestamp>-<model-slug>-log.csv
 ```
 
 `...-log.csv` columns:
 `run, files_changed, lines_added, lines_deleted, lines_total, duration_s, exit_code, timed_out, commit_sha, commit_message, model, git_branch`.
 
-The **`model`** column is the resolved model (`--model` if set; otherwise read from `~/.codex/config.toml` when possible, else `default`). **`git_branch`** is the experiment branch created in the target repo (includes timestamp and model slug in the default name).
+The **`model`** column is the `--model` value passed on the command line. **`git_branch`** is the experiment branch created in the target repo (includes timestamp, model slug, and optional `--label` suffix).
+
+### Per-step artifacts (for interactive dashboard)
+
+For each CSV log, a sibling folder is created:
+
+```
+result/<target_repo_name>[-<label>]/<timestamp>-<model-slug>/
+  run_001/
+    diff.patch      # unified diff (scoped like CSV line stats)
+    codex.jsonl     # raw Codex --json output
+    response.txt    # agent_message text from Codex JSONL (for dashboard)
+  run_002/
+    ...
+```
+
+Runs started before this feature have CSV data only; the dashboard chart still works, but diff/response panels show a missing-artifact message until you re-run the experiment.
+
+## Interactive dashboard
+
+Build a static HTML dashboard (Chart.js, no server) for one experiment folder:
+
+```bash
+python dashboard/build.py --exp target
+open result/target/dashboard.html
+```
+
+The dashboard shows one model at a time (tabs for each `*-log.csv` run). Click a chart point or use **Prev** / **Next** to inspect that step’s diff and agent response. Arrow keys also step through runs.
+
+**Static plots** (unchanged, for papers): `python result/plot.py` — reads only `*-log.csv` files; artifact folders are ignored.
 
 ## Important notes (scoping)
 
