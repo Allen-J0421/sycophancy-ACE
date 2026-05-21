@@ -6,7 +6,8 @@ Set a fixed prompt in `prompt.env` as `CODEX_PROMPT=...` (or export CODEX_PROMPT
 Each iteration:
 - runs `codex exec` on the target codebase
 - computes total line changes via `git diff --cached --numstat <prev_sha>`
-- appends one row to `./result/<target_repo>/<stamp>-<model>-log.csv`.
+- appends one row to `./result/<target_repo>/<stamp>-<model>-log.csv`
+- writes per-step artifacts under `./result/<target_repo>/<stamp>-<model>/run_NNN/`.
 """
 
 from __future__ import annotations
@@ -97,6 +98,8 @@ class IterationResult:
     codex: CodexResult
     commit_sha: str
     commit_message: str
+    jsonl_text: str = ""
+    diff_patch: str = ""
 
     def as_csv_row(self, *, model: str, branch: str) -> list[object]:
         return [
@@ -123,6 +126,7 @@ class ExperimentConfig:
     effective_model: str
     branch: str
     results_csv: Path
+    artifacts_dir: Path
     start_commit: str
     iterations: int
 
@@ -342,6 +346,13 @@ def default_branch_name(
     return branch
 
 
+def _cached_diff_args(previous_sha: str, pathspec: list[str] | None) -> list[str]:
+    diff_args = ["diff", "--cached", previous_sha]
+    if pathspec is not None:
+        diff_args += ["--", *pathspec]
+    return diff_args
+
+
 def diff_stats(
     repo_root: Path,
     previous_sha: str,
@@ -351,6 +362,16 @@ def diff_stats(
     if pathspec is not None:
         diff_args += ["--", *pathspec]
     return sum_numstat(run_git(repo_root, diff_args).stdout)
+
+
+def capture_step_diff(
+    repo_root: Path,
+    previous_sha: str,
+    pathspec: list[str] | None,
+) -> str:
+    """Unified diff for staged changes vs ``previous_sha`` (repo must already be staged)."""
+    proc = run_git(repo_root, _cached_diff_args(previous_sha, pathspec), check=False)
+    return proc.stdout or ""
 
 
 def build_codex_command(
@@ -410,6 +431,77 @@ def parse_codex_session_id(jsonl_text: str) -> str | None:
     return None
 
 
+def _non_empty_str(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _agent_message_text(block: dict) -> str | None:
+    """Text from a Codex block whose type is agent_message (or legacy assistant/message)."""
+    if block.get("type") not in ("agent_message", "assistant", "message"):
+        return None
+    return _non_empty_str(block.get("text")) or _non_empty_str(block.get("content"))
+
+
+def _extract_agent_message_from_event(obj: dict) -> str | None:
+    """User-facing agent text from one Codex ``--json`` line."""
+    item = obj.get("item")
+    if isinstance(item, dict):
+        text = _agent_message_text(item)
+        if text:
+            return text
+
+    payload = obj.get("payload")
+    if isinstance(payload, dict):
+        text = _agent_message_text(payload)
+        if text:
+            return text
+
+    return _agent_message_text(obj)
+
+
+def extract_agent_response(jsonl_text: str) -> str:
+    """Collect ``agent_message`` text from Codex ``--json`` JSONL (in file order)."""
+    messages: list[str] = []
+    seen: set[str] = set()
+
+    for raw in jsonl_text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+
+        text = _extract_agent_message_from_event(obj)
+        if text and text not in seen:
+            seen.add(text)
+            messages.append(text)
+
+    if messages:
+        return "\n\n".join(messages)
+    return "(No agent message in Codex JSONL.)"
+
+
+def write_step_artifacts(
+    artifacts_dir: Path,
+    run_number: int,
+    *,
+    diff_patch: str,
+    jsonl_text: str,
+    response_text: str,
+) -> None:
+    run_dir = artifacts_dir / f"run_{run_number:03d}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "diff.patch").write_text(diff_patch, encoding="utf-8")
+    (run_dir / "codex.jsonl").write_text(jsonl_text, encoding="utf-8")
+    (run_dir / "response.txt").write_text(response_text, encoding="utf-8")
+
+
 def run_codex(
     *,
     codex_cd: Path,
@@ -418,7 +510,7 @@ def run_codex(
     timeout: int,
     is_first: bool = True,
     session_id: str | None = None,
-) -> CodexResult:
+) -> tuple[CodexResult, str]:
     cmd = build_codex_command(codex_cd, prompt, model, is_first=is_first, session_id=session_id)
     t0 = time.monotonic()
     try:
@@ -442,17 +534,23 @@ def run_codex(
                     "Try running with a longer timeout, or run `codex exec --json ...` manually to inspect output."
                     f"{detail}"
                 )
-        return CodexResult(
-            exit_code=proc.returncode,
-            duration_s=time.monotonic() - t0,
-            timed_out=False,
-            session_id=sid,
+        return (
+            CodexResult(
+                exit_code=proc.returncode,
+                duration_s=time.monotonic() - t0,
+                timed_out=False,
+                session_id=sid,
+            ),
+            jsonl,
         )
     except subprocess.TimeoutExpired:
-        return CodexResult(
-            exit_code=124,
-            duration_s=time.monotonic() - t0,
-            timed_out=True,
+        return (
+            CodexResult(
+                exit_code=124,
+                duration_s=time.monotonic() - t0,
+                timed_out=True,
+            ),
+            "",
         )
 
 
@@ -480,7 +578,7 @@ def run_iteration(
     """Run Codex once for one logged iteration, then stage, diff, and commit."""
     is_first_codex = iteration == 1 and session_id is None
 
-    codex = run_codex(
+    codex, jsonl_text = run_codex(
         codex_cd=codex_cd,
         prompt=prompt,
         model=model,
@@ -490,6 +588,7 @@ def run_iteration(
     )
 
     stats = _stage_all_and_diff_stats(repo_root, previous_sha, pathspec)
+    diff_patch = capture_step_diff(repo_root, previous_sha, pathspec)
 
     commit_message = f"codex-exp: iteration {iteration}"
     if not codex_run_ok(codex):
@@ -504,6 +603,8 @@ def run_iteration(
         codex=codex,
         commit_sha=commit_sha,
         commit_message=commit_message,
+        jsonl_text=jsonl_text,
+        diff_patch=diff_patch,
     )
 
 
@@ -565,6 +666,7 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
     if label_slug:
         result_dir = f"{target.repo_name}-{label_slug}"
     results_csv = (script_dir() / "result" / result_dir / f"{stamp}-{model.slug}-log.csv").resolve()
+    artifacts_dir = results_csv.parent / f"{stamp}-{model.slug}"
     return ExperimentConfig(
         target=target,
         prompt=load_prompt(),
@@ -572,6 +674,7 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
         effective_model=model.effective,
         branch=branch,
         results_csv=results_csv,
+        artifacts_dir=artifacts_dir,
         start_commit=args.commit,
         iterations=args.iterations,
     )
@@ -581,6 +684,7 @@ def eprint_setup(config: ExperimentConfig) -> None:
     eprint(f"[setup] Model (effective): {config.effective_model}")
     eprint(f"[setup] Experiment branch:  {config.branch}")
     eprint(f"[setup] CSV log:            {config.results_csv}")
+    eprint(f"[setup] Artifacts:          {config.artifacts_dir}/")
 
 
 def iter_experiment_results(
@@ -644,11 +748,19 @@ def write_experiment_log(config: ExperimentConfig) -> int:
 
         for result in iter_experiment_results(config, prev_sha):
             write_iteration_row(w, result, config)
+            write_step_artifacts(
+                config.artifacts_dir,
+                result.number,
+                diff_patch=result.diff_patch,
+                jsonl_text=result.jsonl_text,
+                response_text=extract_agent_response(result.jsonl_text),
+            )
             eprint_iteration_result(result)
             if not codex_run_ok(result.codex):
                 codex_failures += 1
 
     eprint(f"[done] Wrote: {config.results_csv}")
+    eprint(f"[done] Artifacts: {config.artifacts_dir}/")
     return codex_failures
 
 

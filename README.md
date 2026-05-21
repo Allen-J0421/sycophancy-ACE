@@ -2,8 +2,9 @@
 
 A small Python harness that repeatedly applies a fixed prompt to a target
 codebase via the OpenAI Codex CLI in **cumulative mode** (each iteration sees
-the modified state from the previous iteration) and records **only** per-iteration
-line-change totals (added/deleted/total) to a single CSV.
+the modified state from the previous iteration), records per-iteration
+line-change totals to a CSV, and saves per-step artifacts for the interactive
+dashboard.
 
 ## Requirements
 
@@ -43,6 +44,7 @@ The prompt is read from `prompt.env` (`CODEX_PROMPT=...`) or from the `CODEX_PRO
    - Iteration 2+: invoke `codex exec resume <id> --json --full-auto --skip-git-repo-check [--model ...] <prompt>` with **`cwd=<codex_cd>`** (your Codex CLI does not accept `--cd` on `resume`, so the harness sets the process working directory instead).
    - `git add -A` (stages the whole repo), compute totals from `git diff --cached --numstat <prev_sha> [-- <pathspec>]`.
    - Append one row to `<stamp>-<model>-log.csv` under `result/<target_repo_name>/` (or `result/<target_repo_name>-<label>/` when `--label` is set).
+   - Write step artifacts under `<stamp>-<model>/run_NNN/` (diff, Codex JSONL, parsed response).
    - Commit (`--allow-empty`) so the next iteration diffs against this state.
 
 ## Output layout
@@ -57,6 +59,35 @@ result/<target_repo_name>[-<label>]/<timestamp>-<model-slug>-log.csv
 `run, files_changed, lines_added, lines_deleted, lines_total, duration_s, exit_code, timed_out, commit_sha, commit_message, model, git_branch`.
 
 The **`model`** column is the `--model` value passed on the command line. **`git_branch`** is the experiment branch created in the target repo (includes timestamp, model slug, and optional `--label` suffix).
+
+### Per-step artifacts (for interactive dashboard)
+
+For each CSV log, a sibling folder is created:
+
+```
+result/<target_repo_name>[-<label>]/<timestamp>-<model-slug>/
+  run_001/
+    diff.patch      # unified diff (scoped like CSV line stats)
+    codex.jsonl     # raw Codex --json output
+    response.txt    # agent_message text from Codex JSONL (for dashboard)
+  run_002/
+    ...
+```
+
+Runs started before this feature have CSV data only; the dashboard chart still works, but diff/response panels show a missing-artifact message until you re-run the experiment.
+
+## Interactive dashboard
+
+Build a static HTML dashboard (Chart.js, no server) for one experiment folder:
+
+```bash
+python dashboard/build.py --exp target
+open result/target/dashboard.html
+```
+
+The dashboard shows one model at a time (tabs for each `*-log.csv` run). Click a chart point or use **Prev** / **Next** to inspect that step’s diff and agent response. Arrow keys also step through runs.
+
+**Static plots** (unchanged, for papers): `python result/plot.py` — reads only `*-log.csv` files; artifact folders are ignored.
 
 ## Important notes (scoping)
 
