@@ -17,6 +17,10 @@
     nextBtn: document.getElementById("next-btn"),
     diffPre: document.getElementById("diff-pre"),
     responsePre: document.getElementById("response-pre"),
+    reasoningBtn: document.getElementById("reasoning-btn"),
+    reasoningDialog: document.getElementById("reasoning-dialog"),
+    reasoningPre: document.getElementById("reasoning-pre"),
+    reasoningClose: document.getElementById("reasoning-close"),
     codexBtn: document.getElementById("codex-btn"),
     codexDialog: document.getElementById("codex-dialog"),
     codexPre: document.getElementById("codex-pre"),
@@ -75,20 +79,6 @@
       .join("");
   }
 
-  function formatJsonl(text) {
-    return text
-      .split("\n")
-      .filter((line) => line.trim())
-      .map((line) => {
-        try {
-          return JSON.stringify(JSON.parse(line), null, 2);
-        } catch {
-          return line;
-        }
-      })
-      .join("\n\n");
-  }
-
   function setDiffPre(el, text, isEmpty) {
     if (isEmpty) {
       el.innerHTML = '<span class="empty-msg">' + escapeHtml(text) + "</span>";
@@ -127,6 +117,7 @@
       setDiffPre(els.diffPre, step.diff || "(empty diff)", !step.diff);
       setPre(els.responsePre, step.response || "(empty response)", !step.response);
     }
+    els.reasoningBtn.disabled = !step.reasoning;
     els.codexBtn.disabled = !step.codex_jsonl;
   }
 
@@ -207,11 +198,21 @@
     });
   }
 
+  function initReasoningDialog() {
+    els.reasoningBtn.addEventListener("click", () => {
+      const step = activeStep();
+      if (!step?.reasoning) return;
+      els.reasoningPre.textContent = step.reasoning;
+      els.reasoningDialog.showModal();
+    });
+    els.reasoningClose.addEventListener("click", () => els.reasoningDialog.close());
+  }
+
   function initCodexDialog() {
     els.codexBtn.addEventListener("click", () => {
       const step = activeStep();
       if (!step?.codex_jsonl) return;
-      els.codexPre.textContent = formatJsonl(step.codex_jsonl);
+      els.codexPre.textContent = step.codex_jsonl;
       els.codexDialog.showModal();
     });
     els.codexClose.addEventListener("click", () => els.codexDialog.close());
@@ -250,6 +251,7 @@
     selectedRun = DATA.models[0].steps[0]?.run || 1;
     renderTabs();
     initNav();
+    initReasoningDialog();
     initCodexDialog();
     buildChart();
     updatePanels();

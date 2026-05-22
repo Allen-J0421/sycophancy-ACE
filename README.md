@@ -68,8 +68,7 @@ For each CSV log, a sibling folder is created:
 result/<target_repo_name>[-<label>]/<timestamp>-<model-slug>/
   run_001/
     diff.patch      # unified diff (scoped like CSV line stats)
-    codex.jsonl     # raw Codex --json output
-    response.txt    # agent_message text from Codex JSONL (for dashboard)
+    codex.jsonl     # raw Codex --json output (dashboard parses at build time)
   run_002/
     ...
 ```

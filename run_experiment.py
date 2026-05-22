@@ -431,75 +431,17 @@ def parse_codex_session_id(jsonl_text: str) -> str | None:
     return None
 
 
-def _non_empty_str(value: object) -> str | None:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
-
-
-def _agent_message_text(block: dict) -> str | None:
-    """Text from a Codex block whose type is agent_message (or legacy assistant/message)."""
-    if block.get("type") not in ("agent_message", "assistant", "message"):
-        return None
-    return _non_empty_str(block.get("text")) or _non_empty_str(block.get("content"))
-
-
-def _extract_agent_message_from_event(obj: dict) -> str | None:
-    """User-facing agent text from one Codex ``--json`` line."""
-    item = obj.get("item")
-    if isinstance(item, dict):
-        text = _agent_message_text(item)
-        if text:
-            return text
-
-    payload = obj.get("payload")
-    if isinstance(payload, dict):
-        text = _agent_message_text(payload)
-        if text:
-            return text
-
-    return _agent_message_text(obj)
-
-
-def extract_agent_response(jsonl_text: str) -> str:
-    """Collect ``agent_message`` text from Codex ``--json`` JSONL (in file order)."""
-    messages: list[str] = []
-    seen: set[str] = set()
-
-    for raw in jsonl_text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(obj, dict):
-            continue
-
-        text = _extract_agent_message_from_event(obj)
-        if text and text not in seen:
-            seen.add(text)
-            messages.append(text)
-
-    if messages:
-        return "\n\n".join(messages)
-    return "(No agent message in Codex JSONL.)"
-
-
 def write_step_artifacts(
     artifacts_dir: Path,
     run_number: int,
     *,
     diff_patch: str,
     jsonl_text: str,
-    response_text: str,
 ) -> None:
     run_dir = artifacts_dir / f"run_{run_number:03d}"
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "diff.patch").write_text(diff_patch, encoding="utf-8")
     (run_dir / "codex.jsonl").write_text(jsonl_text, encoding="utf-8")
-    (run_dir / "response.txt").write_text(response_text, encoding="utf-8")
 
 
 def run_codex(
@@ -753,7 +695,6 @@ def write_experiment_log(config: ExperimentConfig) -> int:
                 result.number,
                 diff_patch=result.diff_patch,
                 jsonl_text=result.jsonl_text,
-                response_text=extract_agent_response(result.jsonl_text),
             )
             eprint_iteration_result(result)
             if not codex_run_ok(result.codex):
