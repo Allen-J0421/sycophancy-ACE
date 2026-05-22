@@ -79,6 +79,22 @@
       .join("");
   }
 
+  function formatJsonl(text) {
+    return text
+      .split("\n")
+      .map((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return "";
+        try {
+          return JSON.stringify(JSON.parse(trimmed), null, 2);
+        } catch {
+          return line;
+        }
+      })
+      .filter((block) => block.length > 0)
+      .join("\n\n");
+  }
+
   function setDiffPre(el, text, isEmpty) {
     if (isEmpty) {
       el.innerHTML = '<span class="empty-msg">' + escapeHtml(text) + "</span>";
@@ -212,7 +228,7 @@
     els.codexBtn.addEventListener("click", () => {
       const step = activeStep();
       if (!step?.codex_jsonl) return;
-      els.codexPre.textContent = step.codex_jsonl;
+      els.codexPre.textContent = formatJsonl(step.codex_jsonl);
       els.codexDialog.showModal();
     });
     els.codexClose.addEventListener("click", () => els.codexDialog.close());
