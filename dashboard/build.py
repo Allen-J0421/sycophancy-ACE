@@ -12,8 +12,10 @@ from pathlib import Path
 # Allow importing style_config from result/
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parent
+sys.path.insert(0, str(_SCRIPT_DIR))
 sys.path.insert(0, str(_REPO_ROOT / "result"))
 
+from codex_parse import extract_final_agent_message, extract_reasoning_transcript  # noqa: E402
 from style_config import COLORS, LABELS  # noqa: E402
 
 MAX_FIELD_BYTES = 200_000
@@ -60,18 +62,13 @@ def load_steps_from_csv(csv_path: Path) -> list[dict]:
             run = int(row["run"])
             run_dir = artifacts_dir / f"run_{run:03d}"
             diff_path = run_dir / "diff.patch"
-            response_path = run_dir / "response.txt"
             codex_path = run_dir / "codex.jsonl"
-            has_artifacts = (
-                diff_path.exists() or response_path.exists() or codex_path.exists()
-            )
+            has_artifacts = diff_path.exists() or codex_path.exists()
             diff = truncate_text(read_artifact_file(diff_path)) if diff_path.exists() else ""
-            response = (
-                truncate_text(read_artifact_file(response_path)) if response_path.exists() else ""
-            )
-            codex_jsonl = (
-                truncate_text(read_artifact_file(codex_path)) if codex_path.exists() else ""
-            )
+            codex_raw = read_artifact_file(codex_path) if codex_path.exists() else ""
+            codex_jsonl = truncate_text(codex_raw) if codex_raw else ""
+            response = extract_final_agent_message(codex_raw) if codex_raw else ""
+            reasoning = extract_reasoning_transcript(codex_raw) if codex_raw else ""
 
             steps.append(
                 {
@@ -86,6 +83,7 @@ def load_steps_from_csv(csv_path: Path) -> list[dict]:
                     "commit_sha": row["commit_sha"],
                     "diff": diff,
                     "response": response,
+                    "reasoning": reasoning,
                     "codex_jsonl": codex_jsonl,
                     "has_artifacts": has_artifacts,
                 }
