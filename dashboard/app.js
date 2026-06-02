@@ -25,6 +25,11 @@
     codexDialog: document.getElementById("codex-dialog"),
     codexPre: document.getElementById("codex-pre"),
     codexClose: document.getElementById("codex-close"),
+    refdiffPre: document.getElementById("refdiff-pre"),
+    refdiffBtn: document.getElementById("refdiff-btn"),
+    refdiffDialog: document.getElementById("refdiff-dialog"),
+    refdiffDialogPre: document.getElementById("refdiff-dialog-pre"),
+    refdiffClose: document.getElementById("refdiff-close"),
     canvas: document.getElementById("chart"),
   };
 
@@ -68,15 +73,78 @@
     return "diff-ctx";
   }
 
+  function parseHunkHeader(line) {
+    const match = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (!match) return null;
+    return {
+      oldLine: parseInt(match[1], 10),
+      newLine: parseInt(match[2], 10),
+    };
+  }
+
+  function renderDiffRow(oldNum, newNum, line, cls) {
+    const oldGutter = oldNum != null ? String(oldNum) : "";
+    const newGutter = newNum != null ? String(newNum) : "";
+    const content = escapeHtml(line) || " ";
+    return (
+      '<div class="diff-row ' +
+      cls +
+      '">' +
+      '<span class="diff-ln diff-ln-old">' +
+      escapeHtml(oldGutter) +
+      "</span>" +
+      '<span class="diff-ln diff-ln-new">' +
+      escapeHtml(newGutter) +
+      "</span>" +
+      '<span class="diff-content">' +
+      content +
+      "</span>" +
+      "</div>"
+    );
+  }
+
   function renderDiffHtml(diff) {
     const lines = diff.split("\n");
-    return lines
-      .map((line) => {
-        const cls = diffLineClass(line);
-        const content = escapeHtml(line) || " ";
-        return '<span class="diff-line ' + cls + '">' + content + "</span>";
-      })
-      .join("");
+    const rows = [];
+    let oldLine = null;
+    let newLine = null;
+
+    for (const line of lines) {
+      const cls = diffLineClass(line);
+
+      if (line.startsWith("@@")) {
+        const hunk = parseHunkHeader(line);
+        if (hunk) {
+          oldLine = hunk.oldLine;
+          newLine = hunk.newLine;
+        }
+        rows.push(renderDiffRow(null, null, line, cls));
+        continue;
+      }
+
+      if (line.startsWith("-") && !line.startsWith("---")) {
+        rows.push(renderDiffRow(oldLine, null, line, cls));
+        if (oldLine != null) oldLine++;
+        continue;
+      }
+
+      if (line.startsWith("+") && !line.startsWith("+++")) {
+        rows.push(renderDiffRow(null, newLine, line, cls));
+        if (newLine != null) newLine++;
+        continue;
+      }
+
+      if (cls === "diff-ctx") {
+        rows.push(renderDiffRow(oldLine, newLine, line, cls));
+        if (oldLine != null) oldLine++;
+        if (newLine != null) newLine++;
+        continue;
+      }
+
+      rows.push(renderDiffRow(null, null, line, cls));
+    }
+
+    return rows.join("");
   }
 
   function formatJsonl(text) {
@@ -93,6 +161,78 @@
       })
       .filter((block) => block.length > 0)
       .join("\n\n");
+  }
+
+  function formatNode(node) {
+    if (!node) return "(unknown)";
+    const kind = node.kind || "";
+    const localName = node.localName || "";
+    const file = node.file || "";
+    const line = node.line != null ? node.line : "";
+    const label = [kind, localName].filter(Boolean).join(" ");
+    if (file) {
+      return `${label}  @ ${file}:${line}`;
+    }
+    return label || "(unknown)";
+  }
+
+  function refdiffDescription(rel) {
+    if (rel.similarity != null && rel.description_with_score) {
+      return rel.description_with_score;
+    }
+    return rel.description_standard || "";
+  }
+
+  function formatRefdiffCell(record) {
+    if (!record) return "";
+    if (!record.refdiff_ok) {
+      const msg = (record.error_message || "unknown error").trim();
+      return `RefDiff failed\n${msg}`;
+    }
+
+    const nRef = intOrZero(record.n_refactorings);
+    const nSame = intOrZero(record.n_same);
+    const nTotal = intOrZero(record.n_relationships_total);
+    const refactorings = record.refactorings || [];
+    const sameRelationships = record.same_relationships || [];
+
+    const lines = [];
+    lines.push(
+      `RefDiff: ${nRef} refactoring, ${nSame} non-refactoring relationship (${nTotal} total)`
+    );
+
+    for (const rel of refactorings) {
+      const desc = refdiffDescription(rel);
+      if (desc) lines.push(desc);
+    }
+
+    if (refactorings.length > 0) {
+      lines.push("");
+      lines.push("Refactoring Relationship (RefDiff-detected structural refactorings)");
+      for (const rel of refactorings) {
+        lines.push(`  ${rel.type || "UNKNOWN"}`);
+        lines.push(`    before: ${formatNode(rel.before)}`);
+        lines.push(`    after:  ${formatNode(rel.after)}`);
+      }
+    }
+
+    if (sameRelationships.length > 0) {
+      lines.push("");
+      lines.push("Non-refactoring relationships (Matched elements where identity preserved)");
+      for (const rel of sameRelationships) {
+        const label = (rel.before && rel.before.localName) || rel.type || "SAME";
+        lines.push(`  ${label}`);
+        lines.push(`    before: ${formatNode(rel.before)}`);
+        lines.push(`    after:  ${formatNode(rel.after)}`);
+      }
+    }
+
+    return lines.join("\n");
+  }
+
+  function intOrZero(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
   }
 
   function setDiffPre(el, text, isEmpty) {
@@ -117,10 +257,14 @@
     const idx = model.steps.findIndex((s) => s.run === selectedRun) + 1;
 
     els.stepLabel.textContent = `Step ${idx} of ${total} (run ${step.run})`;
-    els.stepMeta.textContent =
+    let meta =
       `+${step.lines_added} / -${step.lines_deleted} (total ${step.lines_total}) · ` +
       `${step.duration_s}s · exit ${step.exit_code}` +
       (step.timed_out ? " · timed out" : "");
+    if (step.refdiff_hover) {
+      meta += ` · RefDiff: ${step.refdiff_hover}`;
+    }
+    els.stepMeta.textContent = meta;
 
     els.prevBtn.disabled = idx <= 1;
     els.nextBtn.disabled = idx >= total;
@@ -135,6 +279,17 @@
     }
     els.reasoningBtn.disabled = !step.reasoning;
     els.codexBtn.disabled = !step.codex_jsonl;
+    els.refdiffBtn.disabled = !step.refdiff;
+
+    if (step.refdiff) {
+      setPre(els.refdiffPre, formatRefdiffCell(step.refdiff), false);
+    } else {
+      setPre(
+        els.refdiffPre,
+        "No RefDiff data for this experiment. Run: python run_refdiff.py --repo <target>",
+        true
+      );
+    }
   }
 
   function buildChart() {
@@ -168,6 +323,10 @@
       options: {
         responsive: true,
         maintainAspectRatio: true,
+        interaction: {
+          mode: "nearest",
+          intersect: true,
+        },
         onClick: (_evt, elements) => {
           if (!elements.length) return;
           const idx = elements[0].index;
@@ -179,6 +338,16 @@
             display: true,
             text: "Lines total changed per refactoring run",
             font: { size: 14 },
+          },
+          tooltip: {
+            callbacks: {
+              afterBody(tooltipItems) {
+                if (!tooltipItems.length) return [];
+                const step = model.steps[tooltipItems[0].dataIndex];
+                if (!step || !step.refdiff_hover) return [];
+                return ["RefDiff: " + step.refdiff_hover];
+              },
+            },
           },
         },
         scales: {
@@ -234,6 +403,16 @@
     els.codexClose.addEventListener("click", () => els.codexDialog.close());
   }
 
+  function initRefdiffDialog() {
+    els.refdiffBtn.addEventListener("click", () => {
+      const step = activeStep();
+      if (!step?.refdiff) return;
+      els.refdiffDialogPre.textContent = JSON.stringify(step.refdiff, null, 2);
+      els.refdiffDialog.showModal();
+    });
+    els.refdiffClose.addEventListener("click", () => els.refdiffDialog.close());
+  }
+
   function initNav() {
     els.prevBtn.addEventListener("click", () => {
       const model = activeModel();
@@ -269,6 +448,7 @@
     initNav();
     initReasoningDialog();
     initCodexDialog();
+    initRefdiffDialog();
     buildChart();
     updatePanels();
   }

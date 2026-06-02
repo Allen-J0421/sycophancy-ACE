@@ -42,6 +42,47 @@ def read_artifact_file(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def stamp_from_csv(csv_path: Path) -> str:
+    name = csv_path.name
+    if name.endswith("-log.csv"):
+        return name[: -len("-log.csv")]
+    return csv_path.stem
+
+
+def refdiff_jsonl_path(csv_path: Path) -> Path:
+    stamp = stamp_from_csv(csv_path)
+    return csv_path.parent / "refdiff" / f"{stamp}-refdiff.jsonl"
+
+
+def build_refdiff_hover(record: dict) -> str:
+    if not record.get("refdiff_ok", False):
+        msg = (record.get("error_message") or "failed").strip()
+        return f"error: {msg[:100]}" if msg else "error"
+    n = int(record.get("n_refactorings", 0))
+    if n == 0:
+        return "(none)"
+    type_counts: dict[str, int] = {}
+    for rel in record.get("refactorings") or []:
+        t = rel.get("type", "UNKNOWN")
+        type_counts[t] = type_counts.get(t, 0) + 1
+    return ", ".join(f"{t} ({c})" for t, c in sorted(type_counts.items()))
+
+
+def load_refdiff_for_csv(csv_path: Path) -> dict[int, dict]:
+    jsonl_path = refdiff_jsonl_path(csv_path)
+    if not jsonl_path.is_file():
+        return {}
+
+    by_run: dict[int, dict] = {}
+    for line in jsonl_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        record = json.loads(line)
+        by_run[int(record["run"])] = record
+    return by_run
+
+
 def artifacts_dir_for_csv(csv_path: Path) -> Path:
     """Map ``<stamp>-<model>-log.csv`` → ``<stamp>-<model>/``."""
     name = csv_path.name
@@ -54,6 +95,7 @@ def artifacts_dir_for_csv(csv_path: Path) -> Path:
 
 def load_steps_from_csv(csv_path: Path) -> list[dict]:
     artifacts_dir = artifacts_dir_for_csv(csv_path)
+    refdiff_by_run = load_refdiff_for_csv(csv_path)
     steps: list[dict] = []
 
     with csv_path.open(newline="", encoding="utf-8") as f:
@@ -70,24 +112,41 @@ def load_steps_from_csv(csv_path: Path) -> list[dict]:
             response = extract_final_agent_message(codex_raw) if codex_raw else ""
             reasoning = extract_reasoning_transcript(codex_raw) if codex_raw else ""
 
-            steps.append(
-                {
-                    "run": run,
-                    "lines_total": int(row["lines_total"]),
-                    "lines_added": int(row["lines_added"]),
-                    "lines_deleted": int(row["lines_deleted"]),
-                    "files_changed": int(row["files_changed"]),
-                    "duration_s": float(row["duration_s"]),
-                    "exit_code": int(row["exit_code"]),
-                    "timed_out": int(row["timed_out"]),
-                    "commit_sha": row["commit_sha"],
-                    "diff": diff,
-                    "response": response,
-                    "reasoning": reasoning,
-                    "codex_jsonl": codex_jsonl,
-                    "has_artifacts": has_artifacts,
-                }
-            )
+            step: dict = {
+                "run": run,
+                "lines_total": int(row["lines_total"]),
+                "lines_added": int(row["lines_added"]),
+                "lines_deleted": int(row["lines_deleted"]),
+                "files_changed": int(row["files_changed"]),
+                "duration_s": float(row["duration_s"]),
+                "exit_code": int(row["exit_code"]),
+                "timed_out": int(row["timed_out"]),
+                "commit_sha": row["commit_sha"],
+                "diff": diff,
+                "response": response,
+                "reasoning": reasoning,
+                "codex_jsonl": codex_jsonl,
+                "has_artifacts": has_artifacts,
+            }
+
+            refdiff_record = refdiff_by_run.get(run)
+            if refdiff_record is not None:
+                csv_sha = row["commit_sha"].strip()
+                rec_sha = str(refdiff_record.get("commit_sha", "")).strip()
+                if rec_sha and csv_sha and not rec_sha.startswith(csv_sha[:7]) and not csv_sha.startswith(rec_sha[:7]):
+                    print(
+                        f"warning: refdiff commit mismatch run {run}: "
+                        f"csv={csv_sha[:12]} jsonl={rec_sha[:12]}",
+                        file=sys.stderr,
+                    )
+                step["refdiff"] = refdiff_record
+                step["refdiff_hover"] = build_refdiff_hover(refdiff_record)
+                step["refdiff_ok"] = bool(refdiff_record.get("refdiff_ok", False))
+                err = refdiff_record.get("error_message") or ""
+                if err:
+                    step["refdiff_error"] = err
+
+            steps.append(step)
 
     return steps
 
