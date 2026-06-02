@@ -218,7 +218,7 @@
 
     if (sameRelationships.length > 0) {
       lines.push("");
-      lines.push("Non-refactoring relationships (Matched elements where identity preserved)");
+      lines.push('Non-refactoring relationships ("SAME")');
       for (const rel of sameRelationships) {
         const label = (rel.before && rel.before.localName) || rel.type || "SAME";
         lines.push(`  ${label}`);
