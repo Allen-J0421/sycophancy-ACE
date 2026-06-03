@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +18,16 @@ INDEX_JS_PATH = _SCRIPT_DIR / "index.js"
 OUTPUT_PATH = _REPO_ROOT / "index.html"
 
 DASH_TEMP_MARKER = "-Dash-Temp"
+_STAMP_RE = re.compile(r"^(\d{8}T\d{6}Z)")
+
+
+def stamp_to_epoch(csv_path: Path) -> float | None:
+    """Parse leading UTC stamp from ``<stamp>-<model>-log.csv``."""
+    match = _STAMP_RE.match(csv_path.name)
+    if not match:
+        return None
+    dt = datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
 def parse_experiment_name(folder_name: str) -> tuple[str, str | None]:
@@ -46,7 +57,8 @@ def discover_dashboards(result_dir: Path) -> list[dict]:
         if exp_dir.name in ("__pycache__",):
             continue
 
-        csv_count = len(list(exp_dir.glob("*-log.csv")))
+        csv_files = list(exp_dir.glob("*-log.csv"))
+        csv_count = len(csv_files)
         if csv_count == 0:
             continue
 
@@ -56,16 +68,18 @@ def discover_dashboards(result_dir: Path) -> list[dict]:
             subtitle_parts.append(temp_label)
         subtitle_parts.append(f"{csv_count} model run{'s' if csv_count != 1 else ''}")
 
+        stamps = [s for s in (stamp_to_epoch(p) for p in csv_files) if s is not None]
+
         dashboard_path = exp_dir / "dashboard.html"
         if dashboard_path.is_file():
-            mtime = dashboard_path.stat().st_mtime
+            updated = max(stamps) if stamps else dashboard_path.stat().st_mtime
             built.append(
                 {
                     "id": exp_dir.name,
                     "href": f"result/{exp_dir.name}/dashboard.html",
                     "title": repo.replace("_", " "),
-                    "subtitle": " · ".join(subtitle_parts) + f" · Updated {format_updated(mtime)}",
-                    "updated": mtime,
+                    "subtitle": " · ".join(subtitle_parts) + f" · Updated {format_updated(updated)}",
+                    "updated": updated,
                     "pending": False,
                 }
             )
@@ -79,7 +93,7 @@ def discover_dashboards(result_dir: Path) -> list[dict]:
                 }
             )
 
-    built.sort(key=lambda x: x["id"])
+    built.sort(key=lambda x: x["updated"], reverse=True)
     pending.sort(key=lambda x: x["id"])
     return built + pending
 

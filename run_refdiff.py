@@ -12,6 +12,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -22,22 +23,89 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _RUNNER_DIR = _SCRIPT_DIR / "refdiff-runner"
 _RESULT_DIR = _SCRIPT_DIR / "result"
 _DEFAULT_JAVA_HOME = Path("/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home")
+_MAX_GRADLE_JAVA = 23  # Gradle 8.10.2 max supported runtime
 
 
 def eprint(*args: object) -> None:
     print(*args, file=sys.stderr)
 
 
-def java_home() -> str:
-    env = os.environ.get("JAVA_HOME", "").strip()
-    if env and Path(env).is_dir():
-        return env
-    if _DEFAULT_JAVA_HOME.is_dir():
-        return str(_DEFAULT_JAVA_HOME)
-    raise RuntimeError(
-        "JAVA_HOME not set and default OpenJDK 21 not found. "
-        "Install openjdk@21 or export JAVA_HOME."
+def jdk_major_version(home: Path) -> int | None:
+    """Return JDK major version from <home>/release or `java -version`."""
+    release = home / "release"
+    if release.is_file():
+        text = release.read_text(encoding="utf-8", errors="replace")
+        match = re.search(r'^JAVA_VERSION="([^"]+)"', text, re.MULTILINE)
+        if match:
+            version = match.group(1)
+            if version.startswith("1."):
+                parts = version.split(".")
+                if len(parts) >= 2 and parts[1].isdigit():
+                    return int(parts[1])
+            head = version.split(".", 1)[0]
+            if head.isdigit():
+                return int(head)
+
+    java_bin = home / "bin" / "java"
+    if not java_bin.is_file():
+        return None
+    proc = subprocess.run(
+        [str(java_bin), "-version"],
+        capture_output=True,
+        text=True,
     )
+    output = (proc.stderr or "") + (proc.stdout or "")
+    match = re.search(r'version "(\d+)(?:\.(\d+))?', output)
+    if not match:
+        return None
+    major = int(match.group(1))
+    if major == 1 and match.group(2):
+        return int(match.group(2))
+    return major
+
+
+def java_home() -> str:
+    env_home = os.environ.get("JAVA_HOME", "").strip()
+    candidates: list[Path] = []
+    if env_home:
+        candidates.append(Path(env_home))
+    if _DEFAULT_JAVA_HOME not in candidates:
+        candidates.append(_DEFAULT_JAVA_HOME)
+
+    for home in candidates:
+        if not home.is_dir():
+            continue
+        major = jdk_major_version(home)
+        if major is None:
+            eprint(f"[warn] cannot detect Java version for {home}, skipping")
+            continue
+        if major > _MAX_GRADLE_JAVA:
+            eprint(
+                f"[warn] {home} is Java {major} (Gradle 8.10.2 supports up to "
+                f"{_MAX_GRADLE_JAVA}), skipping"
+            )
+            continue
+        if env_home and str(home.resolve()) != Path(env_home).resolve():
+            eprint(f"[warn] using {home} (Java {major}) instead of JAVA_HOME={env_home}")
+        return str(home)
+
+    raise RuntimeError(
+        f"No JDK <= {_MAX_GRADLE_JAVA} found for Gradle 8.10.2. "
+        "Install openjdk@21 (brew install openjdk@21) or set JAVA_HOME to a "
+        f"compatible JDK (e.g. {_DEFAULT_JAVA_HOME})."
+    )
+
+
+def detect_repo_language(repo: Path) -> str | None:
+    has_java = bool(list(repo.rglob("*.java")))
+    has_js = bool(list(repo.rglob("*.js"))) or bool(list(repo.rglob("*.jsx")))
+    if has_java and has_js:
+        return None
+    if has_java:
+        return "java"
+    if has_js:
+        return "js"
+    return None
 
 
 def is_java_experiment(exp_name: str, repo: Path) -> bool:
@@ -45,6 +113,14 @@ def is_java_experiment(exp_name: str, repo: Path) -> bool:
         return True
     if list(repo.rglob("*.java")):
         return True
+    return False
+
+
+def experiment_matches_language(exp_name: str, repo: Path, lang: str) -> bool:
+    if lang == "java":
+        return is_java_experiment(exp_name, repo)
+    if lang == "js":
+        return "_Java" not in exp_name and not exp_name.endswith("_Java")
     return False
 
 
@@ -127,6 +203,7 @@ def run_refdiff_commit(
     *,
     repo: Path,
     commit_sha: str,
+    lang: str,
     out_json: Path,
     matcher_log: Path | None,
     gradlew: Path,
@@ -138,6 +215,8 @@ def run_refdiff_commit(
         str(repo),
         "--commit",
         commit_sha,
+        "--lang",
+        lang,
         "--out",
         str(out_json),
         "--include-same",
@@ -177,6 +256,7 @@ def process_csv(
     csv_path: Path,
     repo: Path,
     exp_name: str,
+    lang: str,
     env: dict[str, str],
 ) -> tuple[int, int]:
     stamp = stamp_from_csv(csv_path)
@@ -217,6 +297,7 @@ def process_csv(
                 success, record = run_refdiff_commit(
                     repo=repo,
                     commit_sha=commit_sha,
+                    lang=lang,
                     out_json=tmp_path,
                     matcher_log=matcher_log,
                     gradlew=gradlew,
@@ -257,13 +338,14 @@ def process_experiment_dir(
     *,
     exp_dir: Path,
     repo: Path,
+    lang: str,
     env: dict[str, str],
 ) -> tuple[int, int] | None:
     """Process one result/<experiment>/ folder. Returns None if skipped."""
     exp_name = exp_dir.name
 
-    if not is_java_experiment(exp_name, repo):
-        eprint(f"[skip] {exp_name}: not a Java experiment")
+    if not experiment_matches_language(exp_name, repo, lang):
+        eprint(f"[skip] {exp_name}: not a {lang} experiment")
         return None
 
     probe_sha = first_commit_sha(exp_dir)
@@ -284,6 +366,7 @@ def process_experiment_dir(
             csv_path=csv_path,
             repo=repo,
             exp_name=exp_name,
+            lang=lang,
             env=env,
         )
         ok_count += ok
@@ -301,6 +384,20 @@ def main(argv: list[str] | None = None) -> int:
         eprint(f"error: not a git repo: {repo}")
         return 2
 
+    lang = detect_repo_language(repo)
+    if lang is None:
+        has_java = bool(list(repo.rglob("*.java")))
+        has_js = bool(list(repo.rglob("*.js"))) or bool(list(repo.rglob("*.jsx")))
+        if has_java and has_js:
+            eprint(
+                "error: repo contains both .java and .js/.jsx files; "
+                "RefDiff auto-detect requires a single language"
+            )
+        else:
+            eprint("error: repo contains no .java, .js, or .jsx source files")
+        return 2
+    eprint(f"[info] repo language: {lang}")
+
     exp_dirs = experiment_dirs_with_logs(_RESULT_DIR)
     if not exp_dirs:
         eprint(f"error: no experiment directories with *-log.csv in {_RESULT_DIR}")
@@ -316,6 +413,7 @@ def main(argv: list[str] | None = None) -> int:
         outcome = process_experiment_dir(
             exp_dir=exp_dir,
             repo=repo,
+            lang=lang,
             env=env,
         )
         if outcome is None:

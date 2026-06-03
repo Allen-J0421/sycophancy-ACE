@@ -1,14 +1,14 @@
 # Codex line-change experiment runner
 
-A small research harness that runs repeated **cumulative** Codex refactors on a git-backed codebase, logs per-iteration line-change metrics, optionally mines **RefDiff** refactorings on Java subjects, and builds a static **interactive dashboard** for inspection.
+A small research harness that runs repeated **cumulative** Codex refactors on a git-backed codebase, logs per-iteration line-change metrics, optionally mines **RefDiff** refactorings on Java or JavaScript subjects, and builds a static **interactive dashboard** for inspection.
 
 The pipeline has three **separate** phases. RefDiff never runs inside the Codex loop.
 
 | Phase | Command | When |
 |-------|---------|------|
 | 1. Experiment | `run_experiment.py` | Codex iterations + CSV + artifacts |
-| 2. RefDiff (Java) | `run_refdiff.py` | After phase 1, on the target git repo |
-| 3. Dashboard | `dashboard/build.py` | After phase 1 (and 2 for Java hover/RefDiff panel) |
+| 2. RefDiff (Java / JS) | `run_refdiff.py` | After phase 1, on the target git repo |
+| 3. Dashboard | `dashboard/build.py` | After phase 1 (and 2 for RefDiff hover/panel) |
 
 ---
 
@@ -41,6 +41,19 @@ python dashboard/build.py --exp bubble_sort_Java
 open result/bubble_sort_Java/dashboard.html
 ```
 
+**JavaScript subject (all three phases):**
+
+```bash
+export JAVA_HOME="/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
+
+python run_experiment.py ../test_subject/exp-app 10 HEAD --model gpt-5.5
+
+python run_refdiff.py --repo ../test_subject/exp-app
+
+python dashboard/build.py --exp exp-app-Dash-Temp0.0
+open result/exp-app-Dash-Temp0.0/dashboard.html
+```
+
 Use the **same `--repo` path** you passed to `run_experiment.py`. Commits live in that git repository, not under `result/`.
 
 ---
@@ -68,7 +81,7 @@ export JAVA_HOME="/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
 ```
 sandbox/
   run_experiment.py      # Phase 1: Codex cumulative runs
-  run_refdiff.py         # Phase 2: RefDiff batch (Java)
+  run_refdiff.py         # Phase 2: RefDiff batch (Java / JavaScript)
   prompt.env             # CODEX_PROMPT=...
   refdiff-runner/        # Gradle app (RefDiff 2.0.0 from Maven Central)
   dashboard/
@@ -79,7 +92,7 @@ sandbox/
     <experiment>/        # One folder per target repo name (see --label)
       <stamp>-<model>-log.csv
       <stamp>-<model>/run_NNN/{diff.patch,codex.jsonl}
-      refdiff/           # Phase 2 output (Java only)
+      refdiff/           # Phase 2 output (Java / JavaScript)
       dashboard.html     # Phase 3 output
   index.html             # Links to all built dashboards
   result/plot.py         # Optional PDF/PNG line charts
@@ -131,9 +144,11 @@ Cumulative mode: the tree is never reset between iterations.
 
 ---
 
-## Phase 2: RefDiff (Java only)
+## Phase 2: RefDiff (Java / JavaScript)
 
 Runs **after** the experiment. Does not modify `run_experiment.py` or call Codex.
+
+Language is **auto-detected** from `--repo`: `.java` files → Java plugin; `.js`/`.jsx` → JavaScript plugin. Mixed-language repos (both present) are rejected. TypeScript (`.ts`/`.tsx`) is not supported.
 
 ### Command
 
@@ -141,7 +156,9 @@ Runs **after** the experiment. Does not modify `run_experiment.py` or call Codex
 python run_refdiff.py --repo <path-to-target-git-repo>
 ```
 
-Scans every `result/*/` folder with `*-log.csv` (like `result/plot.py`). Skips folders whose commits are not in `--repo`, non-Java experiments, and batches that already have `refdiff/*-refdiff.jsonl`. Python dashboards are unchanged.
+Scans every `result/*/` folder with `*-log.csv` (like `result/plot.py`). Skips folders whose commits are not in `--repo`, experiments that do not match the detected language, and batches that already have `refdiff/*-refdiff.jsonl`. Python-only dashboards are unchanged.
+
+**JavaScript on Apple Silicon:** `refdiff-js` uses J2V8 native libraries (x86_64). If you see `J2V8 native library not loaded`, use an **x64 JDK under Rosetta 2** (not an aarch64 JDK).
 
 ### Output
 
@@ -154,7 +171,7 @@ result/<experiment>/refdiff/
 
 Each JSONL record includes:
 
-- **Provenance:** `run`, `commit_sha`, `parent_sha`, `commit_message`, `model`, `git_branch`, `stamp`, `repo_path`, `experiment`
+- **Provenance:** `run`, `commit_sha`, `parent_sha`, `commit_message`, `model`, `git_branch`, `stamp`, `repo_path`, `experiment`, `language` (`java` or `js`)
 - **Status:** `refdiff_ok`, `error_message`, `duration_ms`
 - **Summary:** `n_refactorings`, `n_same`, `n_relationships_total`, `by_type` (refactoring types only; `SAME` is counted in `n_same`)
 - **Refactorings:** type, similarity, descriptions, before/after node snapshots (file, line, path)
@@ -198,7 +215,7 @@ RefDiff’s one-line CLI output for a refactoring is stored per relationship as 
 cd refdiff-runner
 export JAVA_HOME="/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
 
-./gradlew -q run --args="--repo /path/to/repo --commit f03dd21 --out /tmp/out.json --include-same --quiet"
+./gradlew -q run --args="--repo /path/to/repo --commit f03dd21 --lang java --out /tmp/out.json --include-same --quiet"
 ```
 
 ---
@@ -219,7 +236,7 @@ python dashboard/build_index.py              # index only
 - Tabs per `*-log.csv` (model / timestamp batch).
 - Line chart of `lines_total` per run; **click** a point or use **Prev/Next** (arrow keys) to select a step.
 - Panels: **RefDiff** (formatted summary + per-step raw JSON via **refdiff.jsonl**), agent response, unified diff; **Reasoning** and **codex.jsonl** dialogs for the selected step.
-- **Java + RefDiff:** hover a chart point for a one-line summary (e.g. `RefDiff: EXTRACT (1)`); see [Relationship types](#relationship-types) above when interpreting `type` fields.
+- **RefDiff:** hover a chart point for a one-line summary (e.g. `RefDiff: EXTRACT (1)`); see [Relationship types](#relationship-types) above when interpreting `type` fields.
 
 Rebuild the dashboard after running `run_refdiff.py` to embed RefDiff data.
 

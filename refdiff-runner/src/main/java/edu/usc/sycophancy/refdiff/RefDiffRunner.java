@@ -22,7 +22,9 @@ import refdiff.core.io.FilePathFilter;
 import refdiff.core.io.GitHelper;
 import refdiff.core.io.SourceFileSet;
 import refdiff.core.util.PairBeforeAfter;
+import refdiff.parsers.LanguagePlugin;
 import refdiff.parsers.java.JavaPlugin;
+import refdiff.parsers.js.JsPlugin;
 
 /**
  * CLI wrapper around RefDiff for local git repositories.
@@ -64,22 +66,18 @@ public final class RefDiffRunner {
             }
 
             CollectingMatcherMonitor monitor = new CollectingMatcherMonitor();
-            JavaPlugin plugin = new JavaPlugin(tempDir);
-            FilePathFilter fileFilter = plugin.getAllowedFilesFilter();
-            CstDiff diff;
-            long durationMs;
-            try (Repository repository = GitHelper.openRepository(gitDir)) {
-                CommitInfo info = resolveCommit(repository, opts.commit);
-                resolvedCommitSha = info.sha;
-                parentSha = info.parentSha != null ? info.parentSha : "";
-
-                PairBeforeAfter<SourceFileSet> sources =
-                    GitHelper.getSourcesBeforeAndAfterCommit(repository, opts.commit, fileFilter);
-                CstComparator comparator = new CstComparator(plugin);
-                long compareStartMs = System.currentTimeMillis();
-                diff = comparator.compare(sources.getBefore(), sources.getAfter(), monitor);
-                durationMs = System.currentTimeMillis() - compareStartMs;
+            DiffResult diffResult;
+            if ("js".equals(opts.lang)) {
+                try (JsPlugin plugin = new JsPlugin()) {
+                    diffResult = runDiff(gitDir, opts.commit, plugin, monitor);
+                }
+            } else {
+                JavaPlugin plugin = new JavaPlugin(tempDir);
+                diffResult = runDiff(gitDir, opts.commit, plugin, monitor);
             }
+
+            resolvedCommitSha = diffResult.commitSha;
+            parentSha = diffResult.parentSha != null ? diffResult.parentSha : "";
 
             if (opts.matcherLog != null) {
                 File matcherFile = new File(opts.matcherLog);
@@ -91,15 +89,16 @@ public final class RefDiffRunner {
                 repoPath.getPath(),
                 resolvedCommitSha,
                 parentSha,
-                diff,
+                diffResult.diff,
                 opts.includeSame,
                 monitor.getLines(),
-                durationMs,
+                diffResult.durationMs,
                 true,
                 "");
+            record.put("language", opts.lang);
 
             if (!opts.quiet) {
-                printHumanSummary(repoPath, gitDir, resolvedCommitSha, diff);
+                printHumanSummary(repoPath, gitDir, resolvedCommitSha, diffResult.diff);
             }
 
             writeOutput(record, opts);
@@ -117,6 +116,7 @@ public final class RefDiffRunner {
                 durationMs,
                 false,
                 e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+            record.put("language", opts.lang);
 
             if (!opts.quiet) {
                 System.err.println("RefDiff failed: " + e.getMessage());
@@ -131,6 +131,24 @@ public final class RefDiffRunner {
         }
 
         System.exit(exitCode);
+    }
+
+    private static DiffResult runDiff(
+            File gitDir,
+            String commit,
+            LanguagePlugin plugin,
+            CollectingMatcherMonitor monitor) throws Exception {
+        FilePathFilter fileFilter = plugin.getAllowedFilesFilter();
+        try (Repository repository = GitHelper.openRepository(gitDir)) {
+            CommitInfo info = resolveCommit(repository, commit);
+            PairBeforeAfter<SourceFileSet> sources =
+                GitHelper.getSourcesBeforeAndAfterCommit(repository, commit, fileFilter);
+            CstComparator comparator = new CstComparator(plugin);
+            long compareStartMs = System.currentTimeMillis();
+            CstDiff diff = comparator.compare(sources.getBefore(), sources.getAfter(), monitor);
+            long durationMs = System.currentTimeMillis() - compareStartMs;
+            return new DiffResult(info.sha, info.parentSha, diff, durationMs);
+        }
     }
 
     private static void writeOutput(Map<String, Object> record, CliOptions opts) throws Exception {
@@ -188,6 +206,20 @@ public final class RefDiffRunner {
         }
     }
 
+    static final class DiffResult {
+        final String commitSha;
+        final String parentSha;
+        final CstDiff diff;
+        final long durationMs;
+
+        DiffResult(String commitSha, String parentSha, CstDiff diff, long durationMs) {
+            this.commitSha = commitSha;
+            this.parentSha = parentSha;
+            this.diff = diff;
+            this.durationMs = durationMs;
+        }
+    }
+
     static File resolveGitDir(File path) throws GitDirException {
         File dotGit = new File(path, ".git");
         if (dotGit.isDirectory()) {
@@ -209,7 +241,7 @@ public final class RefDiffRunner {
     }
 
     private static void printUsageAndExit(int code) {
-        System.err.println("Usage: refdiff-runner --repo <path> --commit <sha> [--out <file.json>]");
+        System.err.println("Usage: refdiff-runner --repo <path> --commit <sha> --lang java|js [--out <file.json>]");
         System.err.println("       [--include-same] [--matcher-log <file>] [--pretty] [--quiet]");
         System.exit(code);
     }
@@ -217,6 +249,7 @@ public final class RefDiffRunner {
     static final class CliOptions {
         final String repo;
         final String commit;
+        final String lang;
         final String out;
         final String matcherLog;
         final boolean includeSame;
@@ -226,6 +259,7 @@ public final class RefDiffRunner {
         CliOptions(
                 String repo,
                 String commit,
+                String lang,
                 String out,
                 String matcherLog,
                 boolean includeSame,
@@ -233,6 +267,7 @@ public final class RefDiffRunner {
                 boolean quiet) {
             this.repo = repo;
             this.commit = commit;
+            this.lang = lang;
             this.out = out;
             this.matcherLog = matcherLog;
             this.includeSame = includeSame;
@@ -243,6 +278,7 @@ public final class RefDiffRunner {
         static CliOptions parse(String[] args) {
             String repo = null;
             String commit = null;
+            String lang = null;
             String out = null;
             String matcherLog = null;
             boolean includeSame = false;
@@ -257,6 +293,9 @@ public final class RefDiffRunner {
                         break;
                     case "--commit":
                         commit = requireValue(args, ++i, "--commit");
+                        break;
+                    case "--lang":
+                        lang = requireValue(args, ++i, "--lang");
                         break;
                     case "--out":
                         out = requireValue(args, ++i, "--out");
@@ -281,7 +320,13 @@ public final class RefDiffRunner {
             if (repo == null || commit == null) {
                 throw new IllegalArgumentException("--repo and --commit are required");
             }
-            return new CliOptions(repo, commit, out, matcherLog, includeSame, pretty, quiet);
+            if (lang == null) {
+                throw new IllegalArgumentException("--lang is required (java or js)");
+            }
+            if (!"java".equals(lang) && !"js".equals(lang)) {
+                throw new IllegalArgumentException("--lang must be java or js");
+            }
+            return new CliOptions(repo, commit, lang, out, matcherLog, includeSame, pretty, quiet);
         }
 
         private static String requireValue(String[] args, int index, String flag) {
