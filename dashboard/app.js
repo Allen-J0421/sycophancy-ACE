@@ -227,6 +227,18 @@
       }
     }
 
+    const nearMisses = record.near_misses || [];
+    if (nearMisses.length > 0) {
+      lines.push("");
+      lines.push("Near-miss candidates (below RefDiff threshold; inferred, not detected)");
+      for (const nm of nearMisses) {
+        const score = nm.score != null ? Number(nm.score).toFixed(3) : "?";
+        lines.push(`  (match discarded)  ${nm.type || "UNKNOWN"}  score=${score}`);
+        lines.push(`    before: ${formatNode(nm.before)}`);
+        lines.push(`    after:  ${formatNode(nm.after)}`);
+      }
+    }
+
     return lines.join("\n");
   }
 

@@ -59,13 +59,18 @@ def build_refdiff_hover(record: dict) -> str:
         msg = (record.get("error_message") or "failed").strip()
         return f"error: {msg[:100]}" if msg else "error"
     n = int(record.get("n_refactorings", 0))
+    near = record.get("near_misses") or []
     if n == 0:
-        return "(none)"
-    type_counts: dict[str, int] = {}
-    for rel in record.get("refactorings") or []:
-        t = rel.get("type", "UNKNOWN")
-        type_counts[t] = type_counts.get(t, 0) + 1
-    return ", ".join(f"{t} ({c})" for t, c in sorted(type_counts.items()))
+        hover = "(none)"
+    else:
+        type_counts: dict[str, int] = {}
+        for rel in record.get("refactorings") or []:
+            t = rel.get("type", "UNKNOWN")
+            type_counts[t] = type_counts.get(t, 0) + 1
+        hover = ", ".join(f"{t} ({c})" for t, c in sorted(type_counts.items()))
+    if near:
+        hover += f" +{len(near)} near-miss"
+    return hover
 
 
 def load_refdiff_for_csv(csv_path: Path) -> dict[int, dict]:

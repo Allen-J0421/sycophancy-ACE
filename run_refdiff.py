@@ -4,6 +4,8 @@
 Scans result/ for folders with *-log.csv (like result/plot.py), invokes
 refdiff-runner per commit_sha on --repo, and writes refdiff/<stamp>-refdiff.jsonl
 plus matcher logs. Skips experiment folders whose commits are not in --repo.
+
+Near-miss thresholds are read from `.env` (see REFDIFF_NEAR_MISS_* below).
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,6 +27,20 @@ _RUNNER_DIR = _SCRIPT_DIR / "refdiff-runner"
 _RESULT_DIR = _SCRIPT_DIR / "result"
 _DEFAULT_JAVA_HOME = Path("/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home")
 _MAX_GRADLE_JAVA = 23  # Gradle 8.10.2 max supported runtime
+
+# RefDiff-js bundles an ancient @babel/parser (7.0.0-beta.51) that cannot parse
+# `??` / `?.` without plugins it never enables. It extracts that parser into
+# `${java.io.tmpdir}/refdiff_node_modules/@babel/parser` only when absent, and
+# reuses whatever is already there. build.gradle pins java.io.tmpdir to
+# _REFDIFF_NODE_TMP; we pre-seed a modern vendored parser there so modern JS
+# syntax parses correctly. See vendor/babel-parser.
+_VENDOR_BABEL = _RUNNER_DIR / "vendor" / "babel-parser"
+_REFDIFF_NODE_TMP = _RUNNER_DIR / ".refdiff-node-tmp"
+_BABEL_FILES = ("package.json", "lib/index.js", "bin/babel-parser.js")
+
+# Near-miss score band defaults; overridden by .env (cwd first, then repo root).
+NEAR_MISS_MIN_SCORE = 0.3
+NEAR_MISS_MAX_SCORE = 0.5
 
 
 def eprint(*args: object) -> None:
@@ -94,6 +111,76 @@ def java_home() -> str:
         "Install openjdk@21 (brew install openjdk@21) or set JAVA_HOME to a "
         f"compatible JDK (e.g. {_DEFAULT_JAVA_HOME})."
     )
+
+
+def _parse_env_float(key: str, value: str) -> float | None:
+    raw = value.strip().strip('"').strip("'")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        eprint(f"[warn] invalid {key}={value!r} in .env; ignoring")
+        return None
+
+
+def load_dotenv() -> None:
+    """Load REFDIFF_NEAR_MISS_* from `.env` (cwd, then sandbox root)."""
+    global NEAR_MISS_MIN_SCORE, NEAR_MISS_MAX_SCORE
+    candidates = [Path.cwd() / ".env", _SCRIPT_DIR / ".env"]
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen or not path.is_file():
+            continue
+        seen.add(resolved)
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            key = key.strip()
+            if key == "REFDIFF_NEAR_MISS_MIN_SCORE":
+                parsed = _parse_env_float(key, value)
+                if parsed is not None:
+                    NEAR_MISS_MIN_SCORE = parsed
+            elif key == "REFDIFF_NEAR_MISS_MAX_SCORE":
+                parsed = _parse_env_float(key, value)
+                if parsed is not None:
+                    NEAR_MISS_MAX_SCORE = parsed
+
+    if NEAR_MISS_MIN_SCORE >= NEAR_MISS_MAX_SCORE:
+        eprint(
+            "[warn] .env: REFDIFF_NEAR_MISS_MIN_SCORE must be < REFDIFF_NEAR_MISS_MAX_SCORE; "
+            "using 0.3 / 0.5"
+        )
+        NEAR_MISS_MIN_SCORE = 0.3
+        NEAR_MISS_MAX_SCORE = 0.5
+
+
+def seed_babel_parser() -> bool:
+    """Pre-seed RefDiff's reuse location with the vendored modern @babel/parser.
+
+    Force-copies the vendored parser into
+    ``_REFDIFF_NODE_TMP/refdiff_node_modules/@babel/parser`` so RefDiff-js reuses
+    it (it only extracts its bundled beta.51 when the files are absent). Keeps the
+    copy fresh on every invocation in case the OS temp reaper cleared it.
+    """
+    if not (_VENDOR_BABEL / "lib" / "index.js").is_file():
+        eprint(
+            f"[warn] vendored @babel/parser missing at {_VENDOR_BABEL}; "
+            "JS files using ??/?. may fail to parse"
+        )
+        return False
+    dst_root = _REFDIFF_NODE_TMP / "refdiff_node_modules" / "@babel" / "parser"
+    for rel in _BABEL_FILES:
+        src = _VENDOR_BABEL / rel
+        if not src.is_file():
+            continue
+        dst = dst_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    return True
 
 
 def detect_repo_language(repo: Path) -> str | None:
@@ -226,7 +313,17 @@ def run_refdiff_commit(
         arg_tokens.extend(["--matcher-log", str(matcher_log)])
     # Gradle CLI treats tokens after `--args` as Gradle options unless passed as `--args="..."`.
     arg_string = " ".join(shlex.quote(t) for t in arg_tokens)
-    args = [str(gradlew), "-q", "run", f"--args={arg_string}"]
+    # -P (per-invocation project property) keeps the JVM's java.io.tmpdir aligned
+    # with the directory we pre-seeded with a modern @babel/parser.
+    args = [
+        str(gradlew),
+        "-q",
+        f"-PrefdiffTmpdir={_REFDIFF_NODE_TMP}",
+        f"-PrefdiffNearMissMin={NEAR_MISS_MIN_SCORE}",
+        f"-PrefdiffNearMissMax={NEAR_MISS_MAX_SCORE}",
+        "run",
+        f"--args={arg_string}",
+    ]
     proc = subprocess.run(
         args,
         cwd=_RUNNER_DIR,
@@ -375,6 +472,8 @@ def process_experiment_dir(
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv()
+
     parser = argparse.ArgumentParser(description="Run RefDiff on experiment CSV commits.")
     parser.add_argument("--repo", type=Path, required=True, help="Path to target git repo")
     args = parser.parse_args(argv)
@@ -397,6 +496,10 @@ def main(argv: list[str] | None = None) -> int:
             eprint("error: repo contains no .java, .js, or .jsx source files")
         return 2
     eprint(f"[info] repo language: {lang}")
+    eprint(
+        f"[info] near-miss score band (from .env): "
+        f"{NEAR_MISS_MIN_SCORE} <= score < {NEAR_MISS_MAX_SCORE}"
+    )
 
     exp_dirs = experiment_dirs_with_logs(_RESULT_DIR)
     if not exp_dirs:
@@ -405,6 +508,10 @@ def main(argv: list[str] | None = None) -> int:
 
     env = os.environ.copy()
     env["JAVA_HOME"] = java_home()
+
+    if lang == "js":
+        if seed_babel_parser():
+            eprint(f"[info] seeded modern @babel/parser into {_REFDIFF_NODE_TMP}")
 
     total_ok = 0
     total_fail = 0

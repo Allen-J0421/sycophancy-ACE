@@ -92,6 +92,7 @@ public final class RefDiffRunner {
                 diffResult.diff,
                 opts.includeSame,
                 monitor.getLines(),
+                monitor.getDiscardedMatches(),
                 diffResult.durationMs,
                 true,
                 "");
@@ -112,6 +113,7 @@ public final class RefDiffRunner {
                 parentSha,
                 null,
                 opts.includeSame,
+                List.of(),
                 List.of(),
                 durationMs,
                 false,
