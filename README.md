@@ -165,24 +165,23 @@ Scans every `result/*/` folder with `*-log.csv` (like `result/plot.py`). Skips f
 ```
 result/<experiment>/refdiff/
   <stamp>-refdiff.jsonl           # one JSON object per CSV row (run)
-  <stamp>-matcher/
-    run_001.matcher.log           # discarded matcher candidates
+  <stamp>-matcher.log             # discarded matcher candidates, labeled by run
 ```
 
 Each JSONL record includes:
 
 - **Provenance:** `run`, `commit_sha`, `parent_sha`, `commit_message`, `model`, `git_branch`, `stamp`, `repo_path`, `experiment`, `language` (`java` or `js`)
 - **Status:** `refdiff_ok`, `error_message`, `duration_ms`
-- **Summary:** `n_refactorings`, `n_same`, `n_relationships_total`, `by_type` (refactoring types only; `SAME` is counted in `n_same`)
-- **Refactorings:** type, similarity, descriptions, before/after node snapshots (file, line, path)
+- **Summary:** `n_same`, `n_matching`, `n_non_matching`, `n_relationships_total`
+- **Relationships:** type, matching/non-matching flag, similarity, descriptions, before/after node snapshots (file, line, path)
 - **Git (Tier 2):** `git_stat` (`files_changed`, `lines_added`, `lines_deleted`)
-- **Matcher (Tier 2):** `matcher_discarded`, `matcher_log`
+- **Matcher (Tier 2):** `matcher_discarded`, `matcher_log` (single run-labeled file per batch)
 - **SAME (Tier 2):** `same_relationships[]`
 
 Records split relationships into two buckets:
 
-- **`refactorings[]`** — structural refactorings (`isRefactoring()`); listed in `by_type` and `n_refactorings`
-- **`same_relationships[]`** — matched elements with no refactoring detected; counted in `n_same`
+- **`matching_relationships[]`** — RefDiff relationships whose type is matching, including `SAME`, `RENAME`, `MOVE`, etc.
+- **`non_matching_relationships[]`** — RefDiff relationships whose type is non-matching, such as extract/inline-style relationships.
 
 ### Relationship types
 
@@ -265,8 +264,7 @@ result/bubble_sort_Java/
       ...
   refdiff/                                    # after run_refdiff.py
     20260601T211117Z-gpt-5.5-refdiff.jsonl
-    20260601T211117Z-gpt-5.5-matcher/
-      run_001.matcher.log
+    20260601T211117Z-gpt-5.5-matcher.log
   dashboard.html                              # after dashboard/build.py
 ```
 

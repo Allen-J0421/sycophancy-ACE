@@ -2,13 +2,9 @@ package edu.usc.sycophancy.refdiff;
 
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.TreeMap;
 
 import refdiff.core.cst.CstNode;
 import refdiff.core.cst.Location;
@@ -21,44 +17,7 @@ import refdiff.core.diff.RelationshipType;
  */
 public final class RefDiffExporter {
 
-    private static final String PROP_NEAR_MISS_MIN = "refdiff.nearMiss.min";
-    private static final String PROP_NEAR_MISS_MAX = "refdiff.nearMiss.max";
-    private static final double DEFAULT_NEAR_MISS_MIN_SCORE = 0.3;
-    private static final double DEFAULT_NEAR_MISS_MAX_SCORE = 0.5;
-
     private RefDiffExporter() {}
-
-    static final class NearMissScoreBand {
-        final double min;
-        final double max;
-
-        NearMissScoreBand(double min, double max) {
-            this.min = min;
-            this.max = max;
-        }
-    }
-
-    /** Score band from JVM system properties (set by Gradle from run_refdiff.py / .env). */
-    static NearMissScoreBand nearMissScoreBand() {
-        double min = parsePropertyScore(PROP_NEAR_MISS_MIN, DEFAULT_NEAR_MISS_MIN_SCORE);
-        double max = parsePropertyScore(PROP_NEAR_MISS_MAX, DEFAULT_NEAR_MISS_MAX_SCORE);
-        if (min >= max) {
-            return new NearMissScoreBand(DEFAULT_NEAR_MISS_MIN_SCORE, DEFAULT_NEAR_MISS_MAX_SCORE);
-        }
-        return new NearMissScoreBand(min, max);
-    }
-
-    private static double parsePropertyScore(String key, double defaultValue) {
-        String raw = System.getProperty(key);
-        if (raw == null || raw.isBlank()) {
-            return defaultValue;
-        }
-        try {
-            return Double.parseDouble(raw.trim());
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
-    }
 
     public static Map<String, Object> buildRecord(
             String repoPath,
@@ -67,7 +26,6 @@ public final class RefDiffExporter {
             CstDiff diff,
             boolean includeSame,
             List<String> matcherDiscarded,
-            List<CollectingMatcherMonitor.DiscardedMatch> discardedMatches,
             long durationMs,
             boolean refdiffOk,
             String errorMessage) {
@@ -80,157 +38,154 @@ public final class RefDiffExporter {
         record.put("error_message", errorMessage != null ? errorMessage : "");
         record.put("duration_ms", durationMs);
         record.put("matcher_discarded", matcherDiscarded != null ? matcherDiscarded : List.of());
-        NearMissScoreBand nearMissBand = nearMissScoreBand();
 
         if (!refdiffOk || diff == null) {
-            record.put("n_refactorings", 0);
             record.put("n_same", 0);
+            record.put("n_matching", 0);
+            record.put("n_non_matching", 0);
             record.put("n_relationships_total", 0);
-            record.put("by_type", Map.of());
-            record.put("refactorings", List.of());
-            record.put("same_relationships", List.of());
-            record.put("near_misses", List.of());
+            record.put("nodes_before", List.of());
+            record.put("nodes_after", List.of());
+            record.put("matching_relationships", List.of());
+            record.put("non_matching_relationships", List.of());
+            record.put("node_relationships", Map.of());
             return record;
         }
+
+        List<Map<String, Object>> nodesBefore = new ArrayList<>();
+        diff.getBefore().forEachNode((n, depth) -> nodesBefore.add(nodeOrNull(n)));
+        List<Map<String, Object>> nodesAfter = new ArrayList<>();
+        diff.getAfter().forEachNode((n, depth) -> nodesAfter.add(nodeOrNull(n)));
+        record.put("nodes_before", nodesBefore);
+        record.put("nodes_after", nodesAfter);
 
         // RefDiff returns relationships in an unordered Set, so impose a stable
         // ordering here to keep the emitted JSON reproducible across runs.
         List<Relationship> sorted = new ArrayList<>(diff.getRelationships());
         sorted.sort(STABLE_ORDER);
 
-        List<Map<String, Object>> refactorings = new ArrayList<>();
-        List<Map<String, Object>> sameRelationships = new ArrayList<>();
-        // by_type counts refactorings only (excludes SAME); SAME is reported via n_same.
-        Map<String, Integer> byType = new TreeMap<>();
+        List<Map<String, Object>> matchingRelationships = new ArrayList<>();
+        List<Map<String, Object>> nonMatchingRelationships = new ArrayList<>();
         int sameCount = 0;
+        int matchingCount = 0;
+        int nonMatchingCount = 0;
 
         for (Relationship rel : sorted) {
-            Map<String, Object> relMap = relationshipToMap(rel);
-            if (rel.isRefactoring()) {
-                byType.merge(rel.getType().name(), 1, Integer::sum);
-                refactorings.add(relMap);
+            boolean isMatching = rel.getType().isMatching();
+            if (isMatching) {
+                matchingCount++;
             } else {
-                sameCount++;
-                if (includeSame) {
-                    sameRelationships.add(relMap);
+                nonMatchingCount++;
+            }
+
+            Map<String, Object> relMap = relationshipToMap(rel);
+            if (isMatching) {
+                if (rel.getType() == RelationshipType.SAME) {
+                    sameCount++;
+                    if (includeSame) {
+                        matchingRelationships.add(relMap);
+                    }
+                } else {
+                    matchingRelationships.add(relMap);
                 }
+            } else {
+                nonMatchingRelationships.add(relMap);
             }
         }
 
-        record.put("n_refactorings", refactorings.size());
         record.put("n_same", sameCount);
+        record.put("n_matching", matchingCount);
+        record.put("n_non_matching", nonMatchingCount);
         record.put("n_relationships_total", sorted.size());
-        record.put("by_type", byType);
-        record.put("refactorings", refactorings);
-        record.put("same_relationships", sameRelationships);
-        record.put(
-            "near_misses",
-            buildNearMisses(
-                diff,
-                discardedMatches != null ? discardedMatches : List.of(),
-                nearMissBand));
+        record.put("matching_relationships", matchingRelationships);
+        record.put("non_matching_relationships", nonMatchingRelationships);
+        record.put("node_relationships", buildNodeRelationships(nodesBefore, nodesAfter, sorted));
         return record;
     }
 
-    private static List<Map<String, Object>> buildNearMisses(
-            CstDiff diff,
-            List<CollectingMatcherMonitor.DiscardedMatch> discarded,
-            NearMissScoreBand band) {
-        Map<CstNode, CstNode> matched = new HashMap<>();
-        for (Relationship rel : diff.getRelationships()) {
+    private static Map<String, Object> buildNodeRelationships(
+            List<Map<String, Object>> nodesBefore,
+            List<Map<String, Object>> nodesAfter,
+            List<Relationship> relationships) {
+        Map<String, Object> nodeRelationships = new LinkedHashMap<>();
+
+        for (Map<String, Object> node : nodesBefore) {
+            if (node == null) {
+                continue;
+            }
+            String key = nodeKeyForRole("before", node);
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("node", node);
+            entry.put("relationships", new ArrayList<>());
+            nodeRelationships.put(key, entry);
+        }
+        for (Map<String, Object> node : nodesAfter) {
+            if (node == null) {
+                continue;
+            }
+            String key = nodeKeyForRole("after", node);
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("node", node);
+            entry.put("relationships", new ArrayList<>());
+            nodeRelationships.put(key, entry);
+        }
+
+        for (Relationship rel : relationships) {
             CstNode before = rel.getNodeBefore();
             CstNode after = rel.getNodeAfter();
-            if (before != null && after != null) {
-                matched.put(before, after);
-            }
-        }
-
-        Set<String> seen = new HashSet<>();
-        List<Map<String, Object>> nearMisses = new ArrayList<>();
-        for (CollectingMatcherMonitor.DiscardedMatch dm : discarded) {
-            if (dm.score < band.min || dm.score >= band.max) {
+            if (before == null || after == null) {
                 continue;
             }
-            String dedupKey = nodeKey(dm.before) + "->" + nodeKey(dm.after);
-            if (!seen.add(dedupKey)) {
-                continue;
-            }
-            String inferredType = inferNearMissType(dm.before, dm.after, matched);
-            if (inferredType == null) {
-                continue;
-            }
-            Map<String, Object> entry = new LinkedHashMap<>();
-            entry.put("type", inferredType);
-            entry.put("score", dm.score);
-            entry.put("before", nodeOrNull(dm.before));
-            entry.put("after", nodeOrNull(dm.after));
-            nearMisses.add(entry);
+            String beforeKey = nodeKeyForRole("before", before.getId());
+            String afterKey = nodeKeyForRole("after", after.getId());
+
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> beforeRels =
+                (List<Map<String, Object>>) getOrCreateEntry(nodeRelationships, beforeKey, before).get("relationships");
+            beforeRels.add(relationshipRef(rel, "before", afterKey));
+
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> afterRels =
+                (List<Map<String, Object>>) getOrCreateEntry(nodeRelationships, afterKey, after).get("relationships");
+            afterRels.add(relationshipRef(rel, "after", beforeKey));
         }
-        nearMisses.sort(Comparator
-            .comparing((Map<String, Object> m) -> (String) m.get("type"))
-            .thenComparing(m -> nodeKeyFromMap((Map<String, Object>) m.get("before")))
-            .thenComparing(m -> nodeKeyFromMap((Map<String, Object>) m.get("after")))
-            .thenComparing(m -> (Double) m.get("score")));
-        return nearMisses;
+
+        return nodeRelationships;
     }
 
-    private static String nodeKeyFromMap(Map<String, Object> node) {
-        if (node == null) {
-            return "";
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> getOrCreateEntry(
+            Map<String, Object> nodeRelationships, String key, CstNode node) {
+        Map<String, Object> entry = (Map<String, Object>) nodeRelationships.get(key);
+        if (entry != null) {
+            return entry;
         }
-        String file = String.valueOf(node.getOrDefault("file", ""));
-        Object lineObj = node.get("line");
-        int line = lineObj instanceof Number ? ((Number) lineObj).intValue() : 0;
-        String localName = String.valueOf(node.getOrDefault("localName", ""));
-        return file + ":" + line + ":" + localName;
+        entry = new LinkedHashMap<>();
+        entry.put("node", nodeOrNull(node));
+        entry.put("relationships", new ArrayList<>());
+        nodeRelationships.put(key, entry);
+        return entry;
     }
 
-    /**
-     * Mirrors RefDiff {@code findRelationshipForCandidate} for same-location pairs only.
-     * Returns {@code null} for SAME, MOVE*, or unmatched parents.
-     */
-    private static String inferNearMissType(
-            CstNode n1, CstNode n2, Map<CstNode, CstNode> matched) {
-        if (!sameType(n1, n2)) {
-            return null;
-        }
-        if (!sameLocation(n1, n2, matched)) {
-            return null;
-        }
-        if (sameSignature(n1, n2)) {
-            return null;
-        }
-        if (sameName(n1, n2)) {
-            return RelationshipType.CHANGE_SIGNATURE.name();
-        }
-        return RelationshipType.RENAME.name();
+    private static Map<String, Object> relationshipRef(
+            Relationship rel, String role, String counterpartKey) {
+        Map<String, Object> ref = new LinkedHashMap<>();
+        ref.put("type", rel.getType().name());
+        ref.put("is_matching", rel.getType().isMatching());
+        ref.put("role", role);
+        ref.put("counterpart_key", counterpartKey);
+        ref.put("similarity", rel.getSimilarity());
+        return ref;
     }
 
-    private static boolean sameType(CstNode n1, CstNode n2) {
-        if (n1.getType() == null || n2.getType() == null) {
-            return false;
-        }
-        return n1.getType().equals(n2.getType());
+    private static String nodeKeyForRole(String role, Map<String, Object> node) {
+        Object idObj = node.get("id");
+        int id = idObj instanceof Number ? ((Number) idObj).intValue() : 0;
+        return nodeKeyForRole(role, id);
     }
 
-    private static boolean sameName(CstNode n1, CstNode n2) {
-        String s1 = n1.getSimpleName();
-        String s2 = n2.getSimpleName();
-        return s1 != null && s1.equals(s2);
-    }
-
-    private static boolean sameSignature(CstNode n1, CstNode n2) {
-        String l1 = n1.getLocalName();
-        String l2 = n2.getLocalName();
-        return l1 != null && l1.equals(l2);
-    }
-
-    private static boolean sameLocation(CstNode n1, CstNode n2, Map<CstNode, CstNode> matched) {
-        if (!n1.getParent().isPresent() || !n2.getParent().isPresent()) {
-            return false;
-        }
-        CstNode matchedParent = matched.get(n1.getParent().get());
-        return matchedParent != null && matchedParent.equals(n2.getParent().get());
+    private static String nodeKeyForRole(String role, int id) {
+        return role + ":" + id;
     }
 
     /**
@@ -266,6 +221,7 @@ public final class RefDiffExporter {
     private static Map<String, Object> relationshipToMap(Relationship rel) {
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("type", rel.getType().name());
+        map.put("is_matching", rel.getType().isMatching());
         map.put("similarity", rel.getSimilarity());
         map.put("description_standard", rel.getStandardDescription());
         map.put("description_with_score", descriptionWithScore(rel));
@@ -294,6 +250,7 @@ public final class RefDiffExporter {
             return null;
         }
         Map<String, Object> map = new LinkedHashMap<>();
+        map.put("id", snap.id);
         map.put("kind", snap.kind);
         map.put("localName", snap.localName);
         map.put("file", snap.file);

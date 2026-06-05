@@ -3,9 +3,9 @@
 
 Scans result/ for folders with *-log.csv (like result/plot.py), invokes
 refdiff-runner per commit_sha on --repo, and writes refdiff/<stamp>-refdiff.jsonl
-plus matcher logs. Skips experiment folders whose commits are not in --repo.
+plus a single run-labeled matcher log. Skips experiment folders whose commits are not in --repo.
 
-Near-miss thresholds are read from `.env` (see REFDIFF_NEAR_MISS_* below).
+The JSONL file is the canonical RefDiff artifact; summaries can be regenerated from it.
 """
 
 from __future__ import annotations
@@ -37,11 +37,6 @@ _MAX_GRADLE_JAVA = 23  # Gradle 8.10.2 max supported runtime
 _VENDOR_BABEL = _RUNNER_DIR / "vendor" / "babel-parser"
 _REFDIFF_NODE_TMP = _RUNNER_DIR / ".refdiff-node-tmp"
 _BABEL_FILES = ("package.json", "lib/index.js", "bin/babel-parser.js")
-
-# Near-miss score band defaults; overridden by .env (cwd first, then repo root).
-NEAR_MISS_MIN_SCORE = 0.3
-NEAR_MISS_MAX_SCORE = 0.5
-
 
 def eprint(*args: object) -> None:
     print(*args, file=sys.stderr)
@@ -111,51 +106,6 @@ def java_home() -> str:
         "Install openjdk@21 (brew install openjdk@21) or set JAVA_HOME to a "
         f"compatible JDK (e.g. {_DEFAULT_JAVA_HOME})."
     )
-
-
-def _parse_env_float(key: str, value: str) -> float | None:
-    raw = value.strip().strip('"').strip("'")
-    if not raw:
-        return None
-    try:
-        return float(raw)
-    except ValueError:
-        eprint(f"[warn] invalid {key}={value!r} in .env; ignoring")
-        return None
-
-
-def load_dotenv() -> None:
-    """Load REFDIFF_NEAR_MISS_* from `.env` (cwd, then sandbox root)."""
-    global NEAR_MISS_MIN_SCORE, NEAR_MISS_MAX_SCORE
-    candidates = [Path.cwd() / ".env", _SCRIPT_DIR / ".env"]
-    seen: set[Path] = set()
-    for path in candidates:
-        resolved = path.resolve()
-        if resolved in seen or not path.is_file():
-            continue
-        seen.add(resolved)
-        for line in path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or "=" not in stripped:
-                continue
-            key, value = stripped.split("=", 1)
-            key = key.strip()
-            if key == "REFDIFF_NEAR_MISS_MIN_SCORE":
-                parsed = _parse_env_float(key, value)
-                if parsed is not None:
-                    NEAR_MISS_MIN_SCORE = parsed
-            elif key == "REFDIFF_NEAR_MISS_MAX_SCORE":
-                parsed = _parse_env_float(key, value)
-                if parsed is not None:
-                    NEAR_MISS_MAX_SCORE = parsed
-
-    if NEAR_MISS_MIN_SCORE >= NEAR_MISS_MAX_SCORE:
-        eprint(
-            "[warn] .env: REFDIFF_NEAR_MISS_MIN_SCORE must be < REFDIFF_NEAR_MISS_MAX_SCORE; "
-            "using 0.3 / 0.5"
-        )
-        NEAR_MISS_MIN_SCORE = 0.3
-        NEAR_MISS_MAX_SCORE = 0.5
 
 
 def seed_babel_parser() -> bool:
@@ -319,8 +269,6 @@ def run_refdiff_commit(
         str(gradlew),
         "-q",
         f"-PrefdiffTmpdir={_REFDIFF_NODE_TMP}",
-        f"-PrefdiffNearMissMin={NEAR_MISS_MIN_SCORE}",
-        f"-PrefdiffNearMissMax={NEAR_MISS_MAX_SCORE}",
         "run",
         f"--args={arg_string}",
     ]
@@ -359,14 +307,13 @@ def process_csv(
     stamp = stamp_from_csv(csv_path)
     refdiff_dir = csv_path.parent / "refdiff"
     jsonl_path = refdiff_dir / f"{stamp}-refdiff.jsonl"
-    matcher_dir = refdiff_dir / f"{stamp}-matcher"
+    matcher_log_path = refdiff_dir / f"{stamp}-matcher.log"
 
     if jsonl_path.exists():
         eprint(f"[skip] {jsonl_path} exists")
         return 0, 0
 
     refdiff_dir.mkdir(parents=True, exist_ok=True)
-    matcher_dir.mkdir(parents=True, exist_ok=True)
     gradlew = _RUNNER_DIR / "gradlew"
     if not gradlew.is_file():
         raise FileNotFoundError(f"Gradle wrapper not found: {gradlew}")
@@ -374,13 +321,13 @@ def process_csv(
     ok_count = 0
     fail_count = 0
     lines_out: list[str] = []
+    matcher_sections: list[str] = []
 
     with csv_path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             run = int(row["run"])
             commit_sha = row["commit_sha"].strip()
-            matcher_log = matcher_dir / f"run_{run:03d}.matcher.log"
 
             with tempfile.NamedTemporaryFile(
                 mode="w",
@@ -389,6 +336,13 @@ def process_csv(
                 encoding="utf-8",
             ) as tmp:
                 tmp_path = Path(tmp.name)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".matcher.log",
+                delete=False,
+                encoding="utf-8",
+            ) as matcher_tmp:
+                matcher_tmp_path = Path(matcher_tmp.name)
 
             try:
                 success, record = run_refdiff_commit(
@@ -396,7 +350,7 @@ def process_csv(
                     commit_sha=commit_sha,
                     lang=lang,
                     out_json=tmp_path,
-                    matcher_log=matcher_log,
+                    matcher_log=matcher_tmp_path,
                     gradlew=gradlew,
                     env=env,
                 )
@@ -412,10 +366,23 @@ def process_csv(
             record["experiment"] = exp_name
             record["git_stat"] = git_numstat(repo, commit_sha)
 
-            rel_matcher = matcher_log.relative_to(csv_path.parent)
+            rel_matcher = matcher_log_path.relative_to(csv_path.parent)
             record["matcher_log"] = str(rel_matcher).replace("\\", "/")
-            if matcher_log.exists() and matcher_log.stat().st_size == 0:
-                record["matcher_discarded"] = record.get("matcher_discarded") or []
+            matcher_lines: list[str] = []
+            if matcher_tmp_path.exists():
+                matcher_lines = matcher_tmp_path.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines()
+            if matcher_lines:
+                matcher_sections.append(
+                    "\n".join(
+                        [
+                            f"## run {run:03d} commit {commit_sha}",
+                            *matcher_lines,
+                        ]
+                    )
+                )
+            record["matcher_discarded"] = record.get("matcher_discarded") or matcher_lines
 
             if success:
                 ok_count += 1
@@ -425,9 +392,21 @@ def process_csv(
 
             lines_out.append(json.dumps(record, ensure_ascii=False))
             tmp_path.unlink(missing_ok=True)
+            matcher_tmp_path.unlink(missing_ok=True)
 
     jsonl_path.write_text("\n".join(lines_out) + "\n", encoding="utf-8")
+    matcher_text = [
+        f"# RefDiff matcher discarded candidates for {stamp}",
+        "",
+    ]
+    if matcher_sections:
+        matcher_text.extend(matcher_sections)
+    else:
+        matcher_text.append("No discarded matcher candidates.")
+    matcher_log_path.write_text("\n\n".join(matcher_text) + "\n", encoding="utf-8")
+
     eprint(f"[done] {jsonl_path} ({ok_count} ok, {fail_count} failed)")
+    eprint(f"[done] {matcher_log_path}")
     return ok_count, fail_count
 
 
@@ -472,8 +451,6 @@ def process_experiment_dir(
 
 
 def main(argv: list[str] | None = None) -> int:
-    load_dotenv()
-
     parser = argparse.ArgumentParser(description="Run RefDiff on experiment CSV commits.")
     parser.add_argument("--repo", type=Path, required=True, help="Path to target git repo")
     args = parser.parse_args(argv)
@@ -496,10 +473,6 @@ def main(argv: list[str] | None = None) -> int:
             eprint("error: repo contains no .java, .js, or .jsx source files")
         return 2
     eprint(f"[info] repo language: {lang}")
-    eprint(
-        f"[info] near-miss score band (from .env): "
-        f"{NEAR_MISS_MIN_SCORE} <= score < {NEAR_MISS_MAX_SCORE}"
-    )
 
     exp_dirs = experiment_dirs_with_logs(_RESULT_DIR)
     if not exp_dirs:

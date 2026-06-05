@@ -43,10 +43,14 @@
   }
 
   function escapeHtml(text) {
-    return text
+    return String(text)
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
+  }
+
+  function escapeAttr(text) {
+    return escapeHtml(text).replace(/"/g, "&quot;");
   }
 
   function setPre(el, text, isEmpty) {
@@ -163,83 +167,240 @@
       .join("\n\n");
   }
 
-  function formatNode(node) {
-    if (!node) return "(unknown)";
-    const kind = node.kind || "";
-    const localName = node.localName || "";
-    const file = node.file || "";
-    const line = node.line != null ? node.line : "";
-    const label = [kind, localName].filter(Boolean).join(" ");
-    if (file) {
-      return `${label}  @ ${file}:${line}`;
+  function renderNodeHtml(node) {
+    if (!node) {
+      return '<span class="empty-msg">(unknown)</span>';
     }
-    return label || "(unknown)";
+
+    const label =
+      node.kind && node.localName
+        ? `${node.kind}: ${node.localName}`
+        : node.kind || node.localName || "";
+    const file = node.file || "";
+    const line = node.line != null ? String(node.line) : "";
+    const path = Array.isArray(node.path) ? node.path.join(" / ") : "";
+
+    return (
+      '<div class="refdiff-node">' +
+      '<div class="refdiff-node-title">' +
+      escapeHtml(label || "(unknown)") +
+      "</div>" +
+      (file
+        ? '<div class="refdiff-node-location">' +
+          escapeHtml(file + (line ? ":" + line : "")) +
+          "</div>"
+        : "") +
+      (path && path !== file
+        ? '<div class="refdiff-node-path">' + escapeHtml(path) + "</div>"
+        : "") +
+      "</div>"
+    );
   }
 
-  function refdiffDescription(rel) {
+  function relationshipDescription(rel) {
     if (rel.similarity != null && rel.description_with_score) {
       return rel.description_with_score;
     }
     return rel.description_standard || "";
   }
 
-  function formatRefdiffCell(record) {
+  function renderRelationshipHtml(rel, fallbackMatching) {
+    const isMatching =
+      rel.is_matching === true || (rel.is_matching == null && fallbackMatching === true);
+    const className = isMatching ? "matching" : "non-matching";
+    const label = isMatching ? "Matching" : "Non-Matching";
+    const type = rel.type || "UNKNOWN";
+    const description = relationshipDescription(rel);
+    const similarity =
+      rel.similarity != null
+        ? '<div class="refdiff-similarity">score ' + escapeHtml(Number(rel.similarity).toFixed(3)) + "</div>"
+        : "";
+
+    return (
+      '<div class="refdiff-relationship" title="' +
+      escapeAttr(description) +
+      '">' +
+      '<span class="refdiff-badge ' +
+      className +
+      '">' +
+      label +
+      "</span>" +
+      '<span class="refdiff-type">' +
+      escapeHtml(type) +
+      "</span>" +
+      similarity +
+      "</div>"
+    );
+  }
+
+  function renderNoRelationshipHtml(label) {
+    return (
+      '<div class="refdiff-relationship">' +
+      '<span class="refdiff-badge no-relationship">No Relationship</span>' +
+      '<span class="refdiff-type">' +
+      escapeHtml(label) +
+      "</span>" +
+      "</div>"
+    );
+  }
+
+  function renderRelationshipRow(beforeNode, relationshipHtml, afterNode) {
+    return (
+      "<tr>" +
+      "<td>" +
+      renderNodeHtml(beforeNode) +
+      "</td>" +
+      "<td>" +
+      relationshipHtml +
+      "</td>" +
+      "<td>" +
+      renderNodeHtml(afterNode) +
+      "</td>" +
+      "</tr>"
+    );
+  }
+
+  function renderNodeRelationshipRows(record) {
+    const nodeRelationships = record.node_relationships || {};
+    const entries = Object.entries(nodeRelationships);
+    const result = { rows: [], matching: 0, nonMatching: 0, noRelationship: 0 };
+    const seenBefore = new Set();
+    const seenAfter = new Set();
+
+    for (const [key, entry] of entries) {
+      if (!key.startsWith("before:")) continue;
+      const beforeNode = entry.node;
+      const relationships = entry.relationships || [];
+      if (relationships.length === 0) continue;
+
+      seenBefore.add(key);
+      for (const rel of relationships) {
+        const afterKey = rel.counterpart_key;
+        const afterEntry = nodeRelationships[afterKey] || {};
+        if (afterKey) seenAfter.add(afterKey);
+        if (rel.is_matching === true) {
+          result.matching++;
+        } else {
+          result.nonMatching++;
+        }
+        result.rows.push(
+          renderRelationshipRow(
+            beforeNode,
+            renderRelationshipHtml(rel, rel.is_matching === true),
+            afterEntry.node
+          )
+        );
+      }
+    }
+
+    for (const [key, entry] of entries) {
+      if (!key.startsWith("before:") || seenBefore.has(key)) continue;
+      result.noRelationship++;
+      result.rows.push(renderRelationshipRow(entry.node, renderNoRelationshipHtml("Node Deleted"), null));
+    }
+
+    for (const [key, entry] of entries) {
+      if (!key.startsWith("after:") || seenAfter.has(key)) continue;
+      result.noRelationship++;
+      result.rows.push(renderRelationshipRow(null, renderNoRelationshipHtml("Node Added"), entry.node));
+    }
+
+    if (result.rows.length > 0 || entries.length > 0) {
+      return result;
+    }
+
+    return renderFallbackRelationshipRows(record);
+  }
+
+  function renderFallbackRelationshipRows(record) {
+    const matchingRelationships = record.matching_relationships || [];
+    const nonMatchingRelationships = record.non_matching_relationships || [];
+    const relationships = [
+      ...nonMatchingRelationships.map((rel) => ({ rel, fallbackMatching: false })),
+      ...matchingRelationships.map((rel) => ({ rel, fallbackMatching: true })),
+    ];
+    const seenBeforeIds = new Set();
+    const seenAfterIds = new Set();
+    const result = { rows: [], matching: 0, nonMatching: 0, noRelationship: 0 };
+
+    for (const { rel, fallbackMatching } of relationships) {
+      if (rel.before) seenBeforeIds.add(rel.before.id);
+      if (rel.after) seenAfterIds.add(rel.after.id);
+      if (rel.is_matching === true || fallbackMatching === true) {
+        result.matching++;
+      } else {
+        result.nonMatching++;
+      }
+      result.rows.push(
+        renderRelationshipRow(
+          rel.before,
+          renderRelationshipHtml(rel, fallbackMatching),
+          rel.after
+        )
+      );
+    }
+
+    for (const node of record.nodes_before || []) {
+      if (seenBeforeIds.has(node.id)) continue;
+      result.noRelationship++;
+      result.rows.push(renderRelationshipRow(node, renderNoRelationshipHtml("Node Deleted"), null));
+    }
+
+    for (const node of record.nodes_after || []) {
+      if (seenAfterIds.has(node.id)) continue;
+      result.noRelationship++;
+      result.rows.push(renderRelationshipRow(null, renderNoRelationshipHtml("Node Added"), node));
+    }
+
+    return result;
+  }
+
+  function renderRefdiffHtml(record) {
     if (!record) return "";
     if (!record.refdiff_ok) {
       const msg = (record.error_message || "unknown error").trim();
-      return `RefDiff failed\n${msg}`;
+      return (
+        '<div class="empty-msg">RefDiff failed<br />' +
+        escapeHtml(msg) +
+        "</div>"
+      );
     }
 
-    const nRef = intOrZero(record.n_refactorings);
-    const nSame = intOrZero(record.n_same);
-    const nTotal = intOrZero(record.n_relationships_total);
-    const refactorings = record.refactorings || [];
-    const sameRelationships = record.same_relationships || [];
+    const nNodesBefore = (record.nodes_before || []).length;
+    const nNodesAfter = (record.nodes_after || []).length;
+    const rowData = renderNodeRelationshipRows(record);
+    const nMatching = rowData.matching;
+    const nNonMatching = rowData.nonMatching;
+    const nNoRelationship = rowData.noRelationship;
+    const nTotal = nMatching + nNonMatching + nNoRelationship;
 
-    const lines = [];
-    lines.push(
-      `RefDiff: ${nRef} refactoring, ${nSame} non-refactoring relationship (${nTotal} total)`
+    const summary =
+      '<div class="refdiff-summary">' +
+      escapeHtml(
+        `RefDiff: ${nMatching} matching, ${nNonMatching} non-matching, ${nNoRelationship} no relationship (${nTotal} total)`
+      ) +
+      '<span class="refdiff-summary-secondary">' +
+      escapeHtml(`Nodes: ${nNodesBefore} before, ${nNodesAfter} after`) +
+      "</span>" +
+      "</div>";
+
+    if (rowData.rows.length === 0) {
+      return summary + '<div class="empty-msg">No nodes detected.</div>';
+    }
+
+    return (
+      summary +
+      '<table class="refdiff-table">' +
+      "<thead><tr>" +
+      "<th>Node before</th>" +
+      "<th>Relationship</th>" +
+      "<th>Node after</th>" +
+      "</tr></thead>" +
+      "<tbody>" +
+      rowData.rows.join("") +
+      "</tbody>" +
+      "</table>"
     );
-
-    for (const rel of refactorings) {
-      const desc = refdiffDescription(rel);
-      if (desc) lines.push(desc);
-    }
-
-    if (refactorings.length > 0) {
-      lines.push("");
-      lines.push("Refactoring Relationship (RefDiff-detected structural refactorings)");
-      for (const rel of refactorings) {
-        lines.push(`  ${rel.type || "UNKNOWN"}`);
-        lines.push(`    before: ${formatNode(rel.before)}`);
-        lines.push(`    after:  ${formatNode(rel.after)}`);
-      }
-    }
-
-    if (sameRelationships.length > 0) {
-      lines.push("");
-      lines.push('Non-refactoring relationships ("SAME")');
-      for (const rel of sameRelationships) {
-        const label = (rel.before && rel.before.localName) || rel.type || "SAME";
-        lines.push(`  ${label}`);
-        lines.push(`    before: ${formatNode(rel.before)}`);
-        lines.push(`    after:  ${formatNode(rel.after)}`);
-      }
-    }
-
-    const nearMisses = record.near_misses || [];
-    if (nearMisses.length > 0) {
-      lines.push("");
-      lines.push("Near-miss candidates (below RefDiff threshold; inferred, not detected)");
-      for (const nm of nearMisses) {
-        const score = nm.score != null ? Number(nm.score).toFixed(3) : "?";
-        lines.push(`  (match discarded)  ${nm.type || "UNKNOWN"}  score=${score}`);
-        lines.push(`    before: ${formatNode(nm.before)}`);
-        lines.push(`    after:  ${formatNode(nm.after)}`);
-      }
-    }
-
-    return lines.join("\n");
   }
 
   function intOrZero(value) {
@@ -294,13 +455,10 @@
     els.refdiffBtn.disabled = !step.refdiff;
 
     if (step.refdiff) {
-      setPre(els.refdiffPre, formatRefdiffCell(step.refdiff), false);
+      els.refdiffPre.innerHTML = renderRefdiffHtml(step.refdiff);
     } else {
-      setPre(
-        els.refdiffPre,
-        "No RefDiff data for this experiment. Run: python run_refdiff.py --repo <target>",
-        true
-      );
+      els.refdiffPre.innerHTML =
+        '<span class="empty-msg">No RefDiff data for this experiment. Run: python run_refdiff.py --repo &lt;target&gt;</span>';
     }
   }
 
@@ -348,7 +506,7 @@
           legend: { display: false },
           title: {
             display: true,
-            text: "Lines total changed per refactoring run",
+            text: "Lines total changed per experiment run",
             font: { size: 14 },
           },
           tooltip: {

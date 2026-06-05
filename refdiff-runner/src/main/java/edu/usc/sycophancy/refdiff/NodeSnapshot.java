@@ -11,13 +11,15 @@ import refdiff.core.diff.CstRootHelper;
  */
 public final class NodeSnapshot {
 
+    public final int id;
     public final String kind;
     public final String localName;
     public final String file;
     public final int line;
     public final List<String> path;
 
-    public NodeSnapshot(String kind, String localName, String file, int line, List<String> path) {
+    public NodeSnapshot(int id, String kind, String localName, String file, int line, List<String> path) {
+        this.id = id;
         this.kind = kind;
         this.localName = localName;
         this.file = file;
@@ -34,6 +36,7 @@ public final class NodeSnapshot {
         int line = loc != null ? loc.getLine() : 0;
         String kind = node.getType() != null ? node.getType().replace("Declaration", "") : "";
         return new NodeSnapshot(
+            node.getId(),
             kind,
             node.getLocalName(),
             file,
