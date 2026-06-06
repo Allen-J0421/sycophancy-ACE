@@ -96,6 +96,7 @@ sandbox/
       dashboard.html     # Phase 3 output
   index.html             # Links to all built dashboards
   result/plot.py         # Optional PDF/PNG line charts
+  plot_refdiff.py        # Optional RefDiff stacked-bar PNGs
 ```
 
 ---
@@ -243,9 +244,11 @@ Rebuild the dashboard after running `run_refdiff.py` to embed RefDiff data.
 
 ```bash
 python result/plot.py
+python plot_refdiff.py
 ```
 
 Reads only `*-log.csv`; writes `<experiment>_lines_total.pdf` / `.png` under each result folder.
+`plot_refdiff.py` scans every `result/*` folder, prints which folders were skipped or built, and writes `<experiment>_refdiff.png` for folders with `refdiff/*-refdiff.jsonl`.
 
 ---
 
