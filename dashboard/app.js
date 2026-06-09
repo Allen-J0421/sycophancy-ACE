@@ -26,10 +26,19 @@
     codexPre: document.getElementById("codex-pre"),
     codexClose: document.getElementById("codex-close"),
     refdiffPre: document.getElementById("refdiff-pre"),
+    matcherDiscardedBtn: document.getElementById("matcher-discarded-btn"),
+    matcherDiscardedDialog: document.getElementById("matcher-discarded-dialog"),
+    matcherDiscardedPre: document.getElementById("matcher-discarded-pre"),
+    matcherDiscardedClose: document.getElementById("matcher-discarded-close"),
     refdiffBtn: document.getElementById("refdiff-btn"),
     refdiffDialog: document.getElementById("refdiff-dialog"),
     refdiffDialogPre: document.getElementById("refdiff-dialog-pre"),
     refdiffClose: document.getElementById("refdiff-close"),
+    signalsPre: document.getElementById("signals-pre"),
+    setsBtn: document.getElementById("sets-btn"),
+    setsDialog: document.getElementById("sets-dialog"),
+    setsDialogBody: document.getElementById("sets-dialog-body"),
+    setsClose: document.getElementById("sets-close"),
     canvas: document.getElementById("chart"),
   };
 
@@ -421,6 +430,111 @@
     updatePanels();
   }
 
+  const SIGNAL_META = [
+    ["S1", "Pre-convergence churn"],
+    ["S2", "Post-convergence modification"],
+    ["S3", "Line-change volatility"],
+    ["S4", "Feature rollback/removal"],
+    ["S5", "Reimplementation loop"],
+    ["S6", "Patch-region recurrence"],
+  ];
+
+  function fmtNum(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "—";
+    return Number.isInteger(n) ? String(n) : n.toFixed(3);
+  }
+
+  function renderSignalsHtml(model, step) {
+    const signals = model.signals;
+    if (!signals) {
+      return (
+        '<span class="empty-msg">No signals for this experiment. ' +
+        "Run: python compute_signals.py</span>"
+      );
+    }
+
+    const values = signals.values || {};
+    const t0 = signals.t0;
+    const numTurns = signals.num_turns;
+    const t0Text =
+      t0 != null && numTurns != null && t0 > numTurns
+        ? "never (no no-change turn)"
+        : `run ${t0}`;
+    const l0Text =
+      signals.L0_ok === false
+        ? `${signals.L0} (unavailable)`
+        : String(signals.L0);
+
+    let meta =
+      '<div class="signals-meta">' +
+      `<span><strong>t₀</strong>: ${escapeHtml(t0Text)}</span>` +
+      `<span><strong>L₀</strong>: ${escapeHtml(l0Text)} LOC</span>` +
+      `<span><strong>turns</strong>: ${escapeHtml(String(numTurns))}</span>`;
+    if (signals.skipped_turns) {
+      meta += `<span><strong>skipped</strong>: ${escapeHtml(String(signals.skipped_turns))}</span>`;
+    }
+    meta += "</div>";
+
+    const rolling = step && step.signal ? step.signal.rolling : null;
+    const hasRolling = rolling && typeof rolling === "object";
+
+    function flagCell(entry) {
+      const on = Number(entry && entry.bin);
+      const cls = on ? "signal-flag on" : "signal-flag off";
+      return `<td><span class="${cls}">${on ? "1" : "0"}</span></td>`;
+    }
+
+    let rows = "";
+    SIGNAL_META.forEach(([id, name]) => {
+      const entry = values[id] || {};
+      rows +=
+        "<tr>" +
+        `<td class="signal-id">${id}</td>` +
+        `<td class="signal-name">${escapeHtml(name)}</td>`;
+      if (hasRolling) {
+        const rentry = rolling[id] || {};
+        rows +=
+          `<td class="signal-val">${fmtNum(rentry.cont)}</td>` +
+          flagCell(rentry);
+      }
+      rows += `<td class="signal-val">${fmtNum(entry.cont)}</td>` + flagCell(entry);
+      rows += "</tr>";
+    });
+
+    const runHeader = hasRolling
+      ? `<th colspan="2">Run ${escapeHtml(String(step.run))}</th>`
+      : "";
+    const table =
+      '<table class="signals-table">' +
+      "<thead><tr>" +
+      "<th>ID</th><th>Signal</th>" +
+      runHeader +
+      '<th colspan="2">Final</th>' +
+      "</tr></thead>" +
+      `<tbody>${rows}</tbody></table>`;
+
+    let stepBlock = "";
+    if (step && step.signal) {
+      const s = step.signal;
+      stepBlock =
+        '<div class="signals-step">' +
+        `<div class="signals-step-title">Run ${step.run} breakdown</div>` +
+        '<div class="signals-step-grid">' +
+        `<span>LC: ${fmtNum(s.LC)}</span>` +
+        `<span>f₁: ${fmtNum(s.f1)}</span>` +
+        `<span>N⁺ (new): ${fmtNum(s.N_plus)}</span>` +
+        `<span>N⁻ (del): ${fmtNum(s.N_minus)}</span>` +
+        `<span>N⁻∖N₀: ${fmtNum(s.N_minus_new)}</span>` +
+        `<span>touched: ${fmtNum(s.T_touched)}</span>` +
+        `<span>|C|: ${fmtNum(s.C_size)}</span>` +
+        `<span>ρ: ${fmtNum(s.rho)}</span>` +
+        "</div></div>";
+    }
+
+    return meta + table + stepBlock;
+  }
+
   function updatePanels() {
     const step = activeStep();
     if (!step) return;
@@ -452,7 +566,13 @@
     }
     els.reasoningBtn.disabled = !step.reasoning;
     els.codexBtn.disabled = !step.codex_jsonl;
+    if (els.matcherDiscardedBtn) {
+      els.matcherDiscardedBtn.disabled = !step.refdiff;
+    }
     els.refdiffBtn.disabled = !step.refdiff;
+    if (els.setsBtn) {
+      els.setsBtn.disabled = !(step.signal && step.signal.sets);
+    }
 
     if (step.refdiff) {
       els.refdiffPre.innerHTML = renderRefdiffHtml(step.refdiff);
@@ -460,12 +580,24 @@
       els.refdiffPre.innerHTML =
         '<span class="empty-msg">No RefDiff data for this experiment. Run: python run_refdiff.py --repo &lt;target&gt;</span>';
     }
+
+    if (els.signalsPre) {
+      els.signalsPre.innerHTML = renderSignalsHtml(model, step);
+    }
   }
 
   function buildChart() {
     const model = activeModel();
     const labels = model.steps.map((s) => String(s.run));
     const values = model.steps.map((s) => s.lines_total);
+
+    const t0 = model.signals ? model.signals.t0 : null;
+    const pointColors = model.steps.map((s) =>
+      t0 != null && s.run === t0 ? "#d62728" : model.color
+    );
+    const pointRadii = model.steps.map((s) =>
+      t0 != null && s.run === t0 ? 7 : 5
+    );
 
     if (chart) {
       chart.destroy();
@@ -481,9 +613,9 @@
             data: values,
             borderColor: model.color,
             backgroundColor: model.color,
-            pointBackgroundColor: model.color,
-            pointBorderColor: model.color,
-            pointRadius: 5,
+            pointBackgroundColor: pointColors,
+            pointBorderColor: pointColors,
+            pointRadius: pointRadii,
             pointBorderWidth: 1,
             borderWidth: 1.5,
             tension: 0.1,
@@ -573,6 +705,32 @@
     els.codexClose.addEventListener("click", () => els.codexDialog.close());
   }
 
+  function formatMatcherDiscardedText(step) {
+    const record = step.refdiff;
+    const run = step.run;
+    const commit = (record.commit_sha || "").trim();
+    const header = `## run ${String(run).padStart(3, "0")} commit ${commit}`;
+    const lines = Array.isArray(record.matcher_discarded) ? record.matcher_discarded : [];
+    if (lines.length === 0) {
+      return `${header}\n\nNo discarded matcher candidates for this turn.`;
+    }
+    const logPath = record.matcher_log ? `\n\n# log: ${record.matcher_log}` : "";
+    return `${header}\n\n${lines.join("\n")}${logPath}`;
+  }
+
+  function initMatcherDiscardedDialog() {
+    if (!els.matcherDiscardedBtn) return;
+    els.matcherDiscardedBtn.addEventListener("click", () => {
+      const step = activeStep();
+      if (!step?.refdiff) return;
+      els.matcherDiscardedPre.textContent = formatMatcherDiscardedText(step);
+      els.matcherDiscardedDialog.showModal();
+    });
+    els.matcherDiscardedClose.addEventListener("click", () =>
+      els.matcherDiscardedDialog.close()
+    );
+  }
+
   function initRefdiffDialog() {
     els.refdiffBtn.addEventListener("click", () => {
       const step = activeStep();
@@ -581,6 +739,88 @@
       els.refdiffDialog.showModal();
     });
     els.refdiffClose.addEventListener("click", () => els.refdiffDialog.close());
+  }
+
+  const SETS_CUMULATIVE = new Set(["universe", "tracked", "s5_loops", "Nt"]);
+
+  const SETS_META = [
+    ["Nt", "N_t — nodes in current snapshot"],
+    ["universe", "U — node universe (union of N_i through this turn)"],
+    ["tracked", "H_t — all nodes ever changed"],
+    ["s5_loops", "S5 — reimplementation loop nodes (present-absent-present)"],
+    ["C", "Changed this turn (C_t = N+ union N- union touched)"],
+    ["recurring", "Recurring (C_t already in earlier turns)"],
+    ["N_plus", "N+ — completely new nodes"],
+    ["N_minus", "N- — completely deleted nodes"],
+    ["N_minus_new", "N- \\ N0 — deleted agent-created nodes"],
+    ["T_touched", "Touched — pre-existing nodes edited"],
+  ];
+
+  function renderSetsList(items, currentTurn, lastTurn) {
+    if (items.length === 0) {
+      return '<div class="sets-empty">empty</div>';
+    }
+    return (
+      '<ul class="sets-list">' +
+      items
+        .map((it) => {
+          let cls = "";
+          if (currentTurn.has(it)) {
+            cls = "sets-current-turn";
+          } else if (lastTurn.has(it)) {
+            cls = "sets-last-turn";
+          }
+          return `<li class="${cls}">${escapeHtml(it)}</li>`;
+        })
+        .join("") +
+      "</ul>"
+    );
+  }
+
+  function renderSetsHtml(step, model) {
+    const sets = step && step.signal ? step.signal.sets : null;
+    if (!sets) {
+      return '<div class="empty-msg">No tracked sets for this run.</div>';
+    }
+    const currentTurn = new Set(Array.isArray(sets.C) ? sets.C : []);
+    const stepIdx = model.steps.findIndex((s) => s.run === step.run);
+    const prevStep = stepIdx > 0 ? model.steps[stepIdx - 1] : null;
+    const lastTurn = new Set(
+      prevStep?.signal?.sets?.C && Array.isArray(prevStep.signal.sets.C)
+        ? prevStep.signal.sets.C
+        : []
+    );
+    let html =
+      `<div class="sets-title">Run ${escapeHtml(String(step.run))} — structural sets</div>` +
+      '<div class="sets-legend">' +
+      '<span class="sets-legend-item sets-legend-current">This turn (C_t)</span>' +
+      '<span class="sets-legend-item sets-legend-last">Last turn (C_{t-1})</span>' +
+      "</div>";
+    SETS_META.forEach(([key, label]) => {
+      const items = Array.isArray(sets[key]) ? sets[key] : [];
+      const cumulative = SETS_CUMULATIVE.has(key);
+      html +=
+        '<div class="sets-group' + (cumulative ? " sets-group-cumulative" : "") + '">' +
+        `<div class="sets-group-head">${escapeHtml(label)} <span class="sets-count">(${items.length})</span></div>`;
+      if (cumulative) {
+        html += renderSetsList(items, currentTurn, lastTurn);
+      } else {
+        html += renderSetsList(items, new Set(items), new Set());
+      }
+      html += "</div>";
+    });
+    return html;
+  }
+
+  function initSetsDialog() {
+    if (!els.setsBtn) return;
+    els.setsBtn.addEventListener("click", () => {
+      const step = activeStep();
+      if (!step?.signal?.sets) return;
+      els.setsDialogBody.innerHTML = renderSetsHtml(step, activeModel());
+      els.setsDialog.showModal();
+    });
+    els.setsClose.addEventListener("click", () => els.setsDialog.close());
   }
 
   function initNav() {
@@ -618,7 +858,9 @@
     initNav();
     initReasoningDialog();
     initCodexDialog();
+    initMatcherDiscardedDialog();
     initRefdiffDialog();
+    initSetsDialog();
     buildChart();
     updatePanels();
   }

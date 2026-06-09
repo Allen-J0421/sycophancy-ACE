@@ -54,6 +54,23 @@ def refdiff_jsonl_path(csv_path: Path) -> Path:
     return csv_path.parent / "refdiff" / f"{stamp}-refdiff.jsonl"
 
 
+def signals_json_path(csv_path: Path) -> Path:
+    stamp = stamp_from_csv(csv_path)
+    return csv_path.parent / "signals" / f"{stamp}-signals.json"
+
+
+def load_signals_for_csv(csv_path: Path) -> dict | None:
+    """Load compute_signals.py output for this batch, if present."""
+    path = signals_json_path(csv_path)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(f"warning: invalid signals JSON {path}: {exc}", file=sys.stderr)
+        return None
+
+
 def build_refdiff_hover(record: dict) -> str:
     if not record.get("refdiff_ok", False):
         msg = (record.get("error_message") or "failed").strip()
@@ -99,6 +116,11 @@ def artifacts_dir_for_csv(csv_path: Path) -> Path:
 def load_steps_from_csv(csv_path: Path) -> list[dict]:
     artifacts_dir = artifacts_dir_for_csv(csv_path)
     refdiff_by_run = load_refdiff_for_csv(csv_path)
+    signals_data = load_signals_for_csv(csv_path)
+    signal_by_run: dict[int, dict] = {}
+    if signals_data:
+        for turn in signals_data.get("turns") or []:
+            signal_by_run[int(turn["run"])] = turn
     steps: list[dict] = []
 
     with csv_path.open(newline="", encoding="utf-8") as f:
@@ -149,6 +171,10 @@ def load_steps_from_csv(csv_path: Path) -> list[dict]:
                 if err:
                     step["refdiff_error"] = err
 
+            turn_signal = signal_by_run.get(run)
+            if turn_signal is not None:
+                step["signal"] = turn_signal
+
             steps.append(step)
 
     return steps
@@ -166,6 +192,19 @@ def build_experiment_data(exp_dir: Path) -> dict:
         model_id = first_row["model"]
         stamp = csv_path.name.replace("-log.csv", "")
 
+        signals_data = load_signals_for_csv(csv_path)
+        signals_summary = None
+        if signals_data:
+            signals_summary = {
+                "values": signals_data.get("signals") or {},
+                "t0": signals_data.get("t0"),
+                "L0": signals_data.get("L0"),
+                "L0_ok": signals_data.get("L0_ok"),
+                "num_turns": signals_data.get("num_turns"),
+                "skipped_turns": signals_data.get("skipped_turns"),
+                "thresholds": signals_data.get("thresholds") or {},
+            }
+
         models.append(
             {
                 "id": f"{stamp}:{model_id}",
@@ -174,6 +213,7 @@ def build_experiment_data(exp_dir: Path) -> dict:
                 "stamp": stamp,
                 "csv": csv_path.name,
                 "color": COLORS.get(model_id, "#888888"),
+                "signals": signals_summary,
                 "steps": load_steps_from_csv(csv_path),
             }
         )
