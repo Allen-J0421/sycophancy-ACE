@@ -5,6 +5,8 @@ import java.io.FileOutputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -12,6 +14,7 @@ import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.treewalk.TreeWalk;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
@@ -20,8 +23,9 @@ import refdiff.core.diff.CstDiff;
 import refdiff.core.diff.Relationship;
 import refdiff.core.io.FilePathFilter;
 import refdiff.core.io.GitHelper;
+import refdiff.core.io.GitSourceTree;
+import refdiff.core.io.SourceFile;
 import refdiff.core.io.SourceFileSet;
-import refdiff.core.util.PairBeforeAfter;
 import refdiff.parsers.LanguagePlugin;
 import refdiff.parsers.java.JavaPlugin;
 import refdiff.parsers.js.JsPlugin;
@@ -140,15 +144,62 @@ public final class RefDiffRunner {
             CollectingMatcherMonitor monitor) throws Exception {
         FilePathFilter fileFilter = plugin.getAllowedFilesFilter();
         try (Repository repository = GitHelper.openRepository(gitDir)) {
-            CommitInfo info = resolveCommit(repository, commit);
-            PairBeforeAfter<SourceFileSet> sources =
-                GitHelper.getSourcesBeforeAndAfterCommit(repository, commit, fileFilter);
-            CstComparator comparator = new CstComparator(plugin);
-            long compareStartMs = System.currentTimeMillis();
-            CstDiff diff = comparator.compare(sources.getBefore(), sources.getAfter(), monitor);
-            long durationMs = System.currentTimeMillis() - compareStartMs;
-            return new DiffResult(info.sha, info.parentSha, diff, durationMs);
+            try (RevWalk rw = new RevWalk(repository)) {
+                ObjectId objectId = repository.resolve(commit);
+                if (objectId == null) {
+                    throw new IllegalArgumentException("Unknown commit: " + commit);
+                }
+                RevCommit revCommit = rw.parseCommit(objectId);
+                String sha = revCommit.getId().getName();
+
+                RevCommit parentCommit = null;
+                String parentSha = null;
+                if (revCommit.getParentCount() >= 1) {
+                    parentCommit = rw.parseCommit(revCommit.getParent(0).getId());
+                    parentSha = parentCommit.getId().getName();
+                }
+
+                // Compare the FULL source tree at each commit (not just the files
+                // changed in the commit). RefDiff's commit helper only returns
+                // changed files, which makes nodes in untouched files vanish from
+                // the snapshot and produces phantom delete/re-add signals. Feeding
+                // the complete tree lets unchanged nodes match as SAME so every
+                // turn carries a faithful full-repo node set.
+                List<SourceFile> afterFiles = listSourceFiles(repository, revCommit, fileFilter);
+                List<SourceFile> beforeFiles = parentCommit != null
+                    ? listSourceFiles(repository, parentCommit, fileFilter)
+                    : new ArrayList<>();
+
+                ObjectId beforeId = parentCommit != null ? parentCommit.getId() : revCommit.getId();
+                SourceFileSet before = new GitSourceTree(repository, beforeId, beforeFiles);
+                SourceFileSet after = new GitSourceTree(repository, revCommit.getId(), afterFiles);
+
+                CstComparator comparator = new CstComparator(plugin);
+                long compareStartMs = System.currentTimeMillis();
+                CstDiff diff = comparator.compare(before, after, monitor);
+                long durationMs = System.currentTimeMillis() - compareStartMs;
+                return new DiffResult(sha, parentSha, diff, durationMs);
+            }
         }
+    }
+
+    /** Enumerate every source file in a commit's tree that passes the language filter. */
+    private static List<SourceFile> listSourceFiles(
+            Repository repository,
+            RevCommit commit,
+            FilePathFilter filter) throws Exception {
+        List<SourceFile> files = new ArrayList<>();
+        try (TreeWalk tw = new TreeWalk(repository)) {
+            tw.addTree(commit.getTree());
+            tw.setRecursive(true);
+            while (tw.next()) {
+                String path = tw.getPathString();
+                if (filter.isAllowed(path)) {
+                    files.add(new SourceFile(Paths.get(path)));
+                }
+            }
+        }
+        return files;
     }
 
     private static void writeOutput(Map<String, Object> record, CliOptions opts) throws Exception {
