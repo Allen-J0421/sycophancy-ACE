@@ -17,11 +17,26 @@
     nextBtn: document.getElementById("next-btn"),
     diffPre: document.getElementById("diff-pre"),
     responsePre: document.getElementById("response-pre"),
+    prompterColumn: document.getElementById("prompter-column"),
+    codingColumnHeader: document.getElementById("coding-column-header"),
+    codingOnlyActions: document.getElementById("coding-only-actions"),
+    prompterPre: document.getElementById("prompter-pre"),
+    prompterMessagesBtn: document.getElementById("prompter-messages-btn"),
+    prompterJsonlBtn: document.getElementById("prompter-jsonl-btn"),
+    prompterMessagesDialog: document.getElementById("prompter-messages-dialog"),
+    prompterMessagesPre: document.getElementById("prompter-messages-pre"),
+    prompterMessagesClose: document.getElementById("prompter-messages-close"),
+    prompterJsonlDialog: document.getElementById("prompter-jsonl-dialog"),
+    prompterJsonlPre: document.getElementById("prompter-jsonl-pre"),
+    prompterJsonlClose: document.getElementById("prompter-jsonl-close"),
+    responseColumns: document.getElementById("response-columns"),
     reasoningBtn: document.getElementById("reasoning-btn"),
+    reasoningBtnColumn: document.getElementById("reasoning-btn-column"),
     reasoningDialog: document.getElementById("reasoning-dialog"),
     reasoningPre: document.getElementById("reasoning-pre"),
     reasoningClose: document.getElementById("reasoning-close"),
     codexBtn: document.getElementById("codex-btn"),
+    codexBtnColumn: document.getElementById("codex-btn-column"),
     codexDialog: document.getElementById("codex-dialog"),
     codexPre: document.getElementById("codex-pre"),
     codexClose: document.getElementById("codex-close"),
@@ -41,6 +56,58 @@
     setsClose: document.getElementById("sets-close"),
     canvas: document.getElementById("chart"),
   };
+
+  function stepHasPrompter(step) {
+    return Boolean(
+      step &&
+        (step.prompter_prompt ||
+          step.prompter_transcript ||
+          step.prompter_jsonl)
+    );
+  }
+
+  function setAgentResponseLayout(step) {
+    const prompterMode = stepHasPrompter(step);
+    if (els.prompterColumn) {
+      els.prompterColumn.hidden = !prompterMode;
+    }
+    if (els.codingColumnHeader) {
+      els.codingColumnHeader.hidden = !prompterMode;
+    }
+    if (els.codingOnlyActions) {
+      els.codingOnlyActions.hidden = prompterMode;
+    }
+    if (els.responseColumns) {
+      els.responseColumns.classList.toggle("response-columns-prompter", prompterMode);
+    }
+  }
+
+  function setReasoningButtonsDisabled(disabled) {
+    if (els.reasoningBtn) els.reasoningBtn.disabled = disabled;
+    if (els.reasoningBtnColumn) els.reasoningBtnColumn.disabled = disabled;
+  }
+
+  function agentJsonlForStep(step) {
+    return step?.agent_jsonl || step?.codex_jsonl || "";
+  }
+
+  function agentJsonlLabel(step) {
+    const kind = step?.agent_kind;
+    if (kind === "claude") return "claude.jsonl";
+    return "codex.jsonl";
+  }
+
+  function setCodexButtonsDisabled(disabled) {
+    if (els.codexBtn) els.codexBtn.disabled = disabled;
+    if (els.codexBtnColumn) els.codexBtnColumn.disabled = disabled;
+  }
+
+  function updateAgentJsonlButtons(step) {
+    const label = agentJsonlLabel(step);
+    if (els.codexBtn) els.codexBtn.textContent = label;
+    if (els.codexBtnColumn) els.codexBtnColumn.textContent = label;
+    setCodexButtonsDisabled(!agentJsonlForStep(step));
+  }
 
   function activeModel() {
     return DATA.models[activeModelIndex];
@@ -557,15 +624,32 @@
     els.nextBtn.disabled = idx >= total;
 
     const hasArtifacts = step.has_artifacts;
+    setAgentResponseLayout(step);
     if (!hasArtifacts) {
       setDiffPre(els.diffPre, missingMsg, true);
       setPre(els.responsePre, missingMsg, true);
+      if (els.prompterPre) {
+        setPre(els.prompterPre, missingMsg, true);
+      }
     } else {
       setDiffPre(els.diffPre, step.diff || "(empty diff)", !step.diff);
       setPre(els.responsePre, step.response || "(empty response)", !step.response);
+      if (els.prompterPre) {
+        const prompterText =
+          step.prompter_prompt ||
+          step.prompter_transcript ||
+          "(empty prompter response)";
+        setPre(els.prompterPre, prompterText, !step.prompter_prompt);
+      }
     }
-    els.reasoningBtn.disabled = !step.reasoning;
-    els.codexBtn.disabled = !step.codex_jsonl;
+    setReasoningButtonsDisabled(!step.reasoning);
+    updateAgentJsonlButtons(step);
+    if (els.prompterMessagesBtn) {
+      els.prompterMessagesBtn.disabled = !step.prompter_transcript;
+    }
+    if (els.prompterJsonlBtn) {
+      els.prompterJsonlBtn.disabled = !step.prompter_jsonl;
+    }
     if (els.matcherDiscardedBtn) {
       els.matcherDiscardedBtn.disabled = !step.refdiff;
     }
@@ -686,23 +770,65 @@
   }
 
   function initReasoningDialog() {
-    els.reasoningBtn.addEventListener("click", () => {
+    function openReasoningDialog() {
       const step = activeStep();
       if (!step?.reasoning) return;
       els.reasoningPre.textContent = step.reasoning;
       els.reasoningDialog.showModal();
-    });
+    }
+    if (els.reasoningBtn) {
+      els.reasoningBtn.addEventListener("click", openReasoningDialog);
+    }
+    if (els.reasoningBtnColumn) {
+      els.reasoningBtnColumn.addEventListener("click", openReasoningDialog);
+    }
     els.reasoningClose.addEventListener("click", () => els.reasoningDialog.close());
   }
 
   function initCodexDialog() {
-    els.codexBtn.addEventListener("click", () => {
+    function openCodexDialog() {
       const step = activeStep();
-      if (!step?.codex_jsonl) return;
-      els.codexPre.textContent = formatJsonl(step.codex_jsonl);
+      const agentJsonl = agentJsonlForStep(step);
+      if (!agentJsonl) return;
+      els.codexPre.textContent = formatJsonl(agentJsonl);
       els.codexDialog.showModal();
-    });
+    }
+    if (els.codexBtn) {
+      els.codexBtn.addEventListener("click", openCodexDialog);
+    }
+    if (els.codexBtnColumn) {
+      els.codexBtnColumn.addEventListener("click", openCodexDialog);
+    }
     els.codexClose.addEventListener("click", () => els.codexDialog.close());
+  }
+
+  function initPrompterDialogs() {
+    if (els.prompterMessagesBtn) {
+      els.prompterMessagesBtn.addEventListener("click", () => {
+        const step = activeStep();
+        if (!step?.prompter_transcript) return;
+        els.prompterMessagesPre.textContent = step.prompter_transcript;
+        els.prompterMessagesDialog.showModal();
+      });
+    }
+    if (els.prompterMessagesClose) {
+      els.prompterMessagesClose.addEventListener("click", () =>
+        els.prompterMessagesDialog.close()
+      );
+    }
+    if (els.prompterJsonlBtn) {
+      els.prompterJsonlBtn.addEventListener("click", () => {
+        const step = activeStep();
+        if (!step?.prompter_jsonl) return;
+        els.prompterJsonlPre.textContent = formatJsonl(step.prompter_jsonl);
+        els.prompterJsonlDialog.showModal();
+      });
+    }
+    if (els.prompterJsonlClose) {
+      els.prompterJsonlClose.addEventListener("click", () =>
+        els.prompterJsonlDialog.close()
+      );
+    }
   }
 
   function formatMatcherDiscardedText(step) {
@@ -858,6 +984,7 @@
     initNav();
     initReasoningDialog();
     initCodexDialog();
+    initPrompterDialogs();
     initMatcherDiscardedDialog();
     initRefdiffDialog();
     initSetsDialog();

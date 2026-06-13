@@ -113,6 +113,78 @@ def artifacts_dir_for_csv(csv_path: Path) -> Path:
     return csv_path.parent / folder_name
 
 
+def build_prompter_transcript(events: list[dict]) -> str:
+    """Readable intermediate messages from normalized prompter envelopes."""
+    parts: list[str] = []
+    for ev in events:
+        event = str(ev.get("event") or "")
+        text = str(ev.get("text") or "").strip()
+        if event == "request":
+            payload = ev.get("payload")
+            message = ""
+            if isinstance(payload, dict):
+                message = str(payload.get("message") or "").strip()
+            if message:
+                parts.append(f"[Prompter input]\n{message}")
+            continue
+        if not text:
+            continue
+        if event == "response":
+            parts.append(f"[Prompter request]\n{text}")
+        elif event == "prompt_out":
+            parts.append(f"[Sent to coding agent]\n{text}")
+        elif event == "error":
+            parts.append(f"[Prompter error]\n{text}")
+    return "\n\n".join(parts)
+
+
+def load_prompter_artifacts(run_dir: Path) -> dict | None:
+    path = run_dir / "prompter.jsonl"
+    if not path.is_file():
+        prompt_path = run_dir / "prompt.txt"
+        if prompt_path.is_file():
+            prompt_text = prompt_path.read_text(encoding="utf-8", errors="replace").strip()
+            if prompt_text:
+                return {
+                    "prompter_prompt": prompt_text,
+                    "prompter_transcript": "",
+                    "prompter_jsonl": "",
+                }
+        return None
+
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    events: list[dict] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            events.append(obj)
+
+    prompt_out = ""
+    for ev in events:
+        if ev.get("event") == "prompt_out":
+            text = str(ev.get("text") or "").strip()
+            if text:
+                prompt_out = text
+
+    prompt_path = run_dir / "prompt.txt"
+    if prompt_path.is_file():
+        file_prompt = prompt_path.read_text(encoding="utf-8", errors="replace").strip()
+        if file_prompt:
+            prompt_out = file_prompt
+
+    return {
+        "prompter_prompt": prompt_out,
+        "prompter_transcript": build_prompter_transcript(events),
+        "prompter_jsonl": truncate_text(raw),
+    }
+
+
 def load_steps_from_csv(csv_path: Path) -> list[dict]:
     artifacts_dir = artifacts_dir_for_csv(csv_path)
     refdiff_by_run = load_refdiff_for_csv(csv_path)
@@ -129,13 +201,20 @@ def load_steps_from_csv(csv_path: Path) -> list[dict]:
             run = int(row["run"])
             run_dir = artifacts_dir / f"run_{run:03d}"
             diff_path = run_dir / "diff.patch"
+            claude_path = run_dir / "claude.jsonl"
             codex_path = run_dir / "codex.jsonl"
-            has_artifacts = diff_path.exists() or codex_path.exists()
+            if claude_path.exists():
+                agent_path = claude_path
+                agent_kind = "claude"
+            else:
+                agent_path = codex_path
+                agent_kind = "codex"
+            has_artifacts = diff_path.exists() or agent_path.exists()
             diff = truncate_text(read_artifact_file(diff_path)) if diff_path.exists() else ""
-            codex_raw = read_artifact_file(codex_path) if codex_path.exists() else ""
-            codex_jsonl = truncate_text(codex_raw) if codex_raw else ""
-            response = extract_final_agent_message(codex_raw) if codex_raw else ""
-            reasoning = extract_reasoning_transcript(codex_raw) if codex_raw else ""
+            agent_raw = read_artifact_file(agent_path) if agent_path.exists() else ""
+            agent_jsonl = truncate_text(agent_raw) if agent_raw else ""
+            response = extract_final_agent_message(agent_raw) if agent_raw else ""
+            reasoning = extract_reasoning_transcript(agent_raw) if agent_raw else ""
 
             step: dict = {
                 "run": run,
@@ -150,7 +229,8 @@ def load_steps_from_csv(csv_path: Path) -> list[dict]:
                 "diff": diff,
                 "response": response,
                 "reasoning": reasoning,
-                "codex_jsonl": codex_jsonl,
+                "agent_jsonl": agent_jsonl,
+                "agent_kind": agent_kind,
                 "has_artifacts": has_artifacts,
             }
 
@@ -174,6 +254,10 @@ def load_steps_from_csv(csv_path: Path) -> list[dict]:
             turn_signal = signal_by_run.get(run)
             if turn_signal is not None:
                 step["signal"] = turn_signal
+
+            prompter_data = load_prompter_artifacts(run_dir)
+            if prompter_data is not None:
+                step.update(prompter_data)
 
             steps.append(step)
 
@@ -205,6 +289,9 @@ def build_experiment_data(exp_dir: Path) -> dict:
                 "thresholds": signals_data.get("thresholds") or {},
             }
 
+        steps = load_steps_from_csv(csv_path)
+        has_prompter = any(step.get("prompter_prompt") for step in steps)
+
         models.append(
             {
                 "id": f"{stamp}:{model_id}",
@@ -214,7 +301,8 @@ def build_experiment_data(exp_dir: Path) -> dict:
                 "csv": csv_path.name,
                 "color": COLORS.get(model_id, "#888888"),
                 "signals": signals_summary,
-                "steps": load_steps_from_csv(csv_path),
+                "has_prompter": has_prompter,
+                "steps": steps,
             }
         )
 
