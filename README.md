@@ -176,7 +176,7 @@ PROMPTER_SYSTEM_PROMPT_FILE=prompter_system_prompt.txt
 
 Paths in `*_FILE` keys are resolved relative to `prompt.env`, then the current working directory. You can still use inline `PROMPTER_SYSTEM_PROMPT=...` for short one-line prompts.
 
-Prompter artifacts: `<stamp>-<model>/prompt.txt` (all Gemini prompts, labeled by turn), `run_NNN/prompter.jsonl` (Gemini event log for that turn). Each `prompter.jsonl` includes `request`, `response` (`payload.raw` + `payload.parsed` with answer/thought parts, usage, finish reason), `chat_history` (curated SDK history after the turn), and `prompt_out`. Results land under `result/<repo>-<label>-Agent/` (or `result/<repo>-Agent/` without `--label`); the git experiment branch gets the same `-Agent` suffix. Rebuild the dashboard to see the two-column prompter + coding-agent panel.
+Prompter artifacts: `<stamp>-<model>/prompt.txt` (all Gemini prompts, labeled by turn), `run_NNN/prompter.jsonl` (Gemini event log for that turn). Each `prompter.jsonl` includes `request`, `response` (`payload.raw` + `payload.parsed` with answer/thought parts, usage, finish reason), `chat_history` (curated SDK history after the turn), and `prompt_out`. Results land under `result/<repo>-<label>-Agent/` (or `result/<repo>-Agent/` without `--label`); the git experiment branch gets the same `-Agent` suffix. Rebuild the dashboard to see the stacked prompter + coding-agent panel.
 
 ```bash
 python dashboard/build.py --exp bubble_sort-Prompter-Temp0.0-Agent
@@ -349,7 +349,7 @@ python dashboard/build_index.py              # index only
 
 - Tabs per `logs/*-log.csv` (model / timestamp batch).
 - Line chart of `lines_total` per run; **click** a point or use **Prev/Next** (arrow keys) to select a step.
-- Panels: **Signals** (S1-S6 shown as the rolling value up to the selected run next to the final value, plus the selected run's structural breakdown), **RefDiff** (formatted summary + per-step raw JSON via **refdiff.jsonl**), agent response, unified diff; **Reasoning** and agent JSONL dialogs (`codex.jsonl` / `claude.jsonl`) for the selected step. **Prompter experiments** show a two-column agent panel (Gemini prompter + coding agent).
+- Panels: **Signals** (S1-S6 shown as the rolling value up to the selected run next to the final value, plus the selected run's structural breakdown), **RefDiff** (formatted summary + per-step raw JSON via **refdiff.jsonl**), agent response, unified diff; **Reasoning** and agent JSONL dialogs (`codex.jsonl` / `claude.jsonl`) for the selected step. **Prompter experiments** show a stacked agent panel (Gemini user message on top, coding agent below).
 - **RefDiff:** hover a chart point for a one-line summary (e.g. `RefDiff: EXTRACT (1)`); see [Relationship types](#relationship-types) above when interpreting `type` fields.
 - **Signals:** the convergence turn `t0` is highlighted in red on the chart.
 
