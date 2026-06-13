@@ -7,7 +7,7 @@ Optional ``--prompter`` mode uses a Gemini user agent (``GEMINI_API_KEY`` and
 ``PROMPTER_MODEL`` in ``.env``; ``PROMPTER_SYSTEM_PROMPT`` and ``PROMPTER_NUDGE`` in
 ``prompt.env``; requires ``google-genai``) to generate a vague refactoring request each turn;
 the coding agent still runs in one session. Prompter artifacts:
-``run_NNN/prompt.txt``, ``run_NNN/prompter.jsonl``.
+``<stamp>-<model>/prompt.txt`` (all turns), ``run_NNN/prompter.jsonl``.
 
 The coding CLI is chosen from ``--model``: names starting with ``claude`` use Claude;
 all other models use Codex.
@@ -17,7 +17,7 @@ Implementation lives in the ``experiment_runner`` package.
 Each iteration:
 - runs the selected coding agent on the target codebase
 - computes total line changes via `git diff --cached --numstat <prev_sha>`
-- appends one row to `./result/<target_repo>/<stamp>-<model>-log.csv`
+- appends one row to `./result/<target_repo>/logs/<stamp>-<model>-log.csv`
 - writes per-step artifacts under `./result/<target_repo>/<stamp>-<model>/run_NNN/`.
 """
 

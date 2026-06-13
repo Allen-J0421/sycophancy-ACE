@@ -14,8 +14,19 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 sys.path.insert(0, str(_REPO_ROOT / "result"))
+sys.path.insert(0, str(_REPO_ROOT))
 
 from codex_parse import extract_final_agent_message, extract_reasoning_transcript  # noqa: E402
+from experiment_runner.artifacts import load_prompts_by_turn  # noqa: E402
+from experiment_runner.result_paths import (  # noqa: E402
+    artifacts_dir_for_csv,
+    exp_dir_has_logs,
+    iter_log_csvs,
+    logs_dir,
+    refdiff_jsonl_path,
+    signals_json_path,
+    stamp_from_log_csv,
+)
 from style_config import COLORS, LABELS  # noqa: E402
 
 MAX_FIELD_BYTES = 200_000
@@ -43,20 +54,7 @@ def read_artifact_file(path: Path) -> str:
 
 
 def stamp_from_csv(csv_path: Path) -> str:
-    name = csv_path.name
-    if name.endswith("-log.csv"):
-        return name[: -len("-log.csv")]
-    return csv_path.stem
-
-
-def refdiff_jsonl_path(csv_path: Path) -> Path:
-    stamp = stamp_from_csv(csv_path)
-    return csv_path.parent / "refdiff" / f"{stamp}-refdiff.jsonl"
-
-
-def signals_json_path(csv_path: Path) -> Path:
-    stamp = stamp_from_csv(csv_path)
-    return csv_path.parent / "signals" / f"{stamp}-signals.json"
+    return stamp_from_log_csv(csv_path)
 
 
 def load_signals_for_csv(csv_path: Path) -> dict | None:
@@ -103,14 +101,27 @@ def load_refdiff_for_csv(csv_path: Path) -> dict[int, dict]:
     return by_run
 
 
-def artifacts_dir_for_csv(csv_path: Path) -> Path:
-    """Map ``<stamp>-<model>-log.csv`` → ``<stamp>-<model>/``."""
-    name = csv_path.name
-    if name.endswith("-log.csv"):
-        folder_name = name[: -len("-log.csv")]
-    else:
-        folder_name = csv_path.stem
-    return csv_path.parent / folder_name
+def _summarize_chat_history(curated: object, *, preview_chars: int = 200) -> str:
+    if not isinstance(curated, list):
+        return ""
+    lines: list[str] = []
+    for entry in curated:
+        if not isinstance(entry, dict):
+            continue
+        role = str(entry.get("role") or "unknown")
+        texts: list[str] = []
+        parts = entry.get("parts")
+        if isinstance(parts, list):
+            for part in parts:
+                if isinstance(part, dict):
+                    text = str(part.get("text") or "").strip()
+                    if text:
+                        texts.append(text)
+        body = " ".join(texts).replace("\n", " ").strip()
+        if len(body) > preview_chars:
+            body = body[: preview_chars - 3] + "..."
+        lines.append(f"{role}: {body or '(empty)'}")
+    return "\n".join(lines)
 
 
 def build_prompter_transcript(events: list[dict]) -> str:
@@ -127,26 +138,52 @@ def build_prompter_transcript(events: list[dict]) -> str:
             if message:
                 parts.append(f"[Prompter input]\n{message}")
             continue
-        if not text:
+        if event == "chat_history":
+            payload = ev.get("payload")
+            if isinstance(payload, dict):
+                summary = _summarize_chat_history(payload.get("curated"))
+                if summary:
+                    parts.append(f"[Gemini curated history]\n{summary}")
             continue
         if event == "response":
-            parts.append(f"[Prompter request]\n{text}")
-        elif event == "prompt_out":
+            payload = ev.get("payload")
+            if isinstance(payload, dict):
+                parsed = payload.get("parsed")
+                if isinstance(parsed, dict):
+                    thought = str(parsed.get("thought_text") or "").strip()
+                    if thought:
+                        parts.append(f"[Prompter thought]\n{thought}")
+            if text:
+                parts.append(f"[Prompter request]\n{text}")
+            continue
+        if not text:
+            continue
+        if event == "prompt_out":
             parts.append(f"[Sent to coding agent]\n{text}")
         elif event == "error":
             parts.append(f"[Prompter error]\n{text}")
     return "\n\n".join(parts)
 
 
-def load_prompter_artifacts(run_dir: Path) -> dict | None:
+def load_prompter_artifacts(
+    run_dir: Path,
+    *,
+    prompt_text: str | None = None,
+) -> dict | None:
     path = run_dir / "prompter.jsonl"
     if not path.is_file():
+        if prompt_text:
+            return {
+                "prompter_prompt": prompt_text,
+                "prompter_transcript": "",
+                "prompter_jsonl": "",
+            }
         prompt_path = run_dir / "prompt.txt"
         if prompt_path.is_file():
-            prompt_text = prompt_path.read_text(encoding="utf-8", errors="replace").strip()
-            if prompt_text:
+            file_prompt = prompt_path.read_text(encoding="utf-8", errors="replace").strip()
+            if file_prompt:
                 return {
-                    "prompter_prompt": prompt_text,
+                    "prompter_prompt": file_prompt,
                     "prompter_transcript": "",
                     "prompter_jsonl": "",
                 }
@@ -165,18 +202,20 @@ def load_prompter_artifacts(run_dir: Path) -> dict | None:
         if isinstance(obj, dict):
             events.append(obj)
 
-    prompt_out = ""
-    for ev in events:
-        if ev.get("event") == "prompt_out":
-            text = str(ev.get("text") or "").strip()
-            if text:
-                prompt_out = text
+    prompt_out = prompt_text or ""
+    if not prompt_out:
+        for ev in events:
+            if ev.get("event") == "prompt_out":
+                text = str(ev.get("text") or "").strip()
+                if text:
+                    prompt_out = text
 
-    prompt_path = run_dir / "prompt.txt"
-    if prompt_path.is_file():
-        file_prompt = prompt_path.read_text(encoding="utf-8", errors="replace").strip()
-        if file_prompt:
-            prompt_out = file_prompt
+    if not prompt_out:
+        prompt_path = run_dir / "prompt.txt"
+        if prompt_path.is_file():
+            file_prompt = prompt_path.read_text(encoding="utf-8", errors="replace").strip()
+            if file_prompt:
+                prompt_out = file_prompt
 
     return {
         "prompter_prompt": prompt_out,
@@ -187,6 +226,7 @@ def load_prompter_artifacts(run_dir: Path) -> dict | None:
 
 def load_steps_from_csv(csv_path: Path) -> list[dict]:
     artifacts_dir = artifacts_dir_for_csv(csv_path)
+    prompts_by_turn = load_prompts_by_turn(artifacts_dir)
     refdiff_by_run = load_refdiff_for_csv(csv_path)
     signals_data = load_signals_for_csv(csv_path)
     signal_by_run: dict[int, dict] = {}
@@ -255,7 +295,10 @@ def load_steps_from_csv(csv_path: Path) -> list[dict]:
             if turn_signal is not None:
                 step["signal"] = turn_signal
 
-            prompter_data = load_prompter_artifacts(run_dir)
+            prompter_data = load_prompter_artifacts(
+                run_dir,
+                prompt_text=prompts_by_turn.get(run),
+            )
             if prompter_data is not None:
                 step.update(prompter_data)
 
@@ -265,9 +308,9 @@ def load_steps_from_csv(csv_path: Path) -> list[dict]:
 
 
 def build_experiment_data(exp_dir: Path) -> dict:
-    csv_files = sorted(exp_dir.glob("*-log.csv"))
+    csv_files = iter_log_csvs(exp_dir)
     if not csv_files:
-        raise FileNotFoundError(f"No *-log.csv files in {exp_dir}")
+        raise FileNotFoundError(f"No *-log.csv files in {logs_dir(exp_dir)}")
 
     models: list[dict] = []
     for csv_path in csv_files:
@@ -337,7 +380,7 @@ def experiment_dirs_with_logs(result_dir: Path) -> list[Path]:
             continue
         if exp_dir.name == "__pycache__":
             continue
-        if list(exp_dir.glob("*-log.csv")):
+        if exp_dir_has_logs(exp_dir):
             dirs.append(exp_dir)
     return dirs
 

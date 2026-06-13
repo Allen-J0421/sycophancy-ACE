@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run RefDiff on experiment commits (post-hoc, separate from run_experiment.py).
 
-Scans result/ for folders with *-log.csv (like result/plot.py), invokes
+Scans result/ for folders with logs/*-log.csv (like result/plot.py), invokes
 refdiff-runner per commit_sha on --repo, and writes refdiff/<stamp>-refdiff.jsonl
 plus a single run-labeled matcher log. Skips experiment folders whose commits are not in --repo.
 
@@ -25,6 +25,17 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _RUNNER_DIR = _SCRIPT_DIR / "refdiff-runner"
 _RESULT_DIR = _SCRIPT_DIR / "result"
+sys.path.insert(0, str(_SCRIPT_DIR))
+
+from experiment_runner.result_paths import (  # noqa: E402
+    exp_dir_for_csv,
+    exp_dir_has_logs,
+    iter_log_csvs,
+    refdiff_dir,
+    refdiff_jsonl_path,
+    refdiff_matcher_log_path,
+    stamp_from_log_csv,
+)
 _DEFAULT_JAVA_HOME = Path("/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home")
 _MAX_GRADLE_JAVA = 23  # Gradle 8.10.2 max supported runtime
 
@@ -171,7 +182,7 @@ def experiment_dirs_with_logs(result_dir: Path) -> list[Path]:
             continue
         if exp_dir.name in ("__pycache__",):
             continue
-        if list(exp_dir.glob("*-log.csv")):
+        if exp_dir_has_logs(exp_dir):
             dirs.append(exp_dir)
     return dirs
 
@@ -187,7 +198,7 @@ def repo_contains_commit(repo: Path, commit_sha: str) -> bool:
 
 
 def first_commit_sha(exp_dir: Path) -> str | None:
-    csv_files = sorted(exp_dir.glob("*-log.csv"))
+    csv_files = iter_log_csvs(exp_dir)
     if not csv_files:
         return None
     with csv_files[0].open(newline="", encoding="utf-8") as f:
@@ -199,10 +210,7 @@ def first_commit_sha(exp_dir: Path) -> str | None:
 
 
 def stamp_from_csv(csv_path: Path) -> str:
-    name = csv_path.name
-    if name.endswith("-log.csv"):
-        return name[: -len("-log.csv")]
-    return csv_path.stem
+    return stamp_from_log_csv(csv_path)
 
 
 def git_numstat(repo: Path, commit_sha: str) -> dict[str, int]:
@@ -305,15 +313,15 @@ def process_csv(
     env: dict[str, str],
 ) -> tuple[int, int]:
     stamp = stamp_from_csv(csv_path)
-    refdiff_dir = csv_path.parent / "refdiff"
-    jsonl_path = refdiff_dir / f"{stamp}-refdiff.jsonl"
-    matcher_log_path = refdiff_dir / f"{stamp}-matcher.log"
+    exp_dir = exp_dir_for_csv(csv_path)
+    jsonl_path = refdiff_jsonl_path(csv_path)
+    matcher_log_path = refdiff_matcher_log_path(csv_path)
 
     if jsonl_path.exists():
         eprint(f"[skip] {jsonl_path} exists")
         return 0, 0
 
-    refdiff_dir.mkdir(parents=True, exist_ok=True)
+    refdiff_dir(exp_dir).mkdir(parents=True, exist_ok=True)
     gradlew = _RUNNER_DIR / "gradlew"
     if not gradlew.is_file():
         raise FileNotFoundError(f"Gradle wrapper not found: {gradlew}")
@@ -366,7 +374,7 @@ def process_csv(
             record["experiment"] = exp_name
             record["git_stat"] = git_numstat(repo, commit_sha)
 
-            rel_matcher = matcher_log_path.relative_to(csv_path.parent)
+            rel_matcher = matcher_log_path.relative_to(exp_dir)
             record["matcher_log"] = str(rel_matcher).replace("\\", "/")
             matcher_lines: list[str] = []
             if matcher_tmp_path.exists():
@@ -429,7 +437,7 @@ def process_experiment_dir(
         eprint(f"[skip] {exp_name}: commits not in {repo}")
         return None
 
-    csv_files = sorted(exp_dir.glob("*-log.csv"))
+    csv_files = iter_log_csvs(exp_dir)
     if not csv_files:
         return None
 

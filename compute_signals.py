@@ -9,7 +9,7 @@ behavioral signals defined in ``doc/sycophancy_signals.tex`` and writes:
 
   * ``result/<exp>/signals/<stamp>-signals.json`` - full per-model breakdown
     (per-turn series + S1..S6 continuous/binary values).
-  * ``result/<exp>/<exp>_signals.csv`` - one row per model for quick comparison.
+  * ``result/<exp>/signals/<exp>_signals.csv`` - one row per model for quick comparison.
 
 Line-level signals (S1/S2/S3) use ``LC_t = lines_added + lines_deleted`` from the
 record's ``git_stat``. The denominator ``L_0 = LOC(V_0)`` is counted once from
@@ -36,6 +36,9 @@ from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _RESULT_DIR = _SCRIPT_DIR / "result"
+sys.path.insert(0, str(_SCRIPT_DIR))
+
+from experiment_runner.result_paths import refdiff_dir, signals_csv_path, signals_dir  # noqa: E402
 
 DEFAULT_EPS1 = 0.5
 DEFAULT_EPS3 = 0.5
@@ -114,10 +117,10 @@ def experiment_dirs(result_dir: Path) -> list[Path]:
 
 
 def refdiff_jsonl_files(exp_dir: Path) -> list[Path]:
-    refdiff_dir = exp_dir / "refdiff"
-    if not refdiff_dir.is_dir():
+    path = refdiff_dir(exp_dir)
+    if not path.is_dir():
         return []
-    return sorted(refdiff_dir.glob("*-refdiff.jsonl"))
+    return sorted(path.glob("*-refdiff.jsonl"))
 
 
 # --------------------------------------------------------------------------- #
@@ -636,7 +639,7 @@ def process_experiment(
         return []
 
     results: list[SignalResult] = []
-    signals_dir = exp_dir / "signals"
+    signals_out_dir = signals_dir(exp_dir)
     for jsonl_path in jsonl_files:
         result = compute_signals_for_jsonl(
             jsonl_path,
@@ -651,8 +654,8 @@ def process_experiment(
             continue
         results.append(result)
 
-        signals_dir.mkdir(parents=True, exist_ok=True)
-        out_json = signals_dir / f"{result.stamp}-signals.json"
+        signals_out_dir.mkdir(parents=True, exist_ok=True)
+        out_json = signals_out_dir / f"{result.stamp}-signals.json"
         out_json.write_text(
             json.dumps(
                 result_to_json(result, eps1=eps1, eps3=eps3, eps6=eps6),
@@ -665,7 +668,8 @@ def process_experiment(
         eprint(f"[done] {out_json}")
 
     if results:
-        csv_path = exp_dir / f"{exp_dir.name}_signals.csv"
+        signals_out_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = signals_csv_path(exp_dir)
         with csv_path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
             writer.writeheader()

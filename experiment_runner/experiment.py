@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 from collections.abc import Iterator
 
-from experiment_runner.artifacts import write_step_artifacts
+from experiment_runner.artifacts import append_prompt_turn, write_step_artifacts
 from experiment_runner.coding_agent import CodingAgent
 from experiment_runner.config import build_coding_agent, build_prompt_source, eprint_setup
 from experiment_runner.constants import CSV_COLUMNS, agent_jsonl_filename
@@ -103,13 +103,18 @@ class ExperimentRunner:
                         branch=self.config.branch,
                     )
                 )
+                if use_prompter and result.prompt_text:
+                    append_prompt_turn(
+                        self.config.artifacts_dir,
+                        result.number,
+                        result.prompt_text,
+                    )
                 write_step_artifacts(
                     self.config.artifacts_dir,
                     result.number,
                     diff_patch=result.diff_patch,
                     jsonl_text=result.jsonl_text,
                     agent_jsonl_name=jsonl_name,
-                    prompt_text=result.prompt_text,
                     prompter_jsonl=result.prompter_jsonl,
                 )
                 self._eprint_iteration_result(result)

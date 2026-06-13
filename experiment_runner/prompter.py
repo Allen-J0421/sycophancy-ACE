@@ -59,6 +59,67 @@ def _response_payload(response: types.GenerateContentResponse) -> dict[str, Any]
     return response.model_dump(mode="json", exclude_none=True)
 
 
+def _part_records(response: types.GenerateContentResponse) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for candidate in response.candidates or []:
+        content = candidate.content
+        if content is None or not content.parts:
+            continue
+        for part in content.parts:
+            record: dict[str, Any] = {}
+            text = non_empty_string(part.text)
+            if text:
+                record["text"] = text
+            if part.thought is not None:
+                record["thought"] = part.thought
+            sig = non_empty_string(part.thought_signature)
+            if sig:
+                record["thought_signature"] = sig
+            if record:
+                records.append(record)
+    return records
+
+
+def _parse_response(response: types.GenerateContentResponse) -> dict[str, Any]:
+    parts = _part_records(response)
+    answer_parts: list[str] = []
+    thought_parts: list[str] = []
+    for record in parts:
+        text = record.get("text")
+        if not text:
+            continue
+        if record.get("thought") is True:
+            thought_parts.append(str(text))
+        else:
+            answer_parts.append(str(text))
+
+    finish_reason: str | None = None
+    if response.candidates:
+        reason = response.candidates[0].finish_reason
+        if reason is not None:
+            finish_reason = reason.name if hasattr(reason, "name") else str(reason)
+
+    parsed: dict[str, Any] = {
+        "answer_text": "\n".join(answer_parts),
+        "thought_text": "\n".join(thought_parts),
+        "parts": parts,
+        "finish_reason": finish_reason,
+        "response_id": response.response_id,
+        "model_version": response.model_version,
+    }
+    if response.usage_metadata is not None:
+        parsed["usage_metadata"] = response.usage_metadata.model_dump(
+            mode="json",
+            exclude_none=True,
+        )
+    if response.prompt_feedback is not None:
+        parsed["prompt_feedback"] = response.prompt_feedback.model_dump(
+            mode="json",
+            exclude_none=True,
+        )
+    return parsed
+
+
 @dataclass
 class GeminiPrompter:
     """Stateful Gemini user agent with lossless event logging."""
@@ -131,6 +192,19 @@ class GeminiPrompter:
         parts.append(self.config.nudge)
         return "\n\n".join(parts)
 
+    def _log_chat_history(self, chat: Any) -> None:
+        history = chat.get_history(curated=True)
+        self._log_event(
+            "chat_history",
+            payload={
+                "curated": [
+                    content.model_dump(mode="json", exclude_none=True)
+                    for content in history
+                ],
+                "message_count": len(history),
+            },
+        )
+
     def next_request(self, turn_input: PrompterTurnInput | None = None) -> str:
         self.turn += 1
         user_text = self._build_user_text(turn_input)
@@ -157,18 +231,25 @@ class GeminiPrompter:
                     "body": exc.details,
                 },
             )
+            self._log_chat_history(chat)
             return self._fallback(reason=f"API error {exc.code}: {err_text}")
         except Exception as exc:
             self._log_event("error", text=str(exc))
+            self._log_chat_history(chat)
             return self._fallback(reason=f"request failed: {exc}")
 
         response_payload = _response_payload(response)
-        reply = non_empty_string(response.text)
+        parsed = _parse_response(response)
+        reply = non_empty_string(parsed["answer_text"]) or non_empty_string(response.text)
         self._log_event(
             "response",
             text=reply or "",
-            payload=response_payload,
+            payload={
+                "raw": response_payload,
+                "parsed": parsed,
+            },
         )
+        self._log_chat_history(chat)
         if not reply:
             return self._fallback(reason="empty reply, using fallback prompt")
 

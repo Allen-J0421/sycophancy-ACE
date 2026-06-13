@@ -14,6 +14,9 @@ from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _RESULT_DIR = _SCRIPT_DIR / "result"
+sys.path.insert(0, str(_SCRIPT_DIR))
+
+from experiment_runner.result_paths import plots_dir, refdiff_dir  # noqa: E402
 
 _CACHE_ROOT = Path(tempfile.gettempdir()) / "sycophancy-plot-refdiff-cache"
 _MPL_CACHE = _CACHE_ROOT / "matplotlib"
@@ -103,10 +106,10 @@ def experiment_dirs(result_dir: Path) -> list[Path]:
 
 
 def refdiff_jsonl_files(exp_dir: Path) -> list[Path]:
-    refdiff_dir = exp_dir / "refdiff"
-    if not refdiff_dir.is_dir():
+    path = refdiff_dir(exp_dir)
+    if not path.is_dir():
         return []
-    return sorted(refdiff_dir.glob("*-refdiff.jsonl"))
+    return sorted(path.glob("*-refdiff.jsonl"))
 
 
 def count_no_relationships(record: dict) -> Counter[str]:
@@ -393,7 +396,9 @@ def plot_experiment(exp_dir: Path, summaries: list[BatchSummary]) -> Path:
     fig.suptitle(f"RefDiff relationship distribution: {exp_dir.name}", fontsize=13)
     fig.subplots_adjust(left=0.04, right=0.98, top=0.88, bottom=0.12)
 
-    out_path = exp_dir / f"{exp_dir.name}_refdiff.png"
+    plots_out_dir = plots_dir(exp_dir)
+    plots_out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = plots_out_dir / f"{exp_dir.name}_refdiff.png"
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     return out_path

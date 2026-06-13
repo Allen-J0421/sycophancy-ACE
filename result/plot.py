@@ -1,10 +1,13 @@
-import glob
 import os
 import sys
+from pathlib import Path
 
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from experiment_runner.result_paths import iter_log_csvs, plots_dir
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from style_config import COLORS, LABELS, MARKERS
@@ -30,13 +33,13 @@ for exp in sorted(os.listdir(base)):
     exp_dir = os.path.join(base, exp)
     if not os.path.isdir(exp_dir):
         continue
-    csv_files = glob.glob(os.path.join(exp_dir, "*-log.csv"))
+    csv_files = iter_log_csvs(Path(exp_dir))
     if not csv_files:
         continue
 
     fig, ax = plt.subplots(figsize=(5.5, 3.5))
 
-    for csv_path in sorted(csv_files):
+    for csv_path in csv_files:
         df = pd.read_csv(csv_path)
         model = df["model"].iloc[0]
         color  = COLORS.get(model, None)
@@ -54,9 +57,11 @@ for exp in sorted(os.listdir(base)):
     ax.legend(loc="upper right")
     fig.tight_layout()
 
-    out_path = os.path.join(exp_dir, f"{exp}_lines_total.pdf")
-    fig.savefig(out_path, bbox_inches="tight")
-    png_path = out_path.replace(".pdf", ".png")
+    plots_dir_path = plots_dir(Path(exp_dir))
+    plots_dir_path.mkdir(parents=True, exist_ok=True)
+    out_path = plots_dir_path / f"{exp}_lines_total.pdf"
+    fig.savefig(str(out_path), bbox_inches="tight")
+    png_path = str(out_path).replace(".pdf", ".png")
     fig.savefig(png_path, bbox_inches="tight")
     print(f"Saved: {out_path}")
     print(f"Saved: {png_path}")
