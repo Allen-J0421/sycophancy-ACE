@@ -5,7 +5,7 @@ Reads the per-model JSON written by ``compute_signals.py``
 (``result/<exp>/signals/<stamp>-signals.json``) and renders, per experiment, a
 grid of grouped bar charts (one panel per continuous signal, models side by
 side) plus a binary-flag matrix (models x S1..S6). Saves
-``result/<exp>/<exp>_signals.png``.
+``result/<exp>/plots/<exp>_signals.png``.
 """
 
 from __future__ import annotations
@@ -20,6 +20,9 @@ from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _RESULT_DIR = _SCRIPT_DIR / "result"
+sys.path.insert(0, str(_SCRIPT_DIR))
+
+from experiment_runner.result_paths import plots_dir, signals_dir  # noqa: E402
 
 _CACHE_ROOT = Path(tempfile.gettempdir()) / "sycophancy-plot-signals-cache"
 _MPL_CACHE = _CACHE_ROOT / "matplotlib"
@@ -97,14 +100,14 @@ def experiment_dirs(result_dir: Path) -> list[Path]:
 
 
 def load_model_signals(exp_dir: Path) -> list[ModelSignals]:
-    signals_dir = exp_dir / "signals"
-    if not signals_dir.is_dir():
+    path = signals_dir(exp_dir)
+    if not path.is_dir():
         return []
 
     models: list[ModelSignals] = []
-    for path in sorted(signals_dir.glob("*-signals.json")):
-        data = json.loads(path.read_text(encoding="utf-8"))
-        model = str(data.get("model") or path.stem)
+    for json_path in sorted(path.glob("*-signals.json")):
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        model = str(data.get("model") or json_path.stem)
         signals = data.get("signals") or {}
         cont = {sid: float(signals.get(sid, {}).get("cont", 0.0)) for sid in SIGNAL_IDS}
         binary = {sid: int(signals.get(sid, {}).get("bin", 0)) for sid in SIGNAL_IDS}
@@ -182,7 +185,9 @@ def plot_experiment(exp_dir: Path, models: list[ModelSignals]) -> Path:
     fig.suptitle(f"Sycophancy signals: {exp_dir.name}", fontsize=13)
     fig.subplots_adjust(left=0.08, right=0.97, top=0.92, bottom=0.08)
 
-    out_path = exp_dir / f"{exp_dir.name}_signals.png"
+    plots_out_dir = plots_dir(exp_dir)
+    plots_out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = plots_out_dir / f"{exp_dir.name}_signals.png"
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     return out_path

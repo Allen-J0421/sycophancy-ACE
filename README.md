@@ -38,7 +38,7 @@ python run_experiment.py ../test_subject/bubble_sort_Java HEAD 10 --model gpt-5.
 
 python run_refdiff.py --repo ../test_subject/bubble_sort_Java
 
-python compute_signals.py            # writes result/<exp>/signals/ + _signals.csv
+python compute_signals.py            # writes result/<exp>/signals/ (JSON + CSV)
 
 python dashboard/build.py --exp bubble_sort_Java
 open result/bubble_sort_Java/dashboard.html
@@ -53,7 +53,7 @@ python run_experiment.py ../test_subject/exp-app HEAD 10 --model gpt-5.5
 
 python run_refdiff.py --repo ../test_subject/exp-app
 
-python compute_signals.py            # writes result/<exp>/signals/ + _signals.csv
+python compute_signals.py            # writes result/<exp>/signals/ (JSON + CSV)
 
 python dashboard/build.py --exp exp-app-Dash-Temp0.0
 open result/exp-app-Dash-Temp0.0/dashboard.html
@@ -101,11 +101,13 @@ sandbox/
     app.js, template.html, style.css
   result/
     <experiment>/        # One folder per target repo name (see --label)
-      <stamp>-<model>-log.csv
-      <stamp>-<model>/run_NNN/{diff.patch,codex.jsonl|claude.jsonl,prompt.txt,prompter.jsonl}
+      logs/
+        <stamp>-<model>-log.csv
+      <stamp>-<model>/run_NNN/{diff.patch,codex.jsonl|claude.jsonl,prompter.jsonl}
+      <stamp>-<model>/prompt.txt   # --prompter only (all turns)
       refdiff/           # Phase 2 output (Java / JavaScript)
-      signals/           # Phase 3 output: <stamp>-signals.json
-      <experiment>_signals.csv   # Phase 3 output: one row per model
+      signals/           # Phase 3 output: <stamp>-signals.json, <exp>_signals.csv
+      plots/             # Optional matplotlib outputs (plot.py, plot_refdiff.py, plot_signals.py)
       dashboard.html     # Phase 4 output
   index.html             # Links to all built dashboards
   result/plot.py         # Optional PDF/PNG line charts
@@ -174,7 +176,7 @@ PROMPTER_SYSTEM_PROMPT_FILE=prompter_system_prompt.txt
 
 Paths in `*_FILE` keys are resolved relative to `prompt.env`, then the current working directory. You can still use inline `PROMPTER_SYSTEM_PROMPT=...` for short one-line prompts.
 
-Per-run artifacts: `run_NNN/prompt.txt` (generated prompt), `run_NNN/prompter.jsonl` (full Gemini event log). Results land under `result/<repo>-<label>-Agent/` (or `result/<repo>-Agent/` without `--label`); the git experiment branch gets the same `-Agent` suffix. Rebuild the dashboard to see the two-column prompter + coding-agent panel.
+Prompter artifacts: `<stamp>-<model>/prompt.txt` (all Gemini prompts, labeled by turn), `run_NNN/prompter.jsonl` (Gemini event log for that turn). Each `prompter.jsonl` includes `request`, `response` (`payload.raw` + `payload.parsed` with answer/thought parts, usage, finish reason), `chat_history` (curated SDK history after the turn), and `prompt_out`. Results land under `result/<repo>-<label>-Agent/` (or `result/<repo>-Agent/` without `--label`); the git experiment branch gets the same `-Agent` suffix. Rebuild the dashboard to see the two-column prompter + coding-agent panel.
 
 ```bash
 python dashboard/build.py --exp bubble_sort-Prompter-Temp0.0-Agent
@@ -187,7 +189,7 @@ python dashboard/build.py --exp bubble_sort-Prompter-Temp0.0-Agent
    - **Fixed prompt:** sends `AGENT_FIXED_PROMPT` to the coding agent. **Prompter mode (`--prompter`):** Gemini sees the start-commit codebase snapshot on turn 1, then each turn gets the prior coding-agent reply plus `diff.patch` context before generating the next prompt.
    - Runs the coding agent in one cumulative session (Codex: `codex exec` / `resume`; Claude: `claude -p` / `--resume`) with JSON/stream-json output.
    - Stages all repo changes (`git add -A`), records line stats vs previous commit (optionally scoped to `target`).
-   - Appends one row to the CSV and writes `run_NNN/diff.patch`, `run_NNN/codex.jsonl` or `run_NNN/claude.jsonl`, and (with `--prompter`) `run_NNN/prompt.txt` + `run_NNN/prompter.jsonl`.
+   - Appends one row to the CSV and writes `run_NNN/diff.patch`, `run_NNN/codex.jsonl` or `run_NNN/claude.jsonl`, and (with `--prompter`) appends to `<stamp>-<model>/prompt.txt` plus `run_NNN/prompter.jsonl`.
    - Commits (allow-empty) for the next iteration.
 
 Cumulative mode: the tree is never reset between iterations.
@@ -216,7 +218,7 @@ Language is **auto-detected** from `--repo`: `.java` files → Java plugin; `.js
 python run_refdiff.py --repo <path-to-target-git-repo>
 ```
 
-Scans every `result/*/` folder with `*-log.csv` (like `result/plot.py`). Skips folders whose commits are not in `--repo`, experiments that do not match the detected language, and batches that already have `refdiff/*-refdiff.jsonl`. Python-only dashboards are unchanged.
+Scans every `result/*/` folder with `logs/*-log.csv` (like `result/plot.py`). Skips folders whose commits are not in `--repo`, experiments that do not match the detected language, and batches that already have `refdiff/*-refdiff.jsonl`. Python-only dashboards are unchanged.
 
 **JavaScript on Apple Silicon:** `refdiff-js` uses J2V8 native libraries (x86_64). If you see `J2V8 native library not loaded`, use an **x64 JDK under Rosetta 2** (not an aarch64 JDK).
 
@@ -323,11 +325,11 @@ relationship.
 
 ```
 result/<experiment>/signals/<stamp>-signals.json   # full per-model breakdown + per-turn series
-result/<experiment>/<experiment>_signals.csv       # one row per model (S1-S6 cont + bin)
+result/<experiment>/signals/<experiment>_signals.csv   # one row per model (S1-S6 cont + bin)
 ```
 
 Optional plots (matplotlib): `python plot_signals.py` writes
-`result/<experiment>/<experiment>_signals.png` (per-signal bar charts across
+`result/<experiment>/plots/<experiment>_signals.png` (per-signal bar charts across
 models + a binary-flag matrix).
 
 ---
@@ -345,7 +347,7 @@ python dashboard/build_index.py              # index only
 
 ### Features
 
-- Tabs per `*-log.csv` (model / timestamp batch).
+- Tabs per `logs/*-log.csv` (model / timestamp batch).
 - Line chart of `lines_total` per run; **click** a point or use **Prev/Next** (arrow keys) to select a step.
 - Panels: **Signals** (S1-S6 shown as the rolling value up to the selected run next to the final value, plus the selected run's structural breakdown), **RefDiff** (formatted summary + per-step raw JSON via **refdiff.jsonl**), agent response, unified diff; **Reasoning** and agent JSONL dialogs (`codex.jsonl` / `claude.jsonl`) for the selected step. **Prompter experiments** show a two-column agent panel (Gemini prompter + coding agent).
 - **RefDiff:** hover a chart point for a one-line summary (e.g. `RefDiff: EXTRACT (1)`); see [Relationship types](#relationship-types) above when interpreting `type` fields.
@@ -361,9 +363,9 @@ python plot_refdiff.py
 python plot_signals.py
 ```
 
-Reads only `*-log.csv`; writes `<experiment>_lines_total.pdf` / `.png` under each result folder.
-`plot_refdiff.py` scans every `result/*` folder, prints which folders were skipped or built, and writes `<experiment>_refdiff.png` for folders with `refdiff/*-refdiff.jsonl`.
-`plot_signals.py` writes `<experiment>_signals.png` for folders with `signals/*-signals.json` (run `compute_signals.py` first).
+Reads only `logs/*-log.csv`; writes `<experiment>_lines_total.pdf` / `.png` under `result/<experiment>/plots/`.
+`plot_refdiff.py` scans every `result/*` folder, prints which folders were skipped or built, and writes `plots/<experiment>_refdiff.png` for folders with `refdiff/*-refdiff.jsonl`.
+`plot_signals.py` writes `plots/<experiment>_signals.png` for folders with `signals/*-signals.json` (run `compute_signals.py` first).
 
 ---
 
@@ -373,13 +375,14 @@ Typical layout for one experiment batch:
 
 ```
 result/bubble_sort_Java/
-  20260601T211117Z-gpt-5.5-log.csv
+  logs/
+    20260601T211117Z-gpt-5.5-log.csv
   20260601T211117Z-gpt-5.5/
-    run_001/
-      diff.patch
-      codex.jsonl          # or claude.jsonl
-      prompt.txt           # --prompter only
-      prompter.jsonl       # --prompter only
+  prompt.txt             # --prompter only (all turns)
+  run_001/
+    diff.patch
+    codex.jsonl          # or claude.jsonl
+    prompter.jsonl       # --prompter only
     run_002/
       ...
   refdiff/                                    # after run_refdiff.py
@@ -387,7 +390,12 @@ result/bubble_sort_Java/
     20260601T211117Z-gpt-5.5-matcher.log
   signals/                                    # after compute_signals.py
     20260601T211117Z-gpt-5.5-signals.json
-  bubble_sort_Java_signals.csv                # after compute_signals.py
+    bubble_sort_Java_signals.csv
+  plots/                                      # after plot.py / plot_refdiff.py / plot_signals.py
+    bubble_sort_Java_lines_total.pdf
+    bubble_sort_Java_lines_total.png
+    bubble_sort_Java_refdiff.png
+    bubble_sort_Java_signals.png
   dashboard.html                              # after dashboard/build.py
 ```
 

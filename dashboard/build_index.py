@@ -6,11 +6,15 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parent
+sys.path.insert(0, str(_REPO_ROOT))
+
+from experiment_runner.result_paths import iter_log_csvs  # noqa: E402
 
 INDEX_TEMPLATE_PATH = _SCRIPT_DIR / "index_template.html"
 INDEX_CSS_PATH = _SCRIPT_DIR / "index.css"
@@ -57,7 +61,7 @@ def discover_dashboards(result_dir: Path) -> list[dict]:
         if exp_dir.name in ("__pycache__",):
             continue
 
-        csv_files = list(exp_dir.glob("*-log.csv"))
+        csv_files = iter_log_csvs(exp_dir)
         csv_count = len(csv_files)
         if csv_count == 0:
             continue

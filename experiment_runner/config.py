@@ -13,6 +13,7 @@ from experiment_runner.constants import DEFAULT_TIMEOUT, PROMPTER_SUFFIX
 from experiment_runner.env import load_prompter_config, load_prompt
 from experiment_runner.git_repo import find_git_root
 from experiment_runner.models import AgentKind, CliArgs, ExperimentConfig, TargetScope
+from experiment_runner.result_paths import artifacts_dir, log_csv_path
 from experiment_runner.prompt_source import FixedPromptSource, GeminiPromptSource, PromptSource
 from experiment_runner.util import (
     eprint,
@@ -164,8 +165,9 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
         result_dir = f"{target.repo_name}-{label_slug}"
     if args.prompter:
         result_dir = f"{result_dir}{PROMPTER_SUFFIX}"
-    results_csv = (script_dir() / "result" / result_dir / f"{stamp}-{model.slug}-log.csv").resolve()
-    artifacts_dir = results_csv.parent / f"{stamp}-{model.slug}"
+    exp_path = (script_dir() / "result" / result_dir).resolve()
+    results_csv = log_csv_path(exp_path, stamp, model.slug)
+    artifacts_dir_path = artifacts_dir(exp_path, stamp, model.slug)
     prompt = load_prompt()
     prompter_config = load_prompter_config(fallback_prompt=prompt) if args.prompter else None
     return ExperimentConfig(
@@ -175,7 +177,7 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
         effective_model=model.effective,
         branch=branch,
         results_csv=results_csv,
-        artifacts_dir=artifacts_dir,
+        artifacts_dir=artifacts_dir_path,
         start_commit=args.commit,
         iterations=args.iterations,
         agent=args.agent,
