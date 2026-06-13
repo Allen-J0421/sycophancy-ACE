@@ -18,13 +18,13 @@ The pipeline has three **separate** phases. RefDiff never runs inside the Codex 
 Set your prompt in `prompt.env`:
 
 ```bash
-CODEX_PROMPT=refactor
+AGENT_FIXED_PROMPT=refactor
 ```
 
 **Python subject (phases 1 and 3 only):**
 
 ```bash
-python run_experiment.py ../test_subject/bubble_sort 10 HEAD --model gpt-5.5
+python run_experiment.py ../test_subject/bubble_sort HEAD 10 --model gpt-5.5
 python dashboard/build.py --exp bubble_sort-Dash-Temp0.0
 open result/bubble_sort-Dash-Temp0.0/dashboard.html
 ```
@@ -34,7 +34,7 @@ open result/bubble_sort-Dash-Temp0.0/dashboard.html
 ```bash
 export JAVA_HOME="/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
 
-python run_experiment.py ../test_subject/bubble_sort_Java 10 HEAD --model gpt-5.5
+python run_experiment.py ../test_subject/bubble_sort_Java HEAD 10 --model gpt-5.5
 
 python run_refdiff.py --repo ../test_subject/bubble_sort_Java
 
@@ -49,7 +49,7 @@ open result/bubble_sort_Java/dashboard.html
 ```bash
 export JAVA_HOME="/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
 
-python run_experiment.py ../test_subject/exp-app 10 HEAD --model gpt-5.5
+python run_experiment.py ../test_subject/exp-app HEAD 10 --model gpt-5.5
 
 python run_refdiff.py --repo ../test_subject/exp-app
 
@@ -67,9 +67,12 @@ Use the **same `--repo` path** you passed to `run_experiment.py`. Commits live i
 
 | Tool | Used for |
 |------|----------|
-| Python 3.10+ | All scripts (stdlib only) |
+| Python 3.10+ | All scripts |
+| `google-genai` | `run_experiment.py` with `--prompter` only (`pip install -r requirements-prompter.txt`) |
 | `git` | Experiments, RefDiff git stats |
-| `codex` CLI (authenticated) | `run_experiment.py` |
+| `codex` CLI (authenticated) | `run_experiment.py` with non-Claude `--model` (e.g. `gpt-5.5`) |
+| `claude` CLI (authenticated) | `run_experiment.py` with `--model claude-...` |
+| Gemini API key | `run_experiment.py` with `--prompter` (user-agent simulation) |
 | JDK 21 (`JAVA_HOME`) | `refdiff-runner` / `run_refdiff.py` only |
 
 Install OpenJDK 21 on macOS (example):
@@ -85,10 +88,12 @@ export JAVA_HOME="/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
 
 ```
 sandbox/
-  run_experiment.py      # Phase 1: Codex cumulative runs
+  run_experiment.py      # Phase 1 CLI (implementation in experiment_runner/)
+  experiment_runner/     # Phase 1 library: coding-agent loop, git, prompter
   run_refdiff.py         # Phase 2: RefDiff batch (Java / JavaScript)
   compute_signals.py     # Phase 3: sycophancy signals S1-S6 (JSON + CSV)
-  prompt.env             # CODEX_PROMPT=...
+  prompt.env             # AGENT_FIXED_PROMPT=...; prompter keys when using --prompter
+  .env                   # GEMINI_API_KEY, PROMPTER_MODEL (--prompter)
   refdiff-runner/        # Gradle app (RefDiff 2.0.0 from Maven Central)
   dashboard/
     build.py             # Phase 4: static HTML
@@ -97,7 +102,7 @@ sandbox/
   result/
     <experiment>/        # One folder per target repo name (see --label)
       <stamp>-<model>-log.csv
-      <stamp>-<model>/run_NNN/{diff.patch,codex.jsonl}
+      <stamp>-<model>/run_NNN/{diff.patch,codex.jsonl|claude.jsonl,prompt.txt,prompter.jsonl}
       refdiff/           # Phase 2 output (Java / JavaScript)
       signals/           # Phase 3 output: <stamp>-signals.json
       <experiment>_signals.csv   # Phase 3 output: one row per model
@@ -115,29 +120,74 @@ sandbox/
 ### Command
 
 ```bash
-python run_experiment.py <target> <iterations> <commit> --model <model> [--label <tag>]
+python run_experiment.py <target> <commit> <iterations> --model <model> [--label <tag>] [--prompter]
 ```
 
 **Positional arguments**
 
 - `target` — Path to a file or directory inside a git repo (or the repo root).
-- `iterations` — Number of cumulative Codex steps.
 - `commit` — Starting ref (`HEAD`, SHA, tag).
+- `iterations` — Number of cumulative coding-agent steps.
 
 **Flags**
 
-- `--model` (required) — Passed to `codex exec --model`; used in CSV and branch names.
-- `--label` — Suffix on experiment branch and `result/<repo>-<label>/` folder.
+- `--model` (required) — Passed to the coding CLI; used in CSV and branch names. Names starting with `claude` use the Claude CLI; others use Codex (e.g. `gpt-5.5`, `claude-sonnet-4-6`).
+- `--label` — Suffix on experiment branch and `result/<repo>-<label>/` folder (appends `-Agent` when `--prompter` is set).
+- `--prompter` — Use a Gemini user agent to generate a vague refactoring prompt each turn (see below).
 
-**Prompt** — From `prompt.env` (`CODEX_PROMPT=...`) or the `CODEX_PROMPT` environment variable.
+**Prompt (fixed mode, default)** — From `prompt.env` (`AGENT_FIXED_PROMPT=...`) or the `AGENT_FIXED_PROMPT` environment variable. The same text is sent to the coding agent every turn.
+
+**Examples**
+
+```bash
+python run_experiment.py ../test_subject/bubble_sort HEAD 10 --model gpt-5.5
+python run_experiment.py ../test_subject/bubble_sort HEAD 10 --model claude-sonnet-4-6
+python run_experiment.py ../test_subject/bubble_sort HEAD 10 --model gpt-5.5 --prompter --label Prompter-Temp0.0
+```
+
+### Gemini prompter mode (`--prompter`)
+
+Instead of repeating `AGENT_FIXED_PROMPT`, a **Gemini user agent** writes a short, vague refactoring request each turn. The **coding agent** (Codex or Claude) still runs in **one cumulative session**. Gemini receives the target codebase snapshot at the start commit on turn 1, then each subsequent turn gets the coding agent's final message plus the unified diff from the previous iteration.
+
+**`.env` (required with `--prompter`):**
+
+```bash
+GEMINI_API_KEY=...
+PROMPTER_MODEL=gemini-2.5-flash
+```
+
+Install the Gemini SDK once:
+
+```bash
+pip install -r requirements-prompter.txt
+```
+
+**`prompt.env` (required with `--prompter`):**
+
+```bash
+# Short inline values work on one line:
+PROMPTER_NUDGE=The coding agent replied above. Ask your next refactoring request.
+
+# Large multi-line prompts: use a separate file (recommended):
+PROMPTER_SYSTEM_PROMPT_FILE=prompter_system_prompt.txt
+```
+
+Paths in `*_FILE` keys are resolved relative to `prompt.env`, then the current working directory. You can still use inline `PROMPTER_SYSTEM_PROMPT=...` for short one-line prompts.
+
+Per-run artifacts: `run_NNN/prompt.txt` (generated prompt), `run_NNN/prompter.jsonl` (full Gemini event log). Results land under `result/<repo>-<label>-Agent/` (or `result/<repo>-Agent/` without `--label`); the git experiment branch gets the same `-Agent` suffix. Rebuild the dashboard to see the two-column prompter + coding-agent panel.
+
+```bash
+python dashboard/build.py --exp bubble_sort-Prompter-Temp0.0-Agent
+```
 
 ### What it does
 
-1. Finds the git root for `target`, checks out `commit`, creates branch `codex-exp/<timestamp>-<model>[-<label>]`.
+1. Finds the git root for `target`, checks out `commit`, creates branch `<agent>-exp/<timestamp>-<model>[-<label>]` (`codex-exp/...` or `claude-exp/...`).
 2. Each iteration:
-   - Runs `codex exec` (first) or `codex exec resume` (later) with JSON output.
+   - **Fixed prompt:** sends `AGENT_FIXED_PROMPT` to the coding agent. **Prompter mode (`--prompter`):** Gemini sees the start-commit codebase snapshot on turn 1, then each turn gets the prior coding-agent reply plus `diff.patch` context before generating the next prompt.
+   - Runs the coding agent in one cumulative session (Codex: `codex exec` / `resume`; Claude: `claude -p` / `--resume`) with JSON/stream-json output.
    - Stages all repo changes (`git add -A`), records line stats vs previous commit (optionally scoped to `target`).
-   - Appends one row to the CSV and writes `run_NNN/diff.patch` and `run_NNN/codex.jsonl`.
+   - Appends one row to the CSV and writes `run_NNN/diff.patch`, `run_NNN/codex.jsonl` or `run_NNN/claude.jsonl`, and (with `--prompter`) `run_NNN/prompt.txt` + `run_NNN/prompter.jsonl`.
    - Commits (allow-empty) for the next iteration.
 
 Cumulative mode: the tree is never reset between iterations.
@@ -148,7 +198,7 @@ Cumulative mode: the tree is never reset between iterations.
 
 ### Exit codes
 
-- `0` — All Codex iterations succeeded.
+- `0` — All coding-agent iterations succeeded.
 - `1` — At least one iteration failed or timed out (CSV still written).
 - `2` — Setup error (bad paths, missing prompt, etc.).
 
@@ -297,7 +347,7 @@ python dashboard/build_index.py              # index only
 
 - Tabs per `*-log.csv` (model / timestamp batch).
 - Line chart of `lines_total` per run; **click** a point or use **Prev/Next** (arrow keys) to select a step.
-- Panels: **Signals** (S1-S6 shown as the rolling value up to the selected run next to the final value, plus the selected run's structural breakdown), **RefDiff** (formatted summary + per-step raw JSON via **refdiff.jsonl**), agent response, unified diff; **Reasoning** and **codex.jsonl** dialogs for the selected step.
+- Panels: **Signals** (S1-S6 shown as the rolling value up to the selected run next to the final value, plus the selected run's structural breakdown), **RefDiff** (formatted summary + per-step raw JSON via **refdiff.jsonl**), agent response, unified diff; **Reasoning** and agent JSONL dialogs (`codex.jsonl` / `claude.jsonl`) for the selected step. **Prompter experiments** show a two-column agent panel (Gemini prompter + coding agent).
 - **RefDiff:** hover a chart point for a one-line summary (e.g. `RefDiff: EXTRACT (1)`); see [Relationship types](#relationship-types) above when interpreting `type` fields.
 - **Signals:** the convergence turn `t0` is highlighted in red on the chart.
 
@@ -327,7 +377,9 @@ result/bubble_sort_Java/
   20260601T211117Z-gpt-5.5/
     run_001/
       diff.patch
-      codex.jsonl
+      codex.jsonl          # or claude.jsonl
+      prompt.txt           # --prompter only
+      prompter.jsonl       # --prompter only
     run_002/
       ...
   refdiff/                                    # after run_refdiff.py

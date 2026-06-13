@@ -1,4 +1,4 @@
-"""Parse Codex ``--json`` JSONL for dashboard display."""
+"""Parse Codex ``--json`` and Claude ``stream-json`` JSONL for dashboard display."""
 
 from __future__ import annotations
 
@@ -33,6 +33,38 @@ def _item_text_from_event(obj: dict, *types: str) -> str | None:
     return _block_text(obj, *types)
 
 
+def _claude_assistant_text(obj: dict) -> str | None:
+    if obj.get("type") != "assistant":
+        return None
+    message = obj.get("message")
+    if not isinstance(message, dict):
+        return None
+    content = message.get("content")
+    if not isinstance(content, list):
+        return None
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") in ("text", "output_text"):
+            text = _non_empty_str(block.get("text"))
+            if text:
+                parts.append(text)
+        elif block.get("type") == "thinking":
+            text = _non_empty_str(block.get("thinking")) or _non_empty_str(block.get("text"))
+            if text:
+                parts.append(text)
+    if parts:
+        return "\n".join(parts)
+    return None
+
+
+def _claude_result_text(obj: dict) -> str | None:
+    if obj.get("type") != "result":
+        return None
+    return _non_empty_str(obj.get("result"))
+
+
 def _iter_jsonl_objects(jsonl_text: str):
     for raw in jsonl_text.splitlines():
         line = raw.strip()
@@ -47,17 +79,25 @@ def _iter_jsonl_objects(jsonl_text: str):
 
 
 def extract_final_agent_message(jsonl_text: str) -> str:
-    """Last ``agent_message`` (or legacy assistant/message) in file order."""
+    """Last agent reply in file order (Codex agent_message or Claude assistant/result)."""
     last: str | None = None
     for obj in _iter_jsonl_objects(jsonl_text):
         text = _item_text_from_event(obj, "agent_message", "assistant", "message")
+        if text:
+            last = text
+            continue
+        text = _claude_assistant_text(obj)
+        if text:
+            last = text
+            continue
+        text = _claude_result_text(obj)
         if text:
             last = text
     return last or ""
 
 
 def extract_reasoning_transcript(jsonl_text: str) -> str:
-    """Reasoning blocks plus agent messages (5.2), or all agent messages (5.4/5.5)."""
+    """Reasoning blocks plus agent messages (Codex 5.2+, Claude thinking/assistant)."""
     reasoning_parts: list[str] = []
     agent_parts: list[str] = []
 
@@ -68,6 +108,25 @@ def extract_reasoning_transcript(jsonl_text: str) -> str:
         agent = _item_text_from_event(obj, "agent_message", "assistant", "message")
         if agent:
             agent_parts.append(agent)
+            continue
+        if obj.get("type") == "assistant":
+            message = obj.get("message")
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") == "thinking":
+                            text = _non_empty_str(block.get("thinking")) or _non_empty_str(
+                                block.get("text")
+                            )
+                            if text:
+                                reasoning_parts.append(text)
+                        elif block.get("type") in ("text", "output_text"):
+                            text = _non_empty_str(block.get("text"))
+                            if text:
+                                agent_parts.append(text)
 
     if reasoning_parts:
         return "\n\n".join(reasoning_parts + agent_parts)
