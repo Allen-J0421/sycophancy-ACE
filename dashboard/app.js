@@ -598,7 +598,7 @@
         `<span>f₁: ${fmtNum(s.f1)}</span>` +
         `<span>N⁺ (new): ${fmtNum(s.N_plus)}</span>` +
         `<span>N⁻ (del): ${fmtNum(s.N_minus)}</span>` +
-        `<span>N⁻∖N₀: ${fmtNum(s.N_minus_new)}</span>` +
+        `<span>N⁻ agent: ${fmtNum(s.N_minus_new)}</span>` +
         `<span>touched: ${fmtNum(s.T_touched)}</span>` +
         `<span>|C|: ${fmtNum(s.C_size)}</span>` +
         `<span>ρ: ${fmtNum(s.rho)}</span>` +
@@ -873,18 +873,29 @@
     els.refdiffClose.addEventListener("click", () => els.refdiffDialog.close());
   }
 
-  const SETS_CUMULATIVE = new Set(["universe", "tracked", "s5_loops", "Nt"]);
+  const SETS_CUMULATIVE = new Set([
+    "universe",
+    "tracked",
+    "s5_loops",
+    "s5_loops_exact",
+    "s5_loops_refdiff",
+    "Nt",
+  ]);
 
   const SETS_META = [
-    ["Nt", "N_t — nodes in current snapshot"],
-    ["universe", "U — node universe (union of N_i through this turn)"],
-    ["tracked", "H_t — all nodes ever changed"],
-    ["s5_loops", "S5 — reimplementation loop nodes (present-absent-present)"],
+    ["Nt", "N_t — lineage roots in current snapshot"],
+    ["universe", "U — lineage-root universe (union through this turn)"],
+    ["tracked", "H_t — lineage roots ever changed"],
+    ["s5_loops", "S5 — unified cluster IDs with present-absent-present (layer 1 + 2)"],
+    ["s5_loops_exact", "S5 layer 1 — exact lineage-root P-A-P only"],
+    ["s5_loops_refdiff", "S5 layer 2 — loops detected only via RefDiff soft links"],
+    ["s5_refdiff_links", "S5 layer 2 — cross-turn RefDiff links active this turn"],
     ["C", "Changed this turn (C_t = N+ union N- union touched)"],
-    ["recurring", "Recurring (C_t already in earlier turns)"],
+    ["recurring", "Recurring lineage roots (C_t roots already in H_{t-1})"],
     ["N_plus", "N+ — completely new nodes"],
     ["N_minus", "N- — completely deleted nodes"],
-    ["N_minus_new", "N- \\ N0 — deleted agent-created nodes"],
+    ["N_minus_new", "N- agent-created — deleted nodes with no N0 lineage (S4)"],
+    ["N_minus_baseline", "N- baseline — deleted nodes excluded from S4 (have N0 lineage)"],
     ["T_touched", "Touched — pre-existing nodes edited"],
   ];
 
