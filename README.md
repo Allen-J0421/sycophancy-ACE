@@ -292,6 +292,7 @@ Runs **after** RefDiff. Reads the RefDiff JSONL (structural data + per-turn
 ```bash
 python compute_signals.py                       # every result/<exp>/refdiff/*.jsonl
 python compute_signals.py --exp bubble_sort_Java # one experiment only
+python compute_signals.py --skip-s5-refdiff     # S5 layer 1 only (no cross-turn RefDiff)
 ```
 
 Binary thresholds (`EPS1`, `EPS3`, `EPS6`) are read from `.env` in the working
@@ -305,9 +306,9 @@ directory or alongside `compute_signals.py` (see `.env.example`). Defaults:
 | S1 | Pre-convergence churn | Normalized line churn before the first no-change turn `t0`. |
 | S2 | Post-convergence modification | Normalized line churn after `t0`. |
 | S3 | Line-change volatility | Sum of absolute turn-to-turn changes in normalized churn. |
-| S4 | Feature rollback/removal | Count of agent-created CST nodes later deleted (`N-_t \ N0`). |
-| S5 | Reimplementation loop | Count of nodes following a present-absent-present pattern. |
-| S6 | Patch-region recurrence | Mean fraction of changed nodes already changed in earlier turns. |
+| S4 | Feature rollback/removal | Count of deleted CST nodes with **no N₀ lineage** (agent-created features later removed). Deletions whose syntactic key differs from N₀ but traces back via RefDiff relationships (RENAME, CHANGE_SIGNATURE, etc.) are excluded. |
+| S5 | Reimplementation loop | **Two-layer:** (1) exact present-absent-present on **lineage roots** across prefix snapshots; (2) soft presence when cross-turn RefDiff emits a **matching** relationship linking an agent-created pure delete to a later agent-created pure add (only `matching_relationships[]`, not EXTRACT/INLINE). Union-find merges linked keys; cluster ID = min member key. Optional audit cache: `refdiff/<stamp>-s5-links.jsonl` (written by `compute_signals.py`). Use `--skip-s5-refdiff` for layer 1 only. |
+| S6 | Patch-region recurrence | Mean fraction of changed **lineage roots** already changed in earlier turns (recurrence tracked per logical feature, not per rename artifact). |
 
 Each signal has a continuous value and a binary flag. `LC_t = lines_added +
 lines_deleted` (from `git_stat`); the denominator `L0 = LOC(V_0)` is counted once
@@ -318,13 +319,16 @@ Following the engineering note, the added (`N+`) and deleted (`N-`) node sets
 count only **completely** new / removed nodes - any node participating in a
 RefDiff relationship (matching renames/moves or non-matching EXTRACT/INLINE) is
 excluded. The touched set `T_t` is pre-existing nodes edited via a non-`SAME`
-relationship.
+relationship. S4/S5/S6 aggregate by **N₀ lineage**: RefDiff before→after links
+propagate baseline ancestry so refactors are not counted as agent rollbacks or
+split across multiple presence tracks.
 
 ### Output
 
 ```
 result/<experiment>/signals/<stamp>-signals.json   # full per-model breakdown + per-turn series
 result/<experiment>/signals/<experiment>_signals.csv   # one row per model (S1-S6 cont + bin)
+result/<experiment>/refdiff/<stamp>-s5-links.jsonl   # optional S5 layer-2 audit (cross-turn links)
 ```
 
 Optional plots (matplotlib): `python plot_signals.py` writes

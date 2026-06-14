@@ -57,7 +57,9 @@ public final class RefDiffRunner {
         }
 
         String parentSha = "";
-        String resolvedCommitSha = opts.commit;
+        String resolvedCommitSha = opts.compareMode
+            ? opts.afterCommit
+            : opts.commit;
         long startMs = System.currentTimeMillis();
         Map<String, Object> record;
         int exitCode = 0;
@@ -72,11 +74,21 @@ public final class RefDiffRunner {
             DiffResult diffResult;
             if ("js".equals(opts.lang)) {
                 try (JsPlugin plugin = new JsPlugin()) {
-                    diffResult = runDiff(gitDir, opts.commit, plugin, monitor);
+                    if (opts.compareMode) {
+                        diffResult = runCompare(
+                            gitDir, opts.beforeCommit, opts.afterCommit, plugin, monitor);
+                    } else {
+                        diffResult = runDiff(gitDir, opts.commit, plugin, monitor);
+                    }
                 }
             } else {
                 JavaPlugin plugin = new JavaPlugin(tempDir);
-                diffResult = runDiff(gitDir, opts.commit, plugin, monitor);
+                if (opts.compareMode) {
+                    diffResult = runCompare(
+                        gitDir, opts.beforeCommit, opts.afterCommit, plugin, monitor);
+                } else {
+                    diffResult = runDiff(gitDir, opts.commit, plugin, monitor);
+                }
             }
 
             resolvedCommitSha = diffResult.commitSha;
@@ -182,6 +194,43 @@ public final class RefDiffRunner {
                 CstDiff diff = comparator.compare(before, after, monitor);
                 long durationMs = System.currentTimeMillis() - compareStartMs;
                 return new DiffResult(sha, parentSha, diff, durationMs, before, after);
+            }
+        }
+    }
+
+    /** Compare two arbitrary commits (cross-turn S5 link extraction). */
+    private static DiffResult runCompare(
+            File gitDir,
+            String beforeCommit,
+            String afterCommit,
+            LanguagePlugin plugin,
+            CollectingMatcherMonitor monitor) throws Exception {
+        FilePathFilter fileFilter = plugin.getAllowedFilesFilter();
+        try (Repository repository = GitHelper.openRepository(gitDir)) {
+            try (RevWalk rw = new RevWalk(repository)) {
+                ObjectId beforeId = repository.resolve(beforeCommit);
+                if (beforeId == null) {
+                    throw new IllegalArgumentException("Unknown before commit: " + beforeCommit);
+                }
+                ObjectId afterId = repository.resolve(afterCommit);
+                if (afterId == null) {
+                    throw new IllegalArgumentException("Unknown after commit: " + afterCommit);
+                }
+                RevCommit beforeRev = rw.parseCommit(beforeId);
+                RevCommit afterRev = rw.parseCommit(afterId);
+                String beforeSha = beforeRev.getId().getName();
+                String afterSha = afterRev.getId().getName();
+
+                List<SourceFile> beforeFiles = listSourceFiles(repository, beforeRev, fileFilter);
+                List<SourceFile> afterFiles = listSourceFiles(repository, afterRev, fileFilter);
+                GitSourceTree before = new GitSourceTree(repository, beforeRev.getId(), beforeFiles);
+                GitSourceTree after = new GitSourceTree(repository, afterRev.getId(), afterFiles);
+
+                CstComparator comparator = new CstComparator(plugin);
+                long compareStartMs = System.currentTimeMillis();
+                CstDiff diff = comparator.compare(before, after, monitor);
+                long durationMs = System.currentTimeMillis() - compareStartMs;
+                return new DiffResult(afterSha, beforeSha, diff, durationMs, before, after);
             }
         }
     }
@@ -306,6 +355,7 @@ public final class RefDiffRunner {
 
     private static void printUsageAndExit(int code) {
         System.err.println("Usage: refdiff-runner --repo <path> --commit <sha> --lang java|js [--out <file.json>]");
+        System.err.println("       --repo <path> --before-commit <sha> --after-commit <sha> --lang java|js");
         System.err.println("       [--include-same] [--matcher-log <file>] [--pretty] [--quiet]");
         System.exit(code);
     }
@@ -313,6 +363,9 @@ public final class RefDiffRunner {
     static final class CliOptions {
         final String repo;
         final String commit;
+        final String beforeCommit;
+        final String afterCommit;
+        final boolean compareMode;
         final String lang;
         final String out;
         final String matcherLog;
@@ -323,6 +376,9 @@ public final class RefDiffRunner {
         CliOptions(
                 String repo,
                 String commit,
+                String beforeCommit,
+                String afterCommit,
+                boolean compareMode,
                 String lang,
                 String out,
                 String matcherLog,
@@ -331,6 +387,9 @@ public final class RefDiffRunner {
                 boolean quiet) {
             this.repo = repo;
             this.commit = commit;
+            this.beforeCommit = beforeCommit;
+            this.afterCommit = afterCommit;
+            this.compareMode = compareMode;
             this.lang = lang;
             this.out = out;
             this.matcherLog = matcherLog;
@@ -342,6 +401,8 @@ public final class RefDiffRunner {
         static CliOptions parse(String[] args) {
             String repo = null;
             String commit = null;
+            String beforeCommit = null;
+            String afterCommit = null;
             String lang = null;
             String out = null;
             String matcherLog = null;
@@ -357,6 +418,12 @@ public final class RefDiffRunner {
                         break;
                     case "--commit":
                         commit = requireValue(args, ++i, "--commit");
+                        break;
+                    case "--before-commit":
+                        beforeCommit = requireValue(args, ++i, "--before-commit");
+                        break;
+                    case "--after-commit":
+                        afterCommit = requireValue(args, ++i, "--after-commit");
                         break;
                     case "--lang":
                         lang = requireValue(args, ++i, "--lang");
@@ -381,8 +448,22 @@ public final class RefDiffRunner {
                 }
             }
 
-            if (repo == null || commit == null) {
-                throw new IllegalArgumentException("--repo and --commit are required");
+            if (repo == null) {
+                throw new IllegalArgumentException("--repo is required");
+            }
+            boolean compareMode = beforeCommit != null || afterCommit != null;
+            if (compareMode) {
+                if (beforeCommit == null || afterCommit == null) {
+                    throw new IllegalArgumentException(
+                        "--before-commit and --after-commit must be used together");
+                }
+                if (commit != null) {
+                    throw new IllegalArgumentException(
+                        "--commit cannot be combined with --before-commit/--after-commit");
+                }
+            } else if (commit == null) {
+                throw new IllegalArgumentException(
+                    "Either --commit or --before-commit/--after-commit is required");
             }
             if (lang == null) {
                 throw new IllegalArgumentException("--lang is required (java or js)");
@@ -390,7 +471,18 @@ public final class RefDiffRunner {
             if (!"java".equals(lang) && !"js".equals(lang)) {
                 throw new IllegalArgumentException("--lang must be java or js");
             }
-            return new CliOptions(repo, commit, lang, out, matcherLog, includeSame, pretty, quiet);
+            return new CliOptions(
+                repo,
+                commit,
+                beforeCommit,
+                afterCommit,
+                compareMode,
+                lang,
+                out,
+                matcherLog,
+                includeSame,
+                pretty,
+                quiet);
         }
 
         private static String requireValue(String[] args, int index, String flag) {
