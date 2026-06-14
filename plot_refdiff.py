@@ -189,7 +189,10 @@ def summarize_jsonl(jsonl_path: Path) -> BatchSummary:
                 continue
 
             for rel in record.get("matching_relationships") or []:
-                counts["Matching"][str(rel.get("type") or "UNKNOWN")] += 1
+                rel_type = str(rel.get("type") or "UNKNOWN")
+                if rel_type == "SAME" and not rel.get("same_edited"):
+                    continue
+                counts["Matching"][rel_type] += 1
             for rel in record.get("non_matching_relationships") or []:
                 counts["Non-Matching"][str(rel.get("type") or "UNKNOWN")] += 1
             counts["No Relationship"].update(count_no_relationships(record))
@@ -325,7 +328,7 @@ def render_summary_widget(
                 ax.text(
                     x0 + 0.13,
                     y,
-                    f"{rel_type}: {count} ({proportion:.0%})",
+                    f"{rel_type}: {count} ({proportion:.1%})",
                     transform=ax.transAxes,
                     ha="left",
                     va="center",

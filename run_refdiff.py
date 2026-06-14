@@ -394,6 +394,9 @@ def process_csv(
 
             if success:
                 ok_count += 1
+                n_same_edited = record.get("n_same_edited")
+                if n_same_edited is not None:
+                    eprint(f"[run {run}] same_edited={n_same_edited}")
             else:
                 fail_count += 1
                 eprint(f"[warn] run {run} commit {commit_sha[:7]}: {record.get('error_message')}")

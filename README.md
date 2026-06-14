@@ -234,11 +234,10 @@ Each JSONL record includes:
 
 - **Provenance:** `run`, `commit_sha`, `parent_sha`, `commit_message`, `model`, `git_branch`, `stamp`, `repo_path`, `experiment`, `language` (`java` or `js`)
 - **Status:** `refdiff_ok`, `error_message`, `duration_ms`
-- **Summary:** `n_same`, `n_matching`, `n_non_matching`, `n_relationships_total`
-- **Relationships:** type, matching/non-matching flag, similarity, descriptions, before/after node snapshots (file, line, path)
+- **Summary:** `n_same`, `n_same_edited`, `n_matching`, `n_non_matching`, `n_relationships_total`
+- **Relationships:** type, matching/non-matching flag, similarity, descriptions, before/after node snapshots (file, line, path, char offsets). Each `SAME` relationship includes `same_edited` (true when source text changed but identity preserved).
 - **Git (Tier 2):** `git_stat` (`files_changed`, `lines_added`, `lines_deleted`)
 - **Matcher (Tier 2):** `matcher_discarded`, `matcher_log` (single run-labeled file per batch)
-- **SAME (Tier 2):** `same_relationships[]`
 
 Records split relationships into two buckets:
 
