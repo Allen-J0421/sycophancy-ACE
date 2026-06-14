@@ -286,6 +286,10 @@
     const className = isMatching ? "matching" : "non-matching";
     const label = isMatching ? "Matching" : "Non-Matching";
     const type = rel.type || "UNKNOWN";
+    let typeLabel = type;
+    if (type === "SAME" && rel.same_edited != null) {
+      typeLabel = rel.same_edited ? "SAME (Edited)" : "SAME (Unchanged)";
+    }
     const description = relationshipDescription(rel);
     const similarity =
       rel.similarity != null
@@ -302,7 +306,7 @@
       label +
       "</span>" +
       '<span class="refdiff-type">' +
-      escapeHtml(type) +
+      escapeHtml(typeLabel) +
       "</span>" +
       similarity +
       "</div>"
@@ -449,12 +453,14 @@
     const nNonMatching = rowData.nonMatching;
     const nNoRelationship = rowData.noRelationship;
     const nTotal = nMatching + nNonMatching + nNoRelationship;
+    const nSameEdited = intOrZero(record.n_same_edited);
+    const summaryText =
+      `RefDiff: ${nMatching} matching, ${nNonMatching} non-matching, ${nNoRelationship} no relationship (${nTotal} total)` +
+      (record.n_same_edited != null ? ` · Same edited: ${nSameEdited}` : "");
 
     const summary =
       '<div class="refdiff-summary">' +
-      escapeHtml(
-        `RefDiff: ${nMatching} matching, ${nNonMatching} non-matching, ${nNoRelationship} no relationship (${nTotal} total)`
-      ) +
+      escapeHtml(summaryText) +
       '<span class="refdiff-summary-secondary">' +
       escapeHtml(`Nodes: ${nNodesBefore} before, ${nNodesAfter} after`) +
       "</span>" +

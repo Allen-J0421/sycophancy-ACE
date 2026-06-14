@@ -25,7 +25,6 @@ import refdiff.core.io.FilePathFilter;
 import refdiff.core.io.GitHelper;
 import refdiff.core.io.GitSourceTree;
 import refdiff.core.io.SourceFile;
-import refdiff.core.io.SourceFileSet;
 import refdiff.parsers.LanguagePlugin;
 import refdiff.parsers.java.JavaPlugin;
 import refdiff.parsers.js.JsPlugin;
@@ -94,6 +93,8 @@ public final class RefDiffRunner {
                 resolvedCommitSha,
                 parentSha,
                 diffResult.diff,
+                diffResult.beforeTree,
+                diffResult.afterTree,
                 opts.includeSame,
                 monitor.getLines(),
                 diffResult.durationMs,
@@ -114,6 +115,8 @@ public final class RefDiffRunner {
                 repoPath.getPath(),
                 resolvedCommitSha,
                 parentSha,
+                null,
+                null,
                 null,
                 opts.includeSame,
                 List.of(),
@@ -171,14 +174,14 @@ public final class RefDiffRunner {
                     : new ArrayList<>();
 
                 ObjectId beforeId = parentCommit != null ? parentCommit.getId() : revCommit.getId();
-                SourceFileSet before = new GitSourceTree(repository, beforeId, beforeFiles);
-                SourceFileSet after = new GitSourceTree(repository, revCommit.getId(), afterFiles);
+                GitSourceTree before = new GitSourceTree(repository, beforeId, beforeFiles);
+                GitSourceTree after = new GitSourceTree(repository, revCommit.getId(), afterFiles);
 
                 CstComparator comparator = new CstComparator(plugin);
                 long compareStartMs = System.currentTimeMillis();
                 CstDiff diff = comparator.compare(before, after, monitor);
                 long durationMs = System.currentTimeMillis() - compareStartMs;
-                return new DiffResult(sha, parentSha, diff, durationMs);
+                return new DiffResult(sha, parentSha, diff, durationMs, before, after);
             }
         }
     }
@@ -262,12 +265,22 @@ public final class RefDiffRunner {
         final String parentSha;
         final CstDiff diff;
         final long durationMs;
+        final GitSourceTree beforeTree;
+        final GitSourceTree afterTree;
 
-        DiffResult(String commitSha, String parentSha, CstDiff diff, long durationMs) {
+        DiffResult(
+                String commitSha,
+                String parentSha,
+                CstDiff diff,
+                long durationMs,
+                GitSourceTree beforeTree,
+                GitSourceTree afterTree) {
             this.commitSha = commitSha;
             this.parentSha = parentSha;
             this.diff = diff;
             this.durationMs = durationMs;
+            this.beforeTree = beforeTree;
+            this.afterTree = afterTree;
         }
     }
 
