@@ -1,0 +1,116 @@
+diff --git a/bubble_sort.java b/bubble_sort.java
+index df24b6e..6924f24 100644
+--- a/bubble_sort.java
++++ b/bubble_sort.java
+@@ -192,6 +192,14 @@ class AccessorFactory {
+     static <T> DataAccessor<T> withMetrics(DataAccessor<T> accessor, MetricsRecorder metrics) {
+         return new CompositeAccessor<>(accessor, metrics);
+     }
++
++    static <T> DataAccessor<T> create(T[] arr, MetricsRecorder metrics) {
++        return withMetrics(createArrayAccessor(arr), metrics);
++    }
++
++    static <T> DataAccessor<T> create(List<T> list, MetricsRecorder metrics) {
++        return withMetrics(createListAccessor(list), metrics);
++    }
+ }
+ 
+ class MetricsAwareComparator<T> {
+@@ -209,6 +217,46 @@ class MetricsAwareComparator<T> {
+     }
+ }
+ 
++interface PassStrategy<T> {
++    boolean execute(DataAccessor<T> accessor, int passIndex);
++}
++
++class BubblePassStrategy<T> implements PassStrategy<T> {
++    private final MetricsAwareComparator<T> comparator;
++
++    BubblePassStrategy(MetricsAwareComparator<T> comparator) {
++        this.comparator = comparator;
++    }
++
++    @Override
++    public boolean execute(DataAccessor<T> accessor, int passIndex) {
++        boolean swapped = false;
++        for (int j = 0; j < accessor.size() - passIndex - 1; j++) {
++            if (comparator.isGreater(accessor.get(j), accessor.get(j + 1))) {
++                accessor.swap(j, j + 1);
++                swapped = true;
++            }
++        }
++        return swapped;
++    }
++}
++
++class SortContext<T> {
++    private final DataAccessor<T> accessor;
++    private final PassStrategy<T> passStrategy;
++
++    SortContext(DataAccessor<T> accessor, PassStrategy<T> passStrategy) {
++        this.accessor = accessor;
++        this.passStrategy = passStrategy;
++    }
++
++    void execute() {
++        for (int i = 0; i < accessor.size() - 1; i++) {
++            if (!passStrategy.execute(accessor, i)) break;
++        }
++    }
++}
++
+ abstract class BaseSorter<T> implements SortingAlgorithm<T> {
+     protected final MetricsAwareComparator<T> comparator;
+     protected final MetricsRecorder metrics;
+@@ -230,15 +278,11 @@ abstract class BaseSorter<T> implements SortingAlgorithm<T> {
+         metrics.reset();
+     }
+ 
+-    protected boolean performPass(DataAccessor<T> accessor, int passIndex) {
+-        boolean swapped = false;
+-        for (int j = 0; j < accessor.size() - passIndex - 1; j++) {
+-            if (comparator.isGreater(accessor.get(j), accessor.get(j + 1))) {
+-                accessor.swap(j, j + 1);
+-                swapped = true;
+-            }
+-        }
+-        return swapped;
++    protected abstract PassStrategy<T> createPassStrategy();
++
++    protected void executeSortContext(DataAccessor<T> accessor) {
++        SortContext<T> context = new SortContext<>(accessor, createPassStrategy());
++        context.execute();
+     }
+ }
+ 
+@@ -250,23 +294,18 @@ class BubbleSort<T> extends BaseSorter<T> {
+     @Override
+     public void sort(T[] arr) {
+         validateInput(arr);
+-        sortInternal(createAccessor(AccessorFactory.createArrayAccessor(arr)));
++        executeSortContext(AccessorFactory.create(arr, metrics));
+     }
+ 
+     @Override
+     public void sort(List<T> list) {
+         if (list == null || list.size() < 2) return;
+-        sortInternal(createAccessor(AccessorFactory.createListAccessor(list)));
++        executeSortContext(AccessorFactory.create(list, metrics));
+     }
+ 
+-    private DataAccessor<T> createAccessor(DataAccessor<T> accessor) {
+-        return AccessorFactory.withMetrics(accessor, metrics);
+-    }
+-
+-    private void sortInternal(DataAccessor<T> accessor) {
+-        for (int i = 0; i < accessor.size() - 1; i++) {
+-            if (!performPass(accessor, i)) break;
+-        }
++    @Override
++    protected PassStrategy<T> createPassStrategy() {
++        return new BubblePassStrategy<>(comparator);
+     }
+ 
+     static class Builder<T> {

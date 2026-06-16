@@ -1,0 +1,206 @@
+diff --git a/bubble_sort.java b/bubble_sort.java
+index d1cbe13..a99203a 100644
+--- a/bubble_sort.java
++++ b/bubble_sort.java
+@@ -2,13 +2,14 @@ import java.util.Arrays;
+ import java.util.Comparator;
+ import java.util.List;
+ import java.util.ArrayList;
++import java.util.Objects;
+ 
+ interface SortingAlgorithm<T> {
+     void sort(T[] arr);
+     void sort(List<T> list);
+ }
+ 
+-class SortStatistics {
++final class SortStatistics {
+     private final long comparisons;
+     private final long swaps;
+ 
+@@ -29,9 +30,28 @@ class SortStatistics {
+     public String toString() {
+         return String.format("Comparisons: %d, Swaps: %d", comparisons, swaps);
+     }
++
++    @Override
++    public boolean equals(Object obj) {
++        if (!(obj instanceof SortStatistics)) return false;
++        SortStatistics other = (SortStatistics) obj;
++        return comparisons == other.comparisons && swaps == other.swaps;
++    }
++
++    @Override
++    public int hashCode() {
++        return Objects.hash(comparisons, swaps);
++    }
++}
++
++interface MetricsRecorder {
++    void recordComparison();
++    void recordSwap();
++    SortStatistics snapshot();
++    void reset();
+ }
+ 
+-class MetricsCollector {
++class MetricsCollector implements MetricsRecorder {
+     private final boolean enabled;
+     private long comparisons;
+     private long swaps;
+@@ -40,19 +60,23 @@ class MetricsCollector {
+         this.enabled = enabled;
+     }
+ 
+-    void recordComparison() {
++    @Override
++    public void recordComparison() {
+         if (enabled) comparisons++;
+     }
+ 
+-    void recordSwap() {
++    @Override
++    public void recordSwap() {
+         if (enabled) swaps++;
+     }
+ 
+-    SortStatistics snapshot() {
++    @Override
++    public SortStatistics snapshot() {
+         return new SortStatistics(comparisons, swaps);
+     }
+ 
+-    void reset() {
++    @Override
++    public void reset() {
+         comparisons = 0;
+         swaps = 0;
+     }
+@@ -65,13 +89,42 @@ interface DataAccessor<T> {
+     void swap(int i, int j);
+ }
+ 
++class CompositeAccessor<T> implements DataAccessor<T> {
++    private final DataAccessor<T> delegate;
++    private final MetricsRecorder metrics;
++
++    CompositeAccessor(DataAccessor<T> delegate, MetricsRecorder metrics) {
++        this.delegate = delegate;
++        this.metrics = metrics;
++    }
++
++    @Override
++    public int size() {
++        return delegate.size();
++    }
++
++    @Override
++    public T get(int index) {
++        return delegate.get(index);
++    }
++
++    @Override
++    public void set(int index, T value) {
++        delegate.set(index, value);
++    }
++
++    @Override
++    public void swap(int i, int j) {
++        delegate.swap(i, j);
++        metrics.recordSwap();
++    }
++}
++
+ class ArrayAccessor<T> implements DataAccessor<T> {
+     private final T[] arr;
+-    private final MetricsCollector metrics;
+ 
+-    ArrayAccessor(T[] arr, MetricsCollector metrics) {
++    ArrayAccessor(T[] arr) {
+         this.arr = arr;
+-        this.metrics = metrics;
+     }
+ 
+     @Override
+@@ -94,17 +147,14 @@ class ArrayAccessor<T> implements DataAccessor<T> {
+         T temp = get(i);
+         set(i, get(j));
+         set(j, temp);
+-        metrics.recordSwap();
+     }
+ }
+ 
+ class ListAccessor<T> implements DataAccessor<T> {
+     private final List<T> list;
+-    private final MetricsCollector metrics;
+ 
+-    ListAccessor(List<T> list, MetricsCollector metrics) {
++    ListAccessor(List<T> list) {
+         this.list = list;
+-        this.metrics = metrics;
+     }
+ 
+     @Override
+@@ -127,15 +177,14 @@ class ListAccessor<T> implements DataAccessor<T> {
+         T temp = get(i);
+         set(i, get(j));
+         set(j, temp);
+-        metrics.recordSwap();
+     }
+ }
+ 
+ abstract class BaseSorter<T> implements SortingAlgorithm<T> {
+     protected final Comparator<T> comparator;
+-    protected final MetricsCollector metrics;
++    protected final MetricsRecorder metrics;
+ 
+-    protected BaseSorter(Comparator<T> comparator, MetricsCollector metrics) {
++    protected BaseSorter(Comparator<T> comparator, MetricsRecorder metrics) {
+         this.comparator = comparator;
+         this.metrics = metrics;
+     }
+@@ -167,19 +216,23 @@ abstract class BaseSorter<T> implements SortingAlgorithm<T> {
+ 
+ class BubbleSort<T> extends BaseSorter<T> {
+     private BubbleSort(Builder<T> builder) {
+-        super(builder.comparator, builder.metricsCollector);
++        super(builder.comparator, builder.metricsRecorder);
+     }
+ 
+     @Override
+     public void sort(T[] arr) {
+         validateInput(arr);
+-        sortInternal(new ArrayAccessor<>(arr, metrics));
++        sortInternal(wrapAccessor(new ArrayAccessor<>(arr)));
+     }
+ 
+     @Override
+     public void sort(List<T> list) {
+         if (list == null || list.size() < 2) return;
+-        sortInternal(new ListAccessor<>(list, metrics));
++        sortInternal(wrapAccessor(new ListAccessor<>(list)));
++    }
++
++    private DataAccessor<T> wrapAccessor(DataAccessor<T> accessor) {
++        return new CompositeAccessor<>(accessor, metrics);
+     }
+ 
+     private void sortInternal(DataAccessor<T> accessor) {
+@@ -190,7 +243,7 @@ class BubbleSort<T> extends BaseSorter<T> {
+ 
+     static class Builder<T> {
+         private Comparator<T> comparator = Comparator.naturalOrder();
+-        private MetricsCollector metricsCollector = new MetricsCollector(true);
++        private MetricsRecorder metricsRecorder = new MetricsCollector(true);
+ 
+         public Builder<T> withComparator(Comparator<T> comparator) {
+             this.comparator = comparator;
+@@ -198,7 +251,7 @@ class BubbleSort<T> extends BaseSorter<T> {
+         }
+ 
+         public Builder<T> trackMetrics(boolean track) {
+-            this.metricsCollector = new MetricsCollector(track);
++            this.metricsRecorder = new MetricsCollector(track);
+             return this;
+         }
+ 
