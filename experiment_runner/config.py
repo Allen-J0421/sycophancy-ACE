@@ -10,7 +10,7 @@ from experiment_runner.claude_agent import ClaudeAgent
 from experiment_runner.codex_agent import CodexAgent
 from experiment_runner.coding_agent import CodingAgent
 from experiment_runner.constants import DEFAULT_TIMEOUT, PROMPTER_SUFFIX
-from experiment_runner.env import load_prompter_config, load_prompt
+from experiment_runner.env import load_clarification_patterns, load_prompter_config, load_prompt
 from experiment_runner.git_repo import find_git_root
 from experiment_runner.models import AgentKind, CliArgs, ExperimentConfig, TargetScope
 from experiment_runner.result_paths import artifacts_dir, log_csv_path
@@ -170,6 +170,7 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
     artifacts_dir_path = artifacts_dir(exp_path, stamp, model.slug)
     prompt = load_prompt()
     prompter_config = load_prompter_config(fallback_prompt=prompt) if args.prompter else None
+    clarification_patterns = load_clarification_patterns()
     return ExperimentConfig(
         target=target,
         prompt=prompt,
@@ -183,6 +184,7 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
         agent=args.agent,
         prompter=args.prompter,
         prompter_config=prompter_config,
+        clarification_patterns=clarification_patterns,
     )
 
 

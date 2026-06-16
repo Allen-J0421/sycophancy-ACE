@@ -5,7 +5,11 @@ from __future__ import annotations
 import csv
 from collections.abc import Iterator
 
-from experiment_runner.artifacts import append_prompt_turn, write_step_artifacts
+from experiment_runner.artifacts import (
+    append_clarification_reply,
+    append_prompt_turn,
+    write_step_artifacts,
+)
 from experiment_runner.coding_agent import CodingAgent
 from experiment_runner.config import build_coding_agent, build_prompt_source, eprint_setup
 from experiment_runner.constants import CSV_COLUMNS, agent_jsonl_filename
@@ -45,8 +49,17 @@ class ExperimentRunner:
         session_id: str | None = None
         last_turn_input: PrompterTurnInput | None = None
         use_prompter = self.config.prompter and self.config.prompter_config is not None
+        patterns = self.config.clarification_patterns
+        clarification_prompter_jsonl: list[str] = []
+
+        def clarification_responder(coding_reply: str) -> str:
+            turn = self.prompt_source.respond_to_clarification(coding_reply)
+            clarification_prompter_jsonl.clear()
+            clarification_prompter_jsonl.append(turn.prompter_jsonl)
+            return turn.prompt
 
         for i in range(1, self.config.iterations + 1):
+            clarification_prompter_jsonl.clear()
             turn = self.prompt_source.next_prompt(last_turn_input)
             result = run_iteration(
                 self.git,
@@ -57,7 +70,13 @@ class ExperimentRunner:
                 session_id=session_id,
                 previous_sha=prev_sha,
                 pathspec=self.config.target.pathspec,
+                clarification_patterns=patterns,
+                clarification_responder=clarification_responder,
             )
+            prompter_jsonl = turn.prompter_jsonl if use_prompter else ""
+            if use_prompter and result.clarification_followup and clarification_prompter_jsonl:
+                prompter_jsonl = clarification_prompter_jsonl[0]
+
             result = IterationResult(
                 number=result.number,
                 stats=result.stats,
@@ -67,9 +86,11 @@ class ExperimentRunner:
                 jsonl_text=result.jsonl_text,
                 diff_patch=result.diff_patch,
                 prompt_text=turn.prompt if use_prompter else "",
-                prompter_jsonl=turn.prompter_jsonl if use_prompter else "",
+                prompter_jsonl=prompter_jsonl,
+                clarification_prompt_text=result.clarification_prompt_text,
+                clarification_followup=result.clarification_followup,
             )
-            if i == 1:
+            if session_id is None:
                 session_id = result.agent.session_id
             if use_prompter and result.jsonl_text:
                 reply = extract_final_agent_message(result.jsonl_text) or None
@@ -82,6 +103,7 @@ class ExperimentRunner:
 
     def write_log(self) -> int:
         """Returns the number of iterations where the coding agent did not complete successfully."""
+        use_prompter = self.config.prompter and self.config.prompter_config is not None
         self.config.results_csv.parent.mkdir(parents=True, exist_ok=True)
         eprint_setup(self.config)
 
@@ -109,6 +131,12 @@ class ExperimentRunner:
                         result.number,
                         result.prompt_text,
                     )
+                    if result.clarification_prompt_text:
+                        append_clarification_reply(
+                            self.config.artifacts_dir,
+                            result.number,
+                            result.clarification_prompt_text,
+                        )
                 write_step_artifacts(
                     self.config.artifacts_dir,
                     result.number,
@@ -135,8 +163,9 @@ class ExperimentRunner:
                 "CSV line-change totals reflect the staged diff at commit time and may be partial."
             )
             return
+        suffix = " (clarification follow-up)" if result.clarification_followup else ""
         eprint(
             f"[run_{result.number:03d}] "
             f"+{result.stats.lines_added} -{result.stats.lines_deleted} "
-            f"total={result.stats.lines_total} exit={a.exit_code}"
+            f"total={result.stats.lines_total} exit={a.exit_code}{suffix}"
         )
