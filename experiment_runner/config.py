@@ -113,6 +113,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use a Gemini user agent to generate vague refactoring prompts each turn.",
     )
+    p.add_argument(
+        "--output-base",
+        type=Path,
+        default=None,
+        help=(
+            "Base directory holding one folder per experiment "
+            "(default: <repo>/result). Used by the pipeline orchestrator to "
+            "route outputs into output/Algorithms or output/RealWorld."
+        ),
+    )
     return p
 
 
@@ -135,6 +145,7 @@ def parse_args(argv: list[str] | None = None) -> CliArgs:
         label=namespace.label,
         agent=agent,
         prompter=bool(namespace.prompter),
+        output_base=namespace.output_base,
     )
 
 
@@ -165,7 +176,8 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
         result_dir = f"{target.repo_name}-{label_slug}"
     if args.prompter:
         result_dir = f"{result_dir}{PROMPTER_SUFFIX}"
-    exp_path = (script_dir() / "result" / result_dir).resolve()
+    base_dir = args.output_base if args.output_base is not None else (script_dir() / "result")
+    exp_path = (base_dir / result_dir).resolve()
     results_csv = log_csv_path(exp_path, stamp, model.slug)
     artifacts_dir_path = artifacts_dir(exp_path, stamp, model.slug)
     prompt = load_prompt()

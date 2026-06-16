@@ -13,11 +13,22 @@ AGENT_FIXED_PROMPT_KEY = "AGENT_FIXED_PROMPT"
 
 
 def prompt_file_candidates() -> list[Path]:
-    return [Path.cwd() / "prompt.env", script_dir() / "prompt.env"]
+    # config/ is the canonical home; the two root paths are kept for back-compat.
+    # *_FILE keys in prompt.env resolve relative to wherever prompt.env is found,
+    # so the pattern .txt files travel with it into config/ with no edits.
+    return [
+        Path.cwd() / "prompt.env",
+        script_dir() / "config" / "prompt.env",
+        script_dir() / "prompt.env",
+    ]
 
 
 def dotenv_file_candidates() -> list[Path]:
-    return [Path.cwd() / ".env", script_dir() / ".env"]
+    return [
+        Path.cwd() / ".env",
+        script_dir() / "config" / ".env",
+        script_dir() / ".env",
+    ]
 
 
 def parse_env_line(raw: str) -> tuple[str, str] | None:

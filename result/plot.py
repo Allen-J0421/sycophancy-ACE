@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -27,7 +28,19 @@ plt.rcParams.update({
     "figure.dpi": 150,
 })
 
-base = os.path.dirname(os.path.abspath(__file__))
+_arg_parser = argparse.ArgumentParser(description="Plot lines_total per run for each experiment.")
+_arg_parser.add_argument(
+    "--output-base",
+    type=Path,
+    default=None,
+    help="Base dir holding experiment folders (default: this script's directory).",
+)
+_cli_args = _arg_parser.parse_args()
+base = (
+    str(_cli_args.output_base.resolve())
+    if _cli_args.output_base is not None
+    else os.path.dirname(os.path.abspath(__file__))
+)
 
 for exp in sorted(os.listdir(base)):
     exp_dir = os.path.join(base, exp)

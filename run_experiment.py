@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Minimal coding-agent experiment runner (cumulative mode).
 
-Set a fixed prompt in `prompt.env` as `AGENT_FIXED_PROMPT=...` (or export AGENT_FIXED_PROMPT).
+Set a fixed prompt in `config/prompt.env` as `AGENT_FIXED_PROMPT=...` (or export AGENT_FIXED_PROMPT).
 
 Optional ``--prompter`` mode uses a Gemini user agent (``GEMINI_API_KEY`` and
 ``PROMPTER_MODEL`` in ``.env``; ``PROMPTER_SYSTEM_PROMPT`` and ``PROMPTER_NUDGE`` in
-``prompt.env``; requires ``google-genai``) to generate a vague refactoring request each turn;
+``config/prompt.env``; requires ``google-genai``) to generate a vague refactoring request each turn;
 the coding agent still runs in one session. Prompter artifacts:
 ``<stamp>-<model>/prompt.txt`` (all turns), ``run_NNN/prompter.jsonl``.
 

@@ -464,7 +464,14 @@ def process_experiment_dir(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run RefDiff on experiment CSV commits.")
     parser.add_argument("--repo", type=Path, required=True, help="Path to target git repo")
+    parser.add_argument(
+        "--output-base",
+        type=Path,
+        default=_RESULT_DIR,
+        help="Base dir holding experiment folders (default: <repo>/result).",
+    )
     args = parser.parse_args(argv)
+    result_base = args.output_base.resolve()
 
     repo = args.repo.resolve()
     if not (repo / ".git").is_dir() and not repo.name.endswith(".git"):
@@ -485,9 +492,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     eprint(f"[info] repo language: {lang}")
 
-    exp_dirs = experiment_dirs_with_logs(_RESULT_DIR)
+    exp_dirs = experiment_dirs_with_logs(result_base)
     if not exp_dirs:
-        eprint(f"error: no experiment directories with *-log.csv in {_RESULT_DIR}")
+        eprint(f"error: no experiment directories with *-log.csv in {result_base}")
         return 2
 
     env = os.environ.copy()
