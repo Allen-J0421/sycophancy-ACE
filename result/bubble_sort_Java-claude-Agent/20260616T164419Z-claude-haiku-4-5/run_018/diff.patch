@@ -1,0 +1,162 @@
+diff --git a/bubble_sort.java b/bubble_sort.java
+index 4262d21..5c23e72 100644
+--- a/bubble_sort.java
++++ b/bubble_sort.java
+@@ -160,6 +160,13 @@ interface DataAccessor<T> {
+     default int getPassLimit(int passIndex) {
+         return size() - passIndex - 1;
+     }
++
++    /**
++     * Checks if this accessor has sortable content.
++     */
++    default boolean isSortable() {
++        return size() >= 2;
++    }
+ }
+ 
+ class CompositeAccessor<T> implements DataAccessor<T> {
+@@ -279,6 +286,10 @@ class InputValidator {
+     }
+ }
+ 
++/**
++ * Factory for creating and composing data accessors.
++ * Supports arrays, lists, and metrics decoration.
++ */
+ class AccessorFactory {
+     static <T> DataAccessor<T> createArrayAccessor(T[] arr) {
+         return new ArrayAccessor<>(arr);
+@@ -292,10 +303,16 @@ class AccessorFactory {
+         return new CompositeAccessor<>(accessor, metrics);
+     }
+ 
++    /**
++     * Creates an accessor for an array with optional metrics.
++     */
+     static <T> DataAccessor<T> create(T[] arr, MetricsRecorder metrics) {
+         return withMetrics(createArrayAccessor(arr), metrics);
+     }
+ 
++    /**
++     * Creates an accessor for a list with optional metrics.
++     */
+     static <T> DataAccessor<T> create(List<T> list, MetricsRecorder metrics) {
+         return withMetrics(createListAccessor(list), metrics);
+     }
+@@ -378,6 +395,72 @@ class BubbleSortExecutor<T> implements SortExecutor<T> {
+     }
+ }
+ 
++/**
++ * Encapsulates a single sorting task: data + validation + execution.
++ * Bridges between public sort API and internal sorting machinery.
++ * @param <T> element type
++ */
++abstract class SortTask<T> {
++    protected final MetricsRecorder metrics;
++
++    protected SortTask(MetricsRecorder metrics) {
++        this.metrics = metrics;
++    }
++
++    /**
++     * Executes the sort task with the given strategy and executor.
++     */
++    protected final void execute(DataAccessor<T> accessor, PassStrategy<T> strategy, SortExecutor<T> executor) {
++        if (accessor.isSortable()) {
++            new SortContext<>(accessor, strategy, executor).execute();
++        }
++    }
++
++    abstract void performSort(PassStrategy<T> strategy, SortExecutor<T> executor);
++}
++
++/**
++ * Sort task for arrays.
++ */
++class ArraySortTask<T> extends SortTask<T> {
++    private final T[] arr;
++    private final DataAccessor<T> accessor;
++
++    ArraySortTask(T[] arr, MetricsRecorder metrics) {
++        super(metrics);
++        InputValidator.validateArray(arr);
++        this.arr = arr;
++        this.accessor = AccessorFactory.create(arr, metrics);
++    }
++
++    @Override
++    void performSort(PassStrategy<T> strategy, SortExecutor<T> executor) {
++        execute(accessor, strategy, executor);
++    }
++}
++
++/**
++ * Sort task for lists.
++ */
++class ListSortTask<T> extends SortTask<T> {
++    private final List<T> list;
++    private final DataAccessor<T> accessor;
++
++    ListSortTask(List<T> list, MetricsRecorder metrics) {
++        super(metrics);
++        if (!InputValidator.shouldSort(list)) {
++            throw new IllegalArgumentException("List must have at least 2 elements");
++        }
++        this.list = list;
++        this.accessor = AccessorFactory.create(list, metrics);
++    }
++
++    @Override
++    void performSort(PassStrategy<T> strategy, SortExecutor<T> executor) {
++        execute(accessor, strategy, executor);
++    }
++}
++
+ class StrategyFactory<T> {
+     private final MetricsAwareComparator<T> comparator;
+ 
+@@ -460,21 +543,14 @@ abstract class BaseSorter<T> implements SortOperations<T> {
+ 
+     protected abstract <A> SortExecutor<A> createExecutor();
+ 
+-    protected void sortArray(T[] arr, DataAccessor<T> accessor) {
+-        InputValidator.validateArray(arr);
+-        executeSortContext(accessor);
+-    }
+-
+-    protected void sortList(List<T> list, DataAccessor<T> accessor) {
+-        if (InputValidator.shouldSort(list)) {
+-            executeSortContext(accessor);
+-        }
++    protected void sortArray(T[] arr) {
++        SortTask<T> task = new ArraySortTask<>(arr, metrics);
++        task.performSort(createPassStrategy(), createExecutor());
+     }
+ 
+-    protected void executeSortContext(DataAccessor<T> accessor) {
+-        PassStrategy<T> strategy = createPassStrategy();
+-        SortExecutor<T> executor = createExecutor();
+-        new SortContext<>(accessor, strategy, executor).execute();
++    protected void sortList(List<T> list) {
++        SortTask<T> task = new ListSortTask<>(list, metrics);
++        task.performSort(createPassStrategy(), createExecutor());
+     }
+ }
+ 
+@@ -490,12 +566,12 @@ class BubbleSort<T> extends BaseSorter<T> {
+ 
+     @Override
+     public void sort(T[] arr) {
+-        sortArray(arr, AccessorFactory.create(arr, metrics));
++        sortArray(arr);
+     }
+ 
+     @Override
+     public void sort(List<T> list) {
+-        sortList(list, AccessorFactory.create(list, metrics));
++        sortList(list);
+     }
+ 
+     @Override
