@@ -13,6 +13,8 @@ class PromptSource(Protocol):
 
     def next_prompt(self, turn_input: PrompterTurnInput | None) -> PromptTurn: ...
 
+    def respond_to_clarification(self, coding_reply: str) -> PromptTurn: ...
+
 
 class FixedPromptSource:
     """Repeat a single static prompt every turn."""
@@ -25,6 +27,10 @@ class FixedPromptSource:
 
     def next_prompt(self, turn_input: PrompterTurnInput | None) -> PromptTurn:
         del turn_input
+        return PromptTurn(prompt=self._prompt, prompter_jsonl="")
+
+    def respond_to_clarification(self, coding_reply: str) -> PromptTurn:
+        del coding_reply
         return PromptTurn(prompt=self._prompt, prompter_jsonl="")
 
 
@@ -44,4 +50,10 @@ class GeminiPromptSource:
     def next_prompt(self, turn_input: PrompterTurnInput | None) -> PromptTurn:
         prompt = self._prompter.next_request(turn_input)
         events = self._prompter.events_jsonl_for_turn(self._prompter.turn)
+        return PromptTurn(prompt=prompt, prompter_jsonl=events)
+
+    def respond_to_clarification(self, coding_reply: str) -> PromptTurn:
+        turn_before = self._prompter.turn
+        prompt = self._prompter.respond_to_clarification(coding_reply)
+        events = self._prompter.events_jsonl_for_turn(turn_before)
         return PromptTurn(prompt=prompt, prompter_jsonl=events)

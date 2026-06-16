@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
-from experiment_runner.models import PrompterConfig
+from experiment_runner.models import ClarificationPatterns, PrompterConfig
 from experiment_runner.util import non_empty_string, script_dir
 
 AGENT_FIXED_PROMPT_KEY = "AGENT_FIXED_PROMPT"
@@ -110,7 +111,68 @@ def load_prompt_text(*, inline: str | None, file_key: str, entries: dict[str, st
     raise SystemExit(f"Missing inline value or {file_key} in prompt.env (required when using --prompter).")
 
 
-def load_prompter_prompts_from_file() -> tuple[str, str]:
+def _parse_bool(value: str | None, *, default: bool) -> bool:
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def load_regex_patterns_file(path: Path) -> tuple[re.Pattern[str], ...]:
+    patterns: list[re.Pattern[str]] = []
+    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            patterns.append(re.compile(line, re.I | re.M))
+        except re.error as exc:
+            raise SystemExit(f"Invalid regex in {path} line {lineno}: {exc}") from exc
+    if not patterns:
+        raise SystemExit(f"Pattern file is empty: {path}")
+    return tuple(patterns)
+
+
+def load_clarification_patterns() -> ClarificationPatterns:
+    entries, prompt_env = load_prompt_env_entries()
+    refusal_path = resolve_prompt_path(
+        entries.get("CLARIFICATION_REFUSAL_PATTERNS_FILE", "clarification_refusal_patterns.txt"),
+        prompt_env=prompt_env,
+    )
+    signal_path = resolve_prompt_path(
+        entries.get("CLARIFICATION_SIGNAL_PATTERNS_FILE", "clarification_signal_patterns.txt"),
+        prompt_env=prompt_env,
+    )
+    return ClarificationPatterns(
+        refusal_blockers=load_regex_patterns_file(refusal_path),
+        clarification_signals=load_regex_patterns_file(signal_path),
+        require_question_mark=_parse_bool(
+            entries.get("CLARIFICATION_REQUIRE_QUESTION_MARK"),
+            default=True,
+        ),
+    )
+
+
+def load_clarification_nudge(entries: dict[str, str], *, prompt_env: Path | None) -> str:
+    inline = entries.get("PROMPTER_CLARIFICATION_NUDGE")
+    if inline:
+        return inline
+    file_key = "PROMPTER_CLARIFICATION_NUDGE_FILE"
+    file_path = entries.get(file_key)
+    if file_path:
+        path = resolve_prompt_path(file_path, prompt_env=prompt_env)
+        text = path.read_text(encoding="utf-8").strip()
+        if text:
+            return text
+        raise SystemExit(f"{file_key} points to an empty file: {path}")
+    return "The coding agent asked for clarification above."
+
+
+def load_prompter_prompts_from_file() -> tuple[str, str, str]:
     """Load PROMPTER_SYSTEM_PROMPT and PROMPTER_NUDGE from prompt.env only."""
     entries, prompt_env = load_prompt_env_entries()
 
@@ -126,7 +188,8 @@ def load_prompter_prompts_from_file() -> tuple[str, str]:
         entries=entries,
         prompt_env=prompt_env,
     )
-    return system_prompt, nudge
+    clarification_nudge = load_clarification_nudge(entries, prompt_env=prompt_env)
+    return system_prompt, nudge, clarification_nudge
 
 
 def prompt_from_env_line(raw: str) -> str | None:
@@ -174,7 +237,7 @@ def require_env_var(name: str) -> str:
 
 def load_prompter_config(*, fallback_prompt: str) -> PrompterConfig:
     load_dotenv_file()
-    system_prompt, nudge = load_prompter_prompts_from_file()
+    system_prompt, nudge, clarification_nudge = load_prompter_prompts_from_file()
 
     api_key = require_env_var("GEMINI_API_KEY")
     model = require_env_var("PROMPTER_MODEL")
@@ -184,4 +247,5 @@ def load_prompter_config(*, fallback_prompt: str) -> PrompterConfig:
         system_prompt=system_prompt,
         nudge=nudge,
         fallback_prompt=fallback_prompt,
+        clarification_nudge=clarification_nudge,
     )

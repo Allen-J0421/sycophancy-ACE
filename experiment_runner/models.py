@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -67,6 +68,8 @@ class IterationResult:
     diff_patch: str = ""
     prompt_text: str = ""
     prompter_jsonl: str = ""
+    clarification_prompt_text: str = ""
+    clarification_followup: bool = False
 
     def as_csv_row(self, *, model: str, branch: str) -> list[object]:
         return [
@@ -86,12 +89,20 @@ class IterationResult:
 
 
 @dataclass(frozen=True)
+class ClarificationPatterns:
+    refusal_blockers: tuple[re.Pattern[str], ...]
+    clarification_signals: tuple[re.Pattern[str], ...]
+    require_question_mark: bool = True
+
+
+@dataclass(frozen=True)
 class PrompterConfig:
     api_key: str
     model: str
     system_prompt: str
     nudge: str
     fallback_prompt: str
+    clarification_nudge: str = "The coding agent asked for clarification above."
 
 
 @dataclass(frozen=True)
@@ -108,6 +119,7 @@ class ExperimentConfig:
     agent: AgentKind = "codex"
     prompter: bool = False
     prompter_config: PrompterConfig | None = None
+    clarification_patterns: ClarificationPatterns | None = None
 
 
 @dataclass(frozen=True)

@@ -13,6 +13,24 @@ def format_prompt_turn(turn: int, text: str) -> str:
     return f"=== Turn {turn} ===\n{text.strip()}"
 
 
+def format_clarification_reply(turn: int, text: str) -> str:
+    return f"=== Turn {turn} (clarification reply) ===\n{text.strip()}"
+
+
+def append_clarification_reply(artifacts_dir: Path, turn: int, text: str) -> None:
+    stripped = text.strip()
+    if not stripped:
+        return
+    path = artifacts_dir / PROMPT_FILE_NAME
+    block = format_clarification_reply(turn, stripped)
+    if path.exists() and path.stat().st_size > 0:
+        content = path.read_text(encoding="utf-8").rstrip() + "\n\n" + block + "\n"
+    else:
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        content = block + "\n"
+    path.write_text(content, encoding="utf-8")
+
+
 def append_prompt_turn(artifacts_dir: Path, turn: int, text: str) -> None:
     """Append one labeled Gemini prompt to the experiment-level prompt.txt."""
     stripped = text.strip()

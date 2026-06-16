@@ -256,6 +256,51 @@ class GeminiPrompter:
         self._log_event("prompt_out", text=reply)
         return reply
 
+    def respond_to_clarification(self, coding_reply: str) -> str:
+        """Reply to a mid-iteration coding-agent clarification without advancing turn."""
+        if self.turn < 1:
+            raise RuntimeError("respond_to_clarification called before next_request")
+
+        reply = non_empty_string(coding_reply) or ""
+        user_text = f"{reply}\n\n{self.config.clarification_nudge}".strip()
+
+        self._log_event(
+            "clarification_request",
+            payload={"message": user_text, "coding_reply": reply},
+        )
+
+        chat = self._ensure_chat()
+        try:
+            response = chat.send_message(user_text)
+        except APIError as exc:
+            err_text = non_empty_string(exc.message) or str(exc)
+            self._log_event(
+                "error",
+                text=err_text,
+                payload={"status_code": exc.code, "body": exc.details, "phase": "clarification"},
+            )
+            self._log_chat_history(chat)
+            return self._fallback(reason=f"clarification API error {exc.code}: {err_text}")
+        except Exception as exc:
+            self._log_event("error", text=str(exc), payload={"phase": "clarification"})
+            self._log_chat_history(chat)
+            return self._fallback(reason=f"clarification request failed: {exc}")
+
+        response_payload = _response_payload(response)
+        parsed = _parse_response(response)
+        answer = non_empty_string(parsed["answer_text"]) or non_empty_string(response.text)
+        self._log_event(
+            "clarification_response",
+            text=answer or "",
+            payload={"raw": response_payload, "parsed": parsed},
+        )
+        self._log_chat_history(chat)
+        if not answer:
+            return self._fallback(reason="empty clarification reply, using fallback prompt")
+
+        self._log_event("clarification_prompt_out", text=answer)
+        return answer
+
     def events_jsonl_for_turn(self, turn: int) -> str:
         lines = [
             json.dumps(ev, ensure_ascii=False)
