@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import os
@@ -426,10 +427,19 @@ def build_one(exp_dir: Path) -> bool:
     return True
 
 
-def main() -> int:
-    exp_dirs = experiment_dirs(_RESULT_DIR)
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Plot RefDiff relationship distribution per experiment.")
+    parser.add_argument(
+        "--output-base",
+        type=Path,
+        default=_RESULT_DIR,
+        help="Base dir holding experiment folders (default: <repo>/result).",
+    )
+    args = parser.parse_args(argv)
+
+    exp_dirs = experiment_dirs(args.output_base.resolve())
     if not exp_dirs:
-        print(f"No result folders found in {_RESULT_DIR}", file=sys.stderr)
+        print(f"No result folders found in {args.output_base}", file=sys.stderr)
         return 2
 
     built = 0

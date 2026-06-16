@@ -15,7 +15,7 @@ The pipeline has three **separate** phases. RefDiff never runs inside the Codex 
 
 ## Quick start
 
-Set your prompt in `prompt.env`:
+Set your prompt in `config/prompt.env`:
 
 ```bash
 AGENT_FIXED_PROMPT=refactor
@@ -92,8 +92,15 @@ sandbox/
   experiment_runner/     # Phase 1 library: coding-agent loop, git, prompter
   run_refdiff.py         # Phase 2: RefDiff batch (Java / JavaScript)
   compute_signals.py     # Phase 3: sycophancy signals S1-S6 (JSON + CSV)
-  prompt.env             # AGENT_FIXED_PROMPT=...; prompter keys when using --prompter
-  .env                   # GEMINI_API_KEY, PROMPTER_MODEL (--prompter)
+  run_pipeline.py        # Batch orchestrator over pipeline_plan.json
+  check_plan.py          # Pre-flight sanity check for pipeline_plan.json
+  pipeline_plan.json     # Editable batch planner (+ pipeline_plan.README.md)
+  config/                # AGENT_FIXED_PROMPT, prompter system prompt, clarification patterns
+    prompt.env           # AGENT_FIXED_PROMPT=...; prompter keys when using --prompter
+    prompter_system_prompt.txt
+    clarification_refusal_patterns.txt
+    clarification_signal_patterns.txt
+  .env                   # GEMINI_API_KEY, PROMPTER_MODEL (--prompter) — stays at root
   refdiff-runner/        # Gradle app (RefDiff 2.0.0 from Maven Central)
   dashboard/
     build.py             # Phase 4: static HTML
@@ -137,7 +144,7 @@ python run_experiment.py <target> <commit> <iterations> --model <model> [--label
 - `--label` — Suffix on experiment branch and `result/<repo>-<label>/` folder (appends `-Agent` when `--prompter` is set).
 - `--prompter` — Use a Gemini user agent to generate a vague refactoring prompt each turn (see below).
 
-**Prompt (fixed mode, default)** — From `prompt.env` (`AGENT_FIXED_PROMPT=...`) or the `AGENT_FIXED_PROMPT` environment variable. The same text is sent to the coding agent every turn.
+**Prompt (fixed mode, default)** — From `config/prompt.env` (`AGENT_FIXED_PROMPT=...`) or the `AGENT_FIXED_PROMPT` environment variable. The same text is sent to the coding agent every turn.
 
 **Examples**
 
@@ -164,7 +171,7 @@ Install the Gemini SDK once:
 pip install -r requirements-prompter.txt
 ```
 
-**`prompt.env` (required with `--prompter`):**
+**`config/prompt.env` (required with `--prompter`):**
 
 ```bash
 # Short inline values work on one line:
@@ -174,7 +181,7 @@ PROMPTER_NUDGE=The coding agent replied above. Ask your next refactoring request
 PROMPTER_SYSTEM_PROMPT_FILE=prompter_system_prompt.txt
 ```
 
-Paths in `*_FILE` keys are resolved relative to `prompt.env`, then the current working directory. You can still use inline `PROMPTER_SYSTEM_PROMPT=...` for short one-line prompts.
+Paths in `*_FILE` keys are resolved relative to `prompt.env`'s own directory (so `config/`), then the current working directory — keep the pattern files next to `prompt.env` in `config/`. You can still use inline `PROMPTER_SYSTEM_PROMPT=...` for short one-line prompts.
 
 Prompter artifacts: `<stamp>-<model>/prompt.txt` (all Gemini prompts, labeled by turn), `run_NNN/prompter.jsonl` (Gemini event log for that turn). Each `prompter.jsonl` includes `request`, `response` (`payload.raw` + `payload.parsed` with answer/thought parts, usage, finish reason), `chat_history` (curated SDK history after the turn), and `prompt_out`. Results land under `result/<repo>-<label>-Agent/` (or `result/<repo>-Agent/` without `--label`); the git experiment branch gets the same `-Agent` suffix. Rebuild the dashboard to see the stacked prompter + coding-agent panel.
 

@@ -131,6 +131,7 @@ class CliArgs:
     label: str | None
     agent: AgentKind
     prompter: bool
+    output_base: Path | None = None
 
 
 @dataclass(frozen=True)
