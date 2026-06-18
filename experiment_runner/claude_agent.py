@@ -18,6 +18,7 @@ def build_claude_command(
     *,
     is_first: bool,
     session_id: str | None = None,
+    effort: str | None = None,
 ) -> list[str]:
     cmd = [
         "claude",
@@ -29,6 +30,8 @@ def build_claude_command(
         "--model",
         model,
     ]
+    if effort:
+        cmd.extend(["--effort", effort])
     if not is_first:
         if not session_id:
             raise RuntimeError("Missing Claude session id for resume.")
@@ -77,10 +80,12 @@ class ClaudeAgent:
         model: str,
         *,
         timeout: int = DEFAULT_TIMEOUT,
+        effort: str | None = None,
     ) -> None:
         self.work_dir = work_dir
         self.model = model
         self.timeout = timeout
+        self.effort = effort
 
     def run(
         self,
@@ -94,6 +99,7 @@ class ClaudeAgent:
             self.model,
             is_first=is_first,
             session_id=session_id,
+            effort=self.effort,
         )
         t0 = time.monotonic()
         try:
