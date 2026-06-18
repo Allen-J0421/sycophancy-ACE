@@ -1,15 +1,30 @@
-# Codex line-change experiment runner
+# Coding-agent line-change experiment runner
 
-A small research harness that runs repeated **cumulative** Codex refactors on a git-backed codebase, logs per-iteration line-change metrics, optionally mines **RefDiff** refactorings on Java or JavaScript subjects, and builds a static **interactive dashboard** for inspection.
+A research harness that runs repeated **cumulative** coding-agent refactors (Codex or Claude) on a git-backed codebase, logs per-iteration line-change metrics, mines **RefDiff** refactorings on Java or JavaScript subjects, derives six **sycophancy signals** (S1–S6), and builds a static **interactive dashboard** for inspection.
 
-The pipeline has three **separate** phases. RefDiff never runs inside the Codex loop.
+The work is split into **separate phases** — RefDiff never runs inside the coding-agent loop. Each phase is its own entry point and runs after the previous one:
 
-| Phase | Command | When |
-|-------|---------|------|
-| 1. Experiment | `run_experiment.py` | Codex iterations + CSV + artifacts |
-| 2. RefDiff (Java / JS) | `run_refdiff.py` | After phase 1, on the target git repo |
-| 3. Signals (S1-S6) | `compute_signals.py` | After phase 2, from RefDiff JSONL + git stats |
-| 4. Dashboard | `dashboard/build.py` | After phase 1 (and 2-3 for RefDiff + signals panels) |
+| # | Phase | Command | Produces |
+|---|-------|---------|----------|
+| 1 | Experiment | `run_experiment.py` | Coding-agent iterations + CSV + per-run artifacts |
+| 2 | RefDiff (Java / JS) | `run_refdiff.py` | Structural refactorings JSONL (on the target git repo) |
+| 3 | Signals (S1–S6) | `compute_signals.py` | Sycophancy signals JSON + CSV (from RefDiff + git stats) |
+| 4 | Dashboard | `dashboard/build.py` | Self-contained interactive HTML |
+
+Two optional plotting phases (`plot_refdiff`, `plot_signals`) sit between 2→3 and 3→4 for static PNGs.
+
+## Two ways to run
+
+| | **Single experiment** (manual) | **Batch pipeline** (robust) |
+|---|---|---|
+| Driver | Call each phase script yourself | `run_pipeline.py` over `pipeline_plan.json` |
+| Scope | One codebase, one model | Many codebases × many models × all phases |
+| Output | `result/<exp>/` | `output/Algorithms/`, `output/RealWorld/` |
+| Resume | — | State file; restarts skip finished steps |
+| Best for | Quick one-off / debugging | Long unattended runs over a dataset |
+
+- **Single experiment** → [Quick start](#quick-start) below, then the per-phase reference.
+- **Batch pipeline** → [Batch pipeline (`run_pipeline.py`)](#batch-pipeline-run_pipelinepy).
 
 ---
 
@@ -21,7 +36,9 @@ Set your prompt in `config/prompt.env`:
 AGENT_FIXED_PROMPT=refactor
 ```
 
-**Python subject (phases 1 and 3 only):**
+A single experiment, one phase at a time. **Python subjects** skip RefDiff/signals (phases 1 + 4 only); **Java/JS subjects** run the full chain.
+
+**Python subject (experiment + dashboard):**
 
 ```bash
 python run_experiment.py ../test_subject/bubble_sort HEAD 10 --model gpt-5.5
@@ -29,10 +46,10 @@ python dashboard/build.py --exp bubble_sort-Dash-Temp0.0
 open result/bubble_sort-Dash-Temp0.0/dashboard.html
 ```
 
-**Java subject (all three phases):**
+**Java subject (full chain):**
 
 ```bash
-export JAVA_HOME="/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
+export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"  # Apple Silicon; Intel: /usr/local/opt/...
 
 python run_experiment.py ../test_subject/bubble_sort_Java HEAD 10 --model gpt-5.5
 
@@ -44,10 +61,10 @@ python dashboard/build.py --exp bubble_sort_Java
 open result/bubble_sort_Java/dashboard.html
 ```
 
-**JavaScript subject (all three phases):**
+**JavaScript subject (full chain):**
 
 ```bash
-export JAVA_HOME="/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
+export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"  # Apple Silicon; Intel: /usr/local/opt/...
 
 python run_experiment.py ../test_subject/exp-app HEAD 10 --model gpt-5.5
 
@@ -63,23 +80,154 @@ Use the **same `--repo` path** you passed to `run_experiment.py`. Commits live i
 
 ---
 
+## Batch pipeline (`run_pipeline.py`)
+
+`run_pipeline.py` is the **robust orchestrator** for running many codebases × many models × all phases unattended. It is pure glue: it shells out to the same phase scripts above (`run_experiment.py`, `run_refdiff.py`, `compute_signals.py`, `plot_*.py`, `dashboard/build.py`), routing their output into a separate `output/` tree and recording progress so it can resume.
+
+### The planner: `pipeline_plan.json`
+
+The batch is described by an editable JSON file. `defaults` apply to every task; each task may override them. Tasks are split into two groups that route to different output dirs:
+
+```json
+{
+  "defaults": {
+    "iterations": 10,
+    "models": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini",
+               "claude-sonnet-4-6", "claude-haiku-4-5", "claude-opus-4-6"],
+    "phases": ["run_exp", "refdiff", "plot_refdiff", "signals", "plot_signals", "dashboard"],
+    "prompter": false,
+    "label": null
+  },
+  "algorithms": [
+    { "target": "../dataset/_worktrees/001_binary_search", "commit": "602252a..." }
+  ],
+  "realworld": [
+    { "target": "../test_subject/exp-app", "commit": "HEAD", "phases": ["run_exp", "signals"] }
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `target` | Path to the codebase (dir/file inside a git repo). **Required per task.** |
+| `commit` | Git ref to branch from (`HEAD`, SHA, tag). **Required per task.** |
+| `models` | Models to run; each becomes one `run_exp` batch. `claude*` → Claude CLI, else Codex. |
+| `iterations` | Cumulative agent steps per model run. |
+| `phases` | Subset of the six canonical phases; they always execute in canonical order. |
+| `prompter` | Use the Gemini user-agent (`--prompter`); adds `-Agent` to the folder. |
+| `label` | Optional tag appended to the experiment folder. |
+
+`algorithms` → `output/Algorithms/`, `realworld` → `output/RealWorld/`. Full field reference: [`pipeline_plan.README.md`](pipeline_plan.README.md).
+
+### Phase-first execution
+
+The canonical phase order is fixed regardless of how phases are listed:
+
+```
+run_exp → refdiff → plot_refdiff → signals → plot_signals → dashboard
+```
+
+For long runs, finish one phase across the **whole plan** before the next (recommended), or omit `--phase` to run the full chain per experiment:
+
+```bash
+python run_pipeline.py --phase run_exp        # all codebases × all models, then stop
+python run_pipeline.py --phase refdiff
+python run_pipeline.py --phase signals
+python run_pipeline.py --phase dashboard
+python run_pipeline.py                        # or: full canonical chain per experiment
+```
+
+A soft **dependency guard** skips a phase until its upstream phase is `done` for that experiment (e.g. `refdiff` waits for at least one `run_exp` to finish). Override with `--no-dep-check`.
+
+### Pre-flight check
+
+Before a live run, the orchestrator runs [`check_plan.py`](check_plan.py) automatically: it verifies each target exists and is a git repo, the commit resolves, the right CLI/JDK is on `PATH`, and prompt/plotting deps are present. Errors abort the run (use `--force` to proceed anyway, `--no-check` to skip). Run it standalone any time:
+
+```bash
+python check_plan.py
+```
+
+### Resume & status
+
+Progress is tracked in **`output/.pipeline_state.json`**, keyed by step:
+
+```
+Algorithms/<exp>::run_exp::<model>      # run_exp is per-model
+Algorithms/<exp>::refdiff               # later phases, one per experiment
+```
+
+Each value is `{"status": "done" | "failed", ...}`. On restart, `done` steps are skipped and the run continues; a `failed` step is recorded and the batch keeps going, so one bad codebase/model never halts the rest. `run_exp` exit code `1` (partial — CSV still written) counts as `done`; exit `2` and other nonzero codes are `failed`. To inspect progress, read that JSON (group keys by the part before `::` for a per-target rollup), or use `--dry-run` to see which steps would run vs. skip.
+
+### Useful flags
+
+| Flag | Effect |
+|------|--------|
+| `--plan FILE` | Use a different planner (default `pipeline_plan.json`). |
+| `--phase a,b` | Run only these phases across the plan (comma list). |
+| `--only-category algorithms\|realworld` | Restrict to one group. |
+| `--task SUBSTR` | Only tasks whose target path / exp folder contains SUBSTR. |
+| `--dry-run` | Print the ordered command plan; execute nothing (skips the pre-flight check). |
+| `--force` | Re-run steps even if already `done`; proceed despite check errors. |
+| `--retry-failed` | Re-run only steps marked `failed`. |
+| `--no-dep-check` | Skip the upstream-phase guard. |
+| `--no-check` | Skip the pre-flight sanity check. |
+| `--output-root DIR` | Root for the `output/` tree (default `output/`). |
+
+Per-step orchestrator logs are written under `output/<Category>/<exp>/pipeline-logs/`.
+
+---
+
 ## Requirements
 
 | Tool | Used for |
 |------|----------|
-| Python 3.10+ | All scripts |
-| `google-genai` | `run_experiment.py` with `--prompter` only (`pip install -r requirements-prompter.txt`) |
+| Python 3.10+ (3.12 recommended) | All scripts |
+| `matplotlib`, `pandas` | Plots and CSV handling |
+| `pytest` | Tests (`tests/`) |
+| `google-genai` | `run_experiment.py` with `--prompter` only |
 | `git` | Experiments, RefDiff git stats |
 | `codex` CLI (authenticated) | `run_experiment.py` with non-Claude `--model` (e.g. `gpt-5.5`) |
 | `claude` CLI (authenticated) | `run_experiment.py` with `--model claude-...` |
 | Gemini API key | `run_experiment.py` with `--prompter` (user-agent simulation) |
-| JDK 21 (`JAVA_HOME`) | `refdiff-runner` / `run_refdiff.py` only |
+| JDK ≤ 23 (`JAVA_HOME`) | `refdiff-runner` / `run_refdiff.py` only |
 
-Install OpenJDK 21 on macOS (example):
+### Python environment
+
+The pinned Python dependencies live in [`environment.yml`](environment.yml):
+
+```bash
+conda env create -f environment.yml
+conda activate sycophancy-sandbox
+```
+
+(`environment.yml` installs only the Python side. The CLIs and JDK below are external — install them separately.)
+
+### JDK (RefDiff only)
+
+RefDiff needs a JDK; the Gradle wrapper (`refdiff-runner/gradlew`) provides Gradle itself. Set `JAVA_HOME` to the JDK — **the path differs by architecture**:
 
 ```bash
 brew install openjdk@21
+
+# Apple Silicon (Homebrew under /opt/homebrew):
+export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
+
+# Intel (Homebrew under /usr/local):
 export JAVA_HOME="/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
+```
+
+Confirm with `"$JAVA_HOME/bin/java" -version`. Add the `export` to your shell profile (`~/.zshrc`) so it persists.
+
+### Coding-agent CLIs
+
+Install and authenticate whichever model family you run:
+
+```bash
+# Codex CLI — for non-Claude models (gpt-5.5, ...)
+brew install codex && codex            # then log in
+
+# Claude Code CLI — for claude-* models
+curl -fsSL https://claude.ai/install.sh | bash && claude   # then log in
 ```
 
 ---
@@ -95,6 +243,8 @@ sandbox/
   run_pipeline.py        # Batch orchestrator over pipeline_plan.json
   check_plan.py          # Pre-flight sanity check for pipeline_plan.json
   pipeline_plan.json     # Editable batch planner (+ pipeline_plan.README.md)
+  environment.yml        # Conda env (sycophancy-sandbox): pinned Python deps
+  tests/                 # pytest suite
   config/                # AGENT_FIXED_PROMPT, prompter system prompt, clarification patterns
     prompt.env           # AGENT_FIXED_PROMPT=...; prompter keys when using --prompter
     prompter_system_prompt.txt
@@ -106,7 +256,7 @@ sandbox/
     build.py             # Phase 4: static HTML
     build_index.py       # Landing page (index.html)
     app.js, template.html, style.css
-  result/
+  result/                # Single-experiment output (manual phase scripts)
     <experiment>/        # One folder per target repo name (see --label)
       logs/
         <stamp>-<model>-log.csv
@@ -116,6 +266,10 @@ sandbox/
       signals/           # Phase 3 output: <stamp>-signals.json, <exp>_signals.csv
       plots/             # Optional matplotlib outputs (plot.py, plot_refdiff.py, plot_signals.py)
       dashboard.html     # Phase 4 output
+  output/                # Batch-pipeline output (run_pipeline.py)
+    .pipeline_state.json # Resume/progress ledger keyed by step
+    Algorithms/          # `algorithms` group; same <experiment>/ layout as result/
+    RealWorld/           #  `realworld` group; plus <exp>/pipeline-logs/ per-step logs
   index.html             # Links to all built dashboards
   result/plot.py         # Optional PDF/PNG line charts
   plot_refdiff.py        # Optional RefDiff stacked-bar PNGs
@@ -280,7 +434,7 @@ RefDiff’s one-line CLI output for a refactoring is stored per relationship as 
 
 ```bash
 cd refdiff-runner
-export JAVA_HOME="/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
+export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"  # Apple Silicon; Intel: /usr/local/opt/...
 
 ./gradlew -q run --args="--repo /path/to/repo --commit f03dd21 --lang java --out /tmp/out.json --include-same --quiet"
 ```
@@ -408,6 +562,8 @@ result/bubble_sort_Java/
     bubble_sort_Java_signals.png
   dashboard.html                              # after dashboard/build.py
 ```
+
+The **batch pipeline** writes the identical per-experiment layout under `output/Algorithms/<exp>/` or `output/RealWorld/<exp>/`, plus a `pipeline-logs/` subfolder of per-step orchestrator logs.
 
 Older runs may have CSV only; the chart still works, but diff/response panels show a missing-artifact message until you re-run the experiment with current harness support.
 

@@ -9,7 +9,11 @@ from pathlib import Path
 from experiment_runner.claude_agent import ClaudeAgent
 from experiment_runner.codex_agent import CodexAgent
 from experiment_runner.coding_agent import CodingAgent
-from experiment_runner.constants import DEFAULT_TIMEOUT, PROMPTER_SUFFIX
+from experiment_runner.constants import (
+    DEFAULT_TIMEOUT,
+    PROMPTER_SUFFIX,
+    effort_levels_for_agent,
+)
 from experiment_runner.env import load_clarification_patterns, load_prompter_config, load_prompt
 from experiment_runner.git_repo import find_git_root
 from experiment_runner.models import AgentKind, CliArgs, ExperimentConfig, TargetScope
@@ -114,6 +118,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Use a Gemini user agent to generate vague refactoring prompts each turn.",
     )
     p.add_argument(
+        "--effort",
+        type=str,
+        default=None,
+        help=(
+            "Thinking / reasoning effort for the coding agent. Must be valid for the "
+            "selected --model's CLI: Claude accepts low|medium|high|xhigh|max; "
+            "Codex accepts minimal|low|medium|high. Default: CLI default."
+        ),
+    )
+    p.add_argument(
         "--output-base",
         type=Path,
         default=None,
@@ -137,6 +151,14 @@ def parse_args(argv: list[str] | None = None) -> CliArgs:
     if namespace.label is not None and not non_empty_string(namespace.label):
         p.error("--label must be non-empty")
     agent = infer_agent_from_model(model)
+    effort = non_empty_string(namespace.effort)
+    if effort is not None:
+        valid = effort_levels_for_agent(agent)
+        if effort not in valid:
+            p.error(
+                f"--effort {effort!r} is not valid for {agent} models; "
+                f"choose one of: {', '.join(valid)}"
+            )
     return CliArgs(
         target=namespace.target,
         iterations=namespace.iterations,
@@ -146,6 +168,7 @@ def parse_args(argv: list[str] | None = None) -> CliArgs:
         agent=agent,
         prompter=bool(namespace.prompter),
         output_base=namespace.output_base,
+        effort=effort,
     )
 
 
@@ -197,6 +220,7 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
         prompter=args.prompter,
         prompter_config=prompter_config,
         clarification_patterns=clarification_patterns,
+        effort=args.effort,
     )
 
 
@@ -206,6 +230,8 @@ def eprint_setup(config: ExperimentConfig) -> None:
     eprint(f"[setup] Experiment branch:  {config.branch}")
     eprint(f"[setup] CSV log:            {config.results_csv}")
     eprint(f"[setup] Artifacts:          {config.artifacts_dir}/")
+    if config.effort:
+        eprint(f"[setup] Effort:             {config.effort}")
     if config.prompter and config.prompter_config:
         eprint(f"[setup] Prompter mode:      Gemini ({config.prompter_config.model})")
 
@@ -216,11 +242,13 @@ def build_coding_agent(config: ExperimentConfig) -> CodingAgent:
             config.target.work_dir,
             config.requested_model,
             timeout=DEFAULT_TIMEOUT,
+            effort=config.effort,
         )
     return CodexAgent(
         config.target.work_dir,
         config.requested_model,
         timeout=DEFAULT_TIMEOUT,
+        effort=config.effort,
     )
 
 

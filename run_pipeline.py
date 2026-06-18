@@ -128,6 +128,8 @@ class Task:
     phases: list[str]
     prompter: bool
     label: str | None
+    effort_codex: str | None = None
+    effort_claude: str | None = None
     exp_folder: str = field(default="")
 
     def __post_init__(self) -> None:
@@ -167,6 +169,8 @@ def load_plan(plan_path: Path, output_root: Path) -> list[Task]:
                     phases=[p for p in CANONICAL_PHASES if p in phases],  # canonical order
                     prompter=bool(merged.get("prompter", False)),
                     label=merged.get("label"),
+                    effort_codex=merged.get("effort_codex"),
+                    effort_claude=merged.get("effort_claude"),
                 )
             )
     return tasks
@@ -232,6 +236,11 @@ def build_steps(task: Task, phases_filter: set[str] | None) -> list[Step]:
     return steps
 
 
+def _agent_for_model(model: str) -> str:
+    """Mirror of run_experiment's CLI inference (claude-* → Claude, else Codex)."""
+    return "claude" if model.strip().lower().startswith("claude") else "codex"
+
+
 def build_command(step: Step) -> list[str]:
     t = step.task
     base = str(t.output_base)
@@ -242,6 +251,9 @@ def build_command(step: Step) -> list[str]:
             "--model", step.model,
             "--output-base", base,
         ]
+        effort = t.effort_claude if _agent_for_model(step.model) == "claude" else t.effort_codex
+        if effort:
+            cmd += ["--effort", effort]
         if t.label:
             cmd += ["--label", t.label]
         if t.prompter:

@@ -7,7 +7,11 @@ import subprocess
 import time
 from pathlib import Path
 
-from experiment_runner.constants import CODEX_AUTO_FLAGS, DEFAULT_TIMEOUT
+from experiment_runner.constants import (
+    CODEX_AUTO_FLAGS,
+    CODEX_REASONING_CONFIG_KEY,
+    DEFAULT_TIMEOUT,
+)
 from experiment_runner.models import AgentRunResult
 from experiment_runner.util import run_text_command
 
@@ -19,6 +23,7 @@ def build_codex_command(
     *,
     is_first: bool,
     session_id: str | None = None,
+    effort: str | None = None,
 ) -> list[str]:
     if is_first:
         cmd = ["codex", "exec", "--json", *CODEX_AUTO_FLAGS, "--cd", str(codex_cd)]
@@ -29,6 +34,8 @@ def build_codex_command(
         # We enforce the working directory via `subprocess.run(..., cwd=...)` instead.
         cmd = ["codex", "exec", "resume", session_id, "--json", *CODEX_AUTO_FLAGS]
 
+    if effort:
+        cmd = [*cmd, "-c", f"{CODEX_REASONING_CONFIG_KEY}={effort}"]
     cmd = [*cmd, "--model", model, prompt]
     return cmd
 
@@ -78,10 +85,12 @@ class CodexAgent:
         model: str,
         *,
         timeout: int = DEFAULT_TIMEOUT,
+        effort: str | None = None,
     ) -> None:
         self.codex_cd = codex_cd
         self.model = model
         self.timeout = timeout
+        self.effort = effort
 
     def run(
         self,
@@ -96,6 +105,7 @@ class CodexAgent:
             self.model,
             is_first=is_first,
             session_id=session_id,
+            effort=self.effort,
         )
         t0 = time.monotonic()
         try:

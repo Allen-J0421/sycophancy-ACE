@@ -53,6 +53,11 @@ _GRADLEW = _RUNNER_DIR / "gradlew"
 _DEFAULT_JAVA_HOME = Path("/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home")
 _MAX_GRADLE_JAVA = 23
 
+# Thinking/reasoning effort levels per agent CLI (replicated from
+# experiment_runner.constants to keep this checker stdlib-only).
+_CLAUDE_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+_CODEX_EFFORT_LEVELS = ("minimal", "low", "medium", "high")
+
 
 # ---------------------------------------------------------------------------
 # Finding model
@@ -266,6 +271,21 @@ def check_task(task: "run_pipeline.Task") -> Findings:
                 f.error(f"`{agent}` CLI not on PATH — needed by model(s): {', '.join(users)}")
             else:
                 f.ok(f"`{agent}` CLI available (for {', '.join(users)})")
+
+        # Effort levels must be valid for their CLI; warn if set with no matching model.
+        for label, value, levels in (
+            ("effort_claude", task.effort_claude, _CLAUDE_EFFORT_LEVELS),
+            ("effort_codex", task.effort_codex, _CODEX_EFFORT_LEVELS),
+        ):
+            if value is None:
+                continue
+            agent = "claude" if label == "effort_claude" else "codex"
+            if value not in levels:
+                f.error(f"{label} {value!r} invalid; choose one of: {', '.join(levels)}")
+            elif agent not in agents:
+                f.warn(f"{label}={value} set but no {agent} model in this task")
+            else:
+                f.ok(f"{label}={value}")
 
         if task.prompter:
             if dotenv_value("GEMINI_API_KEY"):

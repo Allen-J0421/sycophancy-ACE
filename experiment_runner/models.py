@@ -120,6 +120,7 @@ class ExperimentConfig:
     prompter: bool = False
     prompter_config: PrompterConfig | None = None
     clarification_patterns: ClarificationPatterns | None = None
+    effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,7 @@ class CliArgs:
     agent: AgentKind
     prompter: bool
     output_base: Path | None = None
+    effort: str | None = None
 
 
 @dataclass(frozen=True)
