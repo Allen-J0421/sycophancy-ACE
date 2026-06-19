@@ -1,0 +1,260 @@
+diff --git a/app/Main.java b/app/Main.java
+index db6c401..6db142d 100644
+--- a/app/Main.java
++++ b/app/Main.java
+@@ -1,8 +1,38 @@
+ package app;
+ 
++import model.Bear;
++import model.Bird;
++import model.Duck;
++import model.Flower;
++import model.Grass;
++import model.Mouse;
++import model.SpeciesRegistry;
++import model.Wolf;
++
++
++/**
++ * Entry point and composition root: this is the one place that knows the
++ * concrete species, wiring them into a {@link SpeciesRegistry} and injecting
++ * it into the {@link Simulator}. The simulator itself stays oblivious to which
++ * animals and plants exist.
++ */
+ public class Main {
++
+ 	public static void main(String[] args) {
+-		Simulator simulator = new Simulator();
++		Simulator simulator = new Simulator(standardSpecies());
+ 		simulator.runLongSimulation();
+ 	}
++
++
++	/** The default catalogue of species and their spawn probabilities. */
++	private static SpeciesRegistry standardSpecies() {
++		return new SpeciesRegistry()
++				.registerPlant(0.07, Flower::new)
++				.defaultPlant(Grass::new)
++				.registerAnimal(0.07, (field, location) -> new Bird(true, field, location))
++				.registerAnimal(0.07, (field, location) -> new Mouse(true, field, location))
++				.registerAnimal(0.07, (field, location) -> new Duck(true, field, location))
++				.registerAnimal(0.03, (field, location) -> new Wolf(true, field, location))
++				.registerAnimal(0.03, (field, location) -> new Bear(true, field, location));
++	}
+ }
+diff --git a/app/Simulator.java b/app/Simulator.java
+index 8d56e43..783604e 100644
+--- a/app/Simulator.java
++++ b/app/Simulator.java
+@@ -21,8 +21,6 @@ public class Simulator {
+ 
+ 	private static final int DEFAULT_DEPTH = 200;
+ 
+-	private static final double FLOWER_CREATION_PROBABILITY = 0.07;
+-
+ 	private static final TimeCycle DEFAULT_TIMECYCLE = TimeCycle.DAY;
+ 
+ 	private static final Weather DEFAULT_WEATHER = Weather.SUN;
+@@ -30,27 +28,8 @@ public class Simulator {
+ 	private static final int TIMECYCLE_LENGTH = 4;
+ 
+ 
+-	/** A factory that creates a freshly spawned animal at a location. */
+-	@FunctionalInterface
+-	private interface AnimalFactory {
+-		Animal create(Field field, Location location);
+-	}
+-
+-	/** The chance of spawning a given animal in an empty cell, and how to build it. */
+-	private record SpawnRule(double probability, AnimalFactory factory) {
+-	}
+-
+-	/**
+-	 * Animal spawn rules, evaluated in order: the first rule that wins its dice
+-	 * roll claims the cell. Earlier rules therefore have priority.
+-	 */
+-	private static final List<SpawnRule> ANIMAL_SPAWN_RULES = List.of(
+-			new SpawnRule(0.07, (field, location) -> new Bird(true, field, location)),
+-			new SpawnRule(0.07, (field, location) -> new Mouse(true, field, location)),
+-			new SpawnRule(0.07, (field, location) -> new Duck(true, field, location)),
+-			new SpawnRule(0.03, (field, location) -> new Wolf(true, field, location)),
+-			new SpawnRule(0.03, (field, location) -> new Bear(true, field, location)));
+-
++	/** Supplies the animal and plant species used to populate the field. */
++	private final SpeciesRegistry registry;
+ 
+ 	private final List<Animal> animals;
+ 
+@@ -71,12 +50,12 @@ public class Simulator {
+ 	private int sickPercentage;
+ 
+ 
+-	public Simulator() {
+-		this(DEFAULT_DEPTH, DEFAULT_WIDTH);
++	public Simulator(SpeciesRegistry registry) {
++		this(registry, DEFAULT_DEPTH, DEFAULT_WIDTH);
+ 	}
+ 
+ 
+-	public Simulator(int depth, int width) {
++	public Simulator(SpeciesRegistry registry, int depth, int width) {
+ 		if (width <= 0 || depth <= 0) {
+ 			System.out.println("The dimensions must be greater than zero.");
+ 			System.out.println("Using default values.");
+@@ -84,6 +63,7 @@ public class Simulator {
+ 			width = DEFAULT_WIDTH;
+ 		}
+ 
++		this.registry = registry;
+ 		animals = new ArrayList<>();
+ 		plants = new ArrayList<>();
+ 		field = new Field(depth, width);
+@@ -170,28 +150,13 @@ public class Simulator {
+ 		for (int row = 0; row < field.getDepth(); row++) {
+ 			for (int col = 0; col < field.getWidth(); col++) {
+ 				Location location = new Location(row, col);
+-				spawnPlant(rand, location);
+-				spawnAnimal(rand, location);
+-			}
+-		}
+-	}
+-
+-
+-	private void spawnPlant(Random rand, Location location) {
+-		Plant plant = rand.nextDouble() <= FLOWER_CREATION_PROBABILITY
+-				? new Flower(field, location)
+-				: new Grass(field, location);
+-		plants.add(plant);
+-	}
+-
++				plants.add(registry.spawnPlant(rand, field, location));
+ 
+-	private void spawnAnimal(Random rand, Location location) {
+-		for (SpawnRule rule : ANIMAL_SPAWN_RULES) {
+-			if (rand.nextDouble() <= rule.probability()) {
+-				Animal animal = rule.factory().create(field, location);
+-				animals.add(animal);
+-				graphView.setColor(animal.getClass(), animal.getObjectColor(climate));
+-				return;
++				Animal animal = registry.spawnAnimal(rand, field, location);
++				if (animal != null) {
++					animals.add(animal);
++					graphView.setColor(animal.getClass(), animal.getObjectColor(climate));
++				}
+ 			}
+ 		}
+ 	}
+diff --git a/model/AnimalFactory.java b/model/AnimalFactory.java
+new file mode 100644
+index 0000000..fb63ab9
+--- /dev/null
++++ b/model/AnimalFactory.java
+@@ -0,0 +1,11 @@
++package model;
++
++
++/**
++ * Creates a freshly spawned {@link Animal} of some species at a location.
++ * Lets callers build animals without naming a concrete class.
++ */
++@FunctionalInterface
++public interface AnimalFactory {
++	Animal create(Field field, Location location);
++}
+diff --git a/model/PlantFactory.java b/model/PlantFactory.java
+new file mode 100644
+index 0000000..3d25581
+--- /dev/null
++++ b/model/PlantFactory.java
+@@ -0,0 +1,11 @@
++package model;
++
++
++/**
++ * Creates a {@link Plant} of some species at a location.
++ * Lets callers build plants without naming a concrete class.
++ */
++@FunctionalInterface
++public interface PlantFactory {
++	Plant create(Field field, Location location);
++}
+diff --git a/model/SpeciesRegistry.java b/model/SpeciesRegistry.java
+new file mode 100644
+index 0000000..0fb0f32
+--- /dev/null
++++ b/model/SpeciesRegistry.java
+@@ -0,0 +1,74 @@
++package model;
++
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Random;
++
++
++/**
++ * The catalogue of species that can populate a simulation, decoupling the
++ * engine from concrete animal and plant classes. Each species is registered
++ * with a spawn probability and a factory; the registry performs the weighted
++ * draw, so callers spawn life without ever naming a concrete type.
++ *
++ * <p>Registration order is significant. Rules are evaluated in order and the
++ * first to win its dice roll claims the cell, so earlier rules have priority.
++ * Registration methods are fluent to allow a readable one-statement catalogue.
++ */
++public class SpeciesRegistry {
++
++	private record Weighted<F>(double probability, F factory) {
++	}
++
++	private final List<Weighted<AnimalFactory>> animalRules = new ArrayList<>();
++	private final List<Weighted<PlantFactory>> plantRules = new ArrayList<>();
++	private PlantFactory defaultPlant;
++
++
++	public SpeciesRegistry registerAnimal(double probability, AnimalFactory factory) {
++		animalRules.add(new Weighted<>(probability, factory));
++		return this;
++	}
++
++
++	public SpeciesRegistry registerPlant(double probability, PlantFactory factory) {
++		plantRules.add(new Weighted<>(probability, factory));
++		return this;
++	}
++
++
++	/** The plant grown in any cell no weighted plant rule claims. */
++	public SpeciesRegistry defaultPlant(PlantFactory factory) {
++		this.defaultPlant = factory;
++		return this;
++	}
++
++
++	/**
++	 * Choose an animal for a cell, or {@code null} if none of the registered
++	 * species win their roll (the cell is left without an animal).
++	 */
++	public Animal spawnAnimal(Random rand, Field field, Location location) {
++		for (Weighted<AnimalFactory> rule : animalRules) {
++			if (rand.nextDouble() <= rule.probability()) {
++				return rule.factory().create(field, location);
++			}
++		}
++		return null;
++	}
++
++
++	/**
++	 * Choose a plant for a cell, falling back to the default plant when no
++	 * weighted plant rule wins its roll. Never returns {@code null}.
++	 */
++	public Plant spawnPlant(Random rand, Field field, Location location) {
++		for (Weighted<PlantFactory> rule : plantRules) {
++			if (rand.nextDouble() <= rule.probability()) {
++				return rule.factory().create(field, location);
++			}
++		}
++		return defaultPlant.create(field, location);
++	}
++}

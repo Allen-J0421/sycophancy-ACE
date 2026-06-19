@@ -1,0 +1,231 @@
+diff --git a/run-tests.sh b/run-tests.sh
+new file mode 100755
+index 0000000..5de2e08
+--- /dev/null
++++ b/run-tests.sh
+@@ -0,0 +1,33 @@
++#!/usr/bin/env bash
++# Compile and run the JUnit 5 test suite for the predator-prey simulation.
++# No build tool required: this fetches the JUnit Platform Console Standalone jar
++# on first use and drives plain javac. Run from the project root: ./run-tests.sh
++set -euo pipefail
++cd "$(dirname "$0")"
++
++JUNIT_VERSION=1.10.2
++JUNIT_JAR="lib/junit-platform-console-standalone-${JUNIT_VERSION}.jar"
++JUNIT_URL="https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/${JUNIT_VERSION}/junit-platform-console-standalone-${JUNIT_VERSION}.jar"
++
++if [ ! -f "$JUNIT_JAR" ]; then
++	echo "Fetching JUnit ${JUNIT_VERSION}..."
++	mkdir -p lib
++	curl -sSL -o "$JUNIT_JAR" "$JUNIT_URL"
++fi
++
++MAIN_OUT=build/main
++TEST_OUT=build/test
++rm -rf "$MAIN_OUT" "$TEST_OUT"
++mkdir -p "$MAIN_OUT" "$TEST_OUT"
++
++echo "Compiling application sources..."
++javac -d "$MAIN_OUT" $(find config model events logging view app -name '*.java')
++
++echo "Compiling tests..."
++javac -d "$TEST_OUT" -cp "$MAIN_OUT:$JUNIT_JAR" $(find test -name '*.java')
++
++echo "Running tests..."
++java -jar "$JUNIT_JAR" execute \
++	--class-path "$MAIN_OUT:$TEST_OUT" \
++	--scan-class-path="$TEST_OUT" \
++	--details=tree
+diff --git a/test/app/SimulationTrajectoryTest.java b/test/app/SimulationTrajectoryTest.java
+new file mode 100644
+index 0000000..30db163
+--- /dev/null
++++ b/test/app/SimulationTrajectoryTest.java
+@@ -0,0 +1,186 @@
++package app;
++
++import config.Randomizer;
++import config.SimulationConfig;
++import events.EventPublisher;
++import events.SimulationEvent;
++import events.SimulationState;
++import model.Animal;
++import model.Field;
++import model.Season;
++import model.SpeciesRegistry;
++import model.TimeCycle;
++import model.Weather;
++
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++
++import java.util.HashMap;
++import java.util.Map;
++import java.util.TreeMap;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++
++/**
++ * Characterisation test for the simulation's trajectory. With the shared RNG
++ * reset to its fixed seed and the default species configuration, the engine is
++ * fully deterministic, so the exact world state after a given number of steps is
++ * a stable fact we can assert. This replaces the old manual md5 spot-checking
++ * with automated, readable assertions on the real {@link Simulator}.
++ *
++ * <p>Counts are taken from field occupancy — the same thing the views render —
++ * computed from the {@link SimulationState} the engine publishes each step.
++ */
++class SimulationTrajectoryTest {
++
++	private static final int DEPTH = 200;
++	private static final int WIDTH = 320;
++	private static final int STEPS = 160;
++
++	/** Immutable summary of the world at one step. */
++	private record Snapshot(int step, int population, Map<String, Integer> counts, int sick,
++			Season season, Weather weather, int humidity, TimeCycle cycle) {
++	}
++
++	/** Snapshots of every step of one canonical run, computed once for all assertions. */
++	private static Map<Integer, Snapshot> trajectory;
++
++
++	@BeforeAll
++	static void runCanonicalSimulation() {
++		trajectory = run(STEPS);
++	}
++
++
++	@Test
++	@DisplayName("exact world state after 160 steps under the default configuration")
++	void exactStateAfter160Steps() {
++		Snapshot s = trajectory.get(160);
++
++		assertEquals(160, s.step(), "step");
++		assertEquals(1317, s.population(), "population");
++		assertEquals(Map.of("Bear", 174, "Bird", 202, "Duck", 34, "Mouse", 829, "Wolf", 78), s.counts(),
++				"per-species counts");
++		assertEquals(263, s.sick(), "infected count");
++		assertEquals(Season.AUTUMN, s.season(), "season");
++		assertEquals(Weather.SUN, s.weather(), "weather");
++		assertEquals(56, s.humidity(), "humidity");
++		assertEquals(TimeCycle.DAY, s.cycle(), "day/night cycle");
++	}
++
++
++	@Test
++	@DisplayName("population and climate match expectations at intermediate checkpoints")
++	void intermediateCheckpoints() {
++		assertSnapshot(trajectory.get(1), 16684,
++				Map.of("Bear", 1087, "Bird", 5266, "Duck", 4238, "Mouse", 4960, "Wolf", 1133),
++				935, Season.SPRING, Weather.SUN, 15, TimeCycle.DAY);
++
++		assertSnapshot(trajectory.get(40), 5694,
++				Map.of("Bear", 2277, "Bird", 558, "Duck", 389, "Mouse", 776, "Wolf", 1694),
++				1280, Season.AUTUMN, Weather.CLOUD, 111, TimeCycle.DAY);
++
++		assertSnapshot(trajectory.get(80), 2894,
++				Map.of("Bear", 2123, "Bird", 98, "Duck", 40, "Mouse", 268, "Wolf", 365),
++				826, Season.SUMMER, Weather.RAIN, 91, TimeCycle.DAY);
++
++		assertSnapshot(trajectory.get(120), 1046,
++				Map.of("Bear", 433, "Bird", 183, "Duck", 32, "Mouse", 269, "Wolf", 129),
++				267, Season.WINTER, Weather.CLOUD, 96, TimeCycle.DAY);
++	}
++
++
++	@Test
++	@DisplayName("seasons advance on the expected 16-step cadence")
++	void seasonsFollowTheCalendar() {
++		assertEquals(Season.SPRING, trajectory.get(1).season());
++		assertEquals(Season.SUMMER, trajectory.get(16).season());
++		assertEquals(Season.AUTUMN, trajectory.get(32).season());
++		assertEquals(Season.WINTER, trajectory.get(48).season());
++		assertEquals(Season.SPRING, trajectory.get(64).season());
++	}
++
++
++	@Test
++	@DisplayName("re-running from the same seed reproduces the trajectory exactly")
++	void runsAreDeterministic() {
++		Snapshot first = run(60).get(60);
++		Snapshot second = run(60).get(60);
++		assertEquals(first, second, "two seeded runs must produce identical state");
++	}
++
++
++	@Test
++	@DisplayName("the ecosystem stays alive and diverse through the run")
++	void simulationRemainsViable() {
++		Snapshot s = trajectory.get(160);
++		assertTrue(s.population() > 0, "population should survive");
++		assertEquals(5, s.counts().size(), "all five species should still be present");
++		s.counts().forEach((species, n) -> assertTrue(n > 0, species + " should have living members"));
++	}
++
++
++	private static void assertSnapshot(Snapshot s, int population, Map<String, Integer> counts, int sick,
++			Season season, Weather weather, int humidity, TimeCycle cycle) {
++		assertEquals(population, s.population(), "population at step " + s.step());
++		assertEquals(counts, s.counts(), "counts at step " + s.step());
++		assertEquals(sick, s.sick(), "infected at step " + s.step());
++		assertEquals(season, s.season(), "season at step " + s.step());
++		assertEquals(weather, s.weather(), "weather at step " + s.step());
++		assertEquals(humidity, s.humidity(), "humidity at step " + s.step());
++		assertEquals(cycle, s.cycle(), "cycle at step " + s.step());
++	}
++
++
++	/**
++	 * Drive a fresh, headless simulation for {@code steps} steps under the default
++	 * configuration, capturing a snapshot of every published step. The RNG is reset
++	 * first so the run is reproducible regardless of test order.
++	 */
++	private static Map<Integer, Snapshot> run(int steps) {
++		Randomizer.reset();
++		SpeciesRegistry registry = Main.buildRegistry(SimulationConfig.defaults(), new SpeciesCatalog());
++
++		Map<Integer, Snapshot> snapshots = new HashMap<>();
++		EventPublisher capture = event -> {
++			if (event instanceof SimulationEvent.StatusUpdated updated) {
++				Snapshot snapshot = snapshot(updated.state());
++				snapshots.put(snapshot.step(), snapshot);
++			}
++		};
++
++		Simulator simulator = new Simulator(registry, capture, message -> {
++		}, DEPTH, WIDTH);
++		for (int i = 0; i < steps; i++) {
++			simulator.simulateOneStep();
++		}
++		return snapshots;
++	}
++
++
++	/** Count field occupancy and read the climate at the instant of one event. */
++	private static Snapshot snapshot(SimulationState state) {
++		Field field = state.field();
++		int population = 0;
++		int sick = 0;
++		Map<String, Integer> counts = new TreeMap<>();
++		for (int row = 0; row < field.getDepth(); row++) {
++			for (int col = 0; col < field.getWidth(); col++) {
++				Animal animal = field.getAnimalAt(row, col);
++				if (animal != null) {
++					population++;
++					counts.merge(animal.getClass().getSimpleName(), 1, Integer::sum);
++					if (animal.isSick()) {
++						sick++;
++					}
++				}
++			}
++		}
++		return new Snapshot(state.step(), population, counts, sick,
++				state.climate().getCurrentSeason(), state.climate().getCurrentWeather(),
++				state.climate().getHumidity(), state.timeCycle());
++	}
++}

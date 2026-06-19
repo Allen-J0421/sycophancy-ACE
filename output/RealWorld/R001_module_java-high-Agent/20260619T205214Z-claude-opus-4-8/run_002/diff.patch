@@ -1,0 +1,320 @@
+diff --git a/Animal.java b/Animal.java
+index a2774d1..d73ae97 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -7,6 +7,9 @@ public abstract class Animal extends Entity {
+ 
+ 	private static final Random rand = Randomizer.getRandom();
+ 
++	/** Default odds of catching an illness, before a species tunes them. */
++	private static final int DEFAULT_INFECTION_RESISTANCE = 16;
++
+ 	private boolean alive;
+ 
+ 	private int age;
+@@ -21,22 +24,13 @@ public abstract class Animal extends Entity {
+ 
+ 	private int foodLevel;
+ 
+-	private boolean sick;
+-
+-	private int sickProbability;
+-
+-	private int recoverProbability;
+-
+-	private int sickStep;
+-
+-	private int maxSickStep;
++	private final Disease disease = new Disease(DEFAULT_INFECTION_RESISTANCE);
+ 
+ 
+ 	public Animal(Field field, Location location) {
+ 		super(field, location);
+ 		alive = true;
+ 		gender = Gender.random();
+-		sickProbability = 16;
+ 	}
+ 
+ 
+@@ -111,32 +105,17 @@ public abstract class Animal extends Entity {
+ 	}
+ 
+ 
+-	protected void becomeSick() {
+-		if (!isSick() && rand.nextInt(getSickProbability()) == 1) {
+-			toggleSick();
+-		}
+-	}
+-
+-
+-	protected void notSick() {
+-		if (isSick() && rand.nextInt(getRecoverProbability()) == 1) {
+-			toggleSick();
+-			sickStep = 0;
+-		}
+-	}
+-
+-
+ 	protected void battleSickness() {
+-		if (!sick) {
+-			becomeSick();
++		if (!disease.isActive()) {
++			disease.tryInfect();
+ 			return;
+ 		}
+ 
+-		if (sickStep >= maxSickStep) {
++		if (disease.isTerminal()) {
+ 			setDead();
+ 			return;
+ 		}
+-		sickStep++;
++		disease.advance();
+ 
+ 		Field field = getField();
+ 		if (field == null) {
+@@ -146,10 +125,10 @@ public abstract class Animal extends Entity {
+ 		for (Location where : field.adjacentAnimalLocations(getLocation())) {
+ 			Animal neighbour = field.getAnimalAt(where);
+ 			if (neighbour != null && neighbour.getClass().equals(getClass())) {
+-				neighbour.becomeSick();
++				neighbour.disease.tryInfect();
+ 			}
+ 		}
+-		notSick();
++		disease.tryRecover();
+ 	}
+ 
+ 
+@@ -166,28 +145,13 @@ public abstract class Animal extends Entity {
+ 	}
+ 
+ 
+-	protected void toggleSick() {
+-		sick = !sick;
+-	}
+-
+-
+-	protected int getSickProbability() {
+-		return sickProbability;
+-	}
+-
+-
+ 	protected void setSickProbability(int inputValue) {
+-		sickProbability = inputValue;
+-	}
+-
+-
+-	protected int getRecoverProbability() {
+-		return recoverProbability;
++		disease.setInfectionResistance(inputValue);
+ 	}
+ 
+ 
+ 	protected void setRecoverProbability(int inputValue) {
+-		recoverProbability = inputValue;
++		disease.setRecoveryResistance(inputValue);
+ 	}
+ 
+ 
+@@ -222,7 +186,7 @@ public abstract class Animal extends Entity {
+ 
+ 
+ 	protected boolean isSick() {
+-		return sick;
++		return disease.isActive();
+ 	}
+ 
+ 
+@@ -241,23 +205,8 @@ public abstract class Animal extends Entity {
+ 	}
+ 
+ 
+-	public int getSickStep() {
+-		return sickStep;
+-	}
+-
+-
+-	public void setSickStep(int inputValue) {
+-		this.sickStep = inputValue;
+-	}
+-
+-
+-	public int getMaxSickStep() {
+-		return maxSickStep;
+-	}
+-
+-
+ 	public void setMaxSickStep(int inputValue) {
+-		this.maxSickStep = inputValue;
++		disease.setMaxDuration(inputValue);
+ 	}
+ 
+ 
+diff --git a/Climate.java b/Climate.java
+index ca86b91..64d3fb4 100644
+--- a/Climate.java
++++ b/Climate.java
+@@ -5,6 +5,10 @@ public class Climate {
+ 
+ 	private static final int SEASON_LENGTH = 16;
+ 
++	/** Each step, humidity drifts by a random amount in this inclusive range. */
++	private static final int MIN_HUMIDITY_CHANGE = 10;
++	private static final int MAX_HUMIDITY_CHANGE = 20;
++
+ 	private static final Random rand = Randomizer.getRandom();
+ 
+ 	private Weather currentWeather;
+@@ -23,8 +27,8 @@ public class Climate {
+ 	public void updateClimate(int step) {
+ 		updateSeason(step);
+ 
+-
+-		int humidityIncrease = rand.nextInt((20 - 10) + 1) + 10;
++		int humidityIncrease = MIN_HUMIDITY_CHANGE
++				+ rand.nextInt(MAX_HUMIDITY_CHANGE - MIN_HUMIDITY_CHANGE + 1);
+ 
+ 		if (humidity < 80 && (currentWeather == Weather.SUN || currentWeather == Weather.CLOUD)) {
+ 			humidity += humidityIncrease;
+@@ -43,20 +47,8 @@ public class Climate {
+ 
+ 
+ 	private void updateSeason(int step) {
+-		switch ((step / SEASON_LENGTH) % 4) {
+-			case 0:
+-				currentSeason = Season.SPRING;
+-				break;
+-			case 1:
+-				currentSeason = Season.SUMMER;
+-				break;
+-			case 2:
+-				currentSeason = Season.AUTUMN;
+-				break;
+-			case 3:
+-				currentSeason = Season.WINTER;
+-				break;
+-		}
++		// Season.values() is declared in calendar order, one season per SEASON_LENGTH steps.
++		currentSeason = Season.values()[(step / SEASON_LENGTH) % Season.values().length];
+ 	}
+ 
+ 
+diff --git a/Disease.java b/Disease.java
+new file mode 100644
+index 0000000..82816fd
+--- /dev/null
++++ b/Disease.java
+@@ -0,0 +1,79 @@
++import java.util.Random;
++
++
++/**
++ * The illness an {@link Animal} can carry. Encapsulates the full disease
++ * lifecycle — catching it, carrying it for a number of steps, and recovering
++ * (or succumbing) — so the host only has to orchestrate when each happens.
++ *
++ * <p>The "resistance" values are odds: a higher number means the matching
++ * event is less likely, since it succeeds only on a 1-in-N dice roll.
++ */
++public class Disease {
++
++	private static final Random rand = Randomizer.getRandom();
++
++	private boolean active;
++
++	private int infectionResistance;
++
++	private int recoveryResistance;
++
++	private int maxDuration;
++
++	private int duration;
++
++
++	public Disease(int infectionResistance) {
++		this.infectionResistance = infectionResistance;
++	}
++
++
++	public boolean isActive() {
++		return active;
++	}
++
++
++	/** Whether the illness has now been carried longer than it can be survived. */
++	public boolean isTerminal() {
++		return active && duration >= maxDuration;
++	}
++
++
++	/** Advance one step of an active illness. */
++	public void advance() {
++		duration++;
++	}
++
++
++	/** Attempt to contract the illness; a no-op if already infected. */
++	public void tryInfect() {
++		if (!active && rand.nextInt(infectionResistance) == 1) {
++			active = true;
++		}
++	}
++
++
++	/** Attempt to shake off the illness; a no-op if currently healthy. */
++	public void tryRecover() {
++		if (active && rand.nextInt(recoveryResistance) == 1) {
++			active = false;
++			duration = 0;
++		}
++	}
++
++
++	public void setInfectionResistance(int infectionResistance) {
++		this.infectionResistance = infectionResistance;
++	}
++
++
++	public void setRecoveryResistance(int recoveryResistance) {
++		this.recoveryResistance = recoveryResistance;
++	}
++
++
++	public void setMaxDuration(int maxDuration) {
++		this.maxDuration = maxDuration;
++	}
++}
+diff --git a/GraphView.java b/GraphView.java
+index f84a951..7c32b87 100644
+--- a/GraphView.java
++++ b/GraphView.java
+@@ -7,10 +7,10 @@ import java.util.*;
+ public class GraphView extends JFrame {
+ 	private static final Color LIGHT_GRAY = new Color(0, 0, 0, 40);
+ 
+-	private static JFrame frame;
+-	private static GraphPanel graph;
+-	private static JLabel stepLabel;
+-	private static JLabel countLabel;
++	private JFrame frame;
++	private GraphPanel graph;
++	private JLabel stepLabel;
++	private JLabel countLabel;
+ 
+ 
+ 	private Set<Class<?>> classes;
+@@ -25,12 +25,7 @@ public class GraphView extends JFrame {
+ 		classes = new HashSet<>();
+ 		colors = new HashMap<>();
+ 
+-		if (frame == null) {
+-			frame = makeFrame(width, height, startMax);
+-		} else {
+-			graph.newRun();
+-		}
+-
++		frame = makeFrame(width, height, startMax);
+ 	}
+ 
+ 

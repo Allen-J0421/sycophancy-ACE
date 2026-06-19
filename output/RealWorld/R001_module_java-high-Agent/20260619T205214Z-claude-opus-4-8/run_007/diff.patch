@@ -1,0 +1,389 @@
+diff --git a/app/Main.java b/app/Main.java
+index 6db142d..7240cd9 100644
+--- a/app/Main.java
++++ b/app/Main.java
+@@ -1,5 +1,6 @@
+ package app;
+ 
++import events.EventBus;
+ import model.Bear;
+ import model.Bird;
+ import model.Duck;
+@@ -8,18 +9,28 @@ import model.Grass;
+ import model.Mouse;
+ import model.SpeciesRegistry;
+ import model.Wolf;
++import view.GraphView;
++import view.SimulatorView;
+ 
+ 
+ /**
+- * Entry point and composition root: this is the one place that knows the
+- * concrete species, wiring them into a {@link SpeciesRegistry} and injecting
+- * it into the {@link Simulator}. The simulator itself stays oblivious to which
+- * animals and plants exist.
++ * Entry point and composition root: the one place that knows the concrete
++ * species and views. It wires the species into a {@link SpeciesRegistry},
++ * subscribes the views to an {@link EventBus}, and hands the simulator only the
++ * registry and the publish side of the bus — so the engine stays oblivious to
++ * both which creatures exist and who is watching.
+  */
+ public class Main {
+ 
++	private static final int DEPTH = 200;
++	private static final int WIDTH = 320;
++
+ 	public static void main(String[] args) {
+-		Simulator simulator = new Simulator(standardSpecies());
++		EventBus events = new EventBus();
++		events.register(new SimulatorView(DEPTH, WIDTH));
++		events.register(new GraphView(1000, 500, 500));
++
++		Simulator simulator = new Simulator(standardSpecies(), events, DEPTH, WIDTH);
+ 		simulator.runLongSimulation();
+ 	}
+ 
+diff --git a/app/Simulator.java b/app/Simulator.java
+index 8482f31..534531e 100644
+--- a/app/Simulator.java
++++ b/app/Simulator.java
+@@ -1,7 +1,9 @@
+ package app;
+ 
++import events.EventPublisher;
++import events.SimulationEvent;
++import events.SimulationState;
+ import model.*;
+-import view.*;
+ import config.Randomizer;
+ 
+ import java.util.ArrayList;
+@@ -11,8 +13,9 @@ import java.util.Random;
+ 
+ /**
+  * The engine of the predator-prey simulation. It owns the field, the live
+- * animals and plants, and drives the world forward one step at a time while
+- * keeping the grid and graph views in sync.
++ * animals and plants, and drives the world forward one step at a time,
++ * announcing what happens through an {@link EventPublisher}. It has no idea who
++ * (if anyone) is listening — views are wired to the bus by the composition root.
+  */
+ public class Simulator {
+ 
+@@ -31,6 +34,9 @@ public class Simulator {
+ 	/** Supplies the animal and plant species used to populate the field. */
+ 	private final SpeciesRegistry registry;
+ 
++	/** Where the engine announces everything observers might care about. */
++	private final EventPublisher events;
++
+ 	private final List<Animal> animals;
+ 
+ 	private final List<Plant> plants;
+@@ -39,9 +45,6 @@ public class Simulator {
+ 
+ 	private int step;
+ 
+-	/** Every view observing the simulation; notified uniformly each step. */
+-	private final List<SimulationView> views;
+-
+ 	/** Reused to test whether the simulation is still viable. */
+ 	private final FieldStats stats = new FieldStats();
+ 
+@@ -52,12 +55,12 @@ public class Simulator {
+ 	private int sickPercentage;
+ 
+ 
+-	public Simulator(SpeciesRegistry registry) {
+-		this(registry, DEFAULT_DEPTH, DEFAULT_WIDTH);
++	public Simulator(SpeciesRegistry registry, EventPublisher events) {
++		this(registry, events, DEFAULT_DEPTH, DEFAULT_WIDTH);
+ 	}
+ 
+ 
+-	public Simulator(SpeciesRegistry registry, int depth, int width) {
++	public Simulator(SpeciesRegistry registry, EventPublisher events, int depth, int width) {
+ 		if (width <= 0 || depth <= 0) {
+ 			System.out.println("The dimensions must be greater than zero.");
+ 			System.out.println("Using default values.");
+@@ -66,16 +69,13 @@ public class Simulator {
+ 		}
+ 
+ 		this.registry = registry;
++		this.events = events;
+ 		animals = new ArrayList<>();
+ 		plants = new ArrayList<>();
+ 		field = new Field(depth, width);
+ 		climate = new Climate(DEFAULT_WEATHER);
+ 		currentTimeCycle = DEFAULT_TIMECYCLE;
+ 
+-		views = List.of(
+-				new SimulatorView(depth, width),
+-				new GraphView(1000, 500, 500));
+-
+ 		reset();
+ 	}
+ 
+@@ -120,16 +120,14 @@ public class Simulator {
+ 		}
+ 
+ 		sickPercentage = computeSickPercentage();
+-		publish();
++		publishStatus();
+ 	}
+ 
+ 
+-	/** Publish the current state to every view. */
+-	private void publish() {
++	/** Announce the current state of the simulation. */
++	private void publishStatus() {
+ 		SimulationState state = new SimulationState(step, currentTimeCycle, field, climate, sickPercentage);
+-		for (SimulationView view : views) {
+-			view.showStatus(state);
+-		}
++		events.publish(new SimulationEvent.StatusUpdated(state));
+ 	}
+ 
+ 
+@@ -155,10 +153,8 @@ public class Simulator {
+ 		climate.setCurrentWeather(Weather.SUN);
+ 
+ 		sickPercentage = 0;
+-		for (SimulationView view : views) {
+-			view.reset();
+-		}
+-		publish();
++		events.publish(new SimulationEvent.SimulationReset());
++		publishStatus();
+ 	}
+ 
+ 
+@@ -174,18 +170,16 @@ public class Simulator {
+ 				Animal animal = registry.spawnAnimal(rand, field, location);
+ 				if (animal != null) {
+ 					animals.add(animal);
+-					registerSpecies(animal);
++					announceSpecies(animal);
+ 				}
+ 			}
+ 		}
+ 	}
+ 
+ 
+-	/** Tell every view which colour represents a newly seen species. */
+-	private void registerSpecies(Animal animal) {
+-		for (SimulationView view : views) {
+-			view.setColor(animal.getClass(), animal.getObjectColor(climate));
+-		}
++	/** Announce which colour represents a newly spawned species. */
++	private void announceSpecies(Animal animal) {
++		events.publish(new SimulationEvent.SpeciesRegistered(animal.getClass(), animal.getObjectColor(climate)));
+ 	}
+ 
+ 
+diff --git a/events/EventBus.java b/events/EventBus.java
+new file mode 100644
+index 0000000..e6a64fc
+--- /dev/null
++++ b/events/EventBus.java
+@@ -0,0 +1,29 @@
++package events;
++
++import java.util.ArrayList;
++import java.util.List;
++
++
++/**
++ * A simple synchronous event bus. Listeners register once; every published event
++ * is delivered to each of them in registration order. The engine sees only the
++ * {@link EventPublisher} side, so wiring up listeners is purely a composition
++ * concern handled by the application's entry point.
++ */
++public class EventBus implements EventPublisher {
++
++	private final List<SimulationListener> listeners = new ArrayList<>();
++
++
++	public void register(SimulationListener listener) {
++		listeners.add(listener);
++	}
++
++
++	@Override
++	public void publish(SimulationEvent event) {
++		for (SimulationListener listener : listeners) {
++			listener.onEvent(event);
++		}
++	}
++}
+diff --git a/events/EventPublisher.java b/events/EventPublisher.java
+new file mode 100644
+index 0000000..fcbe95d
+--- /dev/null
++++ b/events/EventPublisher.java
+@@ -0,0 +1,11 @@
++package events;
++
++
++/**
++ * The publish side of the event bus: all the simulation engine is allowed to do.
++ * Depending on this (rather than the concrete {@link EventBus}) keeps the engine
++ * unable to enumerate or manage listeners — it can only announce what happened.
++ */
++public interface EventPublisher {
++	void publish(SimulationEvent event);
++}
+diff --git a/events/SimulationEvent.java b/events/SimulationEvent.java
+new file mode 100644
+index 0000000..d31e8ae
+--- /dev/null
++++ b/events/SimulationEvent.java
+@@ -0,0 +1,24 @@
++package events;
++
++import java.awt.Color;
++
++
++/**
++ * Something worth telling observers about. The sealed hierarchy enumerates every
++ * kind of notification the engine emits, so listeners can dispatch on them
++ * exhaustively and the compiler flags any new event type that goes unhandled.
++ */
++public sealed interface SimulationEvent {
++
++	/** The simulation advanced; carries the latest state to render. */
++	record StatusUpdated(SimulationState state) implements SimulationEvent {
++	}
++
++	/** The simulation was reset to a fresh run. */
++	record SimulationReset() implements SimulationEvent {
++	}
++
++	/** A species first appeared, paired with the colour used to depict it. */
++	record SpeciesRegistered(Class<?> species, Color color) implements SimulationEvent {
++	}
++}
+diff --git a/events/SimulationListener.java b/events/SimulationListener.java
+new file mode 100644
+index 0000000..2f678dc
+--- /dev/null
++++ b/events/SimulationListener.java
+@@ -0,0 +1,11 @@
++package events;
++
++
++/**
++ * Receives {@link SimulationEvent}s from the simulation. Any component — a view,
++ * a logger, a recorder — can listen without the engine knowing it exists.
++ */
++@FunctionalInterface
++public interface SimulationListener {
++	void onEvent(SimulationEvent event);
++}
+diff --git a/events/SimulationState.java b/events/SimulationState.java
+new file mode 100644
+index 0000000..f105298
+--- /dev/null
++++ b/events/SimulationState.java
+@@ -0,0 +1,14 @@
++package events;
++
++import model.Climate;
++import model.Field;
++import model.TimeCycle;
++
++
++/**
++ * An immutable snapshot of the simulation at one step, carried by a
++ * {@link SimulationEvent.StatusUpdated} event. Bundling the data into one value
++ * keeps the event contract stable as the simulation grows new things to report.
++ */
++public record SimulationState(int step, TimeCycle timeCycle, Field field, Climate climate, int sickPercentage) {
++}
+diff --git a/view/GraphView.java b/view/GraphView.java
+index 3440879..50cdbbd 100644
+--- a/view/GraphView.java
++++ b/view/GraphView.java
+@@ -1,5 +1,6 @@
+ package view;
+ 
++import events.SimulationState;
+ import model.*;
+ 
+ import javax.swing.*;
+diff --git a/view/SimulationState.java b/view/SimulationState.java
+deleted file mode 100644
+index 1f27200..0000000
+--- a/view/SimulationState.java
++++ /dev/null
+@@ -1,14 +0,0 @@
+-package view;
+-
+-import model.Climate;
+-import model.Field;
+-import model.TimeCycle;
+-
+-
+-/**
+- * An immutable snapshot of the simulation at one step, published to every
+- * {@link SimulationView}. Bundling the data into one value keeps the view
+- * contract stable as the simulation grows new things to report.
+- */
+-public record SimulationState(int step, TimeCycle timeCycle, Field field, Climate climate, int sickPercentage) {
+-}
+diff --git a/view/SimulationView.java b/view/SimulationView.java
+index b72c921..2c781dd 100644
+--- a/view/SimulationView.java
++++ b/view/SimulationView.java
+@@ -1,15 +1,20 @@
+ package view;
+ 
++import events.SimulationEvent;
++import events.SimulationListener;
++import events.SimulationState;
++
+ import java.awt.Color;
+ 
+ 
+ /**
+- * A renderable view of the simulation. The engine publishes a
+- * {@link SimulationState} after every step; the optional hooks let a view that
+- * tracks per-species colour or needs to clear itself between runs opt in,
+- * while views that don't care inherit harmless no-ops.
++ * A renderable view of the simulation. It listens for {@link SimulationEvent}s
++ * and the default {@link #onEvent} bridge translates each event into one of the
++ * focused hooks below, so concrete views implement plain rendering methods and
++ * never have to unpack events themselves. Views that don't track per-species
++ * colour or need a between-run reset inherit harmless no-ops.
+  */
+-public interface SimulationView {
++public interface SimulationView extends SimulationListener {
+ 
+ 	/** Render the latest state of the simulation. */
+ 	void showStatus(SimulationState state);
+@@ -21,4 +26,14 @@ public interface SimulationView {
+ 	/** Associate a species with the colour used to depict it. */
+ 	default void setColor(Class<?> species, Color color) {
+ 	}
++
++
++	@Override
++	default void onEvent(SimulationEvent event) {
++		switch (event) {
++			case SimulationEvent.StatusUpdated e -> showStatus(e.state());
++			case SimulationEvent.SimulationReset e -> reset();
++			case SimulationEvent.SpeciesRegistered e -> setColor(e.species(), e.color());
++		}
++	}
+ }
+diff --git a/view/SimulatorView.java b/view/SimulatorView.java
+index 4b02b18..e3696f3 100644
+--- a/view/SimulatorView.java
++++ b/view/SimulatorView.java
+@@ -1,5 +1,6 @@
+ package view;
+ 
++import events.SimulationState;
+ import model.*;
+ 
+ import javax.swing.*;

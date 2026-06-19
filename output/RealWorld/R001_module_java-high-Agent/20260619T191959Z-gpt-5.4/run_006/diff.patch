@@ -1,0 +1,328 @@
+diff --git a/AbstractSimulationEvent.java b/AbstractSimulationEvent.java
+new file mode 100644
+index 0000000..ca4d1e4
+--- /dev/null
++++ b/AbstractSimulationEvent.java
+@@ -0,0 +1,15 @@
++public abstract class AbstractSimulationEvent implements SimulationEvent {
++
++	private final SimulationSnapshot snapshot;
++
++
++	protected AbstractSimulationEvent(SimulationSnapshot snapshot) {
++		this.snapshot = snapshot;
++	}
++
++
++	@Override
++	public SimulationSnapshot getSnapshot() {
++		return snapshot;
++	}
++}
+diff --git a/GraphView.java b/GraphView.java
+index b2348f2..a864303 100644
+--- a/GraphView.java
++++ b/GraphView.java
+@@ -6,6 +6,7 @@ import java.util.Arrays;
+ import java.util.LinkedHashMap;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Set;
+ import java.util.stream.IntStream;
+ 
+ 
+@@ -41,9 +42,21 @@ public class GraphView extends JFrame implements SimulationObserver {
+ 
+ 
+ 	@Override
+-	public void onSimulationStateChanged(SimulationSnapshot snapshot) {
++	public Set<Class<? extends SimulationEvent>> getSubscribedEventTypes() {
++		return Set.of(SimulationResetEvent.class, SimulationStepCompletedEvent.class, PopulationChangedEvent.class);
++	}
++
++
++	@Override
++	public void onSimulationEvent(SimulationEvent event) {
++		if (event instanceof PopulationChangedEvent) {
++			registerColors(event.getSnapshot());
++			return;
++		}
++
++		SimulationSnapshot snapshot = event.getSnapshot();
+ 		registerColors(snapshot);
+-		if (snapshot.getStep() == 0) {
++		if (event instanceof SimulationResetEvent) {
+ 			reset();
+ 		}
+ 		graph.update(snapshot.getStep(), snapshot.getField(), stats);
+diff --git a/PopulationChangedEvent.java b/PopulationChangedEvent.java
+new file mode 100644
+index 0000000..fef8abc
+--- /dev/null
++++ b/PopulationChangedEvent.java
+@@ -0,0 +1,29 @@
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++
++public class PopulationChangedEvent extends AbstractSimulationEvent {
++
++	private final Map<Class<?>, Integer> previousPopulation;
++
++	private final Map<Class<?>, Integer> currentPopulation;
++
++
++	public PopulationChangedEvent(SimulationSnapshot snapshot, Map<Class<?>, Integer> previousPopulation,
++			Map<Class<?>, Integer> currentPopulation) {
++		super(snapshot);
++		this.previousPopulation = Collections.unmodifiableMap(new LinkedHashMap<>(previousPopulation));
++		this.currentPopulation = Collections.unmodifiableMap(new LinkedHashMap<>(currentPopulation));
++	}
++
++
++	public Map<Class<?>, Integer> getPreviousPopulation() {
++		return previousPopulation;
++	}
++
++
++	public Map<Class<?>, Integer> getCurrentPopulation() {
++		return currentPopulation;
++	}
++}
+diff --git a/SimulationEvent.java b/SimulationEvent.java
+new file mode 100644
+index 0000000..7cb0155
+--- /dev/null
++++ b/SimulationEvent.java
+@@ -0,0 +1,4 @@
++public interface SimulationEvent {
++
++	SimulationSnapshot getSnapshot();
++}
+diff --git a/SimulationObserver.java b/SimulationObserver.java
+index e390b44..e27093e 100644
+--- a/SimulationObserver.java
++++ b/SimulationObserver.java
+@@ -1,4 +1,16 @@
++import java.util.Set;
++
++
+ public interface SimulationObserver {
+ 
+-	void onSimulationStateChanged(SimulationSnapshot snapshot);
++	Set<Class<? extends SimulationEvent>> getSubscribedEventTypes();
++
++
++	void onSimulationEvent(SimulationEvent event);
++
++
++	default boolean supports(SimulationEvent event) {
++		return getSubscribedEventTypes().stream()
++				.anyMatch(eventType -> eventType.isInstance(event));
++	}
+ }
+diff --git a/SimulationResetEvent.java b/SimulationResetEvent.java
+new file mode 100644
+index 0000000..5a84fb1
+--- /dev/null
++++ b/SimulationResetEvent.java
+@@ -0,0 +1,6 @@
++public class SimulationResetEvent extends AbstractSimulationEvent {
++
++	public SimulationResetEvent(SimulationSnapshot snapshot) {
++		super(snapshot);
++	}
++}
+diff --git a/SimulationStepCompletedEvent.java b/SimulationStepCompletedEvent.java
+new file mode 100644
+index 0000000..1c21ff4
+--- /dev/null
++++ b/SimulationStepCompletedEvent.java
+@@ -0,0 +1,6 @@
++public class SimulationStepCompletedEvent extends AbstractSimulationEvent {
++
++	public SimulationStepCompletedEvent(SimulationSnapshot snapshot) {
++		super(snapshot);
++	}
++}
+diff --git a/Simulator.java b/Simulator.java
+index 9def75b..c52db44 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -1,5 +1,8 @@
+ import java.util.ArrayList;
++import java.util.LinkedHashMap;
+ import java.util.List;
++import java.util.Map;
++import java.util.Set;
+ import java.util.stream.Collectors;
+ import java.util.stream.Stream;
+ 
+@@ -38,6 +41,8 @@ public class Simulator {
+ 
+ 	private final FieldStats fieldStats;
+ 
++	private Map<Class<?>, Integer> populationCounts;
++
+ 	private int sickPercentage;
+ 
+ 
+@@ -61,6 +66,7 @@ public class Simulator {
+ 			plants = new ArrayList<>();
+ 			observers = new ArrayList<>();
+ 			fieldStats = new FieldStats();
++			populationCounts = new LinkedHashMap<>();
+ 			field = new Field(depth, width);
+ 			entityController = new FieldEntityController(field);
+ 			climate = new Climate(DEFAULT_WEATHER);
+@@ -85,6 +91,7 @@ public class Simulator {
+ 
+ 
+ 	public void simulateOneStep() {
++		Map<Class<?>, Integer> previousPopulation = populationCounts;
+ 		step++;
+ 		climate.updateClimate(step);
+ 
+@@ -103,24 +110,25 @@ public class Simulator {
+ 			currentTimeCycle = currentTimeCycle.toggle();
+ 		}
+ 
+-		notifyObservers();
++		notifyStepCompleted(previousPopulation);
+ 	}
+ 
+ 
+ 	public void reset() {
++		Map<Class<?>, Integer> previousPopulation = populationCounts;
+ 		step = 0;
+ 		fieldPopulator.populate(entityController, animals, plants);
+ 		currentTimeCycle = DEFAULT_TIMECYCLE;
+ 		climate.setCurrentWeather(Weather.SUN);
+ 
+ 		sickPercentage = 0;
+-		notifyObservers();
++		notifyReset(previousPopulation);
+ 	}
+ 
+ 
+ 	public void addObserver(SimulationObserver observer) {
+ 		observers.add(observer);
+-		observer.onSimulationStateChanged(createSnapshot());
++		dispatchInitialEvents(observer);
+ 	}
+ 
+ 
+@@ -129,10 +137,21 @@ public class Simulator {
+ 	}
+ 
+ 
+-	private void notifyObservers() {
++	private void notifyReset(Map<Class<?>, Integer> previousPopulation) {
++		sickPercentage = calculateSickPercentage();
++		SimulationSnapshot snapshot = createSnapshot();
++		populationCounts = calculatePopulationCounts();
++		dispatchEvent(new SimulationResetEvent(snapshot));
++		dispatchPopulationChangedEvent(snapshot, previousPopulation, populationCounts);
++	}
++
++
++	private void notifyStepCompleted(Map<Class<?>, Integer> previousPopulation) {
+ 		sickPercentage = calculateSickPercentage();
+ 		SimulationSnapshot snapshot = createSnapshot();
+-		observers.forEach(observer -> observer.onSimulationStateChanged(snapshot));
++		populationCounts = calculatePopulationCounts();
++		dispatchPopulationChangedEvent(snapshot, previousPopulation, populationCounts);
++		dispatchEvent(new SimulationStepCompletedEvent(snapshot));
+ 	}
+ 
+ 
+@@ -153,11 +172,57 @@ public class Simulator {
+ 	}
+ 
+ 
++	private Map<Class<?>, Integer> calculatePopulationCounts() {
++		return field.streamAnimals()
++				.collect(Collectors.groupingBy(Animal::getClass, LinkedHashMap::new, Collectors.summingInt(animal -> 1)));
++	}
++
++
++	private void dispatchPopulationChangedEvent(SimulationSnapshot snapshot, Map<Class<?>, Integer> previousPopulation,
++			Map<Class<?>, Integer> currentPopulation) {
++		if (!currentPopulation.equals(previousPopulation)) {
++			dispatchEvent(new PopulationChangedEvent(snapshot, previousPopulation, currentPopulation));
++		}
++	}
++
++
++	private void dispatchEvent(SimulationEvent event) {
++		observers.stream()
++				.filter(observer -> observer.supports(event))
++				.forEach(observer -> observer.onSimulationEvent(event));
++	}
++
++
++	private void dispatchToObserver(SimulationObserver observer, SimulationEvent event) {
++		if (observer.supports(event)) {
++			observer.onSimulationEvent(event);
++		}
++	}
++
++
+ 	private SimulationSnapshot createSnapshot() {
+ 		return new SimulationSnapshot(step, currentTimeCycle, field, climate, sickPercentage, isViable());
+ 	}
+ 
+ 
++	private SimulationEvent createInitialEvent() {
++		SimulationSnapshot snapshot = createSnapshot();
++		if (step == 0) {
++			return new SimulationResetEvent(snapshot);
++		}
++		return new SimulationStepCompletedEvent(snapshot);
++	}
++
++
++	private void dispatchInitialEvents(SimulationObserver observer) {
++		SimulationSnapshot snapshot = createSnapshot();
++		dispatchToObserver(observer, createInitialEvent());
++		if (!populationCounts.isEmpty()) {
++			dispatchToObserver(observer, new PopulationChangedEvent(snapshot, Map.of(), populationCounts));
++		}
++	}
++
++
+ 	private void delay(int millisec) {
+ 		try {
+ 			Thread.sleep(millisec);
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 0c349ac..cb1480b 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -1,5 +1,6 @@
+ import javax.swing.*;
+ import java.awt.*;
++import java.util.Set;
+ 
+ 
+ public class SimulatorView extends JFrame implements SimulationObserver {
+@@ -57,7 +58,18 @@ public class SimulatorView extends JFrame implements SimulationObserver {
+ 
+ 
+ 	@Override
+-	public void onSimulationStateChanged(SimulationSnapshot snapshot) {
++	public Set<Class<? extends SimulationEvent>> getSubscribedEventTypes() {
++		return Set.of(SimulationResetEvent.class, SimulationStepCompletedEvent.class);
++	}
++
++
++	@Override
++	public void onSimulationEvent(SimulationEvent event) {
++		renderSnapshot(event.getSnapshot());
++	}
++
++
++	private void renderSnapshot(SimulationSnapshot snapshot) {
+ 		if (!isVisible()) {
+ 			setVisible(true);
+ 		}

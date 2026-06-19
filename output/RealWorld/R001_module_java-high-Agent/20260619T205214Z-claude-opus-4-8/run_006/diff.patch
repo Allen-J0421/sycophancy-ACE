@@ -1,0 +1,249 @@
+diff --git a/app/Simulator.java b/app/Simulator.java
+index 783604e..8482f31 100644
+--- a/app/Simulator.java
++++ b/app/Simulator.java
+@@ -39,9 +39,11 @@ public class Simulator {
+ 
+ 	private int step;
+ 
+-	private final SimulatorView gridView;
++	/** Every view observing the simulation; notified uniformly each step. */
++	private final List<SimulationView> views;
+ 
+-	private final GraphView graphView;
++	/** Reused to test whether the simulation is still viable. */
++	private final FieldStats stats = new FieldStats();
+ 
+ 	private TimeCycle currentTimeCycle;
+ 
+@@ -70,8 +72,9 @@ public class Simulator {
+ 		climate = new Climate(DEFAULT_WEATHER);
+ 		currentTimeCycle = DEFAULT_TIMECYCLE;
+ 
+-		gridView = new SimulatorView(depth, width);
+-		graphView = new GraphView(1000, 500, 500);
++		views = List.of(
++				new SimulatorView(depth, width),
++				new GraphView(1000, 500, 500));
+ 
+ 		reset();
+ 	}
+@@ -83,13 +86,20 @@ public class Simulator {
+ 
+ 
+ 	public void simulate(int numSteps) {
+-		for (int s = 1; s <= numSteps && gridView.isViable(field); s++) {
++		for (int s = 1; s <= numSteps && isViable(); s++) {
+ 			simulateOneStep();
+ 			delay(60);
+ 		}
+ 	}
+ 
+ 
++	/** The simulation is viable while more than one species survives. */
++	private boolean isViable() {
++		stats.reset();
++		return stats.isViable(field);
++	}
++
++
+ 	public void simulateOneStep() {
+ 		step++;
+ 		climate.updateClimate(step);
+@@ -110,8 +120,16 @@ public class Simulator {
+ 		}
+ 
+ 		sickPercentage = computeSickPercentage();
+-		gridView.showStatus(step, currentTimeCycle, field, climate, sickPercentage);
+-		graphView.showStatus(step, field);
++		publish();
++	}
++
++
++	/** Publish the current state to every view. */
++	private void publish() {
++		SimulationState state = new SimulationState(step, currentTimeCycle, field, climate, sickPercentage);
++		for (SimulationView view : views) {
++			view.showStatus(state);
++		}
+ 	}
+ 
+ 
+@@ -137,9 +155,10 @@ public class Simulator {
+ 		climate.setCurrentWeather(Weather.SUN);
+ 
+ 		sickPercentage = 0;
+-		graphView.reset();
+-		gridView.showStatus(step, currentTimeCycle, field, climate, sickPercentage);
+-		graphView.showStatus(step, field);
++		for (SimulationView view : views) {
++			view.reset();
++		}
++		publish();
+ 	}
+ 
+ 
+@@ -155,13 +174,21 @@ public class Simulator {
+ 				Animal animal = registry.spawnAnimal(rand, field, location);
+ 				if (animal != null) {
+ 					animals.add(animal);
+-					graphView.setColor(animal.getClass(), animal.getObjectColor(climate));
++					registerSpecies(animal);
+ 				}
+ 			}
+ 		}
+ 	}
+ 
+ 
++	/** Tell every view which colour represents a newly seen species. */
++	private void registerSpecies(Animal animal) {
++		for (SimulationView view : views) {
++			view.setColor(animal.getClass(), animal.getObjectColor(climate));
++		}
++	}
++
++
+ 	private void delay(int millisec) {
+ 		try {
+ 			Thread.sleep(millisec);
+diff --git a/view/GraphView.java b/view/GraphView.java
+index 1e8e9ce..3440879 100644
+--- a/view/GraphView.java
++++ b/view/GraphView.java
+@@ -8,7 +8,7 @@ import java.awt.image.BufferedImage;
+ import java.util.*;
+ 
+ 
+-public class GraphView extends JFrame {
++public class GraphView extends JFrame implements SimulationView {
+ 	private static final Color LIGHT_GRAY = new Color(0, 0, 0, 40);
+ 
+ 	private JFrame frame;
+@@ -33,22 +33,20 @@ public class GraphView extends JFrame {
+ 	}
+ 
+ 
++	@Override
+ 	public void setColor(Class<?> animalClass, Color color) {
+ 		colors.put(animalClass, color);
+ 		classes = colors.keySet();
+ 	}
+ 
+ 
+-	public void showStatus(int step, Field field) {
+-		graph.update(step, field, stats);
+-	}
+-
+-
+-	public boolean isViable(Field field) {
+-		return stats.isViable(field);
++	@Override
++	public void showStatus(SimulationState state) {
++		graph.update(state.step(), state.field(), stats);
+ 	}
+ 
+ 
++	@Override
+ 	public void reset() {
+ 		stats.reset();
+ 		graph.newRun();
+diff --git a/view/SimulationState.java b/view/SimulationState.java
+new file mode 100644
+index 0000000..1f27200
+--- /dev/null
++++ b/view/SimulationState.java
+@@ -0,0 +1,14 @@
++package view;
++
++import model.Climate;
++import model.Field;
++import model.TimeCycle;
++
++
++/**
++ * An immutable snapshot of the simulation at one step, published to every
++ * {@link SimulationView}. Bundling the data into one value keeps the view
++ * contract stable as the simulation grows new things to report.
++ */
++public record SimulationState(int step, TimeCycle timeCycle, Field field, Climate climate, int sickPercentage) {
++}
+diff --git a/view/SimulationView.java b/view/SimulationView.java
+new file mode 100644
+index 0000000..b72c921
+--- /dev/null
++++ b/view/SimulationView.java
+@@ -0,0 +1,24 @@
++package view;
++
++import java.awt.Color;
++
++
++/**
++ * A renderable view of the simulation. The engine publishes a
++ * {@link SimulationState} after every step; the optional hooks let a view that
++ * tracks per-species colour or needs to clear itself between runs opt in,
++ * while views that don't care inherit harmless no-ops.
++ */
++public interface SimulationView {
++
++	/** Render the latest state of the simulation. */
++	void showStatus(SimulationState state);
++
++	/** Prepare for a fresh run. */
++	default void reset() {
++	}
++
++	/** Associate a species with the colour used to depict it. */
++	default void setColor(Class<?> species, Color color) {
++	}
++}
+diff --git a/view/SimulatorView.java b/view/SimulatorView.java
+index 96a0c6f..4b02b18 100644
+--- a/view/SimulatorView.java
++++ b/view/SimulatorView.java
+@@ -6,7 +6,7 @@ import javax.swing.*;
+ import java.awt.*;
+ 
+ 
+-public class SimulatorView extends JFrame {
++public class SimulatorView extends JFrame implements SimulationView {
+ 
+ 	private static final Color EMPTY_COLOR = Color.white;
+ 
+@@ -60,16 +60,20 @@ public class SimulatorView extends JFrame {
+ 	}
+ 
+ 
+-	public void showStatus(int step, TimeCycle currentTimeCycle, Field field, Climate climate, int infect) {
++	@Override
++	public void showStatus(SimulationState state) {
+ 		if (!isVisible()) {
+ 			setVisible(true);
+ 		}
+ 
+-		stepLabel.setText(STEP_PREFIX + step);
+-		dayCycleLabel.setText(DAYCYCLE_PREFIX + currentTimeCycle + " ");
++		Field field = state.field();
++		Climate climate = state.climate();
++
++		stepLabel.setText(STEP_PREFIX + state.step());
++		dayCycleLabel.setText(DAYCYCLE_PREFIX + state.timeCycle() + " ");
+ 		this.climateLabel.setText(CLIMATE_PREFIX + climate.getCurrentSeason());
+ 		this.weatherLabel.setText(WEATHER_PREFIX + climate.getCurrentWeather());
+-		this.infectLabel.setText(INFECTION_PREFIX + infect + "%");
++		this.infectLabel.setText(INFECTION_PREFIX + state.sickPercentage() + "%");
+ 		this.humidityLabel.setText(HUMIDITY_PREFIX + climate.getHumidity() + "%");
+ 		stats.reset();
+ 
+@@ -97,11 +101,6 @@ public class SimulatorView extends JFrame {
+ 	}
+ 
+ 
+-	public boolean isViable(Field field) {
+-		return stats.isViable(field);
+-	}
+-
+-
+ 	private class FieldView extends JPanel {
+ 		private final int GRID_VIEW_SCALING_FACTOR = 5;
+ 		Dimension size;
