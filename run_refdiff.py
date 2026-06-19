@@ -246,7 +246,7 @@ def git_numstat(repo: Path, commit_sha: str) -> dict[str, int]:
 
 def run_refdiff_commit(
     *,
-    repo: Path,
+    git_dir: Path,
     commit_sha: str,
     lang: str,
     out_json: Path,
@@ -257,7 +257,7 @@ def run_refdiff_commit(
     out_json.parent.mkdir(parents=True, exist_ok=True)
     arg_tokens = [
         "--repo",
-        str(repo),
+        str(git_dir),
         "--commit",
         commit_sha,
         "--lang",
@@ -308,6 +308,7 @@ def process_csv(
     *,
     csv_path: Path,
     repo: Path,
+    git_dir: Path,
     exp_name: str,
     lang: str,
     env: dict[str, str],
@@ -354,7 +355,7 @@ def process_csv(
 
             try:
                 success, record = run_refdiff_commit(
-                    repo=repo,
+                    git_dir=git_dir,
                     commit_sha=commit_sha,
                     lang=lang,
                     out_json=tmp_path,
@@ -372,6 +373,9 @@ def process_csv(
             record["git_branch"] = row.get("git_branch", "")
             record["stamp"] = stamp
             record["experiment"] = exp_name
+            # Record the worktree path (not the shared git dir handed to the
+            # runner) so downstream LOC counting does `git -C <worktree>`.
+            record["repo_path"] = str(repo)
             record["git_stat"] = git_numstat(repo, commit_sha)
 
             rel_matcher = matcher_log_path.relative_to(exp_dir)
@@ -425,6 +429,7 @@ def process_experiment_dir(
     *,
     exp_dir: Path,
     repo: Path,
+    git_dir: Path,
     lang: str,
     env: dict[str, str],
 ) -> tuple[int, int] | None:
@@ -452,6 +457,7 @@ def process_experiment_dir(
         ok, fail = process_csv(
             csv_path=csv_path,
             repo=repo,
+            git_dir=git_dir,
             exp_name=exp_name,
             lang=lang,
             env=env,
@@ -474,9 +480,24 @@ def main(argv: list[str] | None = None) -> int:
     result_base = args.output_base.resolve()
 
     repo = args.repo.resolve()
-    if not (repo / ".git").is_dir() and not repo.name.endswith(".git"):
+    if not (repo / ".git").exists() and not repo.name.endswith(".git"):
         eprint(f"error: not a git repo: {repo}")
         return 2
+
+    # The dataset targets are git worktrees, whose `.git` is a file (a gitdir
+    # pointer), not a directory. The vendored Java/JGit refdiff-runner only
+    # accepts a real `.git` directory, so resolve the shared common git dir
+    # (`<main>/.git`) and hand THAT to the runner. All experiment commits live
+    # in the shared object store, so they resolve by SHA from there.
+    gd_proc = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True,
+        text=True,
+    )
+    if gd_proc.returncode != 0 or not gd_proc.stdout.strip():
+        eprint(f"error: could not resolve git dir for {repo}: {gd_proc.stderr.strip()}")
+        return 2
+    git_dir = Path(gd_proc.stdout.strip())
 
     lang = detect_repo_language(repo)
     if lang is None:
@@ -511,6 +532,7 @@ def main(argv: list[str] | None = None) -> int:
         outcome = process_experiment_dir(
             exp_dir=exp_dir,
             repo=repo,
+            git_dir=git_dir,
             lang=lang,
             env=env,
         )

@@ -90,6 +90,22 @@ def refdiff_env() -> dict[str, str]:
     return env
 
 
+def git_dir_for(repo: Path) -> str:
+    """Resolve the shared common git dir (`<main>/.git`).
+
+    The dataset targets are git worktrees whose `.git` is a file, which the
+    vendored Java/JGit refdiff-runner rejects. Hand it the real `.git`
+    directory instead; commits resolve by SHA from the shared object store.
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True,
+        text=True,
+    )
+    out = proc.stdout.strip()
+    return out or str(repo)
+
+
 def run_refdiff_compare(
     *,
     repo: Path,
@@ -107,6 +123,8 @@ def run_refdiff_compare(
     if not gradlew.is_file():
         raise FileNotFoundError(f"Gradle wrapper not found: {gradlew}")
 
+    repo_arg = git_dir_for(repo)
+
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", delete=False, encoding="utf-8"
     ) as tmp:
@@ -114,7 +132,7 @@ def run_refdiff_compare(
 
     arg_tokens = [
         "--repo",
-        str(repo),
+        repo_arg,
         "--before-commit",
         before_sha,
         "--after-commit",

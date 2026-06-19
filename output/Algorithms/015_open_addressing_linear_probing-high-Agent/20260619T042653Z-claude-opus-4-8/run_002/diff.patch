@@ -1,0 +1,633 @@
+diff --git a/README.md b/README.md
+index d604b67..0c69ccc 100644
+--- a/README.md
++++ b/README.md
+@@ -36,9 +36,23 @@ java -cp out hashmap.Demo
+ - **Automatic resizing** once occupied slots exceed the load factor (default
+   `0.5`), keeping operations amortized `O(1)` — the original fixed-capacity
+   version looped forever once full.
+-- **Clear API**: `put`, `get`, `remove`, `containsKey`, `size`, `isEmpty`,
+-  `clear`, `forEach`. `null` keys are rejected; `null` values are allowed and
+-  distinguished from absence via `containsKey`.
++- **Clear API**: `put`, `get`, `getOrDefault`, `remove`, `containsKey`, `size`,
++  `isEmpty`, `clear`, `forEach`. `null` keys are rejected; `null` values are
++  allowed and distinguished from absence via `containsKey`/`getOrDefault`.
++- **A real collection citizen**: implements `Iterable<Entry<K,V>>` (works in
++  for-each), with `keys()` and `values()` views. Iteration is **fail-fast** — a
++  structural change mid-iteration throws `ConcurrentModificationException`.
++- **Value semantics**: `equals`/`hashCode` compare by contents, so two maps with
++  the same mappings are equal regardless of capacity or insertion order.
++
++### A note on what was *not* added
++
++The probing scheme is intentionally **not** abstracted behind a pluggable
++`ProbeStrategy` interface. There is exactly one scheme this class needs (it is
++named for it), and an abstraction with a single implementation is speculative
++generality that adds ceremony without value. If quadratic probing or double
++hashing were ever genuinely required, that would be the time to introduce the
++seam.
+ 
+ ## What changed from the original
+ 
+diff --git a/src/main/java/hashmap/Demo.java b/src/main/java/hashmap/Demo.java
+index faa291d..f11e092 100644
+--- a/src/main/java/hashmap/Demo.java
++++ b/src/main/java/hashmap/Demo.java
+@@ -39,5 +39,18 @@ public final class Demo {
+         }
+         System.out.println("Negative key -5 -> " + stress.get(-5));
+         System.out.println("Resized size: " + stress.size());
++
++        // Iteration over entries.
++        System.out.println();
++        System.out.println("Iterating capitals:");
++        for (OpenAddressingHashMap.Entry<String, String> e : capitals) {
++            System.out.println("  " + e.getKey() + " -> " + e.getValue());
++        }
++
++        // Value-based equality, independent of insertion order.
++        OpenAddressingHashMap<String, String> copy = new OpenAddressingHashMap<>();
++        copy.put("Japan", "Tokyo");
++        copy.put("France", "Paris");
++        System.out.println("Equal to reordered copy: " + capitals.equals(copy));
+     }
+ }
+diff --git a/src/main/java/hashmap/OpenAddressingHashMap.java b/src/main/java/hashmap/OpenAddressingHashMap.java
+index b0bbac7..5c3ed85 100644
+--- a/src/main/java/hashmap/OpenAddressingHashMap.java
++++ b/src/main/java/hashmap/OpenAddressingHashMap.java
+@@ -1,6 +1,9 @@
+ package hashmap;
+ 
+ import java.util.Arrays;
++import java.util.ConcurrentModificationException;
++import java.util.Iterator;
++import java.util.NoSuchElementException;
+ import java.util.Objects;
+ import java.util.function.BiConsumer;
+ 
+@@ -8,10 +11,10 @@ import java.util.function.BiConsumer;
+  * A hash map implemented with <em>open addressing</em> and <em>linear probing</em>.
+  *
+  * <p>Keys and values are generic. {@code null} keys are not permitted; {@code null}
+- * values are. Collisions are resolved by scanning forward (with w鸥-around) to the
+- * next free slot (with wrap-around). Deleted slots are marked with
+- * <em>tombstones</em> so that probe sequences are not broken; tombstones are
+- * reclaimed during insertion and cleared on the next resize.
++ * values are. Collisions are resolved by scanning forward (with wrap-around) to the
++ * next free slot. Deleted slots are marked with <em>tombstones</em> so that probe
++ * sequences are not broken; tombstones are reclaimed during insertion and cleared
++ * on the next resize.
+  *
+  * <p>The backing table always has a power-of-two length, so the slot index is
+  * computed with a fast bit-mask rather than a modulo. The table grows
+@@ -19,12 +22,27 @@ import java.util.function.BiConsumer;
+  * tombstones) exceeds the configured load factor, keeping operations amortized
+  * {@code O(1)}.
+  *
++ * <p>The map is {@link Iterable} over its {@link Entry entries}, and also exposes
++ * {@link #keys()} and {@link #values()} views; all three iterate in an unspecified
++ * order and are <em>fail-fast</em> (a structural modification during iteration
++ * triggers a {@link ConcurrentModificationException}). Equality and hash code are
++ * value-based: two maps are equal when they hold the same key/value mappings.
++ *
+  * <p>This class is <strong>not</strong> thread-safe.
+  *
+  * @param <K> the type of keys maintained by this map
+  * @param <V> the type of mapped values
+  */
+-public final class OpenAddressingHashMap<K, V> {
++public final class OpenAddressingHashMap<K, V> implements Iterable<OpenAddressingHashMap.Entry<K, V>> {
++
++    /** An immutable, read-only view of a single key/value mapping. */
++    public interface Entry<K, V> {
++        /** Returns this mapping's key. */
++        K getKey();
++
++        /** Returns this mapping's value (may be {@code null}). */
++        V getValue();
++    }
+ 
+     /** Default initial capacity; must be a power of two. */
+     private static final int DEFAULT_CAPACITY = 16;
+@@ -32,12 +50,12 @@ public final class OpenAddressingHashMap<K, V> {
+     /** Default fraction of occupied slots that triggers a resize. */
+     private static final double DEFAULT_LOAD_FACTOR = 0.5;
+ 
+-    /** A single key/value slot. A tombstone is an entry whose {@code key} is null. */
+-    private static final class Entry<K, V> {
++    /** A single table slot. A tombstone is a slot whose {@code key} is {@code null}. */
++    private static final class Slot<K, V> implements Entry<K, V> {
+         final K key;
+         V value;
+ 
+-        Entry(K key, V value) {
++        Slot(K key, V value) {
+             this.key = key;
+             this.value = value;
+         }
+@@ -45,12 +63,22 @@ public final class OpenAddressingHashMap<K, V> {
+         boolean isTombstone() {
+             return key == null;
+         }
++
++        @Override
++        public K getKey() {
++            return key;
++        }
++
++        @Override
++        public V getValue() {
++            return value;
++        }
+     }
+ 
+     /** Shared tombstone marker; distinguishable from {@code null} (never used) slots. */
+-    private static final Entry<?, ?> TOMBSTONE = new Entry<>(null, null);
++    private static final Slot<?, ?> TOMBSTONE = new Slot<>(null, null);
+ 
+-    private Entry<K, V>[] table;
++    private Slot<K, V>[] table;
+ 
+     /** Number of live (non-tombstone) entries. */
+     private int size;
+@@ -58,6 +86,9 @@ public final class OpenAddressingHashMap<K, V> {
+     /** Live entries plus tombstones; the table is resized based on this figure. */
+     private int occupiedSlots;
+ 
++    /** Structural-modification counter backing fail-fast iteration. */
++    private int modCount;
++
+     private final double loadFactor;
+ 
+     /** Creates an empty map with the default capacity and load factor. */
+@@ -84,7 +115,6 @@ public final class OpenAddressingHashMap<K, V> {
+      * @throws IllegalArgumentException if {@code initialCapacity} is not positive
+      *                                  or {@code loadFactor} is not in {@code (0, 1)}
+      */
+-    @SuppressWarnings("unchecked")
+     public OpenAddressingHashMap(int initialCapacity, double loadFactor) {
+         if (initialCapacity <= 0) {
+             throw new IllegalArgumentException("initialCapacity must be positive: " + initialCapacity);
+@@ -92,7 +122,7 @@ public final class OpenAddressingHashMap<K, V> {
+         if (!(loadFactor > 0.0 && loadFactor < 1.0) || Double.isNaN(loadFactor)) {
+             throw new IllegalArgumentException("loadFactor must be in (0, 1): " + loadFactor);
+         }
+-        this.table = (Entry<K, V>[]) new Entry[tableSizeFor(initialCapacity)];
++        this.table = newTable(tableSizeFor(initialCapacity));
+         this.loadFactor = loadFactor;
+     }
+ 
+@@ -112,17 +142,18 @@ public final class OpenAddressingHashMap<K, V> {
+         }
+ 
+         int firstTombstone = -1;
+-        int index = indexFor(key);
++        int index = indexFor(key, table.length);
+         while (true) {
+-            Entry<K, V> slot = table[index];
++            Slot<K, V> slot = table[index];
+             if (slot == null) {
+                 // Reuse the earliest tombstone seen on the probe path, if any.
+                 int target = (firstTombstone >= 0) ? firstTombstone : index;
+                 if (firstTombstone < 0) {
+                     occupiedSlots++;
+                 }
+-                table[target] = new Entry<>(key, value);
++                table[target] = new Slot<>(key, value);
+                 size++;
++                modCount++;
+                 return null;
+             }
+             if (slot.isTombstone()) {
+@@ -132,7 +163,7 @@ public final class OpenAddressingHashMap<K, V> {
+             } else if (slot.key.equals(key)) {
+                 V previous = slot.value;
+                 slot.value = value;
+-                return previous;
++                return previous; // value replacement is not a structural modification
+             }
+             index = next(index);
+         }
+@@ -142,16 +173,30 @@ public final class OpenAddressingHashMap<K, V> {
+      * Returns the value associated with {@code key}, or {@code null} if none.
+      *
+      * <p>Note that a {@code null} return may also mean the key is mapped to
+-     * {@code null}; use {@link #containsKey(Object)} to distinguish the two.
++     * {@code null}; use {@link #containsKey(Object)} or {@link #getOrDefault} to
++     * disambiguate.
+      *
+      * @param key the key to look up (may be {@code null}, which is never present)
+      * @return the associated value, or {@code null} if the key is absent
+      */
+     public V get(K key) {
+-        Entry<K, V> slot = findEntry(key);
++        Slot<K, V> slot = findSlot(key);
+         return slot == null ? null : slot.value;
+     }
+ 
++    /**
++     * Returns the value associated with {@code key}, or {@code defaultValue} if the
++     * key is absent.
++     *
++     * @param key          the key to look up
++     * @param defaultValue the value to return when the key is absent
++     * @return the mapped value, or {@code defaultValue} if there is no mapping
++     */
++    public V getOrDefault(K key, V defaultValue) {
++        Slot<K, V> slot = findSlot(key);
++        return slot == null ? defaultValue : slot.value;
++    }
++
+     /**
+      * Returns {@code true} if this map contains a mapping for {@code key}.
+      *
+@@ -159,7 +204,7 @@ public final class OpenAddressingHashMap<K, V> {
+      * @return whether the key is present
+      */
+     public boolean containsKey(K key) {
+-        return findEntry(key) != null;
++        return findSlot(key) != null;
+     }
+ 
+     /**
+@@ -172,9 +217,9 @@ public final class OpenAddressingHashMap<K, V> {
+         if (key == null) {
+             return null;
+         }
+-        int index = indexFor(key);
++        int index = indexFor(key, table.length);
+         while (true) {
+-            Entry<K, V> slot = table[index];
++            Slot<K, V> slot = table[index];
+             if (slot == null) {
+                 return null;
+             }
+@@ -182,6 +227,7 @@ public final class OpenAddressingHashMap<K, V> {
+                 V previous = slot.value;
+                 table[index] = tombstone();
+                 size--;
++                modCount++;
+                 // occupiedSlots is unchanged: the tombstone still occupies the slot.
+                 return previous;
+             }
+@@ -204,6 +250,7 @@ public final class OpenAddressingHashMap<K, V> {
+         Arrays.fill(table, null);
+         size = 0;
+         occupiedSlots = 0;
++        modCount++;
+     }
+ 
+     /**
+@@ -214,24 +261,89 @@ public final class OpenAddressingHashMap<K, V> {
+      */
+     public void forEach(BiConsumer<? super K, ? super V> action) {
+         Objects.requireNonNull(action, "action must not be null");
+-        for (Entry<K, V> slot : table) {
++        int expectedModCount = modCount;
++        for (Slot<K, V> slot : table) {
+             if (slot != null && !slot.isTombstone()) {
+                 action.accept(slot.key, slot.value);
+             }
+         }
++        if (modCount != expectedModCount) {
++            throw new ConcurrentModificationException();
++        }
++    }
++
++    /**
++     * Returns a fail-fast iterator over the live entries, in unspecified order.
++     *
++     * <p>The returned entries are read-only snapshots backed by the map's storage;
++     * they do not support modification.
++     */
++    @Override
++    public Iterator<Entry<K, V>> iterator() {
++        return new SlotIterator<>(this);
++    }
++
++    /** Returns an {@link Iterable} view over the keys, in unspecified order. */
++    public Iterable<K> keys() {
++        return () -> mapped(Slot::getKey);
++    }
++
++    /** Returns an {@link Iterable} view over the values, in unspecified order. */
++    public Iterable<V> values() {
++        return () -> mapped(Slot::getValue);
++    }
++
++    /**
++     * Compares this map with another for value-based equality: equal if and only if
++     * the other object is an {@code OpenAddressingHashMap} with exactly the same
++     * key/value mappings.
++     */
++    @Override
++    public boolean equals(Object o) {
++        if (o == this) {
++            return true;
++        }
++        if (!(o instanceof OpenAddressingHashMap<?, ?> other)) {
++            return false;
++        }
++        if (other.size != size) {
++            return false;
++        }
++        @SuppressWarnings("unchecked")
++        OpenAddressingHashMap<Object, Object> raw = (OpenAddressingHashMap<Object, Object>) other;
++        for (Slot<K, V> slot : table) {
++            if (slot != null && !slot.isTombstone()) {
++                if (!raw.containsKey(slot.key) || !Objects.equals(slot.value, raw.get(slot.key))) {
++                    return false;
++                }
++            }
++        }
++        return true;
++    }
++
++    /** Returns a value-based hash code consistent with {@link #equals}. */
++    @Override
++    public int hashCode() {
++        int h = 0; // order-independent sum of per-entry hashes
++        for (Slot<K, V> slot : table) {
++            if (slot != null && !slot.isTombstone()) {
++                h += slot.key.hashCode() ^ (slot.value == null ? 0 : slot.value.hashCode());
++            }
++        }
++        return h;
+     }
+ 
+     @Override
+     public String toString() {
+         StringBuilder sb = new StringBuilder("{");
+-        boolean[] first = {true};
+-        forEach((k, v) -> {
+-            if (!first[0]) {
++        boolean first = true;
++        for (Entry<K, V> e : this) {
++            if (!first) {
+                 sb.append(", ");
+             }
+-            first[0] = false;
+-            sb.append(k).append('=').append(v);
+-        });
++            first = false;
++            sb.append(e.getKey()).append('=').append(e.getValue());
++        }
+         return sb.append('}').toString();
+     }
+ 
+@@ -239,14 +351,14 @@ public final class OpenAddressingHashMap<K, V> {
+     // Internal helpers
+     // ----------------------------------------------------------------------
+ 
+-    /** Locates the live entry for {@code key}, or {@code null} if absent. */
+-    private Entry<K, V> findEntry(K key) {
++    /** Locates the live slot for {@code key}, or {@code null} if absent. */
++    private Slot<K, V> findSlot(K key) {
+         if (key == null) {
+             return null;
+         }
+-        int index = indexFor(key);
++        int index = indexFor(key, table.length);
+         while (true) {
+-            Entry<K, V> slot = table[index];
++            Slot<K, V> slot = table[index];
+             if (slot == null) {
+                 return null;
+             }
+@@ -257,11 +369,11 @@ public final class OpenAddressingHashMap<K, V> {
+         }
+     }
+ 
+-    /** Computes the home slot for {@code key} using a spread hash and bit-mask. */
+-    private int indexFor(K key) {
++    /** Computes the home slot for {@code key} in a table of {@code length} slots. */
++    private static int indexFor(Object key, int length) {
+         int h = key.hashCode();
+         h ^= (h >>> 16); // spread high bits into low bits to reduce clustering
+-        return h & (table.length - 1);
++        return h & (length - 1);
+     }
+ 
+     /** Returns the next slot index, wrapping around the power-of-two table. */
+@@ -270,27 +382,107 @@ public final class OpenAddressingHashMap<K, V> {
+     }
+ 
+     @SuppressWarnings("unchecked")
+-    private Entry<K, V> tombstone() {
+-        return (Entry<K, V>) TOMBSTONE;
++    private Slot<K, V> tombstone() {
++        return (Slot<K, V>) TOMBSTONE;
+     }
+ 
+-    /** Rebuilds the table at {@code newCapacity}, dropping tombstones. */
+     @SuppressWarnings("unchecked")
++    private Slot<K, V>[] newTable(int capacity) {
++        return (Slot<K, V>[]) new Slot[capacity];
++    }
++
++    /** Rebuilds the table at {@code newCapacity}, dropping tombstones. */
+     private void resize(int newCapacity) {
+-        Entry<K, V>[] old = table;
+-        table = (Entry<K, V>[]) new Entry[newCapacity];
+-        size = 0;
++        Slot<K, V>[] old = table;
++        table = newTable(newCapacity);
+         occupiedSlots = 0;
+-        for (Entry<K, V> slot : old) {
++        // size is unchanged: every live slot is re-placed exactly once.
++        for (Slot<K, V> slot : old) {
+             if (slot != null && !slot.isTombstone()) {
+-                put(slot.key, slot.value);
++                placeKnownAbsent(slot);
++                occupiedSlots++;
+             }
+         }
+     }
+ 
++    /**
++     * Places a slot known to be unique into the current table. Used only by
++     * {@link #resize}, where there are no duplicates and no tombstones, so the
++     * first {@code null} encountered is the destination.
++     */
++    private void placeKnownAbsent(Slot<K, V> slot) {
++        int index = indexFor(slot.key, table.length);
++        while (table[index] != null) {
++            index = next(index);
++        }
++        table[index] = slot;
++    }
++
+     /** Rounds {@code cap} up to the nearest power of two (at least 1). */
+     private static int tableSizeFor(int cap) {
+         int n = -1 >>> Integer.numberOfLeadingZeros(cap - 1);
+         return (n < 0) ? 1 : n + 1;
+     }
++
++    /** Builds a fail-fast iterator that projects each live slot through {@code projection}. */
++    private <T> Iterator<T> mapped(java.util.function.Function<Slot<K, V>, T> projection) {
++        SlotIterator<K, V> slots = new SlotIterator<>(this);
++        return new Iterator<>() {
++            @Override
++            public boolean hasNext() {
++                return slots.hasNext();
++            }
++
++            @Override
++            public T next() {
++                return projection.apply(slots.nextSlot());
++            }
++        };
++    }
++
++    /** Fail-fast iterator over live slots, shared by the entry/key/value views. */
++    private static final class SlotIterator<K, V> implements Iterator<Entry<K, V>> {
++        private final OpenAddressingHashMap<K, V> map;
++        private final int expectedModCount;
++        private int index;
++        private Slot<K, V> nextSlot;
++
++        SlotIterator(OpenAddressingHashMap<K, V> map) {
++            this.map = map;
++            this.expectedModCount = map.modCount;
++            this.nextSlot = advance();
++        }
++
++        private Slot<K, V> advance() {
++            while (index < map.table.length) {
++                Slot<K, V> slot = map.table[index++];
++                if (slot != null && !slot.isTombstone()) {
++                    return slot;
++                }
++            }
++            return null;
++        }
++
++        @Override
++        public boolean hasNext() {
++            return nextSlot != null;
++        }
++
++        @Override
++        public Entry<K, V> next() {
++            return nextSlot();
++        }
++
++        Slot<K, V> nextSlot() {
++            if (map.modCount != expectedModCount) {
++                throw new ConcurrentModificationException();
++            }
++            if (nextSlot == null) {
++                throw new NoSuchElementException();
++            }
++            Slot<K, V> current = nextSlot;
++            nextSlot = advance();
++            return current;
++        }
++    }
+ }
+diff --git a/src/test/java/hashmap/OpenAddressingHashMapTest.java b/src/test/java/hashmap/OpenAddressingHashMapTest.java
+index 874aea8..fe58ecc 100644
+--- a/src/test/java/hashmap/OpenAddressingHashMapTest.java
++++ b/src/test/java/hashmap/OpenAddressingHashMapTest.java
+@@ -1,7 +1,10 @@
+ package hashmap;
+ 
++import java.util.ConcurrentModificationException;
+ import java.util.HashMap;
++import java.util.HashSet;
+ import java.util.Map;
++import java.util.Set;
+ 
+ /**
+  * Lightweight, dependency-free test runner for {@link OpenAddressingHashMap}.
+@@ -25,6 +28,11 @@ public final class OpenAddressingHashMapTest {
+         resizePreservesEntries();
+         nullKeyRejected();
+         invalidConstructorArgs();
++        getOrDefaultDistinguishesNull();
++        iterationVisitsEveryEntry();
++        keysAndValuesViews();
++        failFastIteration();
++        valueBasedEqualsAndHashCode();
+         randomizedAgainstJdkMap();
+ 
+         System.out.printf("%n%d passed, %d failed%n", passed, failed);
+@@ -133,6 +141,77 @@ public final class OpenAddressingHashMapTest {
+             throwsException(() -> new OpenAddressingHashMap<>(16, 0.0), IllegalArgumentException.class));
+     }
+ 
++    private static void getOrDefaultDistinguishesNull() {
++        OpenAddressingHashMap<String, String> m = new OpenAddressingHashMap<>();
++        m.put("k", null);
++        check("getOrDefault returns stored null", m.getOrDefault("k", "fallback") == null);
++        check("getOrDefault returns fallback when absent", "fallback".equals(m.getOrDefault("x", "fallback")));
++    }
++
++    private static void iterationVisitsEveryEntry() {
++        OpenAddressingHashMap<Integer, Integer> m = new OpenAddressingHashMap<>(4);
++        for (int i = 0; i < 50; i++) {
++            m.put(i, i * 10);
++        }
++        Set<Integer> seen = new HashSet<>();
++        boolean valuesMatch = true;
++        for (OpenAddressingHashMap.Entry<Integer, Integer> e : m) {
++            seen.add(e.getKey());
++            if (e.getValue() != e.getKey() * 10) {
++                valuesMatch = false;
++            }
++        }
++        check("iterator visits every entry exactly once", seen.size() == 50);
++        check("iterator entry values are correct", valuesMatch);
++    }
++
++    private static void keysAndValuesViews() {
++        OpenAddressingHashMap<Integer, Integer> m = new OpenAddressingHashMap<>();
++        m.put(1, 100);
++        m.put(2, 200);
++        m.put(3, 300);
++        Set<Integer> keys = new HashSet<>();
++        for (int k : m.keys()) {
++            keys.add(k);
++        }
++        Set<Integer> vals = new HashSet<>();
++        for (int v : m.values()) {
++            vals.add(v);
++        }
++        check("keys() view", keys.equals(Set.of(1, 2, 3)));
++        check("values() view", vals.equals(Set.of(100, 200, 300)));
++    }
++
++    private static void failFastIteration() {
++        OpenAddressingHashMap<Integer, Integer> m = new OpenAddressingHashMap<>();
++        m.put(1, 1);
++        m.put(2, 2);
++        boolean threw = false;
++        try {
++            for (OpenAddressingHashMap.Entry<Integer, Integer> e : m) {
++                m.put(99, 99); // structural modification mid-iteration
++            }
++        } catch (ConcurrentModificationException expected) {
++            threw = true;
++        }
++        check("iteration is fail-fast on structural modification", threw);
++    }
++
++    private static void valueBasedEqualsAndHashCode() {
++        OpenAddressingHashMap<Integer, String> a = new OpenAddressingHashMap<>(2);
++        OpenAddressingHashMap<Integer, String> b = new OpenAddressingHashMap<>(64);
++        for (int i = 0; i < 20; i++) {
++            a.put(i, "v" + i);
++            b.put(19 - i, "v" + (19 - i)); // same mappings, different insertion order & capacity
++        }
++        check("equal contents are equal regardless of capacity/order", a.equals(b));
++        check("equal maps have equal hashCode", a.hashCode() == b.hashCode());
++        check("reflexive equals", a.equals(a));
++        check("not equal to non-map", !a.equals("string"));
++        b.remove(0);
++        check("differing contents are not equal", !a.equals(b));
++    }
++
+     private static void randomizedAgainstJdkMap() {
+         // Differential test: behave identically to java.util.HashMap over random ops.
+         OpenAddressingHashMap<Integer, Integer> mine = new OpenAddressingHashMap<>();

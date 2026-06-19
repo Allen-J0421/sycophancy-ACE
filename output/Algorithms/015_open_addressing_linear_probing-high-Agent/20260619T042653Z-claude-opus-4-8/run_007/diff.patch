@@ -1,0 +1,348 @@
+diff --git a/README.md b/README.md
+index 9e0f47c..c39d091 100644
+--- a/README.md
++++ b/README.md
+@@ -7,10 +7,15 @@ A generic hash map implemented with open addressing and linear probing.
+ ```
+ src/
+   main/java/hashmap/
+-    OpenAddressingHashMap.java   # the data structure
+-    Demo.java                    # runnable demonstration (main)
++    OpenAddressingHashMap.java        # the data structure
++    Demo.java                         # runnable demonstration (main)
+   test/java/hashmap/
+-    OpenAddressingHashMapTest.java  # dependency-free self-checking tests
++    OpenAddressingHashMapTest.java    # dependency-free self-checking tests
++  jmh/java/hashmap/bench/
++    HashMapBenchmark.java             # JMH benchmarks vs java.util.HashMap
++benchmarks/
++  run.sh                              # self-contained JMH runner (no Maven needed)
++pom.xml                               # Maven build for the benchmark jar
+ ```
+ 
+ ## Build & run
+@@ -26,6 +31,46 @@ java -cp out hashmap.OpenAddressingHashMapTest
+ java -cp out hashmap.Demo
+ ```
+ 
++## Benchmarking (JMH)
++
++Two ways to run the benchmark harness; both compare `OpenAddressingHashMap`
++head-to-head with `java.util.HashMap` over `getHit`, `getMiss`, `populate`, and
++`iterate`, parameterised by `impl` and `size`.
++
++```sh
++# No build tool required: downloads JMH into ./lib, compiles, and runs.
++benchmarks/run.sh                                   # full suite (slow, rigorous)
++benchmarks/run.sh -p size=10000 -f 1 -wi 3 -i 5     # quick smoke run
++benchmarks/run.sh getHit -rf json -rff out.json     # one benchmark, JSON output
++
++# Or with Maven:
++mvn clean package
++java -jar target/benchmarks.jar -p size=10000 -f 1
++```
++
++### What the numbers say (and don't)
++
++A representative quick run (size = 100,000; 1 fork, 2×0.3s warmup, 3×0.3s
++measurement — **indicative only, not publication-grade**) showed:
++
++| Benchmark  | OpenAddressing | java.util.HashMap |
++|------------|---------------:|------------------:|
++| `getHit`   | ~9.0 ns/op     | ~7.4 ns/op        |
++| `getMiss`  | ~11.5 ns/op    | ~8.0 ns/op        |
++| `iterate`  | ~1.02 ms/op    | ~1.05 ms/op       |
++| `populate` | ~5.7 ms/op     | ~7.3 ms/op        |
++
++Honest reading: this implementation is **not** a uniform win over the JDK. It is
++competitive on iteration and ahead on bulk insertion, but **slower on lookups**,
++especially misses (longer linear-probe chains versus the JDK's bucketed design,
++plus `Integer` autoboxing on every comparison). `java.util.HashMap` is a heavily
++tuned, decades-old implementation; matching it on every axis was never the goal.
++The harness exists precisely so claims are measured rather than assumed — and the
++measurement says "competitive, with trade-offs," not "faster." Run it on your own
++hardware with the full settings before drawing conclusions; the error bars on the
++quick `populate` run above are large enough that only the order of magnitude is
++trustworthy.
++
+ ## Design notes
+ 
+ - **Generic** `OpenAddressingHashMap<K, V>` rather than fixed `int → int`.
+diff --git a/benchmarks/run.sh b/benchmarks/run.sh
+new file mode 100755
+index 0000000..266b6b2
+--- /dev/null
++++ b/benchmarks/run.sh
+@@ -0,0 +1,53 @@
++#!/usr/bin/env bash
++#
++# Self-contained JMH benchmark runner — no Maven/Gradle required.
++#
++# It downloads the JMH jars into ./lib (once), compiles the library and the
++# benchmark with JMH's annotation processor, and runs org.openjdk.jmh.Main.
++# Any arguments are forwarded to JMH, e.g.:
++#
++#   benchmarks/run.sh                                  # full suite
++#   benchmarks/run.sh -p size=10000 -f 1 -wi 3 -i 5    # quick, smaller dataset
++#   benchmarks/run.sh getHit -rf json -rff results.json
++#
++set -euo pipefail
++
++cd "$(dirname "$0")/.."  # repo root
++
++JMH_VERSION="1.37"
++JOPT_VERSION="5.0.4"
++MATH3_VERSION="3.6.1"
++LIB="lib"
++BUILD="build/jmh"
++
++mkdir -p "$LIB" "$BUILD"
++
++fetch() {
++    local url="https://repo1.maven.org/maven2/$1"
++    local dest="$LIB/$2"
++    if [ ! -f "$dest" ]; then
++        echo "Downloading $2 ..."
++        curl -fsSL "$url" -o "$dest"
++    fi
++}
++
++fetch "org/openjdk/jmh/jmh-core/${JMH_VERSION}/jmh-core-${JMH_VERSION}.jar" "jmh-core-${JMH_VERSION}.jar"
++fetch "org/openjdk/jmh/jmh-generator-annprocess/${JMH_VERSION}/jmh-generator-annprocess-${JMH_VERSION}.jar" "jmh-generator-annprocess-${JMH_VERSION}.jar"
++fetch "net/sf/jopt-simple/jopt-simple/${JOPT_VERSION}/jopt-simple-${JOPT_VERSION}.jar" "jopt-simple-${JOPT_VERSION}.jar"
++fetch "org/apache/commons/commons-math3/${MATH3_VERSION}/commons-math3-${MATH3_VERSION}.jar" "commons-math3-${MATH3_VERSION}.jar"
++
++CP=""
++for jar in "$LIB"/*.jar; do
++    CP="$CP:$jar"
++done
++CP="${CP#:}"
++
++echo "Compiling library + benchmark (JMH annotation processing) ..."
++rm -rf "$BUILD"
++mkdir -p "$BUILD"
++javac -cp "$CP" -d "$BUILD" \
++    src/main/java/hashmap/*.java \
++    src/jmh/java/hashmap/bench/*.java
++
++echo "Running benchmarks ..."
++java -cp "$BUILD:$CP" org.openjdk.jmh.Main "$@"
+diff --git a/pom.xml b/pom.xml
+new file mode 100644
+index 0000000..20d36d2
+--- /dev/null
++++ b/pom.xml
+@@ -0,0 +1,92 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<project xmlns="http://maven.apache.org/POM/4.0.0"
++         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
++         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
++    <modelVersion>4.0.0</modelVersion>
++
++    <groupId>com.example.hashmap</groupId>
++    <artifactId>open-addressing-hashmap</artifactId>
++    <version>1.0.0</version>
++    <packaging>jar</packaging>
++
++    <!--
++      Maven build for the JMH benchmark harness. The library sources live in
++      src/main/java; the benchmarks live in src/jmh/java and are added as an extra
++      source root below so the library artifact itself stays free of benchmark code.
++
++      Build the runnable benchmark jar and run it:
++        mvn clean package
++        java -jar target/benchmarks.jar -p size=10000 -f 1
++
++      Note: for a *published* library you would normally split the benchmarks into
++      their own Maven module so jmh-core does not appear as a compile dependency.
++      It is kept in one module here for convenience. The self-contained
++      benchmarks/run.sh requires no Maven at all.
++    -->
++
++    <properties>
++        <maven.compiler.release>21</maven.compiler.release>
++        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
++        <jmh.version>1.37</jmh.version>
++    </properties>
++
++    <dependencies>
++        <dependency>
++            <groupId>org.openjdk.jmh</groupId>
++            <artifactId>jmh-core</artifactId>
++            <version>${jmh.version}</version>
++        </dependency>
++        <dependency>
++            <groupId>org.openjdk.jmh</groupId>
++            <artifactId>jmh-generator-annprocess</artifactId>
++            <version>${jmh.version}</version>
++            <scope>provided</scope>
++        </dependency>
++    </dependencies>
++
++    <build>
++        <plugins>
++            <plugin>
++                <groupId>org.codehaus.mojo</groupId>
++                <artifactId>build-helper-maven-plugin</artifactId>
++                <version>3.5.0</version>
++                <executions>
++                    <execution>
++                        <id>add-benchmark-sources</id>
++                        <phase>generate-sources</phase>
++                        <goals>
++                            <goal>add-source</goal>
++                        </goals>
++                        <configuration>
++                            <sources>
++                                <source>src/jmh/java</source>
++                            </sources>
++                        </configuration>
++                    </execution>
++                </executions>
++            </plugin>
++            <plugin>
++                <groupId>org.apache.maven.plugins</groupId>
++                <artifactId>maven-shade-plugin</artifactId>
++                <version>3.5.1</version>
++                <executions>
++                    <execution>
++                        <phase>package</phase>
++                        <goals>
++                            <goal>shade</goal>
++                        </goals>
++                        <configuration>
++                            <finalName>benchmarks</finalName>
++                            <transformers>
++                                <transformer
++                                    implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
++                                    <mainClass>org.openjdk.jmh.Main</mainClass>
++                                </transformer>
++                            </transformers>
++                        </configuration>
++                    </execution>
++                </executions>
++            </plugin>
++        </plugins>
++    </build>
++</project>
+diff --git a/src/jmh/java/hashmap/bench/HashMapBenchmark.java b/src/jmh/java/hashmap/bench/HashMapBenchmark.java
+new file mode 100644
+index 0000000..4ef5cbd
+--- /dev/null
++++ b/src/jmh/java/hashmap/bench/HashMapBenchmark.java
+@@ -0,0 +1,115 @@
++package hashmap.bench;
++
++import hashmap.OpenAddressingHashMap;
++
++import java.util.HashMap;
++import java.util.Map;
++import java.util.Random;
++import java.util.concurrent.TimeUnit;
++
++import org.openjdk.jmh.annotations.Benchmark;
++import org.openjdk.jmh.annotations.BenchmarkMode;
++import org.openjdk.jmh.annotations.Fork;
++import org.openjdk.jmh.annotations.Measurement;
++import org.openjdk.jmh.annotations.Mode;
++import org.openjdk.jmh.annotations.OutputTimeUnit;
++import org.openjdk.jmh.annotations.Param;
++import org.openjdk.jmh.annotations.Scope;
++import org.openjdk.jmh.annotations.Setup;
++import org.openjdk.jmh.annotations.State;
++import org.openjdk.jmh.annotations.Warmup;
++
++/**
++ * JMH micro-benchmarks comparing {@link OpenAddressingHashMap} against
++ * {@link java.util.HashMap} across the core operations.
++ *
++ * <p>The {@code impl} parameter selects the implementation under test and
++ * {@code size} the number of entries, so every benchmark runs head-to-head against
++ * the JDK baseline. Run it with the script {@code benchmarks/run.sh} or, with a
++ * Maven build, {@code java -jar target/benchmarks.jar}. All JMH options
++ * (iterations, forks, parameter filters) can be overridden on the command line —
++ * e.g. {@code run.sh -p size=10000 -p impl=OpenAddressing -f 1 -wi 3 -i 5}.
++ */
++@BenchmarkMode(Mode.AverageTime)
++@OutputTimeUnit(TimeUnit.NANOSECONDS)
++@State(Scope.Thread)
++@Warmup(iterations = 5, time = 1)
++@Measurement(iterations = 5, time = 1)
++@Fork(2)
++public class HashMapBenchmark {
++
++    @Param({"10000", "1000000"})
++    public int size;
++
++    @Param({"OpenAddressing", "JdkHashMap"})
++    public String impl;
++
++    /** A map pre-populated with {@code size} entries, for read/iterate benchmarks. */
++    private Map<Integer, Integer> populated;
++
++    /** Keys that are present in {@code populated}, probed in round-robin order. */
++    private Integer[] presentKeys;
++
++    /** Keys that are guaranteed absent, for the lookup-miss benchmark. */
++    private Integer[] absentKeys;
++
++    private int cursor;
++
++    @Setup
++    public void setup() {
++        Random random = new Random(42); // deterministic data set
++        presentKeys = new Integer[size];
++        absentKeys = new Integer[size];
++        populated = newMap();
++        for (int i = 0; i < size; i++) {
++            int key = random.nextInt();
++            presentKeys[i] = key;
++            absentKeys[i] = ~key; // bitwise complement is never equal to key
++            populated.put(key, i);
++        }
++    }
++
++    private Map<Integer, Integer> newMap() {
++        return "OpenAddressing".equals(impl)
++            ? new OpenAddressingHashMap<>()
++            : new HashMap<>();
++    }
++
++    private int nextIndex() {
++        int i = cursor;
++        cursor = (i + 1 == size) ? 0 : i + 1;
++        return i;
++    }
++
++    /** Successful lookup of an existing key. */
++    @Benchmark
++    public Integer getHit() {
++        return populated.get(presentKeys[nextIndex()]);
++    }
++
++    /** Unsuccessful lookup, which walks the probe chain to an empty slot. */
++    @Benchmark
++    public Integer getMiss() {
++        return populated.get(absentKeys[nextIndex()]);
++    }
++
++    /** Build a fresh map by inserting every key (includes the resize cost). */
++    @Benchmark
++    public Map<Integer, Integer> populate() {
++        Map<Integer, Integer> map = newMap();
++        for (int i = 0; i < size; i++) {
++            map.put(presentKeys[i], i);
++        }
++        return map;
++    }
++
++    /** Full iteration over the entry set (exercises the struct-of-arrays scan). */
++    @Benchmark
++    public long iterate() {
++        long sum = 0;
++        for (Map.Entry<Integer, Integer> e : populated.entrySet()) {
++            sum += e.getValue();
++        }
++        return sum;
++    }
++}

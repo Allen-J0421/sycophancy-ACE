@@ -1,0 +1,737 @@
+diff --git a/README.md b/README.md
+index 0c69ccc..f806984 100644
+--- a/README.md
++++ b/README.md
+@@ -36,14 +36,21 @@ java -cp out hashmap.Demo
+ - **Automatic resizing** once occupied slots exceed the load factor (default
+   `0.5`), keeping operations amortized `O(1)` — the original fixed-capacity
+   version looped forever once full.
+-- **Clear API**: `put`, `get`, `getOrDefault`, `remove`, `containsKey`, `size`,
+-  `isEmpty`, `clear`, `forEach`. `null` keys are rejected; `null` values are
+-  allowed and distinguished from absence via `containsKey`/`getOrDefault`.
+-- **A real collection citizen**: implements `Iterable<Entry<K,V>>` (works in
+-  for-each), with `keys()` and `values()` views. Iteration is **fail-fast** — a
+-  structural change mid-iteration throws `ConcurrentModificationException`.
+-- **Value semantics**: `equals`/`hashCode` compare by contents, so two maps with
+-  the same mappings are equal regardless of capacity or insertion order.
++- **Implements `java.util.Map<K, V>`**: a drop-in replacement usable anywhere a
++  `Map` is expected. It extends `AbstractMap` for the standard contracts
++  (`equals`/`hashCode`/`toString`/`putAll`/`keySet`/`values` and the Java 8
++  default methods such as `merge`, `compute`, `putIfAbsent`) but **overrides the
++  hot path** (`get`/`put`/`remove`/`containsKey`/`size`/`clear`) with O(1)
++  implementations so it never falls back to `AbstractMap`'s O(n) defaults.
++- **Live, fail-fast views**: `entrySet()`, `keySet()`, and `values()` reflect and
++  write back to the map (e.g. `keySet().remove(k)` deletes the mapping, and the
++  entry-set iterator supports `remove()`). Structurally modifying the map during
++  iteration throws `ConcurrentModificationException`.
++- **Value semantics**: equality and hash code follow the `Map` contract, so an
++  `OpenAddressingHashMap` compares equal to any other `Map` (e.g. a `TreeMap`)
++  with the same mappings.
++- `null` keys are rejected; `null` values are allowed and distinguished from
++  absence via `containsKey`/`getOrDefault`.
+ 
+ ### A note on what was *not* added
+ 
+diff --git a/src/main/java/hashmap/Demo.java b/src/main/java/hashmap/Demo.java
+index f11e092..7c2a2a1 100644
+--- a/src/main/java/hashmap/Demo.java
++++ b/src/main/java/hashmap/Demo.java
+@@ -1,11 +1,14 @@
+ package hashmap;
+ 
++import java.util.Map;
++import java.util.TreeMap;
++
+ /**
+  * Small command-line demonstration of {@link OpenAddressingHashMap}.
+  *
+  * <p>Mirrors the scenario from the original single-file program (insert, replace,
+  * display, size, delete, lookup) and additionally shows behaviour the original
+- * could not handle: negative keys, string keys, and automatic resizing.
++ * could not handle, plus the standard {@link Map} API it now implements.
+  */
+ public final class Demo {
+ 
+@@ -13,7 +16,7 @@ public final class Demo {
+     }
+ 
+     public static void main(String[] args) {
+-        OpenAddressingHashMap<Integer, Integer> map = new OpenAddressingHashMap<>();
++        Map<Integer, Integer> map = new OpenAddressingHashMap<>();
+ 
+         map.put(1, 1);
+         map.put(2, 2);
+@@ -28,29 +31,37 @@ public final class Demo {
+ 
+         // Capabilities the original int-only, fixed-size version lacked.
+         System.out.println();
+-        OpenAddressingHashMap<String, String> capitals = new OpenAddressingHashMap<>();
++        Map<String, String> capitals = new OpenAddressingHashMap<>();
+         capitals.put("France", "Paris");
+         capitals.put("Japan", "Tokyo");
+         System.out.println("String keys: " + capitals.get("Japan"));
+ 
+-        OpenAddressingHashMap<Integer, Integer> stress = new OpenAddressingHashMap<>(4);
++        Map<Integer, Integer> stress = new OpenAddressingHashMap<>(4);
+         for (int i = -5; i <= 100; i++) {
+             stress.put(i, i * i);
+         }
+         System.out.println("Negative key -5 -> " + stress.get(-5));
+         System.out.println("Resized size: " + stress.size());
+ 
+-        // Iteration over entries.
++        // Standard Map views and iteration.
+         System.out.println();
+-        System.out.println("Iterating capitals:");
+-        for (OpenAddressingHashMap.Entry<String, String> e : capitals) {
++        System.out.println("Iterating capitals via entrySet():");
++        for (Map.Entry<String, String> e : capitals.entrySet()) {
+             System.out.println("  " + e.getKey() + " -> " + e.getValue());
+         }
++        System.out.println("keySet():   " + capitals.keySet());
++        System.out.println("values():   " + capitals.values());
++
++        // Interoperability: equals against any other Map implementation.
++        Map<String, String> other = new TreeMap<>();
++        other.put("Japan", "Tokyo");
++        other.put("France", "Paris");
++        System.out.println("Equals a TreeMap with same mappings: " + capitals.equals(other));
+ 
+-        // Value-based equality, independent of insertion order.
+-        OpenAddressingHashMap<String, String> copy = new OpenAddressingHashMap<>();
+-        copy.put("Japan", "Tokyo");
+-        copy.put("France", "Paris");
+-        System.out.println("Equal to reordered copy: " + capitals.equals(copy));
++        // Constructed directly from another Map, and Map default methods work.
++        Map<String, String> copy = new OpenAddressingHashMap<>(other);
++        copy.putIfAbsent("Germany", "Berlin");
++        copy.merge("Germany", "!", (a, b) -> a + b);
++        System.out.println("Copy with default methods: " + new TreeMap<>(copy));
+     }
+ }
+diff --git a/src/main/java/hashmap/OpenAddressingHashMap.java b/src/main/java/hashmap/OpenAddressingHashMap.java
+index 5c3ed85..065c599 100644
+--- a/src/main/java/hashmap/OpenAddressingHashMap.java
++++ b/src/main/java/hashmap/OpenAddressingHashMap.java
+@@ -1,14 +1,16 @@
+ package hashmap;
+ 
+-import java.util.Arrays;
++import java.util.AbstractMap;
++import java.util.AbstractSet;
+ import java.util.ConcurrentModificationException;
+ import java.util.Iterator;
++import java.util.Map;
+ import java.util.NoSuchElementException;
+ import java.util.Objects;
+-import java.util.function.BiConsumer;
++import java.util.Set;
+ 
+ /**
+- * A hash map implemented with <em>open addressing</em> and <em>linear probing</em>.
++ * A {@link Map} implemented with <em>open addressing</em> and <em>linear probing</em>.
+  *
+  * <p>Keys and values are generic. {@code null} keys are not permitted; {@code null}
+  * values are. Collisions are resolved by scanning forward (with wrap-around) to the
+@@ -19,30 +21,23 @@ import java.util.function.BiConsumer;
+  * <p>The backing table always has a power-of-two length, so the slot index is
+  * computed with a fast bit-mask rather than a modulo. The table grows
+  * automatically once the fraction of occupied slots (live entries plus
+- * tombstones) exceeds the configured load factor, keeping operations amortized
+- * {@code O(1)}.
++ * tombstones) exceeds the configured load factor, keeping {@code get}, {@code put},
++ * and {@code remove} amortized {@code O(1)}.
+  *
+- * <p>The map is {@link Iterable} over its {@link Entry entries}, and also exposes
+- * {@link #keys()} and {@link #values()} views; all three iterate in an unspecified
+- * order and are <em>fail-fast</em> (a structural modification during iteration
+- * triggers a {@link ConcurrentModificationException}). Equality and hash code are
+- * value-based: two maps are equal when they hold the same key/value mappings.
++ * <p>This class extends {@link AbstractMap} so that it inherits the standard
++ * {@code Map} contracts for {@link #equals}, {@link #hashCode}, {@link #toString},
++ * {@link #putAll}, {@link #keySet}, and {@link #values}, while overriding the
++ * hot-path operations with constant-time implementations. The {@link #entrySet()}
++ * view, its iterator, and the derived key/value views are <em>fail-fast</em>:
++ * structurally modifying the map during iteration (other than through the
++ * iterator's own {@code remove}) throws {@link ConcurrentModificationException}.
+  *
+  * <p>This class is <strong>not</strong> thread-safe.
+  *
+  * @param <K> the type of keys maintained by this map
+  * @param <V> the type of mapped values
+  */
+-public final class OpenAddressingHashMap<K, V> implements Iterable<OpenAddressingHashMap.Entry<K, V>> {
+-
+-    /** An immutable, read-only view of a single key/value mapping. */
+-    public interface Entry<K, V> {
+-        /** Returns this mapping's key. */
+-        K getKey();
+-
+-        /** Returns this mapping's value (may be {@code null}). */
+-        V getValue();
+-    }
++public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+ 
+     /** Default initial capacity; must be a power of two. */
+     private static final int DEFAULT_CAPACITY = 16;
+@@ -50,8 +45,11 @@ public final class OpenAddressingHashMap<K, V> implements Iterable<OpenAddressin
+     /** Default fraction of occupied slots that triggers a resize. */
+     private static final double DEFAULT_LOAD_FACTOR = 0.5;
+ 
+-    /** A single table slot. A tombstone is a slot whose {@code key} is {@code null}. */
+-    private static final class Slot<K, V> implements Entry<K, V> {
++    /**
++     * A table slot, which doubles as the {@link Map.Entry} exposed by the
++     * {@code entrySet} view. A tombstone is a slot whose {@code key} is {@code null}.
++     */
++    private static final class Slot<K, V> implements Map.Entry<K, V> {
+         final K key;
+         V value;
+ 
+@@ -73,6 +71,27 @@ public final class OpenAddressingHashMap<K, V> implements Iterable<OpenAddressin
+         public V getValue() {
+             return value;
+         }
++
++        /** Writes the new value through to the live slot, per the {@code Map.Entry} contract. */
++        @Override
++        public V setValue(V newValue) {
++            V old = value;
++            value = newValue;
++            return old;
++        }
++
++        @Override
++        public boolean equals(Object o) {
++            if (!(o instanceof Map.Entry<?, ?> e)) {
++                return false;
++            }
++            return Objects.equals(key, e.getKey()) && Objects.equals(value, e.getValue());
++        }
++
++        @Override
++        public int hashCode() {
++            return (key == null ? 0 : key.hashCode()) ^ (value == null ? 0 : value.hashCode());
++        }
+     }
+ 
+     /** Shared tombstone marker; distinguishable from {@code null} (never used) slots. */
+@@ -126,6 +145,22 @@ public final class OpenAddressingHashMap<K, V> implements Iterable<OpenAddressin
+         this.loadFactor = loadFactor;
+     }
+ 
++    /**
++     * Creates a map containing the mappings of {@code source}, sized to hold them
++     * without resizing.
++     *
++     * @param source the mappings to copy
++     * @throws NullPointerException if {@code source} is {@code null}, or contains a null key
++     */
++    public OpenAddressingHashMap(Map<? extends K, ? extends V> source) {
++        this(Math.max(DEFAULT_CAPACITY, (int) (source.size() / DEFAULT_LOAD_FACTOR) + 1), DEFAULT_LOAD_FACTOR);
++        putAll(source);
++    }
++
++    // ----------------------------------------------------------------------
++    // Constant-time overrides of the AbstractMap defaults
++    // ----------------------------------------------------------------------
++
+     /**
+      * Associates {@code value} with {@code key}, replacing any previous mapping.
+      *
+@@ -134,6 +169,7 @@ public final class OpenAddressingHashMap<K, V> implements Iterable<OpenAddressin
+      * @return the previous value for {@code key}, or {@code null} if there was none
+      * @throws NullPointerException if {@code key} is {@code null}
+      */
++    @Override
+     public V put(K key, V value) {
+         Objects.requireNonNull(key, "key must not be null");
+ 
+@@ -169,51 +205,25 @@ public final class OpenAddressingHashMap<K, V> implements Iterable<OpenAddressin
+         }
+     }
+ 
+-    /**
+-     * Returns the value associated with {@code key}, or {@code null} if none.
+-     *
+-     * <p>Note that a {@code null} return may also mean the key is mapped to
+-     * {@code null}; use {@link #containsKey(Object)} or {@link #getOrDefault} to
+-     * disambiguate.
+-     *
+-     * @param key the key to look up (may be {@code null}, which is never present)
+-     * @return the associated value, or {@code null} if the key is absent
+-     */
+-    public V get(K key) {
++    @Override
++    public V get(Object key) {
+         Slot<K, V> slot = findSlot(key);
+         return slot == null ? null : slot.value;
+     }
+ 
+-    /**
+-     * Returns the value associated with {@code key}, or {@code defaultValue} if the
+-     * key is absent.
+-     *
+-     * @param key          the key to look up
+-     * @param defaultValue the value to return when the key is absent
+-     * @return the mapped value, or {@code defaultValue} if there is no mapping
+-     */
+-    public V getOrDefault(K key, V defaultValue) {
++    @Override
++    public V getOrDefault(Object key, V defaultValue) {
+         Slot<K, V> slot = findSlot(key);
+         return slot == null ? defaultValue : slot.value;
+     }
+ 
+-    /**
+-     * Returns {@code true} if this map contains a mapping for {@code key}.
+-     *
+-     * @param key the key to test (may be {@code null}, which is never present)
+-     * @return whether the key is present
+-     */
+-    public boolean containsKey(K key) {
++    @Override
++    public boolean containsKey(Object key) {
+         return findSlot(key) != null;
+     }
+ 
+-    /**
+-     * Removes the mapping for {@code key} if present.
+-     *
+-     * @param key the key whose mapping should be removed
+-     * @return the value that was associated with {@code key}, or {@code null} if absent
+-     */
+-    public V remove(K key) {
++    @Override
++    public V remove(Object key) {
+         if (key == null) {
+             return null;
+         }
+@@ -235,116 +245,32 @@ public final class OpenAddressingHashMap<K, V> implements Iterable<OpenAddressin
+         }
+     }
+ 
+-    /** Returns the number of live entries in this map. */
++    @Override
+     public int size() {
+         return size;
+     }
+ 
+-    /** Returns {@code true} if this map contains no entries. */
++    @Override
+     public boolean isEmpty() {
+         return size == 0;
+     }
+ 
+-    /** Removes all entries, keeping the current table capacity. */
++    @Override
+     public void clear() {
+-        Arrays.fill(table, null);
++        // Allocate fresh storage so capacity is not bloated by a transient large size.
++        table = newTable(DEFAULT_CAPACITY);
+         size = 0;
+         occupiedSlots = 0;
+         modCount++;
+     }
+ 
+     /**
+-     * Performs {@code action} for every live entry, in unspecified order.
+-     *
+-     * @param action the action to apply to each key/value pair
+-     * @throws NullPointerException if {@code action} is {@code null}
+-     */
+-    public void forEach(BiConsumer<? super K, ? super V> action) {
+-        Objects.requireNonNull(action, "action must not be null");
+-        int expectedModCount = modCount;
+-        for (Slot<K, V> slot : table) {
+-            if (slot != null && !slot.isTombstone()) {
+-                action.accept(slot.key, slot.value);
+-            }
+-        }
+-        if (modCount != expectedModCount) {
+-            throw new ConcurrentModificationException();
+-        }
+-    }
+-
+-    /**
+-     * Returns a fail-fast iterator over the live entries, in unspecified order.
+-     *
+-     * <p>The returned entries are read-only snapshots backed by the map's storage;
+-     * they do not support modification.
++     * Returns a live, fail-fast {@link Set} view of the mappings. The view supports
++     * element removal (which removes the mapping from the map) but not addition.
+      */
+     @Override
+-    public Iterator<Entry<K, V>> iterator() {
+-        return new SlotIterator<>(this);
+-    }
+-
+-    /** Returns an {@link Iterable} view over the keys, in unspecified order. */
+-    public Iterable<K> keys() {
+-        return () -> mapped(Slot::getKey);
+-    }
+-
+-    /** Returns an {@link Iterable} view over the values, in unspecified order. */
+-    public Iterable<V> values() {
+-        return () -> mapped(Slot::getValue);
+-    }
+-
+-    /**
+-     * Compares this map with another for value-based equality: equal if and only if
+-     * the other object is an {@code OpenAddressingHashMap} with exactly the same
+-     * key/value mappings.
+-     */
+-    @Override
+-    public boolean equals(Object o) {
+-        if (o == this) {
+-            return true;
+-        }
+-        if (!(o instanceof OpenAddressingHashMap<?, ?> other)) {
+-            return false;
+-        }
+-        if (other.size != size) {
+-            return false;
+-        }
+-        @SuppressWarnings("unchecked")
+-        OpenAddressingHashMap<Object, Object> raw = (OpenAddressingHashMap<Object, Object>) other;
+-        for (Slot<K, V> slot : table) {
+-            if (slot != null && !slot.isTombstone()) {
+-                if (!raw.containsKey(slot.key) || !Objects.equals(slot.value, raw.get(slot.key))) {
+-                    return false;
+-                }
+-            }
+-        }
+-        return true;
+-    }
+-
+-    /** Returns a value-based hash code consistent with {@link #equals}. */
+-    @Override
+-    public int hashCode() {
+-        int h = 0; // order-independent sum of per-entry hashes
+-        for (Slot<K, V> slot : table) {
+-            if (slot != null && !slot.isTombstone()) {
+-                h += slot.key.hashCode() ^ (slot.value == null ? 0 : slot.value.hashCode());
+-            }
+-        }
+-        return h;
+-    }
+-
+-    @Override
+-    public String toString() {
+-        StringBuilder sb = new StringBuilder("{");
+-        boolean first = true;
+-        for (Entry<K, V> e : this) {
+-            if (!first) {
+-                sb.append(", ");
+-            }
+-            first = false;
+-            sb.append(e.getKey()).append('=').append(e.getValue());
+-        }
+-        return sb.append('}').toString();
++    public Set<Map.Entry<K, V>> entrySet() {
++        return new EntrySet();
+     }
+ 
+     // ----------------------------------------------------------------------
+@@ -352,7 +278,7 @@ public final class OpenAddressingHashMap<K, V> implements Iterable<OpenAddressin
+     // ----------------------------------------------------------------------
+ 
+     /** Locates the live slot for {@code key}, or {@code null} if absent. */
+-    private Slot<K, V> findSlot(K key) {
++    private Slot<K, V> findSlot(Object key) {
+         if (key == null) {
+             return null;
+         }
+@@ -424,43 +350,79 @@ public final class OpenAddressingHashMap<K, V> implements Iterable<OpenAddressin
+         return (n < 0) ? 1 : n + 1;
+     }
+ 
+-    /** Builds a fail-fast iterator that projects each live slot through {@code projection}. */
+-    private <T> Iterator<T> mapped(java.util.function.Function<Slot<K, V>, T> projection) {
+-        SlotIterator<K, V> slots = new SlotIterator<>(this);
+-        return new Iterator<>() {
+-            @Override
+-            public boolean hasNext() {
+-                return slots.hasNext();
++    // ----------------------------------------------------------------------
++    // Views
++    // ----------------------------------------------------------------------
++
++    /** The {@code entrySet} view; key and value views are derived from it by AbstractMap. */
++    private final class EntrySet extends AbstractSet<Map.Entry<K, V>> {
++        @Override
++        public int size() {
++            return size;
++        }
++
++        @Override
++        public void clear() {
++            OpenAddressingHashMap.this.clear();
++        }
++
++        @Override
++        public Iterator<Map.Entry<K, V>> iterator() {
++            return new SlotIterator<>(OpenAddressingHashMap.this);
++        }
++
++        @Override
++        public boolean contains(Object o) {
++            if (!(o instanceof Map.Entry<?, ?> e)) {
++                return false;
+             }
++            Slot<K, V> slot = findSlot(e.getKey());
++            return slot != null && Objects.equals(slot.value, e.getValue());
++        }
+ 
+-            @Override
+-            public T next() {
+-                return projection.apply(slots.nextSlot());
++        @Override
++        public boolean remove(Object o) {
++            if (!(o instanceof Map.Entry<?, ?> e)) {
++                return false;
+             }
+-        };
++            Slot<K, V> slot = findSlot(e.getKey());
++            if (slot != null && Objects.equals(slot.value, e.getValue())) {
++                OpenAddressingHashMap.this.remove(e.getKey());
++                return true;
++            }
++            return false;
++        }
+     }
+ 
+-    /** Fail-fast iterator over live slots, shared by the entry/key/value views. */
+-    private static final class SlotIterator<K, V> implements Iterator<Entry<K, V>> {
++    /** Fail-fast iterator over live slots, supporting {@link #remove()}. */
++    private static final class SlotIterator<K, V> implements Iterator<Map.Entry<K, V>> {
+         private final OpenAddressingHashMap<K, V> map;
+-        private final int expectedModCount;
+-        private int index;
++        private int expectedModCount;
++        private int scan;            // next table index to examine
++        private int nextIndex = -1;  // table index of nextSlot
++        private int lastIndex = -1;  // table index of the last returned slot, for remove()
+         private Slot<K, V> nextSlot;
+ 
+         SlotIterator(OpenAddressingHashMap<K, V> map) {
+             this.map = map;
+             this.expectedModCount = map.modCount;
+-            this.nextSlot = advance();
++            advance();
+         }
+ 
+-        private Slot<K, V> advance() {
+-            while (index < map.table.length) {
+-                Slot<K, V> slot = map.table[index++];
++        private void advance() {
++            Slot<K, V>[] table = map.table;
++            while (scan < table.length) {
++                Slot<K, V> slot = table[scan];
+                 if (slot != null && !slot.isTombstone()) {
+-                    return slot;
++                    nextIndex = scan;
++                    nextSlot = slot;
++                    scan++;
++                    return;
+                 }
++                scan++;
+             }
+-            return null;
++            nextIndex = -1;
++            nextSlot = null;
+         }
+ 
+         @Override
+@@ -469,20 +431,32 @@ public final class OpenAddressingHashMap<K, V> implements Iterable<OpenAddressin
+         }
+ 
+         @Override
+-        public Entry<K, V> next() {
+-            return nextSlot();
+-        }
+-
+-        Slot<K, V> nextSlot() {
++        public Map.Entry<K, V> next() {
+             if (map.modCount != expectedModCount) {
+                 throw new ConcurrentModificationException();
+             }
+             if (nextSlot == null) {
+                 throw new NoSuchElementException();
+             }
++            lastIndex = nextIndex;
+             Slot<K, V> current = nextSlot;
+-            nextSlot = advance();
++            advance();
+             return current;
+         }
++
++        @Override
++        public void remove() {
++            if (lastIndex < 0) {
++                throw new IllegalStateException("next() has not been called, or remove() already called");
++            }
++            if (map.modCount != expectedModCount) {
++                throw new ConcurrentModificationException();
++            }
++            map.table[lastIndex] = map.tombstone();
++            map.size--;
++            map.modCount++;
++            expectedModCount = map.modCount; // stay consistent so iteration may continue
++            lastIndex = -1;
++        }
+     }
+ }
+diff --git a/src/test/java/hashmap/OpenAddressingHashMapTest.java b/src/test/java/hashmap/OpenAddressingHashMapTest.java
+index fe58ecc..b457505 100644
+--- a/src/test/java/hashmap/OpenAddressingHashMapTest.java
++++ b/src/test/java/hashmap/OpenAddressingHashMapTest.java
+@@ -3,8 +3,10 @@ package hashmap;
+ import java.util.ConcurrentModificationException;
+ import java.util.HashMap;
+ import java.util.HashSet;
++import java.util.Iterator;
+ import java.util.Map;
+ import java.util.Set;
++import java.util.TreeMap;
+ 
+ /**
+  * Lightweight, dependency-free test runner for {@link OpenAddressingHashMap}.
+@@ -33,6 +35,11 @@ public final class OpenAddressingHashMapTest {
+         keysAndValuesViews();
+         failFastIteration();
+         valueBasedEqualsAndHashCode();
++        mapInteroperability();
++        viewsAreLive();
++        iteratorRemove();
++        entrySetSetValueWritesThrough();
++        mapDefaultMethods();
+         randomizedAgainstJdkMap();
+ 
+         System.out.printf("%n%d passed, %d failed%n", passed, failed);
+@@ -155,7 +162,7 @@ public final class OpenAddressingHashMapTest {
+         }
+         Set<Integer> seen = new HashSet<>();
+         boolean valuesMatch = true;
+-        for (OpenAddressingHashMap.Entry<Integer, Integer> e : m) {
++        for (Map.Entry<Integer, Integer> e : m.entrySet()) {
+             seen.add(e.getKey());
+             if (e.getValue() != e.getKey() * 10) {
+                 valuesMatch = false;
+@@ -166,29 +173,23 @@ public final class OpenAddressingHashMapTest {
+     }
+ 
+     private static void keysAndValuesViews() {
+-        OpenAddressingHashMap<Integer, Integer> m = new OpenAddressingHashMap<>();
++        Map<Integer, Integer> m = new OpenAddressingHashMap<>();
+         m.put(1, 100);
+         m.put(2, 200);
+         m.put(3, 300);
+-        Set<Integer> keys = new HashSet<>();
+-        for (int k : m.keys()) {
+-            keys.add(k);
+-        }
+-        Set<Integer> vals = new HashSet<>();
+-        for (int v : m.values()) {
+-            vals.add(v);
+-        }
+-        check("keys() view", keys.equals(Set.of(1, 2, 3)));
+-        check("values() view", vals.equals(Set.of(100, 200, 300)));
++        check("keySet() view", new HashSet<>(m.keySet()).equals(Set.of(1, 2, 3)));
++        check("values() view", new HashSet<>(m.values()).equals(Set.of(100, 200, 300)));
++        check("keySet contains is O(1) accurate", m.keySet().contains(2) && !m.keySet().contains(9));
++        check("keySet size", m.keySet().size() == 3);
+     }
+ 
+     private static void failFastIteration() {
+-        OpenAddressingHashMap<Integer, Integer> m = new OpenAddressingHashMap<>();
++        Map<Integer, Integer> m = new OpenAddressingHashMap<>();
+         m.put(1, 1);
+         m.put(2, 2);
+         boolean threw = false;
+         try {
+-            for (OpenAddressingHashMap.Entry<Integer, Integer> e : m) {
++            for (Map.Entry<Integer, Integer> e : m.entrySet()) {
+                 m.put(99, 99); // structural modification mid-iteration
+             }
+         } catch (ConcurrentModificationException expected) {
+@@ -197,6 +198,79 @@ public final class OpenAddressingHashMapTest {
+         check("iteration is fail-fast on structural modification", threw);
+     }
+ 
++    private static void mapInteroperability() {
++        Map<Integer, String> mine = new OpenAddressingHashMap<>();
++        Map<Integer, String> jdk = new TreeMap<>();
++        for (int i = 0; i < 20; i++) {
++            mine.put(i, "v" + i);
++            jdk.put(i, "v" + i);
++        }
++        check("equals a TreeMap with same mappings", mine.equals(jdk));
++        check("TreeMap equals us (symmetric)", jdk.equals(mine));
++        check("hashCode matches the Map contract", mine.hashCode() == jdk.hashCode());
++        check("is a java.util.Map", mine instanceof Map);
++    }
++
++    private static void viewsAreLive() {
++        Map<Integer, Integer> m = new OpenAddressingHashMap<>();
++        m.put(1, 1);
++        m.put(2, 2);
++        m.put(3, 3);
++        // Removing through the keySet view must remove from the map.
++        m.keySet().remove(2);
++        check("keySet().remove writes through", !m.containsKey(2) && m.size() == 2);
++        // Removing through the values view removes a matching entry.
++        m.values().remove(3);
++        check("values().remove writes through", !m.containsValue(3) && m.size() == 1);
++        check("containsValue true", m.containsValue(1));
++        check("containsValue false", !m.containsValue(999));
++    }
++
++    private static void iteratorRemove() {
++        Map<Integer, Integer> m = new OpenAddressingHashMap<>();
++        for (int i = 0; i < 100; i++) {
++            m.put(i, i);
++        }
++        Iterator<Map.Entry<Integer, Integer>> it = m.entrySet().iterator();
++        while (it.hasNext()) {
++            if (it.next().getKey() % 2 == 0) {
++                it.remove();
++            }
++        }
++        boolean onlyOdd = true;
++        for (int k : m.keySet()) {
++            if (k % 2 == 0) {
++                onlyOdd = false;
++            }
++        }
++        check("iterator.remove() drops matching entries", m.size() == 50 && onlyOdd);
++        check("iterator.remove() leaves odd keys reachable", m.get(7) == 7 && m.get(8) == null);
++    }
++
++    private static void entrySetSetValueWritesThrough() {
++        Map<String, Integer> m = new OpenAddressingHashMap<>();
++        m.put("a", 1);
++        for (Map.Entry<String, Integer> e : m.entrySet()) {
++            e.setValue(e.getValue() + 100);
++        }
++        check("Map.Entry.setValue writes through", m.get("a") == 101);
++    }
++
++    private static void mapDefaultMethods() {
++        Map<String, Integer> m = new OpenAddressingHashMap<>();
++        check("putIfAbsent inserts", m.putIfAbsent("a", 1) == null && m.get("a") == 1);
++        check("putIfAbsent keeps existing", m.putIfAbsent("a", 2) == 1 && m.get("a") == 1);
++        m.merge("a", 10, Integer::sum);
++        check("merge combines", m.get("a") == 11);
++        m.compute("a", (k, v) -> v * 2);
++        check("compute updates", m.get("a") == 22);
++        m.computeIfAbsent("b", k -> 5);
++        check("computeIfAbsent inserts", m.get("b") == 5);
++        Map<String, Integer> source = Map.of("x", 1, "y", 2);
++        m.putAll(source);
++        check("putAll copies mappings", m.get("x") == 1 && m.get("y") == 2);
++    }
++
+     private static void valueBasedEqualsAndHashCode() {
+         OpenAddressingHashMap<Integer, String> a = new OpenAddressingHashMap<>(2);
+         OpenAddressingHashMap<Integer, String> b = new OpenAddressingHashMap<>(64);

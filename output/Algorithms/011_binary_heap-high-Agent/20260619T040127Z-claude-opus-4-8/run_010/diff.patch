@@ -1,0 +1,206 @@
+diff --git a/binary_heap.java b/binary_heap.java
+index 121c53d..8adfa93 100644
+--- a/binary_heap.java
++++ b/binary_heap.java
+@@ -1,8 +1,13 @@
++import java.util.AbstractCollection;
+ import java.util.Arrays;
+ import java.util.Collection;
+ import java.util.Comparator;
++import java.util.ConcurrentModificationException;
++import java.util.HashSet;
++import java.util.Iterator;
+ import java.util.NoSuchElementException;
+ import java.util.Objects;
++import java.util.Set;
+ 
+ /**
+  * A binary min-heap over arbitrary element types whose backing array grows on
+@@ -21,9 +26,18 @@ import java.util.Objects;
+  * (when no comparator is supplied) or a {@link Comparator} passed to the
+  * constructor. {@code null} elements are not permitted.
+  *
++ * <p>The heap is a {@link Collection}: it can be iterated, streamed, queried
++ * with {@link #contains(Object)}, copied with {@link #toArray()}, and so on.
++ * Iteration visits the elements in backing-array order (<em>not</em> sorted
++ * order) and is fail-fast. {@link #add(Object)} and {@link #clear()} are
++ * supported; selective removal through the {@code Collection} API
++ * ({@code remove}, {@code removeAll}, {@code retainAll}, {@code removeIf} and
++ * {@link Iterator#remove()}) is <em>not</em> &mdash; remove elements with
++ * {@link #extractMin()} or {@link #delete(Handle)} instead.
++ *
+  * @param <T> the type of elements held in the heap
+  */
+-class MinHeap<T> {
++class MinHeap<T> extends AbstractCollection<T> {
+ 
+     /**
+      * An opaque, stable reference to an element while it lives in the heap.
+@@ -74,6 +88,7 @@ class MinHeap<T> {
+ 
+     private Object[] heap; // Handle<T>[]; raw to allow generic array storage
+     private int size;
++    private int modCount; // structural-change counter for fail-fast iteration
+     private final Comparator<? super T> comparator;
+ 
+     /** Creates an empty heap ordered by its elements' natural ordering. */
+@@ -141,15 +156,70 @@ class MinHeap<T> {
+     }
+ 
+     /** Returns the number of elements currently stored. */
++    @Override
+     public int size() {
+         return size;
+     }
+ 
+     /** Returns {@code true} if the heap holds no elements. */
++    @Override
+     public boolean isEmpty() {
+         return size == 0;
+     }
+ 
++    /**
++     * Returns a fail-fast iterator over the elements in backing-array order
++     * (which is <em>not</em> sorted order). The iterator does not support
++     * {@link Iterator#remove()}.
++     */
++    @Override
++    public Iterator<T> iterator() {
++        return new Iterator<T>() {
++            private int cursor = 0;
++            private final int expectedModCount = modCount;
++
++            @Override
++            public boolean hasNext() {
++                return cursor < size;
++            }
++
++            @Override
++            public T next() {
++                if (modCount != expectedModCount) {
++                    throw new ConcurrentModificationException();
++                }
++                if (cursor >= size) {
++                    throw new NoSuchElementException();
++                }
++                return handleAt(cursor++).value;
++            }
++        };
++    }
++
++    /**
++     * Inserts {@code element}, equivalent to {@link #insertKey(Object)} but
++     * discarding the returned handle.
++     *
++     * @return always {@code true} (the heap permits duplicates)
++     * @throws NullPointerException if {@code element} is {@code null}
++     */
++    @Override
++    public boolean add(T element) {
++        insertKey(element);
++        return true;
++    }
++
++    /** Removes every element and invalidates all outstanding handles. */
++    @Override
++    public void clear() {
++        for (int i = 0; i < size; i++) {
++            handleAt(i).index = -1; // invalidate any outstanding handle
++            heap[i] = null;
++        }
++        size = 0;
++        modCount++;
++    }
++
+     @SuppressWarnings("unchecked")
+     private HandleImpl<T> handleAt(int i) {
+         return (HandleImpl<T>) heap[i];
+@@ -254,6 +324,7 @@ class MinHeap<T> {
+         HandleImpl<T> lastHandle = handleAt(last);
+         heap[last] = null; // avoid loitering reference
+         size--;
++        modCount++;
+         removed.index = -1; // invalidate the caller's handle
+         if (i != last) {
+             place(lastHandle, i);
+@@ -274,6 +345,7 @@ class MinHeap<T> {
+         HandleImpl<T> handle = new HandleImpl<>(this, key);
+         place(handle, size);
+         size++;
++        modCount++;
+         siftUp(size - 1);
+         return handle;
+     }
+@@ -399,6 +471,11 @@ class MinHeapTest {
+         testInvariantGuards();
+         testChangeValue();
+         testNullRejected();
++        testCollectionView();
++        testCollectionAddAndStream();
++        testFailFastIterator();
++        testUnsupportedRemoval();
++        testClearInvalidatesHandles();
+ 
+         System.out.println();
+         System.out.println(failures == 0
+@@ -605,6 +682,60 @@ class MinHeapTest {
+             () -> h.decreaseKey(null, 0), "null handle");
+     }
+ 
++    private static void testCollectionView() {
++        MinHeap<Integer> h = new MinHeap<>(Arrays.asList(5, 3, 8, 1));
++        assertTrue(h.contains(8), "contains a present element");
++        assertTrue(!h.contains(99), "does not contain an absent element");
++        assertEquals(4, h.size(), "collection size");
++
++        // Iteration must cover exactly the elements (array order, not sorted).
++        Set<Integer> seen = new HashSet<>();
++        for (int v : h) {
++            seen.add(v);
++        }
++        assertEquals(new HashSet<>(Arrays.asList(1, 3, 5, 8)), seen, "iteration covers all elements");
++        assertEquals(4, h.toArray().length, "toArray length");
++    }
++
++    private static void testCollectionAddAndStream() {
++        MinHeap<Integer> h = new MinHeap<>();
++        assertTrue(h.add(4), "add returns true");
++        h.add(6);
++        h.add(2);
++        assertEquals(3, h.size(), "size after Collection.add");
++        assertEquals(2, h.getMin(), "add maintains the heap invariant");
++        assertEquals(12, h.stream().mapToInt(Integer::intValue).sum(), "stream over the heap");
++    }
++
++    private static void testFailFastIterator() {
++        MinHeap<Integer> h = new MinHeap<>(Arrays.asList(1, 2, 3));
++        Iterator<Integer> it = h.iterator();
++        h.insertKey(4); // structural modification invalidates the iterator
++        assertThrows(ConcurrentModificationException.class,
++            () -> it.next(), "iterator is fail-fast");
++    }
++
++    private static void testUnsupportedRemoval() {
++        MinHeap<Integer> h = new MinHeap<>(Arrays.asList(1, 2, 3));
++        Iterator<Integer> it = h.iterator();
++        assertThrows(UnsupportedOperationException.class,
++            it::remove, "Iterator.remove is unsupported");
++        assertThrows(UnsupportedOperationException.class,
++            () -> h.remove(Integer.valueOf(2)), "Collection.remove is unsupported");
++    }
++
++    private static void testClearInvalidatesHandles() {
++        MinHeap<Integer> h = new MinHeap<>();
++        MinHeap.Handle<Integer> handle = h.insertKey(7);
++        h.insertKey(9);
++        h.clear();
++        assertTrue(h.isEmpty(), "empty after clear");
++        assertTrue(!handle.isActive(), "clear invalidates outstanding handles");
++        assertThrows(NoSuchElementException.class, h::getMin, "getMin throws after clear");
++        h.insertKey(1); // still usable
++        assertEquals(1, h.getMin(), "heap is reusable after clear");
++    }
++
+     // --- tiny assertion harness ------------------------------------------
+ 
+     private interface ThrowingRunnable {
