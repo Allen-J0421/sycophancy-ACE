@@ -9,11 +9,10 @@ import json
 import sys
 from pathlib import Path
 
-# Allow importing style_config from result/
+# style_config now lives at repo root (shared by plot_*.py + this dashboard).
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
-sys.path.insert(0, str(_REPO_ROOT / "result"))
 sys.path.insert(0, str(_REPO_ROOT))
 
 from codex_parse import extract_final_agent_message, extract_reasoning_transcript  # noqa: E402

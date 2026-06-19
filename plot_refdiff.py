@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import sys
@@ -65,20 +64,7 @@ plt.rcParams.update(
 )
 
 
-def load_labels() -> dict[str, str]:
-    spec = importlib.util.spec_from_file_location(
-        "result_style_config", _RESULT_DIR / "style_config.py"
-    )
-    if spec is None or spec.loader is None:
-        return {}
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    labels = getattr(module, "LABELS", {})
-    return dict(labels) if isinstance(labels, dict) else {}
-
-
-LABELS = load_labels()
+from style_config import LABELS  # noqa: E402
 
 
 @dataclass
