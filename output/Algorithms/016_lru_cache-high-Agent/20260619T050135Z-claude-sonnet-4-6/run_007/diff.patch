@@ -1,0 +1,91 @@
+diff --git a/lru_cache.java b/lru_cache.java
+index 9f323db..2ae11b6 100644
+--- a/lru_cache.java
++++ b/lru_cache.java
+@@ -1,6 +1,7 @@
+ import java.util.LinkedHashMap;
+ import java.util.Map;
+ import java.util.Optional;
++import java.util.function.BiConsumer;
+ import java.util.function.Function;
+ 
+ interface Cache<K, V> {
+@@ -34,29 +35,39 @@ class LRUCache<K, V> implements Cache<K, V> {
+     private static class EvictingLinkedHashMap<K, V> extends LinkedHashMap<K, V> {
+         private static final long serialVersionUID = 1L;
+         private final int capacity;
++        private final BiConsumer<K, V> onEviction;
+ 
+-        EvictingLinkedHashMap(int capacity) {
++        EvictingLinkedHashMap(int capacity, BiConsumer<K, V> onEviction) {
+             super(capacity + 1, 0.75f, true);
+             this.capacity = capacity;
++            this.onEviction = onEviction;
+         }
+ 
+         @Override
+         protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+-            return size() > capacity;
++            if (size() > capacity) {
++                onEviction.accept(eldest.getKey(), eldest.getValue());
++                return true;
++            }
++            return false;
+         }
+     }
+ 
+     private final Map<K, V> store;
+ 
+-    private LRUCache(int capacity) {
+-        this.store = new EvictingLinkedHashMap<>(capacity);
++    private LRUCache(int capacity, BiConsumer<K, V> onEviction) {
++        this.store = new EvictingLinkedHashMap<>(capacity, onEviction);
+     }
+ 
+     static <K, V> LRUCache<K, V> create(int capacity) {
++        return create(capacity, (k, v) -> {});
++    }
++
++    static <K, V> LRUCache<K, V> create(int capacity, BiConsumer<K, V> onEviction) {
+         if (capacity <= 0) {
+             throw new IllegalArgumentException("Capacity must be positive, got: " + capacity);
+         }
+-        return new LRUCache<>(capacity);
++        return new LRUCache<>(capacity, onEviction);
+     }
+ 
+     @Override
+@@ -109,14 +120,12 @@ class SynchronizedCache<K, V> implements Cache<K, V> {
+     @Override public synchronized void clear()                    { delegate.clear(); }
+     @Override public synchronized int size()                      { return delegate.size(); }
+ 
+-    // Overridden to hold the lock across all three steps of the default implementation,
+-    // making the check-then-act sequence atomic.
++    // Delegates to the default implementation; synchronized here holds the lock across
++    // all three steps (containsKey → put → get), making the sequence atomic.
++    // Java's reentrant monitors allow the nested synchronized calls to re-enter safely.
+     @Override
+     public synchronized V computeIfAbsent(K key, Function<? super K, ? extends V> loader) {
+-        if (!containsKey(key)) {
+-            put(key, loader.apply(key));
+-        }
+-        return get(key).orElse(null);
++        return Cache.super.computeIfAbsent(key, loader);
+     }
+ }
+ 
+@@ -148,6 +157,14 @@ class Main {
+         cache.clear();
+         System.out.println(cache.isEmpty());           // true
+ 
++        // Eviction listener: called whenever an entry is displaced
++        Cache<Integer, Integer> tracked = LRUCache.create(2,
++            (k, v) -> System.out.println("evicted: " + k + "=" + v));
++        tracked.put(1, 10);
++        tracked.put(2, 20);
++        tracked.put(3, 30); // evicts 1=10
++        tracked.put(4, 40); // evicts 2=20
++
+         // Thread-safe wrapper: same Cache interface, synchronized operations
+         Cache<String, String> safe = SynchronizedCache.wrap(LRUCache.create(3));
+         safe.put("a", "apple");

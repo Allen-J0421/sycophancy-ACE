@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -80,7 +81,10 @@ def discover_dashboards(result_dir: Path) -> list[dict]:
             built.append(
                 {
                     "id": exp_dir.name,
-                    "href": f"result/{exp_dir.name}/dashboard.html",
+                    # href is relative to index.html (repo root); point at the
+                    # dashboard's real location (e.g. output/Algorithms/<exp>/…),
+                    # not a hardcoded result/ prefix.
+                    "href": os.path.relpath(dashboard_path, _REPO_ROOT),
                     "title": repo.replace("_", " "),
                     "subtitle": " · ".join(subtitle_parts) + f" · Updated {format_updated(updated)}",
                     "updated": updated,
@@ -97,7 +101,7 @@ def discover_dashboards(result_dir: Path) -> list[dict]:
                 }
             )
 
-    built.sort(key=lambda x: x["updated"], reverse=True)
+    built.sort(key=lambda x: x["id"])
     pending.sort(key=lambda x: x["id"])
     return built + pending
 

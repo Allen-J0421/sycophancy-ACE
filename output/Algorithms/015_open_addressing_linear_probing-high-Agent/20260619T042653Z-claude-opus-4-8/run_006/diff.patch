@@ -1,0 +1,543 @@
+diff --git a/README.md b/README.md
+index f806984..9e0f47c 100644
+--- a/README.md
++++ b/README.md
+@@ -29,6 +29,13 @@ java -cp out hashmap.Demo
+ ## Design notes
+ 
+ - **Generic** `OpenAddressingHashMap<K, V>` rather than fixed `int → int`.
++- **Struct-of-arrays storage**: entries live in two parallel arrays (`keys` and
++  `values`) instead of an array of per-entry node objects. This removes a level
++  of indirection (no node to allocate or dereference) and improves locality — a
++  probe scans the contiguous `keys` array and only reads `values` once a key
++  matches. Slot state is encoded in `keys` itself: `null` = empty, a private
++  sentinel = tombstone, anything else = live; so occupancy depends only on the
++  key, and a live entry may hold a `null` value.
+ - **Power-of-two table** with a spread hash, so the slot index is a bit-mask
+   (`h & (len - 1)`) and negative hash codes are handled correctly.
+ - **Tombstones** mark deleted slots so probe chains stay intact; they are
+@@ -52,6 +59,21 @@ java -cp out hashmap.Demo
+ - `null` keys are rejected; `null` values are allowed and distinguished from
+   absence via `containsKey`/`getOrDefault`.
+ 
++### A note on performance, honestly
++
++The struct-of-arrays layout removes the per-entry node object and the pointer
++chase that comes with it, and keeps the probe loop scanning a single dense array.
++Those are real wins. But two caveats are worth stating plainly:
++
++- For **reference-typed** keys and values (the only thing Java generics allow),
++  the arrays still hold references, not inlined data, so the cache-locality
++  benefit is smaller than in a language with value types. The largest SoA gains
++  would come from **primitive specialization** (e.g. an `int`-keyed variant with
++  an `int[]`), which generics cannot express.
++- No microbenchmark is included, because a credible one needs JMH (warm-up, dead-
++  code elimination, etc.); ad-hoc timing loops would be misleading. Treat the
++  improvement as architectural, not as a measured speedup.
++
+ ### A note on what was *not* added
+ 
+ The probing scheme is intentionally **not** abstracted behind a pluggable
+diff --git a/src/main/java/hashmap/OpenAddressingHashMap.java b/src/main/java/hashmap/OpenAddressingHashMap.java
+index 065c599..9d774df 100644
+--- a/src/main/java/hashmap/OpenAddressingHashMap.java
++++ b/src/main/java/hashmap/OpenAddressingHashMap.java
+@@ -10,19 +10,27 @@ import java.util.Objects;
+ import java.util.Set;
+ 
+ /**
+- * A {@link Map} implemented with <em>open addressing</em> and <em>linear probing</em>.
++ * A {@link Map} implemented with <em>open addressing</em>, <em>linear probing</em>,
++ * and a <em>struct-of-arrays</em> storage layout.
++ *
++ * <p>Rather than storing one wrapper object per entry, the table is held as two
++ * parallel arrays &mdash; {@code keys} and {@code values}. This removes a level of
++ * indirection (there is no per-entry node object to allocate or dereference) and
++ * improves locality: a probe scans the contiguous {@code keys} array and only
++ * touches {@code values} once a key actually matches. A slot's state is encoded in
++ * the {@code keys} array itself: {@code null} marks an unused slot, a private
++ * {@link #TOMBSTONE} sentinel marks a deleted slot, and any other reference marks a
++ * live entry. Because occupancy is determined entirely by {@code keys}, a live
++ * entry may freely have a {@code null} value.
+  *
+  * <p>Keys and values are generic. {@code null} keys are not permitted; {@code null}
+  * values are. Collisions are resolved by scanning forward (with wrap-around) to the
+- * next free slot. Deleted slots are marked with <em>tombstones</em> so that probe
+- * sequences are not broken; tombstones are reclaimed during insertion and cleared
+- * on the next resize.
+- *
+- * <p>The backing table always has a power-of-two length, so the slot index is
+- * computed with a fast bit-mask rather than a modulo. The table grows
+- * automatically once the fraction of occupied slots (live entries plus
+- * tombstones) exceeds the configured load factor, keeping {@code get}, {@code put},
+- * and {@code remove} amortized {@code O(1)}.
++ * next free slot. Tombstones keep probe sequences intact; they are reclaimed during
++ * insertion and cleared on the next resize. The table length is always a power of
++ * two, so the slot index is a bit-mask rather than a modulo, and the table grows
++ * once the fraction of occupied slots (live entries plus tombstones) exceeds the
++ * configured load factor, keeping {@code get}/{@code put}/{@code remove} amortized
++ * {@code O(1)}.
+  *
+  * <p>This class extends {@link AbstractMap} so that it inherits the standard
+  * {@code Map} contracts for {@link #equals}, {@link #hashCode}, {@link #toString},
+@@ -45,59 +53,12 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+     /** Default fraction of occupied slots that triggers a resize. */
+     private static final double DEFAULT_LOAD_FACTOR = 0.5;
+ 
+-    /**
+-     * A table slot, which doubles as the {@link Map.Entry} exposed by the
+-     * {@code entrySet} view. A tombstone is a slot whose {@code key} is {@code null}.
+-     */
+-    private static final class Slot<K, V> implements Map.Entry<K, V> {
+-        final K key;
+-        V value;
+-
+-        Slot(K key, V value) {
+-            this.key = key;
+-            this.value = value;
+-        }
++    /** Sentinel stored in {@code keys} to mark a deleted slot, distinct from {@code null}. */
++    private static final Object TOMBSTONE = new Object();
+ 
+-        boolean isTombstone() {
+-            return key == null;
+-        }
+-
+-        @Override
+-        public K getKey() {
+-            return key;
+-        }
+-
+-        @Override
+-        public V getValue() {
+-            return value;
+-        }
+-
+-        /** Writes the new value through to the live slot, per the {@code Map.Entry} contract. */
+-        @Override
+-        public V setValue(V newValue) {
+-            V old = value;
+-            value = newValue;
+-            return old;
+-        }
+-
+-        @Override
+-        public boolean equals(Object o) {
+-            if (!(o instanceof Map.Entry<?, ?> e)) {
+-                return false;
+-            }
+-            return Objects.equals(key, e.getKey()) && Objects.equals(value, e.getValue());
+-        }
+-
+-        @Override
+-        public int hashCode() {
+-            return (key == null ? 0 : key.hashCode()) ^ (value == null ? 0 : value.hashCode());
+-        }
+-    }
+-
+-    /** Shared tombstone marker; distinguishable from {@code null} (never used) slots. */
+-    private static final Slot<?, ?> TOMBSTONE = new Slot<>(null, null);
+-
+-    private Slot<K, V>[] table;
++    /** Parallel storage: {@code keys[i]} and {@code values[i]} form one entry. */
++    private Object[] keys;
++    private Object[] values;
+ 
+     /** Number of live (non-tombstone) entries. */
+     private int size;
+@@ -141,7 +102,9 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+         if (!(loadFactor > 0.0 && loadFactor < 1.0) || Double.isNaN(loadFactor)) {
+             throw new IllegalArgumentException("loadFactor must be in (0, 1): " + loadFactor);
+         }
+-        this.table = newTable(tableSizeFor(initialCapacity));
++        int capacity = tableSizeFor(initialCapacity);
++        this.keys = new Object[capacity];
++        this.values = new Object[capacity];
+         this.loadFactor = loadFactor;
+     }
+ 
+@@ -170,35 +133,37 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+      * @throws NullPointerException if {@code key} is {@code null}
+      */
+     @Override
++    @SuppressWarnings("unchecked")
+     public V put(K key, V value) {
+         Objects.requireNonNull(key, "key must not be null");
+ 
+-        if (occupiedSlots + 1 > table.length * loadFactor) {
+-            resize(table.length * 2);
++        if (occupiedSlots + 1 > keys.length * loadFactor) {
++            resize(keys.length * 2);
+         }
+ 
+         int firstTombstone = -1;
+-        int index = indexFor(key, table.length);
++        int index = indexFor(key, keys.length);
+         while (true) {
+-            Slot<K, V> slot = table[index];
+-            if (slot == null) {
++            Object k = keys[index];
++            if (k == null) {
+                 // Reuse the earliest tombstone seen on the probe path, if any.
+                 int target = (firstTombstone >= 0) ? firstTombstone : index;
+                 if (firstTombstone < 0) {
+                     occupiedSlots++;
+                 }
+-                table[target] = new Slot<>(key, value);
++                keys[target] = key;
++                values[target] = value;
+                 size++;
+                 modCount++;
+                 return null;
+             }
+-            if (slot.isTombstone()) {
++            if (k == TOMBSTONE) {
+                 if (firstTombstone < 0) {
+                     firstTombstone = index;
+                 }
+-            } else if (slot.key.equals(key)) {
+-                V previous = slot.value;
+-                slot.value = value;
++            } else if (k.equals(key)) {
++                V previous = (V) values[index];
++                values[index] = value;
+                 return previous; // value replacement is not a structural modification
+             }
+             index = next(index);
+@@ -206,36 +171,40 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+     }
+ 
+     @Override
++    @SuppressWarnings("unchecked")
+     public V get(Object key) {
+-        Slot<K, V> slot = findSlot(key);
+-        return slot == null ? null : slot.value;
++        int index = findIndex(key);
++        return index < 0 ? null : (V) values[index];
+     }
+ 
+     @Override
++    @SuppressWarnings("unchecked")
+     public V getOrDefault(Object key, V defaultValue) {
+-        Slot<K, V> slot = findSlot(key);
+-        return slot == null ? defaultValue : slot.value;
++        int index = findIndex(key);
++        return index < 0 ? defaultValue : (V) values[index];
+     }
+ 
+     @Override
+     public boolean containsKey(Object key) {
+-        return findSlot(key) != null;
++        return findIndex(key) >= 0;
+     }
+ 
+     @Override
++    @SuppressWarnings("unchecked")
+     public V remove(Object key) {
+         if (key == null) {
+             return null;
+         }
+-        int index = indexFor(key, table.length);
++        int index = indexFor(key, keys.length);
+         while (true) {
+-            Slot<K, V> slot = table[index];
+-            if (slot == null) {
++            Object k = keys[index];
++            if (k == null) {
+                 return null;
+             }
+-            if (!slot.isTombstone() && slot.key.equals(key)) {
+-                V previous = slot.value;
+-                table[index] = tombstone();
++            if (k != TOMBSTONE && k.equals(key)) {
++                V previous = (V) values[index];
++                keys[index] = TOMBSTONE;
++                values[index] = null; // release the value for GC
+                 size--;
+                 modCount++;
+                 // occupiedSlots is unchanged: the tombstone still occupies the slot.
+@@ -258,7 +227,8 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+     @Override
+     public void clear() {
+         // Allocate fresh storage so capacity is not bloated by a transient large size.
+-        table = newTable(DEFAULT_CAPACITY);
++        keys = new Object[DEFAULT_CAPACITY];
++        values = new Object[DEFAULT_CAPACITY];
+         size = 0;
+         occupiedSlots = 0;
+         modCount++;
+@@ -277,24 +247,30 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+     // Internal helpers
+     // ----------------------------------------------------------------------
+ 
+-    /** Locates the live slot for {@code key}, or {@code null} if absent. */
+-    private Slot<K, V> findSlot(Object key) {
++    /** Returns the index of the live slot for {@code key}, or {@code -1} if absent. */
++    private int findIndex(Object key) {
+         if (key == null) {
+-            return null;
++            return -1;
+         }
+-        int index = indexFor(key, table.length);
++        int index = indexFor(key, keys.length);
+         while (true) {
+-            Slot<K, V> slot = table[index];
+-            if (slot == null) {
+-                return null;
++            Object k = keys[index];
++            if (k == null) {
++                return -1;
+             }
+-            if (!slot.isTombstone() && slot.key.equals(key)) {
+-                return slot;
++            if (k != TOMBSTONE && k.equals(key)) {
++                return index;
+             }
+             index = next(index);
+         }
+     }
+ 
++    /** Returns whether slot {@code i} holds a live entry. */
++    private boolean isLive(int i) {
++        Object k = keys[i];
++        return k != null && k != TOMBSTONE;
++    }
++
+     /** Computes the home slot for {@code key} in a table of {@code length} slots. */
+     private static int indexFor(Object key, int length) {
+         int h = key.hashCode();
+@@ -304,44 +280,38 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+ 
+     /** Returns the next slot index, wrapping around the power-of-two table. */
+     private int next(int index) {
+-        return (index + 1) & (table.length - 1);
+-    }
+-
+-    @SuppressWarnings("unchecked")
+-    private Slot<K, V> tombstone() {
+-        return (Slot<K, V>) TOMBSTONE;
+-    }
+-
+-    @SuppressWarnings("unchecked")
+-    private Slot<K, V>[] newTable(int capacity) {
+-        return (Slot<K, V>[]) new Slot[capacity];
++        return (index + 1) & (keys.length - 1);
+     }
+ 
+     /** Rebuilds the table at {@code newCapacity}, dropping tombstones. */
+     private void resize(int newCapacity) {
+-        Slot<K, V>[] old = table;
+-        table = newTable(newCapacity);
++        Object[] oldKeys = keys;
++        Object[] oldValues = values;
++        keys = new Object[newCapacity];
++        values = new Object[newCapacity];
+         occupiedSlots = 0;
+         // size is unchanged: every live slot is re-placed exactly once.
+-        for (Slot<K, V> slot : old) {
+-            if (slot != null && !slot.isTombstone()) {
+-                placeKnownAbsent(slot);
++        for (int i = 0; i < oldKeys.length; i++) {
++            Object k = oldKeys[i];
++            if (k != null && k != TOMBSTONE) {
++                placeKnownAbsent(k, oldValues[i]);
+                 occupiedSlots++;
+             }
+         }
+     }
+ 
+     /**
+-     * Places a slot known to be unique into the current table. Used only by
++     * Places an entry known to be unique into the current table. Used only by
+      * {@link #resize}, where there are no duplicates and no tombstones, so the
+      * first {@code null} encountered is the destination.
+      */
+-    private void placeKnownAbsent(Slot<K, V> slot) {
+-        int index = indexFor(slot.key, table.length);
+-        while (table[index] != null) {
++    private void placeKnownAbsent(Object key, Object value) {
++        int index = indexFor(key, keys.length);
++        while (keys[index] != null) {
+             index = next(index);
+         }
+-        table[index] = slot;
++        keys[index] = key;
++        values[index] = value;
+     }
+ 
+     /** Rounds {@code cap} up to the nearest power of two (at least 1). */
+@@ -354,6 +324,57 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+     // Views
+     // ----------------------------------------------------------------------
+ 
++    /**
++     * A {@link Map.Entry} backed by a table index. {@code getValue}/{@code setValue}
++     * read and write {@code values[index]} directly, so the entry stays in sync with
++     * the map (writes are visible to the map, per the {@code Map.Entry} contract).
++     * The key is captured at construction, since a live slot's key never changes
++     * while the slot remains live.
++     */
++    private final class IndexEntry implements Map.Entry<K, V> {
++        private final int index;
++        private final K key;
++
++        @SuppressWarnings("unchecked")
++        IndexEntry(int index) {
++            this.index = index;
++            this.key = (K) keys[index];
++        }
++
++        @Override
++        public K getKey() {
++            return key;
++        }
++
++        @Override
++        @SuppressWarnings("unchecked")
++        public V getValue() {
++            return (V) values[index];
++        }
++
++        @Override
++        @SuppressWarnings("unchecked")
++        public V setValue(V newValue) {
++            V old = (V) values[index];
++            values[index] = newValue;
++            return old;
++        }
++
++        @Override
++        public boolean equals(Object o) {
++            if (!(o instanceof Map.Entry<?, ?> e)) {
++                return false;
++            }
++            return Objects.equals(key, e.getKey()) && Objects.equals(getValue(), e.getValue());
++        }
++
++        @Override
++        public int hashCode() {
++            V value = getValue();
++            return (key == null ? 0 : key.hashCode()) ^ (value == null ? 0 : value.hashCode());
++        }
++    }
++
+     /** The {@code entrySet} view; key and value views are derived from it by AbstractMap. */
+     private final class EntrySet extends AbstractSet<Map.Entry<K, V>> {
+         @Override
+@@ -368,7 +389,7 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+ 
+         @Override
+         public Iterator<Map.Entry<K, V>> iterator() {
+-            return new SlotIterator<>(OpenAddressingHashMap.this);
++            return new EntryIterator();
+         }
+ 
+         @Override
+@@ -376,8 +397,8 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+             if (!(o instanceof Map.Entry<?, ?> e)) {
+                 return false;
+             }
+-            Slot<K, V> slot = findSlot(e.getKey());
+-            return slot != null && Objects.equals(slot.value, e.getValue());
++            int index = findIndex(e.getKey());
++            return index >= 0 && Objects.equals(values[index], e.getValue());
+         }
+ 
+         @Override
+@@ -385,8 +406,8 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+             if (!(o instanceof Map.Entry<?, ?> e)) {
+                 return false;
+             }
+-            Slot<K, V> slot = findSlot(e.getKey());
+-            if (slot != null && Objects.equals(slot.value, e.getValue())) {
++            int index = findIndex(e.getKey());
++            if (index >= 0 && Objects.equals(values[index], e.getValue())) {
+                 OpenAddressingHashMap.this.remove(e.getKey());
+                 return true;
+             }
+@@ -395,53 +416,44 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+     }
+ 
+     /** Fail-fast iterator over live slots, supporting {@link #remove()}. */
+-    private static final class SlotIterator<K, V> implements Iterator<Map.Entry<K, V>> {
+-        private final OpenAddressingHashMap<K, V> map;
+-        private int expectedModCount;
++    private final class EntryIterator implements Iterator<Map.Entry<K, V>> {
++        private int expectedModCount = modCount;
+         private int scan;            // next table index to examine
+-        private int nextIndex = -1;  // table index of nextSlot
++        private int nextIndex = -1;  // table index of the next live slot, or -1
+         private int lastIndex = -1;  // table index of the last returned slot, for remove()
+-        private Slot<K, V> nextSlot;
+ 
+-        SlotIterator(OpenAddressingHashMap<K, V> map) {
+-            this.map = map;
+-            this.expectedModCount = map.modCount;
++        EntryIterator() {
+             advance();
+         }
+ 
+         private void advance() {
+-            Slot<K, V>[] table = map.table;
+-            while (scan < table.length) {
+-                Slot<K, V> slot = table[scan];
+-                if (slot != null && !slot.isTombstone()) {
+-                    nextIndex = scan;
+-                    nextSlot = slot;
+-                    scan++;
++            while (scan < keys.length) {
++                if (isLive(scan)) {
++                    nextIndex = scan++;
+                     return;
+                 }
+                 scan++;
+             }
+             nextIndex = -1;
+-            nextSlot = null;
+         }
+ 
+         @Override
+         public boolean hasNext() {
+-            return nextSlot != null;
++            return nextIndex >= 0;
+         }
+ 
+         @Override
+         public Map.Entry<K, V> next() {
+-            if (map.modCount != expectedModCount) {
++            if (modCount != expectedModCount) {
+                 throw new ConcurrentModificationException();
+             }
+-            if (nextSlot == null) {
++            if (nextIndex < 0) {
+                 throw new NoSuchElementException();
+             }
+             lastIndex = nextIndex;
+-            Slot<K, V> current = nextSlot;
++            Map.Entry<K, V> entry = new IndexEntry(lastIndex);
+             advance();
+-            return current;
++            return entry;
+         }
+ 
+         @Override
+@@ -449,13 +461,14 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+             if (lastIndex < 0) {
+                 throw new IllegalStateException("next() has not been called, or remove() already called");
+             }
+-            if (map.modCount != expectedModCount) {
++            if (modCount != expectedModCount) {
+                 throw new ConcurrentModificationException();
+             }
+-            map.table[lastIndex] = map.tombstone();
+-            map.size--;
+-            map.modCount++;
+-            expectedModCount = map.modCount; // stay consistent so iteration may continue
++            keys[lastIndex] = TOMBSTONE;
++            values[lastIndex] = null;
++            size--;
++            modCount++;
++            expectedModCount = modCount; // stay consistent so iteration may continue
+             lastIndex = -1;
+         }
+     }

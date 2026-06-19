@@ -1,0 +1,98 @@
+diff --git a/lru_cache.java b/lru_cache.java
+index 30de9a2..42b8193 100644
+--- a/lru_cache.java
++++ b/lru_cache.java
+@@ -82,7 +82,7 @@ class LRUCache<K, V> implements Cache<K, V> {
+     }
+ 
+     @Override public Optional<V> get(K key)     { return Optional.ofNullable(store.get(key)); }
+-    @Override public void put(K key, V value)   { store.put(key, value); }
++    @Override public void put(K key, V value)   { store.put(key, Objects.requireNonNull(value, "null values are not supported")); }
+     @Override public boolean containsKey(K key) { return store.containsKey(key); }
+     @Override public void invalidate(K key)     { store.remove(key); }
+     @Override public void clear()               { store.clear(); }
+@@ -123,10 +123,61 @@ class SynchronizedCache<K, V> implements Cache<K, V> {
+     }
+ }
+ 
++class StatsCache<K, V> implements Cache<K, V> {
++
++    private final Cache<K, V> delegate;
++    private long hits;
++    private long misses;
++
++    private StatsCache(Cache<K, V> delegate) {
++        this.delegate = delegate;
++    }
++
++    static <K, V> StatsCache<K, V> wrap(Cache<K, V> delegate) {
++        Objects.requireNonNull(delegate, "delegate");
++        return new StatsCache<>(delegate);
++    }
++
++    long hits()   { return hits; }
++    long misses() { return misses; }
++
++    double hitRate() {
++        long total = hits + misses;
++        return total == 0 ? 0.0 : (double) hits / total;
++    }
++
++    @Override
++    public Optional<V> get(K key) {
++        Optional<V> result = delegate.get(key);
++        if (result.isPresent()) hits++; else misses++;
++        return result;
++    }
++
++    // Overridden so stats are counted once per logical lookup, not once per internal
++    // get() call. Uses delegate methods directly to bypass this.get()'s accounting.
++    @Override
++    public V computeIfAbsent(K key, Function<? super K, ? extends V> loader) {
++        if (delegate.containsKey(key)) {
++            hits++;
++        } else {
++            misses++;
++            delegate.put(key, loader.apply(key));
++        }
++        return delegate.get(key).orElse(null);
++    }
++
++    @Override public void put(K key, V value)        { delegate.put(key, value); }
++    @Override public boolean containsKey(K key)      { return delegate.containsKey(key); }
++    @Override public void invalidate(K key)          { delegate.invalidate(key); }
++    @Override public void clear()                    { delegate.clear(); }
++    @Override public int size()                      { return delegate.size(); }
++}
++
+ class Main {
+     public static void main(String[] args) {
+         demonstrateEviction();
+         demonstrateEvictionListener();
++        demonstrateStats();
+         demonstrateSynchronizedWrapper();
+     }
+ 
+@@ -166,6 +217,22 @@ class Main {
+         tracked.put(4, 40); // evicts 2=20
+     }
+ 
++    private static void demonstrateStats() {
++        StatsCache<String, Integer> stats = StatsCache.wrap(LRUCache.create(3));
++        stats.put("a", 1);
++        stats.put("b", 2);
++
++        stats.get("a");              // hit
++        stats.get("a");              // hit
++        stats.get("missing");        // miss
++        stats.computeIfAbsent("b", k -> 99);  // hit  (loader skipped)
++        stats.computeIfAbsent("c", k -> 3);   // miss (loader runs)
++
++        System.out.println("hits="    + stats.hits());    // 3
++        System.out.println("misses="  + stats.misses());  // 2
++        System.out.printf( "hitRate=%.2f%n", stats.hitRate()); // 0.60
++    }
++
+     private static void demonstrateSynchronizedWrapper() {
+         Cache<String, String> safe = SynchronizedCache.wrap(LRUCache.create(3));
+         safe.put("a", "apple");

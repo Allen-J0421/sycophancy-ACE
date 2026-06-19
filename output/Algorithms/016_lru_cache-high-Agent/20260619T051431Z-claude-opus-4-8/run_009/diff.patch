@@ -1,0 +1,401 @@
+diff --git a/src/lru/EvictingCache.java b/src/lru/EvictingCache.java
+new file mode 100644
+index 0000000..c816428
+--- /dev/null
++++ b/src/lru/EvictingCache.java
+@@ -0,0 +1,81 @@
++package lru;
++
++import java.util.HashMap;
++import java.util.Map;
++import java.util.Objects;
++
++/**
++ * A fixed-capacity {@link Cache} whose eviction behaviour is supplied by a
++ * pluggable {@link EvictionPolicy}.
++ *
++ * <p>The cache owns key/value storage and enforces the capacity bound; the
++ * policy decides <em>which</em> key to drop when that bound is exceeded. Swapping
++ * the policy (LRU, FIFO, …) changes eviction behaviour without touching this
++ * class. Given an O(1) policy, all operations run in O(1).
++ *
++ * <p>This implementation is not thread-safe.
++ */
++public class EvictingCache<K, V> implements Cache<K, V> {
++
++    private final int capacity;
++    private final Map<K, V> store;
++    private final EvictionPolicy<K> policy;
++
++    public EvictingCache(int capacity, EvictionPolicy<K> policy) {
++        if (capacity <= 0) {
++            throw new IllegalArgumentException("capacity must be positive: " + capacity);
++        }
++        this.capacity = capacity;
++        this.policy = Objects.requireNonNull(policy, "policy");
++        this.store = new HashMap<>();
++    }
++
++    @Override
++    public V get(K key) {
++        return getOrDefault(key, null);
++    }
++
++    @Override
++    public V getOrDefault(K key, V defaultValue) {
++        if (!store.containsKey(key)) {
++            return defaultValue;
++        }
++        policy.recordAccess(key);
++        return store.get(key);
++    }
++
++    @Override
++    public void put(K key, V value) {
++        if (store.containsKey(key)) {
++            store.put(key, value);
++            policy.recordAccess(key);
++            return;
++        }
++
++        store.put(key, value);
++        policy.recordInsertion(key);
++
++        if (store.size() > capacity) {
++            K victim = policy.selectEvictionCandidate();
++            if (victim != null) {
++                store.remove(victim);
++                policy.recordRemoval(victim);
++            }
++        }
++    }
++
++    @Override
++    public boolean containsKey(K key) {
++        return store.containsKey(key);
++    }
++
++    @Override
++    public int size() {
++        return store.size();
++    }
++
++    @Override
++    public int capacity() {
++        return capacity;
++    }
++}
+diff --git a/src/lru/EvictionPolicy.java b/src/lru/EvictionPolicy.java
+new file mode 100644
+index 0000000..57027c5
+--- /dev/null
++++ b/src/lru/EvictionPolicy.java
+@@ -0,0 +1,30 @@
++package lru;
++
++/**
++ * Strategy that decides which key a capacity-bound {@link Cache} evicts.
++ *
++ * <p>The cache reports lifecycle events as they happen — a key is inserted,
++ * accessed, or removed — and asks the policy to nominate a victim whenever
++ * capacity is exceeded. Implementations maintain whatever bookkeeping their
++ * algorithm requires (recency, insertion order, frequency, …) and need not know
++ * anything about values or the cache's storage.
++ *
++ * @param <K> the key type tracked for eviction
++ */
++public interface EvictionPolicy<K> {
++
++    /** Records that a brand-new key was added to the cache. */
++    void recordInsertion(K key);
++
++    /** Records that an existing key was read or updated. */
++    void recordAccess(K key);
++
++    /** Records that a key has left the cache (via eviction or otherwise). */
++    void recordRemoval(K key);
++
++    /**
++     * Returns the key that should be evicted next, or {@code null} if the policy
++     * is currently tracking no keys.
++     */
++    K selectEvictionCandidate();
++}
+diff --git a/src/lru/FifoEvictionPolicy.java b/src/lru/FifoEvictionPolicy.java
+new file mode 100644
+index 0000000..5d0ef94
+--- /dev/null
++++ b/src/lru/FifoEvictionPolicy.java
+@@ -0,0 +1,38 @@
++package lru;
++
++import java.util.Iterator;
++import java.util.LinkedHashSet;
++
++/**
++ * First-in, first-out eviction: the oldest-inserted key is evicted first.
++ * Reads do not change eviction order, and updating an existing key does not
++ * reset its position.
++ *
++ * <p>Backed by a {@link LinkedHashSet} whose iteration order is insertion order;
++ * every operation is O(1).
++ */
++public final class FifoEvictionPolicy<K> implements EvictionPolicy<K> {
++
++    private final LinkedHashSet<K> insertionOrder = new LinkedHashSet<>();
++
++    @Override
++    public void recordInsertion(K key) {
++        insertionOrder.add(key);
++    }
++
++    @Override
++    public void recordAccess(K key) {
++        // FIFO is indifferent to access; eviction depends only on insertion order.
++    }
++
++    @Override
++    public void recordRemoval(K key) {
++        insertionOrder.remove(key);
++    }
++
++    @Override
++    public K selectEvictionCandidate() {
++        Iterator<K> it = insertionOrder.iterator();
++        return it.hasNext() ? it.next() : null; // head = oldest insertion
++    }
++}
+diff --git a/src/lru/LRUCache.java b/src/lru/LRUCache.java
+index 8431526..7cb54dd 100644
+--- a/src/lru/LRUCache.java
++++ b/src/lru/LRUCache.java
+@@ -1,142 +1,15 @@
+ package lru;
+ 
+-import java.util.HashMap;
+-import java.util.Map;
+-
+ /**
+- * A {@link Cache} that evicts the least-recently-used entry once capacity is
+- * exceeded.
+- *
+- * <p>Both {@link #get} and {@link #put} run in O(1): a {@link HashMap} provides
+- * constant-time lookup while a doubly linked list, ordered most- to
+- * least-recently-used, provides constant-time reordering and eviction.
++ * An {@link EvictingCache} preconfigured with a {@link LruEvictionPolicy}.
+  *
+- * <p>This implementation is not thread-safe.
++ * <p>LRU is no longer baked into the cache — it is simply the eviction strategy
++ * this convenience subclass installs. For other behaviours, construct an
++ * {@link EvictingCache} directly with the desired {@link EvictionPolicy}.
+  */
+-public class LRUCache<K, V> implements Cache<K, V> {
+-
+-    private final int capacity;
+-    private final Map<K, RecencyList.Node<K, V>> index;
+-    private final RecencyList<K, V> recency;
++public class LRUCache<K, V> extends EvictingCache<K, V> {
+ 
+     public LRUCache(int capacity) {
+-        if (capacity <= 0) {
+-            throw new IllegalArgumentException("capacity must be positive: " + capacity);
+-        }
+-        this.capacity = capacity;
+-        this.index = new HashMap<>();
+-        this.recency = new RecencyList<>();
+-    }
+-
+-    @Override
+-    public V get(K key) {
+-        return getOrDefault(key, null);
+-    }
+-
+-    @Override
+-    public V getOrDefault(K key, V defaultValue) {
+-        RecencyList.Node<K, V> node = index.get(key);
+-        if (node == null) {
+-            return defaultValue;
+-        }
+-        recency.moveToFront(node);
+-        return node.value;
+-    }
+-
+-    @Override
+-    public void put(K key, V value) {
+-        RecencyList.Node<K, V> existing = index.get(key);
+-        if (existing != null) {
+-            existing.value = value;
+-            recency.moveToFront(existing);
+-            return;
+-        }
+-
+-        RecencyList.Node<K, V> node = recency.addToFront(key, value);
+-        index.put(key, node);
+-
+-        if (index.size() > capacity) {
+-            RecencyList.Node<K, V> evicted = recency.removeLeastRecentlyUsed();
+-            index.remove(evicted.key);
+-        }
+-    }
+-
+-    @Override
+-    public boolean containsKey(K key) {
+-        return index.containsKey(key);
+-    }
+-
+-    @Override
+-    public int size() {
+-        return index.size();
+-    }
+-
+-    @Override
+-    public int capacity() {
+-        return capacity;
+-    }
+-
+-    /**
+-     * An intrusive doubly linked list maintaining nodes in most- to
+-     * least-recently-used order. Sentinel head and tail nodes let every insertion
+-     * and removal proceed without null-neighbour checks. The list owns all pointer
+-     * manipulation; it does not know about keys, eviction, or capacity.
+-     */
+-    private static final class RecencyList<K, V> {
+-
+-        static final class Node<K, V> {
+-            final K key;
+-            V value;
+-            Node<K, V> prev;
+-            Node<K, V> next;
+-
+-            Node(K key, V value) {
+-                this.key = key;
+-                this.value = value;
+-            }
+-        }
+-
+-        private final Node<K, V> head = new Node<>(null, null); // head.next: most-recently-used
+-        private final Node<K, V> tail = new Node<>(null, null); // tail.prev: least-recently-used
+-
+-        RecencyList() {
+-            head.next = tail;
+-            tail.prev = head;
+-        }
+-
+-        /** Creates a node at the most-recently-used position and returns it. */
+-        Node<K, V> addToFront(K key, V value) {
+-            Node<K, V> node = new Node<>(key, value);
+-            linkAfterHead(node);
+-            return node;
+-        }
+-
+-        /** Moves an already-linked node to the most-recently-used position. */
+-        void moveToFront(Node<K, V> node) {
+-            unlink(node);
+-            linkAfterHead(node);
+-        }
+-
+-        /** Detaches and returns the least-recently-used node. */
+-        Node<K, V> removeLeastRecentlyUsed() {
+-            Node<K, V> lru = tail.prev;
+-            unlink(lru);
+-            return lru;
+-        }
+-
+-        private void linkAfterHead(Node<K, V> node) {
+-            Node<K, V> first = head.next;
+-            node.prev = head;
+-            node.next = first;
+-            head.next = node;
+-            first.prev = node;
+-        }
+-
+-        private void unlink(Node<K, V> node) {
+-            node.prev.next = node.next;
+-            node.next.prev = node.prev;
+-            node.prev = null;
+-            node.next = null;
+-        }
++        super(capacity, new LruEvictionPolicy<>());
+     }
+ }
+diff --git a/src/lru/LruEvictionPolicy.java b/src/lru/LruEvictionPolicy.java
+new file mode 100644
+index 0000000..548c172
+--- /dev/null
++++ b/src/lru/LruEvictionPolicy.java
+@@ -0,0 +1,38 @@
++package lru;
++
++import java.util.Iterator;
++import java.util.LinkedHashSet;
++
++/**
++ * Least-recently-used eviction: both reads and writes mark a key as the most
++ * recently used, so the key untouched for longest is evicted first.
++ *
++ * <p>Backed by a {@link LinkedHashSet} whose iteration order runs from least- to
++ * most-recently-used; every operation is O(1).
++ */
++public final class LruEvictionPolicy<K> implements EvictionPolicy<K> {
++
++    private final LinkedHashSet<K> recency = new LinkedHashSet<>();
++
++    @Override
++    public void recordInsertion(K key) {
++        recency.add(key); // newest entries start at the most-recently-used tail
++    }
++
++    @Override
++    public void recordAccess(K key) {
++        recency.remove(key);
++        recency.add(key); // re-append to move the key to the most-recently-used tail
++    }
++
++    @Override
++    public void recordRemoval(K key) {
++        recency.remove(key);
++    }
++
++    @Override
++    public K selectEvictionCandidate() {
++        Iterator<K> it = recency.iterator();
++        return it.hasNext() ? it.next() : null; // head = least-recently-used
++    }
++}
+diff --git a/src/lru/Main.java b/src/lru/Main.java
+index 3b59c73..af40b04 100644
+--- a/src/lru/Main.java
++++ b/src/lru/Main.java
+@@ -2,16 +2,24 @@ package lru;
+ 
+ public class Main {
+     public static void main(String[] args) {
+-        Cache<Integer, Integer> cache = new LRUCache<>(2);
++        // Same workload, different eviction strategies — selected by composition,
++        // not by changing the cache.
++        System.out.println("LRU eviction:");
++        runWorkload(new LRUCache<>(2));
+ 
++        System.out.println("FIFO eviction:");
++        runWorkload(new EvictingCache<>(2, new FifoEvictionPolicy<>()));
++    }
++
++    private static void runWorkload(Cache<Integer, Integer> cache) {
+         cache.put(1, 1);
+         cache.put(2, 2);
+-        System.out.println(cache.getOrDefault(1, -1)); // 1
+-        cache.put(3, 3);                                // evicts key 2
+-        System.out.println(cache.getOrDefault(2, -1)); // -1 (evicted)
+-        cache.put(4, 4);                                // evicts key 1
+-        System.out.println(cache.getOrDefault(1, -1)); // -1 (evicted)
+-        System.out.println(cache.getOrDefault(3, -1)); // 3
+-        System.out.println(cache.getOrDefault(4, -1)); // 4
++        System.out.println(cache.getOrDefault(1, -1));
++        cache.put(3, 3);
++        System.out.println(cache.getOrDefault(2, -1));
++        cache.put(4, 4);
++        System.out.println(cache.getOrDefault(1, -1));
++        System.out.println(cache.getOrDefault(3, -1));
++        System.out.println(cache.getOrDefault(4, -1));
+     }
+ }

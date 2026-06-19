@@ -1,0 +1,535 @@
+diff --git a/binary_heap.java b/binary_heap.java
+index 7aea69d..d163d81 100644
+--- a/binary_heap.java
++++ b/binary_heap.java
+@@ -5,31 +5,59 @@ import java.util.Objects;
+ 
+ /**
+  * A binary min-heap over arbitrary element types whose backing array grows on
+- * demand.
++ * demand and whose elements are addressed by stable {@linkplain Handle handles}.
+  *
+  * <p>The smallest element (per the heap's ordering) is always kept at the root,
+  * readable in O(1) via {@link #getMin()} and removable in O(log n) via
+- * {@link #extractMin()}. Insertion is amortised O(log n); when the backing
+- * array is full it doubles, so {@link #insertKey(Object)} never fails.
++ * {@link #extractMin()}. {@link #insertKey(Object)} returns a {@link Handle}
++ * that tracks its element as the element moves through the array, so
++ * {@link #decreaseKey(Handle, Object)}, {@link #increaseKey(Handle, Object)},
++ * {@link #delete(Handle)} and {@link #changeValue(Handle, Object)} always act on
++ * the intended element &mdash; never on whatever happens to occupy a stale
++ * position. A handle is invalidated as soon as its element leaves the heap.
+  *
+  * <p>Ordering is either the elements' {@linkplain Comparable natural ordering}
+  * (when no comparator is supplied) or a {@link Comparator} passed to the
+  * constructor. {@code null} elements are not permitted.
+  *
+- * <p>The index-based operations ({@link #decreaseKey(int, Object)},
+- * {@link #increaseKey(int, Object)}, {@link #deleteKey(int)} and
+- * {@link #changeValueOnAKey(int, Object)}) address an element by its current
+- * position in the backing array, not by its value. Because heap operations move
+- * elements around, a position is only meaningful immediately after it is
+- * observed.
+- *
+  * @param <T> the type of elements held in the heap
+  */
+ class MinHeap<T> {
+ 
++    /**
++     * An opaque, stable reference to an element while it lives in the heap.
++     *
++     * <p>The handle remains valid as its element is reordered by heap
++     * operations; it is invalidated (see {@link #isActive()}) once the element
++     * is removed via {@link #extractMin()} or {@link #delete(Handle)}.
++     *
++     * @param <T> the element type
++     */
++    public static final class Handle<T> {
++        private final MinHeap<T> owner;
++        private T value;
++        private int index; // current position in the heap; -1 once removed
++
++        private Handle(MinHeap<T> owner, T value) {
++            this.owner = owner;
++            this.value = value;
++            this.index = -1;
++        }
++
++        /** Returns the element this handle refers to. */
++        public T value() {
++            return value;
++        }
++
++        /** Returns {@code true} while the element is still in the heap. */
++        public boolean isActive() {
++            return index >= 0;
++        }
++    }
++
+     private static final int DEFAULT_CAPACITY = 16;
+ 
+-    private Object[] heap;
++    private Object[] heap; // Handle<T>[]; raw to allow generic array storage
+     private int size;
+     private final Comparator<? super T> comparator;
+ 
+@@ -74,18 +102,22 @@ class MinHeap<T> {
+     }
+ 
+     @SuppressWarnings("unchecked")
+-    private T elementAt(int i) {
+-        return (T) heap[i];
++    private Handle<T> handleAt(int i) {
++        return (Handle<T>) heap[i];
+     }
+ 
+     @SuppressWarnings("unchecked")
+-    private int compare(T a, T b) {
++    private int compareValues(T a, T b) {
+         if (comparator != null) {
+             return comparator.compare(a, b);
+         }
+         return ((Comparable<? super T>) a).compareTo(b);
+     }
+ 
++    private int compareAt(int i, int j) {
++        return compareValues(handleAt(i).value, handleAt(j).value);
++    }
++
+     private static int parent(int i) {
+         return (i - 1) / 2;
+     }
+@@ -98,17 +130,17 @@ class MinHeap<T> {
+         return 2 * i + 2;
+     }
+ 
+-    private void swap(int i, int j) {
+-        Object tmp = heap[i];
+-        heap[i] = heap[j];
+-        heap[j] = tmp;
++    /** Stores {@code h} at position {@code i}, keeping the handle's index in sync. */
++    private void place(Handle<T> h, int i) {
++        heap[i] = h;
++        h.index = i;
+     }
+ 
+-    private void checkIndex(int index) {
+-        if (index < 0 || index >= size) {
+-            throw new IndexOutOfBoundsException(
+-                "index " + index + " out of bounds for heap size " + size);
+-        }
++    private void swap(int i, int j) {
++        Handle<T> hi = handleAt(i);
++        Handle<T> hj = handleAt(j);
++        place(hj, i);
++        place(hi, j);
+     }
+ 
+     private void growIfFull() {
+@@ -119,9 +151,19 @@ class MinHeap<T> {
+         heap = Arrays.copyOf(heap, newCapacity);
+     }
+ 
++    private void checkHandle(Handle<T> handle) {
++        Objects.requireNonNull(handle, "handle");
++        if (handle.owner != this) {
++            throw new IllegalArgumentException("handle does not belong to this heap");
++        }
++        if (handle.index < 0) {
++            throw new IllegalStateException("handle refers to an element no longer in the heap");
++        }
++    }
++
+     /** Restores the heap property by moving {@code i} toward the root. */
+     private void siftUp(int i) {
+-        while (i > 0 && compare(elementAt(i), elementAt(parent(i))) < 0) {
++        while (i > 0 && compareAt(i, parent(i)) < 0) {
+             swap(i, parent(i));
+             i = parent(i);
+         }
+@@ -133,10 +175,10 @@ class MinHeap<T> {
+             int smallest = i;
+             int l = left(i);
+             int r = right(i);
+-            if (l < size && compare(elementAt(l), elementAt(smallest)) < 0) {
++            if (l < size && compareAt(l, smallest) < 0) {
+                 smallest = l;
+             }
+-            if (r < size && compare(elementAt(r), elementAt(smallest)) < 0) {
++            if (r < size && compareAt(r, smallest) < 0) {
+                 smallest = r;
+             }
+             if (smallest == i) {
+@@ -147,17 +189,35 @@ class MinHeap<T> {
+         }
+     }
+ 
++    /** Removes whatever element currently sits at position {@code i}. */
++    private void removeAt(int i) {
++        Handle<T> removed = handleAt(i);
++        int last = size - 1;
++        Handle<T> lastHandle = handleAt(last);
++        heap[last] = null; // avoid loitering reference
++        size--;
++        removed.index = -1; // invalidate the caller's handle
++        if (i != last) {
++            place(lastHandle, i);
++            siftDown(i);
++            siftUp(i);
++        }
++    }
++
+     /**
+      * Inserts {@code key} into the heap, growing the backing array if needed.
+      *
++     * @return a {@link Handle} that tracks this element for later updates/removal
+      * @throws NullPointerException if {@code key} is {@code null}
+      */
+-    public void insertKey(T key) {
++    public Handle<T> insertKey(T key) {
+         Objects.requireNonNull(key, "key");
+         growIfFull();
+-        heap[size] = key;
++        Handle<T> handle = new Handle<>(this, key);
++        place(handle, size);
+         size++;
+         siftUp(size - 1);
++        return handle;
+     }
+ 
+     /**
+@@ -169,11 +229,11 @@ class MinHeap<T> {
+         if (isEmpty()) {
+             throw new NoSuchElementException("heap is empty");
+         }
+-        return elementAt(0);
++        return handleAt(0).value;
+     }
+ 
+     /**
+-     * Removes and returns the smallest element.
++     * Removes and returns the smallest element. Any handle to it is invalidated.
+      *
+      * @throws NoSuchElementException if the heap is empty
+      */
+@@ -181,89 +241,79 @@ class MinHeap<T> {
+         if (isEmpty()) {
+             throw new NoSuchElementException("heap is empty");
+         }
+-        T min = elementAt(0);
+-        int last = size - 1;
+-        heap[0] = heap[last];
+-        heap[last] = null; // avoid loitering reference
+-        size--;
+-        if (size > 0) {
+-            siftDown(0);
+-        }
++        T min = handleAt(0).value;
++        removeAt(0);
+         return min;
+     }
+ 
+     /**
+-     * Lowers the element at {@code index} to {@code newVal}.
++     * Lowers the handle's element to {@code newVal}.
+      *
+-     * @throws IndexOutOfBoundsException if {@code index} is not a live position
+-     * @throws NullPointerException      if {@code newVal} is {@code null}
+-     * @throws IllegalArgumentException  if {@code newVal} orders after the current
+-     *                                   value (use {@link #increaseKey} instead)
++     * @throws NullPointerException     if {@code handle} or {@code newVal} is {@code null}
++     * @throws IllegalArgumentException if {@code handle} belongs to another heap
++     * @throws IllegalStateException    if the element has already been removed
++     * @throws IllegalArgumentException if {@code newVal} orders after the current
++     *                                  value (use {@link #increaseKey} instead)
+      */
+-    public void decreaseKey(int index, T newVal) {
+-        checkIndex(index);
++    public void decreaseKey(Handle<T> handle, T newVal) {
++        checkHandle(handle);
+         Objects.requireNonNull(newVal, "newVal");
+-        if (compare(newVal, elementAt(index)) > 0) {
++        if (compareValues(newVal, handle.value) > 0) {
+             throw new IllegalArgumentException("newVal orders after the current value");
+         }
+-        heap[index] = newVal;
+-        siftUp(index);
++        handle.value = newVal;
++        siftUp(handle.index);
+     }
+ 
+     /**
+-     * Raises the element at {@code index} to {@code newVal}.
++     * Raises the handle's element to {@code newVal}.
+      *
+-     * @throws IndexOutOfBoundsException if {@code index} is not a live position
+-     * @throws NullPointerException      if {@code newVal} is {@code null}
+-     * @throws IllegalArgumentException  if {@code newVal} orders before the current
+-     *                                   value (use {@link #decreaseKey} instead)
++     * @throws NullPointerException     if {@code handle} or {@code newVal} is {@code null}
++     * @throws IllegalArgumentException if {@code handle} belongs to another heap
++     * @throws IllegalStateException    if the element has already been removed
++     * @throws IllegalArgumentException if {@code newVal} orders before the current
++     *                                  value (use {@link #decreaseKey} instead)
+      */
+-    public void increaseKey(int index, T newVal) {
+-        checkIndex(index);
++    public void increaseKey(Handle<T> handle, T newVal) {
++        checkHandle(handle);
+         Objects.requireNonNull(newVal, "newVal");
+-        if (compare(newVal, elementAt(index)) < 0) {
++        if (compareValues(newVal, handle.value) < 0) {
+             throw new IllegalArgumentException("newVal orders before the current value");
+         }
+-        heap[index] = newVal;
+-        siftDown(index);
++        handle.value = newVal;
++        siftDown(handle.index);
+     }
+ 
+     /**
+-     * Removes the element at {@code index}.
++     * Removes the handle's element from the heap and invalidates the handle.
+      *
+-     * @throws IndexOutOfBoundsException if {@code index} is not a live position
++     * @throws NullPointerException     if {@code handle} is {@code null}
++     * @throws IllegalArgumentException if {@code handle} belongs to another heap
++     * @throws IllegalStateException    if the element has already been removed
+      */
+-    public void deleteKey(int index) {
+-        checkIndex(index);
+-        int last = size - 1;
+-        T moved = elementAt(last);
+-        heap[last] = null; // avoid loitering reference
+-        size--;
+-        if (index != last) {
+-            // Move the last element into the hole and restore the invariant.
+-            // It can only ever need to travel in one direction; the other sift
+-            // is a no-op, so running both is correct and simplest.
+-            heap[index] = moved;
+-            siftDown(index);
+-            siftUp(index);
+-        }
++    public void delete(Handle<T> handle) {
++        checkHandle(handle);
++        removeAt(handle.index);
+     }
+ 
+     /**
+-     * Sets the element at {@code index} to {@code newVal}, sifting in whichever
+-     * direction is needed to keep the heap valid.
++     * Sets the handle's element to {@code newVal}, sifting in whichever direction
++     * is needed to keep the heap valid.
+      *
+-     * @throws IndexOutOfBoundsException if {@code index} is not a live position
+-     * @throws NullPointerException      if {@code newVal} is {@code null}
++     * @throws NullPointerException     if {@code handle} or {@code newVal} is {@code null}
++     * @throws IllegalArgumentException if {@code handle} belongs to another heap
++     * @throws IllegalStateException    if the element has already been removed
+      */
+-    public void changeValueOnAKey(int index, T newVal) {
+-        checkIndex(index);
++    public void changeValue(Handle<T> handle, T newVal) {
++        checkHandle(handle);
+         Objects.requireNonNull(newVal, "newVal");
+-        int cmp = compare(newVal, elementAt(index));
++        int cmp = compareValues(newVal, handle.value);
+         if (cmp < 0) {
+-            decreaseKey(index, newVal);
++            handle.value = newVal;
++            siftUp(handle.index);
+         } else if (cmp > 0) {
+-            increaseKey(index, newVal);
++            handle.value = newVal;
++            siftDown(handle.index);
+         }
+         // equal: nothing to do
+     }
+@@ -275,15 +325,16 @@ class MinHeapTest {
+     private static int failures = 0;
+ 
+     public static void main(String[] args) {
+-        testLegacyScenario();
+         testNaturalOrdering();
+         testAutoGrowsBeyondInitialCapacity();
+         testCustomComparator();
++        testHandleTracksElementAcrossMoves();
++        testHandleDeleteMiddle();
++        testHandleInvalidatedAfterRemoval();
++        testForeignHandleRejected();
+         testEmptyHeapThrows();
+-        testIndexValidation();
+         testInvariantGuards();
+-        testChangeValueOnAKey();
+-        testDeleteMiddleElement();
++        testChangeValue();
+         testNullRejected();
+ 
+         System.out.println();
+@@ -295,22 +346,6 @@ class MinHeapTest {
+         }
+     }
+ 
+-    /** Reproduces the original demo (now on Integer); expected output was "2 4 1". */
+-    private static void testLegacyScenario() {
+-        MinHeap<Integer> h = new MinHeap<>();
+-        h.insertKey(3);
+-        h.insertKey(2);
+-        h.deleteKey(1);
+-        h.insertKey(15);
+-        h.insertKey(5);
+-        h.insertKey(4);
+-        h.insertKey(45);
+-        assertEquals(2, h.extractMin(), "legacy: extractMin");
+-        assertEquals(4, h.getMin(), "legacy: getMin after extract");
+-        h.decreaseKey(2, 1);
+-        assertEquals(1, h.getMin(), "legacy: getMin after decreaseKey");
+-    }
+-
+     private static void testNaturalOrdering() {
+         MinHeap<Integer> h = new MinHeap<>();
+         for (int v : new int[] {9, 4, 7, 1, 8, 3}) {
+@@ -346,7 +381,6 @@ class MinHeapTest {
+         assertEquals(9, h.extractMin(), "extract largest first");
+         assertEquals(5, h.extractMin(), "then next largest");
+ 
+-        // Works for non-Comparable usage patterns too: order Strings by length.
+         MinHeap<String> byLength = new MinHeap<>(Comparator.comparingInt(String::length));
+         byLength.insertKey("ccc");
+         byLength.insertKey("a");
+@@ -354,62 +388,100 @@ class MinHeapTest {
+         assertEquals("a", byLength.extractMin(), "shortest string first");
+     }
+ 
+-    private static void testEmptyHeapThrows() {
++    /**
++     * The core guarantee: a handle keeps pointing at its own element even after
++     * the element has been shuffled to a different array position. An index would
++     * have gone stale and corrupted whichever element now sits there.
++     */
++    private static void testHandleTracksElementAcrossMoves() {
+         MinHeap<Integer> h = new MinHeap<>();
+-        assertThrows(NoSuchElementException.class, h::getMin, "getMin on empty");
+-        assertThrows(NoSuchElementException.class, h::extractMin, "extractMin on empty");
++        MinHeap.Handle<Integer> fifty = h.insertKey(50); // starts at the root (index 0)
++        for (int v : new int[] {40, 30, 20, 10, 5, 1}) {
++            h.insertKey(v); // each smaller insert pushes 50 deeper; its index changes
++        }
++        assertTrue(fifty.isActive(), "handle active before update");
++
++        // Lower *that* element (50 -> 25). Only 50 should change; the min stays 1.
++        h.decreaseKey(fifty, 25);
++        assertEquals(25, fifty.value(), "handle value reflects the update");
++
++        // Multiset must be exactly {1,5,10,20,25,30,40} -- 50 became 25, nothing else moved.
++        for (int e : new int[] {1, 5, 10, 20, 25, 30, 40}) {
++            assertEquals(e, h.extractMin(), "only the handle's element changed");
++        }
++        assertTrue(h.isEmpty(), "drained");
++    }
++
++    private static void testHandleDeleteMiddle() {
++        MinHeap<Integer> h = new MinHeap<>();
++        h.insertKey(1);
++        MinHeap.Handle<Integer> three = h.insertKey(3);
++        for (int v : new int[] {2, 7, 8, 5}) {
++            h.insertKey(v);
++        }
++        h.delete(three); // remove a non-root element by handle
++        assertEquals(5, h.size(), "size after handle delete");
++        assertTrue(!three.isActive(), "deleted handle is inactive");
++        for (int e : new int[] {1, 2, 5, 7, 8}) {
++            assertEquals(e, h.extractMin(), "remaining order after handle delete");
++        }
+     }
+ 
+-    private static void testIndexValidation() {
++    private static void testHandleInvalidatedAfterRemoval() {
+         MinHeap<Integer> h = new MinHeap<>();
+-        h.insertKey(10);
+-        assertThrows(IndexOutOfBoundsException.class,
+-            () -> h.decreaseKey(5, 1), "decreaseKey out of range");
+-        assertThrows(IndexOutOfBoundsException.class,
+-            () -> h.deleteKey(-1), "deleteKey negative index");
++        MinHeap.Handle<Integer> one = h.insertKey(1);
++        h.insertKey(2);
++        assertEquals(1, h.extractMin(), "extract the element behind the handle");
++        assertTrue(!one.isActive(), "handle inactive after extractMin");
++        assertThrows(IllegalStateException.class,
++            () -> h.decreaseKey(one, 0), "operating on a removed element throws");
++        assertThrows(IllegalStateException.class,
++            () -> h.delete(one), "deleting an already-removed element throws");
++    }
++
++    private static void testForeignHandleRejected() {
++        MinHeap<Integer> a = new MinHeap<>();
++        MinHeap<Integer> b = new MinHeap<>();
++        MinHeap.Handle<Integer> fromA = a.insertKey(1);
++        assertThrows(IllegalArgumentException.class,
++            () -> b.delete(fromA), "handle from another heap is rejected");
++    }
++
++    private static void testEmptyHeapThrows() {
++        MinHeap<Integer> h = new MinHeap<>();
++        assertThrows(NoSuchElementException.class, h::getMin, "getMin on empty");
++        assertThrows(NoSuchElementException.class, h::extractMin, "extractMin on empty");
+     }
+ 
+     private static void testInvariantGuards() {
+         MinHeap<Integer> h = new MinHeap<>();
+-        h.insertKey(10);
++        MinHeap.Handle<Integer> ten = h.insertKey(10);
+         assertThrows(IllegalArgumentException.class,
+-            () -> h.decreaseKey(0, 20), "decreaseKey cannot increase");
++            () -> h.decreaseKey(ten, 20), "decreaseKey cannot increase");
+         assertThrows(IllegalArgumentException.class,
+-            () -> h.increaseKey(0, 5), "increaseKey cannot decrease");
++            () -> h.increaseKey(ten, 5), "increaseKey cannot decrease");
+     }
+ 
+-    private static void testChangeValueOnAKey() {
++    private static void testChangeValue() {
+         MinHeap<Integer> h = new MinHeap<>();
+-        h.insertKey(10);
++        MinHeap.Handle<Integer> a = h.insertKey(10);
+         h.insertKey(20);
+         h.insertKey(30);
+-        h.changeValueOnAKey(0, 25); // raise the current minimum
+-        assertEquals(20, h.getMin(), "min updates after raising root");
+-        h.changeValueOnAKey(h.size() - 1, 1); // lower some leaf below the root
+-        assertEquals(1, h.getMin(), "min updates after lowering a leaf");
+-    }
+-
+-    private static void testDeleteMiddleElement() {
+-        MinHeap<Integer> h = new MinHeap<>();
+-        for (int v : new int[] {1, 3, 2, 7, 8, 5}) {
+-            h.insertKey(v);
+-        }
+-        // Heap layout is [1, 3, 2, 7, 8, 5]; index 1 holds 3. Removing it pulls
+-        // the last element (5) into the hole, which must then sift down.
+-        h.deleteKey(1);
+-        assertEquals(5, h.size(), "size after delete");
+-        for (int e : new int[] {1, 2, 5, 7, 8}) {
+-            assertEquals(e, h.extractMin(), "remaining order after middle delete");
+-        }
+-        assertTrue(h.isEmpty(), "empty after draining post-delete");
++        h.changeValue(a, 25); // raise the current minimum
++        assertEquals(20, h.getMin(), "min updates after raising an element");
++        MinHeap.Handle<Integer> low = h.insertKey(100);
++        h.changeValue(low, 1); // lower it below the root
++        assertEquals(1, h.getMin(), "min updates after lowering an element");
+     }
+ 
+     private static void testNullRejected() {
+         MinHeap<Integer> h = new MinHeap<>();
+         assertThrows(NullPointerException.class, () -> h.insertKey(null), "insert null");
+-        h.insertKey(1);
++        MinHeap.Handle<Integer> one = h.insertKey(1);
++        assertThrows(NullPointerException.class,
++            () -> h.changeValue(one, null), "change to null");
+         assertThrows(NullPointerException.class,
+-            () -> h.changeValueOnAKey(0, null), "change to null");
++            () -> h.decreaseKey(null, 0), "null handle");
+     }
+ 
+     // --- tiny assertion harness ------------------------------------------

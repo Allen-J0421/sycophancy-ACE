@@ -1,0 +1,1002 @@
+diff --git a/README.md b/README.md
+index 4e2a6ad..bfdbf70 100644
+--- a/README.md
++++ b/README.md
+@@ -7,8 +7,9 @@ A generic hash map implemented with open addressing and linear probing.
+ ```
+ src/
+   main/java/hashmap/
+-    OpenAddressingHashMap.java        # the data structure
+-    OpenAddressingHashSet.java        # Set<E> backed by the map
++    OpenAddressingTable.java          # shared open-addressing storage core (internal)
++    OpenAddressingHashMap.java        # Map<K,V> adapter over the core
++    OpenAddressingHashSet.java        # Set<E> adapter over the core
+     Demo.java                         # runnable demonstration (main)
+   test/java/hashmap/
+     OpenAddressingHashMapTest.java    # dependency-free self-checking tests
+@@ -104,13 +105,18 @@ trustworthy.
+ - **Value semantics**: equality and hash code follow the `Map` contract, so an
+   `OpenAddressingHashMap` compares equal to any other `Map` (e.g. a `TreeMap`)
+   with the same mappings.
+-- **`OpenAddressingHashSet<E>`**: a complete `java.util.Set` implementation backed
+-  by the map — exactly how `java.util.HashSet` wraps `HashMap`. Each element is a
+-  key mapped to a shared sentinel, so the set reuses the map's open addressing,
+-  resizing, and struct-of-arrays storage instead of reimplementing them. It
+-  extends `AbstractSet`, so `equals`/`hashCode`/`addAll`/`removeAll`/`retainAll`/
+-  `toArray` come for free, and it compares equal to any `Set` (e.g. a `TreeSet`)
+-  with the same elements.
++- **Shared core, two adapters**: the storage mechanics (keys/values arrays,
++  hashing, probing, tombstones, resizing, fail-fast iteration) live in one
++  package-private class, `OpenAddressingTable`. `OpenAddressingHashMap` and
++  `OpenAddressingHashSet` are thin adapters that **compose** it and present it as a
++  `Map` or `Set`. Composition is used rather than a shared superclass because both
++  already extend `AbstractMap`/`AbstractSet` and Java has single inheritance.
++- **`OpenAddressingHashSet<E>`**: a complete `java.util.Set` over the shared core.
++  It constructs its table with value-tracking *disabled*, so — unlike a set that
++  wraps a map with a dummy value (the `java.util.HashSet` approach) — it allocates
++  **no** per-element value storage at all. It extends `AbstractSet`, so
++  `equals`/`hashCode`/`addAll`/`removeAll`/`retainAll`/`toArray` come for free, and
++  it compares equal to any `Set` (e.g. a `TreeSet`) with the same elements.
+ - `null` keys are rejected; `null` values are allowed and distinguished from
+   absence via `containsKey`/`getOrDefault`.
+ 
+diff --git a/src/main/java/hashmap/OpenAddressingHashMap.java b/src/main/java/hashmap/OpenAddressingHashMap.java
+index 9d774df..38fcb2c 100644
+--- a/src/main/java/hashmap/OpenAddressingHashMap.java
++++ b/src/main/java/hashmap/OpenAddressingHashMap.java
+@@ -2,10 +2,8 @@ package hashmap;
+ 
+ import java.util.AbstractMap;
+ import java.util.AbstractSet;
+-import java.util.ConcurrentModificationException;
+ import java.util.Iterator;
+ import java.util.Map;
+-import java.util.NoSuchElementException;
+ import java.util.Objects;
+ import java.util.Set;
+ 
+@@ -13,24 +11,16 @@ import java.util.Set;
+  * A {@link Map} implemented with <em>open addressing</em>, <em>linear probing</em>,
+  * and a <em>struct-of-arrays</em> storage layout.
+  *
+- * <p>Rather than storing one wrapper object per entry, the table is held as two
+- * parallel arrays &mdash; {@code keys} and {@code values}. This removes a level of
+- * indirection (there is no per-entry node object to allocate or dereference) and
+- * improves locality: a probe scans the contiguous {@code keys} array and only
+- * touches {@code values} once a key actually matches. A slot's state is encoded in
+- * the {@code keys} array itself: {@code null} marks an unused slot, a private
+- * {@link #TOMBSTONE} sentinel marks a deleted slot, and any other reference marks a
+- * live entry. Because occupancy is determined entirely by {@code keys}, a live
+- * entry may freely have a {@code null} value.
++ * <p>The storage mechanics &mdash; parallel {@code keys}/{@code values} arrays,
++ * hashing, probing, tombstone deletion, and resizing &mdash; live in the shared
++ * package-private {@link OpenAddressingTable}, which this map composes and the
++ * sibling {@link OpenAddressingHashSet} reuses. This class is a thin adapter that
++ * presents the table as a {@code java.util.Map}.
+  *
+  * <p>Keys and values are generic. {@code null} keys are not permitted; {@code null}
+- * values are. Collisions are resolved by scanning forward (with wrap-around) to the
+- * next free slot. Tombstones keep probe sequences intact; they are reclaimed during
+- * insertion and cleared on the next resize. The table length is always a power of
+- * two, so the slot index is a bit-mask rather than a modulo, and the table grows
+- * once the fraction of occupied slots (live entries plus tombstones) exceeds the
+- * configured load factor, keeping {@code get}/{@code put}/{@code remove} amortized
+- * {@code O(1)}.
++ * values are. The table length is always a power of two and grows automatically
++ * once the load factor is exceeded, keeping {@code get}/{@code put}/{@code remove}
++ * amortized {@code O(1)}.
+  *
+  * <p>This class extends {@link AbstractMap} so that it inherits the standard
+  * {@code Map} contracts for {@link #equals}, {@link #hashCode}, {@link #toString},
+@@ -38,7 +28,8 @@ import java.util.Set;
+  * hot-path operations with constant-time implementations. The {@link #entrySet()}
+  * view, its iterator, and the derived key/value views are <em>fail-fast</em>:
+  * structurally modifying the map during iteration (other than through the
+- * iterator's own {@code remove}) throws {@link ConcurrentModificationException}.
++ * iterator's own {@code remove}) throws
++ * {@link java.util.ConcurrentModificationException}.
+  *
+  * <p>This class is <strong>not</strong> thread-safe.
+  *
+@@ -47,33 +38,11 @@ import java.util.Set;
+  */
+ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+ 
+-    /** Default initial capacity; must be a power of two. */
+-    private static final int DEFAULT_CAPACITY = 16;
+-
+-    /** Default fraction of occupied slots that triggers a resize. */
+-    private static final double DEFAULT_LOAD_FACTOR = 0.5;
+-
+-    /** Sentinel stored in {@code keys} to mark a deleted slot, distinct from {@code null}. */
+-    private static final Object TOMBSTONE = new Object();
+-
+-    /** Parallel storage: {@code keys[i]} and {@code values[i]} form one entry. */
+-    private Object[] keys;
+-    private Object[] values;
+-
+-    /** Number of live (non-tombstone) entries. */
+-    private int size;
+-
+-    /** Live entries plus tombstones; the table is resized based on this figure. */
+-    private int occupiedSlots;
+-
+-    /** Structural-modification counter backing fail-fast iteration. */
+-    private int modCount;
+-
+-    private final double loadFactor;
++    private final OpenAddressingTable table;
+ 
+     /** Creates an empty map with the default capacity and load factor. */
+     public OpenAddressingHashMap() {
+-        this(DEFAULT_CAPACITY, DEFAULT_LOAD_FACTOR);
++        this(OpenAddressingTable.DEFAULT_CAPACITY, OpenAddressingTable.DEFAULT_LOAD_FACTOR);
+     }
+ 
+     /**
+@@ -83,7 +52,7 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+      * @throws IllegalArgumentException if {@code initialCapacity} is not positive
+      */
+     public OpenAddressingHashMap(int initialCapacity) {
+-        this(initialCapacity, DEFAULT_LOAD_FACTOR);
++        this(initialCapacity, OpenAddressingTable.DEFAULT_LOAD_FACTOR);
+     }
+ 
+     /**
+@@ -96,16 +65,7 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+      *                                  or {@code loadFactor} is not in {@code (0, 1)}
+      */
+     public OpenAddressingHashMap(int initialCapacity, double loadFactor) {
+-        if (initialCapacity <= 0) {
+-            throw new IllegalArgumentException("initialCapacity must be positive: " + initialCapacity);
+-        }
+-        if (!(loadFactor > 0.0 && loadFactor < 1.0) || Double.isNaN(loadFactor)) {
+-            throw new IllegalArgumentException("loadFactor must be in (0, 1): " + loadFactor);
+-        }
+-        int capacity = tableSizeFor(initialCapacity);
+-        this.keys = new Object[capacity];
+-        this.values = new Object[capacity];
+-        this.loadFactor = loadFactor;
++        this.table = new OpenAddressingTable(initialCapacity, loadFactor, true);
+     }
+ 
+     /**
+@@ -116,7 +76,8 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+      * @throws NullPointerException if {@code source} is {@code null}, or contains a null key
+      */
+     public OpenAddressingHashMap(Map<? extends K, ? extends V> source) {
+-        this(Math.max(DEFAULT_CAPACITY, (int) (source.size() / DEFAULT_LOAD_FACTOR) + 1), DEFAULT_LOAD_FACTOR);
++        this(Math.max(OpenAddressingTable.DEFAULT_CAPACITY,
++            (int) (source.size() / OpenAddressingTable.DEFAULT_LOAD_FACTOR) + 1));
+         putAll(source);
+     }
+ 
+@@ -135,103 +96,63 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+     @Override
+     @SuppressWarnings("unchecked")
+     public V put(K key, V value) {
+-        Objects.requireNonNull(key, "key must not be null");
+-
+-        if (occupiedSlots + 1 > keys.length * loadFactor) {
+-            resize(keys.length * 2);
+-        }
+-
+-        int firstTombstone = -1;
+-        int index = indexFor(key, keys.length);
+-        while (true) {
+-            Object k = keys[index];
+-            if (k == null) {
+-                // Reuse the earliest tombstone seen on the probe path, if any.
+-                int target = (firstTombstone >= 0) ? firstTombstone : index;
+-                if (firstTombstone < 0) {
+-                    occupiedSlots++;
+-                }
+-                keys[target] = key;
+-                values[target] = value;
+-                size++;
+-                modCount++;
+-                return null;
+-            }
+-            if (k == TOMBSTONE) {
+-                if (firstTombstone < 0) {
+-                    firstTombstone = index;
+-                }
+-            } else if (k.equals(key)) {
+-                V previous = (V) values[index];
+-                values[index] = value;
+-                return previous; // value replacement is not a structural modification
+-            }
+-            index = next(index);
++        int index = table.insert(key);
++        if (index >= 0) { // key already present
++            return (V) table.setValueAt(index, value);
+         }
++        table.setValueAt(~index, value); // newly inserted slot
++        return null;
+     }
+ 
+     @Override
+     @SuppressWarnings("unchecked")
+     public V get(Object key) {
+-        int index = findIndex(key);
+-        return index < 0 ? null : (V) values[index];
++        int index = table.indexOf(key);
++        return index < 0 ? null : (V) table.valueAt(index);
+     }
+ 
+     @Override
+     @SuppressWarnings("unchecked")
+     public V getOrDefault(Object key, V defaultValue) {
+-        int index = findIndex(key);
+-        return index < 0 ? defaultValue : (V) values[index];
++        int index = table.indexOf(key);
++        return index < 0 ? defaultValue : (V) table.valueAt(index);
+     }
+ 
+     @Override
+     public boolean containsKey(Object key) {
+-        return findIndex(key) >= 0;
++        return table.indexOf(key) >= 0;
++    }
++
++    @Override
++    public boolean containsValue(Object value) {
++        return table.containsValue(value);
+     }
+ 
+     @Override
+     @SuppressWarnings("unchecked")
+     public V remove(Object key) {
+-        if (key == null) {
++        int index = table.indexOf(key);
++        if (index < 0) {
+             return null;
+         }
+-        int index = indexFor(key, keys.length);
+-        while (true) {
+-            Object k = keys[index];
+-            if (k == null) {
+-                return null;
+-            }
+-            if (k != TOMBSTONE && k.equals(key)) {
+-                V previous = (V) values[index];
+-                keys[index] = TOMBSTONE;
+-                values[index] = null; // release the value for GC
+-                size--;
+-                modCount++;
+-                // occupiedSlots is unchanged: the tombstone still occupies the slot.
+-                return previous;
+-            }
+-            index = next(index);
+-        }
++        V previous = (V) table.valueAt(index);
++        table.deleteAt(index);
++        return previous;
+     }
+ 
+     @Override
+     public int size() {
+-        return size;
++        return table.size();
+     }
+ 
+     @Override
+     public boolean isEmpty() {
+-        return size == 0;
++        return table.isEmpty();
+     }
+ 
+     @Override
+     public void clear() {
+-        // Allocate fresh storage so capacity is not bloated by a transient large size.
+-        keys = new Object[DEFAULT_CAPACITY];
+-        values = new Object[DEFAULT_CAPACITY];
+-        size = 0;
+-        occupiedSlots = 0;
+-        modCount++;
++        table.clear();
+     }
+ 
+     /**
+@@ -243,93 +164,16 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+         return new EntrySet();
+     }
+ 
+-    // ----------------------------------------------------------------------
+-    // Internal helpers
+-    // ----------------------------------------------------------------------
+-
+-    /** Returns the index of the live slot for {@code key}, or {@code -1} if absent. */
+-    private int findIndex(Object key) {
+-        if (key == null) {
+-            return -1;
+-        }
+-        int index = indexFor(key, keys.length);
+-        while (true) {
+-            Object k = keys[index];
+-            if (k == null) {
+-                return -1;
+-            }
+-            if (k != TOMBSTONE && k.equals(key)) {
+-                return index;
+-            }
+-            index = next(index);
+-        }
+-    }
+-
+-    /** Returns whether slot {@code i} holds a live entry. */
+-    private boolean isLive(int i) {
+-        Object k = keys[i];
+-        return k != null && k != TOMBSTONE;
+-    }
+-
+-    /** Computes the home slot for {@code key} in a table of {@code length} slots. */
+-    private static int indexFor(Object key, int length) {
+-        int h = key.hashCode();
+-        h ^= (h >>> 16); // spread high bits into low bits to reduce clustering
+-        return h & (length - 1);
+-    }
+-
+-    /** Returns the next slot index, wrapping around the power-of-two table. */
+-    private int next(int index) {
+-        return (index + 1) & (keys.length - 1);
+-    }
+-
+-    /** Rebuilds the table at {@code newCapacity}, dropping tombstones. */
+-    private void resize(int newCapacity) {
+-        Object[] oldKeys = keys;
+-        Object[] oldValues = values;
+-        keys = new Object[newCapacity];
+-        values = new Object[newCapacity];
+-        occupiedSlots = 0;
+-        // size is unchanged: every live slot is re-placed exactly once.
+-        for (int i = 0; i < oldKeys.length; i++) {
+-            Object k = oldKeys[i];
+-            if (k != null && k != TOMBSTONE) {
+-                placeKnownAbsent(k, oldValues[i]);
+-                occupiedSlots++;
+-            }
+-        }
+-    }
+-
+-    /**
+-     * Places an entry known to be unique into the current table. Used only by
+-     * {@link #resize}, where there are no duplicates and no tombstones, so the
+-     * first {@code null} encountered is the destination.
+-     */
+-    private void placeKnownAbsent(Object key, Object value) {
+-        int index = indexFor(key, keys.length);
+-        while (keys[index] != null) {
+-            index = next(index);
+-        }
+-        keys[index] = key;
+-        values[index] = value;
+-    }
+-
+-    /** Rounds {@code cap} up to the nearest power of two (at least 1). */
+-    private static int tableSizeFor(int cap) {
+-        int n = -1 >>> Integer.numberOfLeadingZeros(cap - 1);
+-        return (n < 0) ? 1 : n + 1;
+-    }
+-
+     // ----------------------------------------------------------------------
+     // Views
+     // ----------------------------------------------------------------------
+ 
+     /**
+-     * A {@link Map.Entry} backed by a table index. {@code getValue}/{@code setValue}
+-     * read and write {@code values[index]} directly, so the entry stays in sync with
+-     * the map (writes are visible to the map, per the {@code Map.Entry} contract).
+-     * The key is captured at construction, since a live slot's key never changes
+-     * while the slot remains live.
++     * A {@link Map.Entry} backed by a table slot index. {@code getValue}/
++     * {@code setValue} read and write the table directly, so the entry stays in sync
++     * with the map (writes are visible to the map, per the {@code Map.Entry}
++     * contract). The key is captured at construction, since a live slot's key never
++     * changes while the slot remains live.
+      */
+     private final class IndexEntry implements Map.Entry<K, V> {
+         private final int index;
+@@ -338,7 +182,7 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+         @SuppressWarnings("unchecked")
+         IndexEntry(int index) {
+             this.index = index;
+-            this.key = (K) keys[index];
++            this.key = (K) table.keyAt(index);
+         }
+ 
+         @Override
+@@ -349,15 +193,13 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+         @Override
+         @SuppressWarnings("unchecked")
+         public V getValue() {
+-            return (V) values[index];
++            return (V) table.valueAt(index);
+         }
+ 
+         @Override
+         @SuppressWarnings("unchecked")
+         public V setValue(V newValue) {
+-            V old = (V) values[index];
+-            values[index] = newValue;
+-            return old;
++            return (V) table.setValueAt(index, newValue);
+         }
+ 
+         @Override
+@@ -379,12 +221,12 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+     private final class EntrySet extends AbstractSet<Map.Entry<K, V>> {
+         @Override
+         public int size() {
+-            return size;
++            return table.size();
+         }
+ 
+         @Override
+         public void clear() {
+-            OpenAddressingHashMap.this.clear();
++            table.clear();
+         }
+ 
+         @Override
+@@ -397,8 +239,8 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+             if (!(o instanceof Map.Entry<?, ?> e)) {
+                 return false;
+             }
+-            int index = findIndex(e.getKey());
+-            return index >= 0 && Objects.equals(values[index], e.getValue());
++            int index = table.indexOf(e.getKey());
++            return index >= 0 && Objects.equals(table.valueAt(index), e.getValue());
+         }
+ 
+         @Override
+@@ -406,70 +248,32 @@ public final class OpenAddressingHashMap<K, V> extends AbstractMap<K, V> {
+             if (!(o instanceof Map.Entry<?, ?> e)) {
+                 return false;
+             }
+-            int index = findIndex(e.getKey());
+-            if (index >= 0 && Objects.equals(values[index], e.getValue())) {
+-                OpenAddressingHashMap.this.remove(e.getKey());
++            int index = table.indexOf(e.getKey());
++            if (index >= 0 && Objects.equals(table.valueAt(index), e.getValue())) {
++                table.deleteAt(index);
+                 return true;
+             }
+             return false;
+         }
+     }
+ 
+-    /** Fail-fast iterator over live slots, supporting {@link #remove()}. */
++    /** Fail-fast iterator over entries, delegating slot walking to the table cursor. */
+     private final class EntryIterator implements Iterator<Map.Entry<K, V>> {
+-        private int expectedModCount = modCount;
+-        private int scan;            // next table index to examine
+-        private int nextIndex = -1;  // table index of the next live slot, or -1
+-        private int lastIndex = -1;  // table index of the last returned slot, for remove()
+-
+-        EntryIterator() {
+-            advance();
+-        }
+-
+-        private void advance() {
+-            while (scan < keys.length) {
+-                if (isLive(scan)) {
+-                    nextIndex = scan++;
+-                    return;
+-                }
+-                scan++;
+-            }
+-            nextIndex = -1;
+-        }
++        private final OpenAddressingTable.Cursor cursor = table.cursor();
+ 
+         @Override
+         public boolean hasNext() {
+-            return nextIndex >= 0;
++            return cursor.hasNext();
+         }
+ 
+         @Override
+         public Map.Entry<K, V> next() {
+-            if (modCount != expectedModCount) {
+-                throw new ConcurrentModificationException();
+-            }
+-            if (nextIndex < 0) {
+-                throw new NoSuchElementException();
+-            }
+-            lastIndex = nextIndex;
+-            Map.Entry<K, V> entry = new IndexEntry(lastIndex);
+-            advance();
+-            return entry;
++            return new IndexEntry(cursor.nextIndex());
+         }
+ 
+         @Override
+         public void remove() {
+-            if (lastIndex < 0) {
+-                throw new IllegalStateException("next() has not been called, or remove() already called");
+-            }
+-            if (modCount != expectedModCount) {
+-                throw new ConcurrentModificationException();
+-            }
+-            keys[lastIndex] = TOMBSTONE;
+-            values[lastIndex] = null;
+-            size--;
+-            modCount++;
+-            expectedModCount = modCount; // stay consistent so iteration may continue
+-            lastIndex = -1;
++            cursor.remove();
+         }
+     }
+ }
+diff --git a/src/main/java/hashmap/OpenAddressingHashSet.java b/src/main/java/hashmap/OpenAddressingHashSet.java
+index 29f607b..e5072dd 100644
+--- a/src/main/java/hashmap/OpenAddressingHashSet.java
++++ b/src/main/java/hashmap/OpenAddressingHashSet.java
+@@ -6,37 +6,35 @@ import java.util.Iterator;
+ import java.util.Set;
+ 
+ /**
+- * A {@link Set} backed by an {@link OpenAddressingHashMap}, in the same way
+- * {@link java.util.HashSet} is backed by a {@link java.util.HashMap}: each element
+- * is stored as a key mapped to a shared sentinel value. This reuses all of the
+- * map's machinery (open addressing, linear probing, struct-of-arrays storage,
+- * resizing) so the set is a thin, correct adapter rather than a parallel
+- * reimplementation.
++ * A {@link Set} built on the same open-addressing core as {@link OpenAddressingHashMap}.
++ *
++ * <p>Both collections compose the package-private {@link OpenAddressingTable}, which
++ * holds the shared storage, probing, and resizing logic. The set constructs its
++ * table with value-tracking <em>disabled</em>, so &mdash; unlike a set that merely
++ * wraps a map with a dummy value (the {@code java.util.HashSet} approach) &mdash;
++ * it allocates <strong>no</strong> per-element value storage at all.
+  *
+  * <p>Extending {@link AbstractSet} supplies the bulk operations
+  * ({@code equals}/{@code hashCode}/{@code addAll}/{@code removeAll}/
+- * {@code retainAll}/{@code toArray}/{@code toString}) in terms of the four
+- * primitives overridden here ({@link #add}, {@link #remove(Object)},
+- * {@link #contains(Object)}, {@link #iterator()}, {@link #size()}).
++ * {@code retainAll}/{@code toArray}/{@code toString}) in terms of the primitives
++ * overridden here ({@link #add}, {@link #remove(Object)}, {@link #contains(Object)},
++ * {@link #iterator()}, {@link #size()}).
+  *
+- * <p>Iteration is in an unspecified order and is <em>fail-fast</em> (it delegates
+- * to the backing map's {@code keySet()} iterator, which supports {@code remove}).
+- * Like the backing map, this set does <strong>not</strong> permit {@code null}
+- * elements &mdash; {@link #add} throws {@link NullPointerException} &mdash; and is
++ * <p>Iteration is in an unspecified order and is <em>fail-fast</em>. Like the core,
++ * this set does <strong>not</strong> permit {@code null} elements &mdash;
++ * {@link #add} throws {@link NullPointerException} &mdash; and is
+  * <strong>not</strong> thread-safe.
+  *
+  * @param <E> the type of elements maintained by this set
+  */
+ public final class OpenAddressingHashSet<E> extends AbstractSet<E> {
+ 
+-    /** Dummy value associated with every element key in the backing map. */
+-    private static final Object PRESENT = new Object();
+-
+-    private final OpenAddressingHashMap<E, Object> map;
++    private final OpenAddressingTable table;
+ 
+-    /** Creates an empty set with the backing map's default capacity and load factor. */
++    /** Creates an empty set with the core's default capacity and load factor. */
+     public OpenAddressingHashSet() {
+-        this.map = new OpenAddressingHashMap<>();
++        this.table = new OpenAddressingTable(
++            OpenAddressingTable.DEFAULT_CAPACITY, OpenAddressingTable.DEFAULT_LOAD_FACTOR, false);
+     }
+ 
+     /**
+@@ -46,7 +44,8 @@ public final class OpenAddressingHashSet<E> extends AbstractSet<E> {
+      * @throws IllegalArgumentException if {@code initialCapacity} is not positive
+      */
+     public OpenAddressingHashSet(int initialCapacity) {
+-        this.map = new OpenAddressingHashMap<>(initialCapacity);
++        this.table = new OpenAddressingTable(
++            initialCapacity, OpenAddressingTable.DEFAULT_LOAD_FACTOR, false);
+     }
+ 
+     /**
+@@ -58,7 +57,7 @@ public final class OpenAddressingHashSet<E> extends AbstractSet<E> {
+      * @throws IllegalArgumentException if the arguments are out of range
+      */
+     public OpenAddressingHashSet(int initialCapacity, double loadFactor) {
+-        this.map = new OpenAddressingHashMap<>(initialCapacity, loadFactor);
++        this.table = new OpenAddressingTable(initialCapacity, loadFactor, false);
+     }
+ 
+     /**
+@@ -69,7 +68,9 @@ public final class OpenAddressingHashSet<E> extends AbstractSet<E> {
+      * @throws NullPointerException if {@code source} is {@code null}, or contains a null element
+      */
+     public OpenAddressingHashSet(Collection<? extends E> source) {
+-        this.map = new OpenAddressingHashMap<>(Math.max(16, source.size() * 2 + 1));
++        this.table = new OpenAddressingTable(
++            Math.max(OpenAddressingTable.DEFAULT_CAPACITY, source.size() * 2 + 1),
++            OpenAddressingTable.DEFAULT_LOAD_FACTOR, false);
+         addAll(source);
+     }
+ 
+@@ -82,36 +83,62 @@ public final class OpenAddressingHashSet<E> extends AbstractSet<E> {
+      */
+     @Override
+     public boolean add(E element) {
+-        return map.put(element, PRESENT) == null;
++        return table.insert(element) < 0; // negative result == newly inserted
+     }
+ 
+     @Override
+     public boolean remove(Object o) {
+-        return map.remove(o) == PRESENT;
++        int index = table.indexOf(o);
++        if (index < 0) {
++            return false;
++        }
++        table.deleteAt(index);
++        return true;
+     }
+ 
+     @Override
+     public boolean contains(Object o) {
+-        return map.containsKey(o);
++        return table.indexOf(o) >= 0;
+     }
+ 
+     @Override
+     public int size() {
+-        return map.size();
++        return table.size();
+     }
+ 
+     @Override
+     public boolean isEmpty() {
+-        return map.isEmpty();
++        return table.isEmpty();
+     }
+ 
+     @Override
+     public void clear() {
+-        map.clear();
++        table.clear();
+     }
+ 
+     @Override
+     public Iterator<E> iterator() {
+-        return map.keySet().iterator();
++        return new ElementIterator();
++    }
++
++    /** Fail-fast iterator over elements, delegating slot walking to the table cursor. */
++    private final class ElementIterator implements Iterator<E> {
++        private final OpenAddressingTable.Cursor cursor = table.cursor();
++
++        @Override
++        public boolean hasNext() {
++            return cursor.hasNext();
++        }
++
++        @Override
++        @SuppressWarnings("unchecked")
++        public E next() {
++            return (E) table.keyAt(cursor.nextIndex());
++        }
++
++        @Override
++        public void remove() {
++            cursor.remove();
++        }
+     }
+ }
+diff --git a/src/main/java/hashmap/OpenAddressingTable.java b/src/main/java/hashmap/OpenAddressingTable.java
+new file mode 100644
+index 0000000..efe4b55
+--- /dev/null
++++ b/src/main/java/hashmap/OpenAddressingTable.java
+@@ -0,0 +1,306 @@
++package hashmap;
++
++import java.util.ConcurrentModificationException;
++import java.util.NoSuchElementException;
++import java.util.Objects;
++
++/**
++ * Package-private open-addressing, linear-probing storage core shared by
++ * {@link OpenAddressingHashMap} and {@link OpenAddressingHashSet}.
++ *
++ * <p>This class owns everything the two public collections have in common: the
++ * slot storage, hashing, linear probing, tombstone deletion, automatic resizing,
++ * and fail-fast iteration. The collections are thin adapters that compose a table
++ * and expose it as a {@code Map} or a {@code Set} &mdash; composition is used
++ * rather than a shared superclass because both already extend
++ * {@code AbstractMap}/{@code AbstractSet} and Java allows only single inheritance.
++ *
++ * <p>A table optionally maintains a parallel {@code values} array, selected by the
++ * {@code tracksValues} constructor flag. A map sets it; a set leaves it off, so a
++ * set carries <em>no</em> per-element value storage at all. Slot state lives in the
++ * {@code keys} array: {@code null} marks an unused slot, {@link #TOMBSTONE} marks a
++ * deleted slot, and any other reference marks a live entry &mdash; so occupancy
++ * depends only on the key and a live entry may hold a {@code null} value.
++ *
++ * <p>The table length is always a power of two; the slot index is therefore a
++ * bit-mask rather than a modulo, and the table grows once the fraction of occupied
++ * slots (live entries plus tombstones) exceeds the configured load factor.
++ *
++ * <p>Not thread-safe.
++ */
++final class OpenAddressingTable {
++
++    /** Default initial capacity; must be a power of two. */
++    static final int DEFAULT_CAPACITY = 16;
++
++    /** Default fraction of occupied slots that triggers a resize. */
++    static final double DEFAULT_LOAD_FACTOR = 0.5;
++
++    /** Sentinel stored in {@code keys} to mark a deleted slot, distinct from {@code null}. */
++    private static final Object TOMBSTONE = new Object();
++
++    private Object[] keys;
++    private Object[] values;             // null when !tracksValues
++    private final boolean tracksValues;
++
++    private int size;                    // live entries
++    private int occupiedSlots;           // live entries + tombstones
++    private int modCount;
++    private final double loadFactor;
++
++    OpenAddressingTable(int initialCapacity, double loadFactor, boolean tracksValues) {
++        if (initialCapacity <= 0) {
++            throw new IllegalArgumentException("initialCapacity must be positive: " + initialCapacity);
++        }
++        if (!(loadFactor > 0.0 && loadFactor < 1.0) || Double.isNaN(loadFactor)) {
++            throw new IllegalArgumentException("loadFactor must be in (0, 1): " + loadFactor);
++        }
++        int capacity = tableSizeFor(initialCapacity);
++        this.keys = new Object[capacity];
++        this.tracksValues = tracksValues;
++        this.values = tracksValues ? new Object[capacity] : null;
++        this.loadFactor = loadFactor;
++    }
++
++    // ----------------------------------------------------------------------
++    // Size / state
++    // ----------------------------------------------------------------------
++
++    int size() {
++        return size;
++    }
++
++    boolean isEmpty() {
++        return size == 0;
++    }
++
++    int capacity() {
++        return keys.length;
++    }
++
++    // ----------------------------------------------------------------------
++    // Slot access (by index)
++    // ----------------------------------------------------------------------
++
++    Object keyAt(int index) {
++        return keys[index];
++    }
++
++    Object valueAt(int index) {
++        return values[index];
++    }
++
++    Object setValueAt(int index, Object value) {
++        Object previous = values[index];
++        values[index] = value;
++        return previous;
++    }
++
++    // ----------------------------------------------------------------------
++    // Core operations
++    // ----------------------------------------------------------------------
++
++    /** Returns the index of the live slot for {@code key}, or {@code -1} if absent. */
++    int indexOf(Object key) {
++        if (key == null) {
++            return -1;
++        }
++        int index = indexFor(key, keys.length);
++        while (true) {
++            Object k = keys[index];
++            if (k == null) {
++                return -1;
++            }
++            if (k != TOMBSTONE && k.equals(key)) {
++                return index;
++            }
++            index = next(index);
++        }
++    }
++
++    /**
++     * Ensures {@code key} occupies a slot, growing the table first if needed.
++     *
++     * @return the slot index if the key was already present; the bitwise complement
++     *         ({@code ~index}, a negative number) of the slot index if it was newly
++     *         inserted. {@link OpenAddressingHashMap} uses the sign to decide whether
++     *         {@code put} is replacing or adding.
++     * @throws NullPointerException if {@code key} is {@code null}
++     */
++    int insert(Object key) {
++        Objects.requireNonNull(key, "key/element must not be null");
++
++        if (occupiedSlots + 1 > keys.length * loadFactor) {
++            rehash(keys.length << 1);
++        }
++
++        int firstTombstone = -1;
++        int index = indexFor(key, keys.length);
++        while (true) {
++            Object k = keys[index];
++            if (k == null) {
++                int target = (firstTombstone >= 0) ? firstTombstone : index;
++                if (firstTombstone < 0) {
++                    occupiedSlots++;
++                }
++                keys[target] = key;
++                size++;
++                modCount++;
++                return ~target;
++            }
++            if (k == TOMBSTONE) {
++                if (firstTombstone < 0) {
++                    firstTombstone = index;
++                }
++            } else if (k.equals(key)) {
++                return index;
++            }
++            index = next(index);
++        }
++    }
++
++    /** Tombstones the live slot at {@code index}, releasing any value for GC. */
++    void deleteAt(int index) {
++        keys[index] = TOMBSTONE;
++        if (tracksValues) {
++            values[index] = null;
++        }
++        size--;
++        modCount++;
++        // occupiedSlots is unchanged: the tombstone still occupies the slot.
++    }
++
++    void clear() {
++        keys = new Object[DEFAULT_CAPACITY];
++        values = tracksValues ? new Object[DEFAULT_CAPACITY] : null;
++        size = 0;
++        occupiedSlots = 0;
++        modCount++;
++    }
++
++    /** Linear scan for a value; only meaningful for value-tracking (map) tables. */
++    boolean containsValue(Object value) {
++        for (int i = 0; i < keys.length; i++) {
++            if (isLive(i) && Objects.equals(values[i], value)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    // ----------------------------------------------------------------------
++    // Internal helpers
++    // ----------------------------------------------------------------------
++
++    private boolean isLive(int i) {
++        Object k = keys[i];
++        return k != null && k != TOMBSTONE;
++    }
++
++    private static int indexFor(Object key, int length) {
++        int h = key.hashCode();
++        h ^= (h >>> 16); // spread high bits into low bits to reduce clustering
++        return h & (length - 1);
++    }
++
++    private int next(int index) {
++        return (index + 1) & (keys.length - 1);
++    }
++
++    /** Rebuilds both arrays at {@code newCapacity}, dropping tombstones. */
++    private void rehash(int newCapacity) {
++        Object[] oldKeys = keys;
++        Object[] oldValues = values;
++        keys = new Object[newCapacity];
++        values = tracksValues ? new Object[newCapacity] : null;
++        occupiedSlots = 0;
++        // size is unchanged: every live slot is re-placed exactly once.
++        for (int i = 0; i < oldKeys.length; i++) {
++            Object k = oldKeys[i];
++            if (k != null && k != TOMBSTONE) {
++                int j = freeSlot(k);
++                keys[j] = k;
++                if (tracksValues) {
++                    values[j] = oldValues[i];
++                }
++                occupiedSlots++;
++            }
++        }
++    }
++
++    /** First {@code null} slot on {@code key}'s probe path; used during rehash. */
++    private int freeSlot(Object key) {
++        int index = indexFor(key, keys.length);
++        while (keys[index] != null) {
++            index = next(index);
++        }
++        return index;
++    }
++
++    private static int tableSizeFor(int cap) {
++        int n = -1 >>> Integer.numberOfLeadingZeros(cap - 1);
++        return (n < 0) ? 1 : n + 1;
++    }
++
++    // ----------------------------------------------------------------------
++    // Fail-fast iteration over live slot indices
++    // ----------------------------------------------------------------------
++
++    Cursor cursor() {
++        return new Cursor();
++    }
++
++    /**
++     * Walks the live slots in unspecified order, exposing each by index. Shared by
++     * the map's entry-set iterator and the set's element iterator; supports removal.
++     */
++    final class Cursor {
++        private int expectedModCount = modCount;
++        private int scan;            // next table index to examine
++        private int nextIndex = -1;  // index of the next live slot, or -1
++        private int lastIndex = -1;  // index of the last returned slot, for remove()
++
++        private Cursor() {
++            advance();
++        }
++
++        private void advance() {
++            while (scan < keys.length) {
++                if (isLive(scan)) {
++                    nextIndex = scan++;
++                    return;
++                }
++                scan++;
++            }
++            nextIndex = -1;
++        }
++
++        boolean hasNext() {
++            return nextIndex >= 0;
++        }
++
++        int nextIndex() {
++            if (modCount != expectedModCount) {
++                throw new ConcurrentModificationException();
++            }
++            if (nextIndex < 0) {
++                throw new NoSuchElementException();
++            }
++            lastIndex = nextIndex;
++            advance();
++            return lastIndex;
++        }
++
++        void remove() {
++            if (lastIndex < 0) {
++                throw new IllegalStateException("next() has not been called, or remove() already called");
++            }
++            if (modCount != expectedModCount) {
++                throw new ConcurrentModificationException();
++            }
++            deleteAt(lastIndex);
++            expectedModCount = modCount; // stay consistent so iteration may continue
++            lastIndex = -1;
++        }
++    }
++}
