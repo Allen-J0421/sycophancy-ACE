@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run RefDiff on experiment commits (post-hoc, separate from run_experiment.py).
 
-Scans result/ for folders with logs/*-log.csv (like result/plot.py), invokes
+Scans result/ for folders with logs/*-log.csv (like plot_lines.py), invokes
 refdiff-runner per commit_sha on --repo, and writes refdiff/<stamp>-refdiff.jsonl
 plus a single run-labeled matcher log. Skips experiment folders whose commits are not in --repo.
 

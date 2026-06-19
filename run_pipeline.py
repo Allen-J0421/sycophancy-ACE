@@ -40,12 +40,13 @@ _PYTHON = sys.executable
 
 # Canonical phase order. The orchestrator always runs phases in this order,
 # regardless of how they are written in the planner or passed via --phase.
-CANONICAL_PHASES = ["run_exp", "refdiff", "plot_refdiff", "signals", "plot_signals", "dashboard"]
+CANONICAL_PHASES = ["run_exp", "plot_lines", "refdiff", "plot_refdiff", "signals", "plot_signals", "dashboard"]
 
 # Upstream dependency for the soft dep-check: a phase should only run once the
 # named upstream phase is `done` for the same experiment. run_exp has no upstream.
 PHASE_UPSTREAM = {
     "run_exp": None,
+    "plot_lines": "run_exp",
     "refdiff": "run_exp",
     "plot_refdiff": "refdiff",
     "signals": "refdiff",
@@ -265,6 +266,8 @@ def build_command(step: Step) -> list[str]:
             "--repo", str(t.target),
             "--output-base", base,
         ]
+    if step.phase == "plot_lines":
+        return [_PYTHON, str(_SCRIPT_DIR / "plot_lines.py"), "--output-base", base]
     if step.phase == "plot_refdiff":
         return [_PYTHON, str(_SCRIPT_DIR / "plot_refdiff.py"), "--output-base", base]
     if step.phase == "signals":

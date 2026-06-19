@@ -331,11 +331,16 @@ def check_task(task: "run_pipeline.Task") -> Findings:
             f.error(f"refdiff: Gradle wrapper not found at {_GRADLEW}")
 
     # --- plot deps ---------------------------------------------------------
-    if "plot_refdiff" in phases or "plot_signals" in phases:
+    if {"plot_lines", "plot_refdiff", "plot_signals"} & set(phases):
         if module_available("matplotlib"):
             f.ok("matplotlib importable (plots)")
         else:
             f.error("plot phase requested but `matplotlib` not importable")
+    if "plot_lines" in phases:
+        if module_available("pandas"):
+            f.ok("pandas importable (plot_lines)")
+        else:
+            f.error("plot_lines phase requested but `pandas` not importable")
 
     return f
 

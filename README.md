@@ -11,7 +11,7 @@ The work runs as **separate phases** — each is its own entry point, run in ord
 | 3 | Signals (S1–S6) | `compute_signals.py` | Sycophancy signals JSON + CSV |
 | 4 | Dashboard | `dashboard/build.py` | Self-contained interactive HTML |
 
-Two optional plotting steps (`plot_refdiff.py`, `plot_signals.py`) produce static PNGs between phases 2→3 and 3→4. **Python subjects** skip RefDiff/signals (phases 1 + 4 only); **Java/JS subjects** run the full chain.
+Plotting steps (`plot_lines.py` right after `run_exp`, then `plot_refdiff.py`, `plot_signals.py`) produce static PNGs. **Python subjects** skip RefDiff/signals (run_exp + plot_lines + dashboard only); **Java/JS subjects** run the full chain.
 
 You can run the phases two ways:
 
@@ -103,7 +103,7 @@ An editable JSON file. `defaults` apply to every task; each task may override th
   "defaults": {
     "iterations": 10,
     "models": ["gpt-5.5", "gpt-5.4", "claude-sonnet-4-6", "claude-opus-4-6"],
-    "phases": ["run_exp", "refdiff", "plot_refdiff", "signals", "plot_signals", "dashboard"],
+    "phases": ["run_exp", "plot_lines", "refdiff", "plot_refdiff", "signals", "plot_signals", "dashboard"],
     "prompter": false,
     "label": null
   },
@@ -131,7 +131,7 @@ An editable JSON file. `defaults` apply to every task; each task may override th
 The canonical phase order is fixed regardless of how phases are listed:
 
 ```
-run_exp → refdiff → plot_refdiff → signals → plot_signals → dashboard
+run_exp → plot_lines → refdiff → plot_refdiff → signals → plot_signals → dashboard
 ```
 
 For long runs, finish one phase across the **whole plan** before the next (recommended), or omit `--phase` to run the full chain per experiment:
@@ -321,12 +321,12 @@ Rebuild after `run_refdiff.py` / `compute_signals.py` to embed RefDiff and signa
 ### Static plots (papers)
 
 ```bash
-python result/plot.py      # <experiment>_lines_total.{pdf,png}  (reads logs/*-log.csv)
+python plot_lines.py       # <experiment>_lines.png              (reads logs/*-log.csv)
 python plot_refdiff.py     # <experiment>_refdiff.png            (needs refdiff/*-refdiff.jsonl)
 python plot_signals.py     # <experiment>_signals.png            (needs signals/*-signals.json)
 ```
 
-All write under `result/<experiment>/plots/`. `plot_refdiff.py` / `plot_signals.py` scan every `result/*` folder and print which were skipped vs. built.
+All write under `result/<experiment>/plots/` (or `--output-base <dir>`). `plot_lines.py` / `plot_refdiff.py` / `plot_signals.py` scan every experiment folder and print which were skipped vs. built. `plot_lines` also runs automatically as a pipeline phase right after `run_exp`.
 
 ---
 
@@ -350,7 +350,7 @@ result/bubble_sort_Java/
     <stamp>-<model>-signals.json
     bubble_sort_Java_signals.csv
   plots/                       # after plot*.py
-    bubble_sort_Java_{lines_total.pdf,lines_total.png,refdiff.png,signals.png}
+    bubble_sort_Java_{lines.png,refdiff.png,signals.png}
   dashboard.html               # after dashboard/build.py
 ```
 
@@ -374,9 +374,9 @@ config/                AGENT_FIXED_PROMPT, prompter system prompt, clarification
 dashboard/             build.py (Phase 4), build_index.py, app.js, template.html, style.css
 result/                Single-experiment output (manual phase scripts)
 output/                Batch-pipeline output (.pipeline_state.json, Algorithms/, RealWorld/)
+plot_lines.py          Line-change PNGs (pipeline phase after run_exp)
 plot_refdiff.py        Optional RefDiff stacked-bar PNGs
 plot_signals.py        Optional signal bar charts + binary-flag matrix PNGs
-result/plot.py         Optional PDF/PNG line charts
 index.html             Links to all built dashboards
 tests/                 pytest suite
 ```
