@@ -1,0 +1,323 @@
+diff --git a/FieldPopulator.java b/FieldPopulator.java
+index d02c3b7..8182336 100644
+--- a/FieldPopulator.java
++++ b/FieldPopulator.java
+@@ -19,17 +19,11 @@ public class FieldPopulator {
+ 
+ 	private final RandomService random;
+ 
+-	private final GraphView graphView;
+-
+-	private final Climate climate;
+-
+ 	private final List<AnimalSpawnRule> animalSpawnRules;
+ 
+ 
+-	public FieldPopulator(GraphView graphView, Climate climate) {
++	public FieldPopulator() {
+ 		this.random = RandomService.shared();
+-		this.graphView = graphView;
+-		this.climate = climate;
+ 		this.animalSpawnRules = new ArrayList<>();
+ 		registerAnimalSpawnRules();
+ 	}
+@@ -78,7 +72,6 @@ public class FieldPopulator {
+ 		Animal animal = createAnimal(field, location);
+ 		if (animal != null) {
+ 			animals.add(animal);
+-			graphView.setColor(animal.getClass(), animal.getObjectColor(climate));
+ 		}
+ 	}
+ 
+diff --git a/GraphView.java b/GraphView.java
+index 2e522f8..b2348f2 100644
+--- a/GraphView.java
++++ b/GraphView.java
+@@ -9,7 +9,7 @@ import java.util.Map;
+ import java.util.stream.IntStream;
+ 
+ 
+-public class GraphView extends JFrame {
++public class GraphView extends JFrame implements SimulationObserver {
+ 	private static final Color LIGHT_GRAY = new Color(0, 0, 0, 40);
+ 
+ 	private static JFrame frame;
+@@ -40,17 +40,17 @@ public class GraphView extends JFrame {
+ 	}
+ 
+ 
+-	public void showStatus(int step, FieldEnvironment field) {
+-		graph.update(step, field, stats);
+-	}
+-
+-
+-	public boolean isViable(FieldEnvironment field) {
+-		return stats.isViable(field);
++	@Override
++	public void onSimulationStateChanged(SimulationSnapshot snapshot) {
++		registerColors(snapshot);
++		if (snapshot.getStep() == 0) {
++			reset();
++		}
++		graph.update(snapshot.getStep(), snapshot.getField(), stats);
+ 	}
+ 
+ 
+-	public void reset() {
++	private void reset() {
+ 		stats.reset();
+ 		graph.newRun();
+ 	}
+@@ -217,4 +217,10 @@ public class GraphView extends JFrame {
+ 	private int getTrackedClassCount() {
+ 		return colors.size();
+ 	}
++
++
++	private void registerColors(SimulationSnapshot snapshot) {
++		snapshot.getField().streamAnimals()
++				.forEach(animal -> setColor(animal.getClass(), animal.getObjectColor(snapshot.getClimate())));
++	}
+ }
+diff --git a/Main.java b/Main.java
+index bcb7675..ef97080 100644
+--- a/Main.java
++++ b/Main.java
+@@ -1,7 +1,11 @@
+ 
+ public class Main {
+ 	public static void main(String[] args) {
+-		Simulator simulator = new Simulator();
++		int depth = 200;
++		int width = 320;
++		Simulator simulator = new Simulator(depth, width);
++		simulator.addObserver(new SimulatorView(depth, width));
++		simulator.addObserver(new GraphView(1000, 500, 500));
+ 		simulator.runLongSimulation();
+ 	}
+ }
+diff --git a/SimulationObserver.java b/SimulationObserver.java
+new file mode 100644
+index 0000000..e390b44
+--- /dev/null
++++ b/SimulationObserver.java
+@@ -0,0 +1,4 @@
++public interface SimulationObserver {
++
++	void onSimulationStateChanged(SimulationSnapshot snapshot);
++}
+diff --git a/SimulationSnapshot.java b/SimulationSnapshot.java
+new file mode 100644
+index 0000000..22a2dea
+--- /dev/null
++++ b/SimulationSnapshot.java
+@@ -0,0 +1,50 @@
++public class SimulationSnapshot {
++
++	private final int step;
++	private final TimeCycle timeCycle;
++	private final FieldEnvironment field;
++	private final Climate climate;
++	private final int sickPercentage;
++	private final boolean viable;
++
++
++	public SimulationSnapshot(int step, TimeCycle timeCycle, FieldEnvironment field, Climate climate,
++			int sickPercentage, boolean viable) {
++		this.step = step;
++		this.timeCycle = timeCycle;
++		this.field = field;
++		this.climate = climate;
++		this.sickPercentage = sickPercentage;
++		this.viable = viable;
++	}
++
++
++	public int getStep() {
++		return step;
++	}
++
++
++	public TimeCycle getTimeCycle() {
++		return timeCycle;
++	}
++
++
++	public FieldEnvironment getField() {
++		return field;
++	}
++
++
++	public Climate getClimate() {
++		return climate;
++	}
++
++
++	public int getSickPercentage() {
++		return sickPercentage;
++	}
++
++
++	public boolean isViable() {
++		return viable;
++	}
++}
+diff --git a/Simulator.java b/Simulator.java
+index eb81193..21508a7 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -26,16 +26,16 @@ public class Simulator {
+ 
+ 	private int step;
+ 
+-	private SimulatorView gridView;
+-
+-	private GraphView graphView;
+-
+ 	private TimeCycle currentTimeCycle;
+ 
+ 	private Climate climate;
+ 
+ 	private FieldPopulator fieldPopulator;
+ 
++	private final List<SimulationObserver> observers;
++
++	private final FieldStats fieldStats;
++
+ 	private int sickPercentage;
+ 
+ 
+@@ -57,15 +57,11 @@ public class Simulator {
+ 		animals = new ArrayList<>();
+ 
+ 		plants = new ArrayList<>();
++		observers = new ArrayList<>();
++		fieldStats = new FieldStats();
+ 		field = new Field(depth, width);
+ 		climate = new Climate(DEFAULT_WEATHER);
+-
+-
+-		gridView = new SimulatorView(depth, width);
+-
+-
+-		graphView = new GraphView(1000, 500, 500);
+-		fieldPopulator = new FieldPopulator(graphView, climate);
++		fieldPopulator = new FieldPopulator();
+ 
+ 
+ 		reset();
+@@ -78,7 +74,7 @@ public class Simulator {
+ 
+ 
+ 	public void simulate(int numSteps) {
+-		for (int step = 1; step <= numSteps && gridView.isViable(field); step++) {
++		for (int step = 1; step <= numSteps && isViable(); step++) {
+ 			simulateOneStep();
+ 			delay(60);
+ 		}
+@@ -104,7 +100,7 @@ public class Simulator {
+ 			currentTimeCycle = currentTimeCycle.toggle();
+ 		}
+ 
+-		updateViews();
++		notifyObservers();
+ 	}
+ 
+ 
+@@ -115,15 +111,25 @@ public class Simulator {
+ 		climate.setCurrentWeather(Weather.SUN);
+ 
+ 		sickPercentage = 0;
+-		graphView.reset();
+-		updateViews();
++		notifyObservers();
++	}
++
++
++	public void addObserver(SimulationObserver observer) {
++		observers.add(observer);
++		observer.onSimulationStateChanged(createSnapshot());
+ 	}
+ 
+ 
+-	private void updateViews() {
++	public void removeObserver(SimulationObserver observer) {
++		observers.remove(observer);
++	}
++
++
++	private void notifyObservers() {
+ 		sickPercentage = calculateSickPercentage();
+-		gridView.showStatus(step, currentTimeCycle, field, climate, sickPercentage);
+-		graphView.showStatus(step, field);
++		SimulationSnapshot snapshot = createSnapshot();
++		observers.forEach(observer -> observer.onSimulationStateChanged(snapshot));
+ 	}
+ 
+ 
+@@ -139,6 +145,16 @@ public class Simulator {
+ 	}
+ 
+ 
++	private boolean isViable() {
++		return fieldStats.isViable(field);
++	}
++
++
++	private SimulationSnapshot createSnapshot() {
++		return new SimulationSnapshot(step, currentTimeCycle, field, climate, sickPercentage, isViable());
++	}
++
++
+ 	private void delay(int millisec) {
+ 		try {
+ 			Thread.sleep(millisec);
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 37c05df..0c349ac 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -2,7 +2,7 @@ import javax.swing.*;
+ import java.awt.*;
+ 
+ 
+-public class SimulatorView extends JFrame {
++public class SimulatorView extends JFrame implements SimulationObserver {
+ 
+ 	private static final Color EMPTY_COLOR = Color.white;
+ 
+@@ -56,16 +56,19 @@ public class SimulatorView extends JFrame {
+ 	}
+ 
+ 
+-	public void showStatus(int step, TimeCycle currentTimeCycle, FieldEnvironment field, Climate climate, int infect) {
++	@Override
++	public void onSimulationStateChanged(SimulationSnapshot snapshot) {
+ 		if (!isVisible()) {
+ 			setVisible(true);
+ 		}
+ 
+-		stepLabel.setText(STEP_PREFIX + step);
+-		dayCycleLabel.setText(DAYCYCLE_PREFIX + currentTimeCycle + " ");
++		FieldEnvironment field = snapshot.getField();
++		Climate climate = snapshot.getClimate();
++		stepLabel.setText(STEP_PREFIX + snapshot.getStep());
++		dayCycleLabel.setText(DAYCYCLE_PREFIX + snapshot.getTimeCycle() + " ");
+ 		this.climateLabel.setText(CLIMATE_PREFIX + climate.getCurrentSeason());
+ 		this.weatherLabel.setText(WEATHER_PREFIX + climate.getCurrentWeather());
+-		this.infectLabel.setText(INFECTION_PREFIX + infect + "%");
++		this.infectLabel.setText(INFECTION_PREFIX + snapshot.getSickPercentage() + "%");
+ 		this.humidityLabel.setText(HUMIDITY_PREFIX + climate.getHumidity() + "%");
+ 		stats.reset();
+ 
+@@ -79,11 +82,6 @@ public class SimulatorView extends JFrame {
+ 	}
+ 
+ 
+-	public boolean isViable(FieldEnvironment field) {
+-		return stats.isViable(field);
+-	}
+-
+-
+ 	private void drawLocation(FieldEnvironment field, Climate climate, Location location) {
+ 		Animal animal = field.getAnimalAt(location);
+ 		Plant plant = field.getPlantAt(location);

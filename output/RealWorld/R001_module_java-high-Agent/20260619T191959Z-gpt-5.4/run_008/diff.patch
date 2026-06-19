@@ -1,0 +1,240 @@
+diff --git a/Animal.java b/Animal.java
+index d71dbab..4fb93a5 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -192,12 +192,6 @@ public abstract class Animal extends Entity {
+ 	}
+ 
+ 
+-	@Override
+-	void accept(EntityVisitor visitor) {
+-		visitor.visitAnimal(this);
+-	}
+-
+-
+ 	protected void setAge(int age) {
+ 		this.age = age;
+ 	}
+diff --git a/AnimalEntityHandler.java b/AnimalEntityHandler.java
+new file mode 100644
+index 0000000..6065a8b
+--- /dev/null
++++ b/AnimalEntityHandler.java
+@@ -0,0 +1,19 @@
++public class AnimalEntityHandler implements EntityHandler<Animal> {
++
++	@Override
++	public Class<Animal> getEntityType() {
++		return Animal.class;
++	}
++
++
++	@Override
++	public void place(FieldEnvironment fieldEnvironment, Animal animal, Location location) {
++		fieldEnvironment.placeAnimal(animal, location);
++	}
++
++
++	@Override
++	public void clear(FieldEnvironment fieldEnvironment, Location location) {
++		fieldEnvironment.clearAnimalAt(location);
++	}
++}
+diff --git a/Entity.java b/Entity.java
+index beb683a..ffe6376 100644
+--- a/Entity.java
++++ b/Entity.java
+@@ -41,10 +41,6 @@ public abstract class Entity {
+ 		controller.remove(this);
+ 	}
+ 
+-
+-	abstract void accept(EntityVisitor visitor);
+-
+-
+ 	void updateLocation(Location newLocation) {
+ 		location = newLocation;
+ 	}
+diff --git a/EntityHandler.java b/EntityHandler.java
+new file mode 100644
+index 0000000..253e229
+--- /dev/null
++++ b/EntityHandler.java
+@@ -0,0 +1,10 @@
++public interface EntityHandler<T extends Entity> {
++
++	Class<T> getEntityType();
++
++
++	void place(FieldEnvironment fieldEnvironment, T entity, Location location);
++
++
++	void clear(FieldEnvironment fieldEnvironment, Location location);
++}
+diff --git a/EntityVisitor.java b/EntityVisitor.java
+deleted file mode 100644
+index 82d1af2..0000000
+--- a/EntityVisitor.java
++++ /dev/null
+@@ -1,7 +0,0 @@
+-public interface EntityVisitor {
+-
+-	void visitAnimal(Animal animal);
+-
+-
+-	void visitPlant(Plant plant);
+-}
+diff --git a/FieldEntityController.java b/FieldEntityController.java
+index 5a03d85..2763957 100644
+--- a/FieldEntityController.java
++++ b/FieldEntityController.java
+@@ -1,10 +1,24 @@
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++
+ public class FieldEntityController implements EntityController {
+ 
+ 	private final FieldEnvironment fieldEnvironment;
+ 
++	private final Map<Class<? extends Entity>, EntityHandler<? extends Entity>> handlers;
++
+ 
+ 	public FieldEntityController(FieldEnvironment fieldEnvironment) {
++		this(fieldEnvironment, List.of(new AnimalEntityHandler(), new PlantEntityHandler()));
++	}
++
++
++	public FieldEntityController(FieldEnvironment fieldEnvironment, List<EntityHandler<? extends Entity>> handlers) {
+ 		this.fieldEnvironment = fieldEnvironment;
++		this.handlers = new LinkedHashMap<>();
++		handlers.forEach(handler -> this.handlers.put(handler.getEntityType(), handler));
+ 	}
+ 
+ 
+@@ -17,7 +31,7 @@ public class FieldEntityController implements EntityController {
+ 	@Override
+ 	public void place(Entity entity, Location location) {
+ 		entity.updateLocation(location);
+-		entity.accept(new PlacementVisitor(location));
++		resolveHandler(entity).place(fieldEnvironment, entity, location);
+ 	}
+ 
+ 
+@@ -25,10 +39,10 @@ public class FieldEntityController implements EntityController {
+ 	public void move(Entity entity, Location location) {
+ 		Location currentLocation = entity.getLocation();
+ 		if (currentLocation != null) {
+-			entity.accept(new ClearingVisitor(currentLocation));
++			resolveHandler(entity).clear(fieldEnvironment, currentLocation);
+ 		}
+ 		entity.updateLocation(location);
+-		entity.accept(new PlacementVisitor(location));
++		resolveHandler(entity).place(fieldEnvironment, entity, location);
+ 	}
+ 
+ 
+@@ -36,52 +50,18 @@ public class FieldEntityController implements EntityController {
+ 	public void remove(Entity entity) {
+ 		Location currentLocation = entity.getLocation();
+ 		if (currentLocation != null) {
+-			entity.accept(new ClearingVisitor(currentLocation));
++			resolveHandler(entity).clear(fieldEnvironment, currentLocation);
+ 			entity.updateLocation(null);
+ 		}
+ 	}
+ 
+ 
+-	private class PlacementVisitor implements EntityVisitor {
+-		private final Location location;
+-
+-
+-		private PlacementVisitor(Location location) {
+-			this.location = location;
+-		}
+-
+-
+-		@Override
+-		public void visitAnimal(Animal animal) {
+-			fieldEnvironment.placeAnimal(animal, location);
+-		}
+-
+-
+-		@Override
+-		public void visitPlant(Plant plant) {
+-			fieldEnvironment.placePlant(plant, location);
+-		}
+-	}
+-
+-
+-	private class ClearingVisitor implements EntityVisitor {
+-		private final Location location;
+-
+-
+-		private ClearingVisitor(Location location) {
+-			this.location = location;
+-		}
+-
+-
+-		@Override
+-		public void visitAnimal(Animal animal) {
+-			fieldEnvironment.clearAnimalAt(location);
+-		}
+-
+-
+-		@Override
+-		public void visitPlant(Plant plant) {
+-			fieldEnvironment.clearPlantAt(location);
+-		}
++	@SuppressWarnings("unchecked")
++	private <T extends Entity> EntityHandler<T> resolveHandler(T entity) {
++		return handlers.values().stream()
++				.filter(handler -> handler.getEntityType().isAssignableFrom(entity.getClass()))
++				.map(handler -> (EntityHandler<T>) handler)
++				.findFirst()
++				.orElseThrow(() -> new IllegalArgumentException("No handler registered for " + entity.getClass().getName()));
+ 	}
+ }
+diff --git a/Plant.java b/Plant.java
+index 92a7f9f..ce9f46b 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -41,12 +41,6 @@ public abstract class Plant extends Entity {
+ 	}
+ 
+ 
+-	@Override
+-	void accept(EntityVisitor visitor) {
+-		visitor.visitPlant(this);
+-	}
+-
+-
+ 	protected int getStage() {
+ 		return stage;
+ 	}
+diff --git a/PlantEntityHandler.java b/PlantEntityHandler.java
+new file mode 100644
+index 0000000..65bd5f6
+--- /dev/null
++++ b/PlantEntityHandler.java
+@@ -0,0 +1,19 @@
++public class PlantEntityHandler implements EntityHandler<Plant> {
++
++	@Override
++	public Class<Plant> getEntityType() {
++		return Plant.class;
++	}
++
++
++	@Override
++	public void place(FieldEnvironment fieldEnvironment, Plant plant, Location location) {
++		fieldEnvironment.placePlant(plant, location);
++	}
++
++
++	@Override
++	public void clear(FieldEnvironment fieldEnvironment, Location location) {
++		fieldEnvironment.clearPlantAt(location);
++	}
++}

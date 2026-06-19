@@ -1,0 +1,354 @@
+diff --git a/app/Main.java b/app/Main.java
+index 3470d11..a042ecd 100644
+--- a/app/Main.java
++++ b/app/Main.java
+@@ -1,56 +1,69 @@
+ package app;
+ 
++import config.SimulationConfig;
+ import events.EventBus;
+ import logging.ConsoleLogger;
+ import logging.EventLogger;
+ import logging.Logger;
+-import model.Bear;
+-import model.Bird;
+-import model.Duck;
+-import model.Flower;
+-import model.Grass;
+-import model.Mouse;
+ import model.SpeciesRegistry;
+-import model.Wolf;
+ import view.GraphView;
+ import view.SimulatorView;
+ 
++import java.io.IOException;
++import java.nio.file.Path;
++
+ 
+ /**
+- * Entry point and composition root: the one place that knows the concrete
+- * species, views, and log destination. It wires the species into a
+- * {@link SpeciesRegistry}, subscribes the views and an {@link EventLogger} to an
+- * {@link EventBus}, and hands the simulator only the registry, the publish side
+- * of the bus, and a {@link Logger} — so the engine stays oblivious to which
+- * creatures exist, who is watching, and where output goes.
++ * Entry point and composition root. It loads the externalised
++ * {@link SimulationConfig}, turns the configured species names into a populated
++ * {@link SpeciesRegistry} via the {@link SpeciesCatalog}, subscribes the views
++ * and an {@link EventLogger} to an {@link EventBus}, and hands the simulator its
++ * collaborators. Simulation parameters live in the configuration file, so they
++ * can be changed without touching or recompiling any code.
+  */
+ public class Main {
+ 
+-	private static final int DEPTH = 200;
+-	private static final int WIDTH = 320;
++	private static final String CONFIG_FILE = "simulation.properties";
+ 
+ 	public static void main(String[] args) {
+ 		Logger logger = new ConsoleLogger();
++		SimulationConfig config = loadConfig(logger);
++		SpeciesRegistry registry = buildRegistry(config, new SpeciesCatalog());
+ 
+ 		EventBus events = new EventBus();
+-		events.register(new SimulatorView(DEPTH, WIDTH));
++		events.register(new SimulatorView(config.fieldDepth(), config.fieldWidth()));
+ 		events.register(new GraphView(1000, 500, 500));
+ 		events.register(new EventLogger(logger));
+ 
+-		Simulator simulator = new Simulator(standardSpecies(), events, logger, DEPTH, WIDTH);
++		Simulator simulator = new Simulator(registry, events, logger, config.fieldDepth(), config.fieldWidth());
+ 		simulator.runLongSimulation();
+ 	}
+ 
+ 
+-	/** The default catalogue of species and their spawn probabilities. */
+-	private static SpeciesRegistry standardSpecies() {
+-		return new SpeciesRegistry()
+-				.registerPlant(0.07, Flower::new)
+-				.defaultPlant(Grass::new)
+-				.registerAnimal(0.07, (field, location) -> new Bird(true, field, location))
+-				.registerAnimal(0.07, (field, location) -> new Mouse(true, field, location))
+-				.registerAnimal(0.07, (field, location) -> new Duck(true, field, location))
+-				.registerAnimal(0.03, (field, location) -> new Wolf(true, field, location))
+-				.registerAnimal(0.03, (field, location) -> new Bear(true, field, location));
++	/** Load the configuration file, falling back to built-in defaults if it is absent. */
++	static SimulationConfig loadConfig(Logger logger) {
++		Path path = Path.of(CONFIG_FILE);
++		try {
++			SimulationConfig config = SimulationConfig.load(path);
++			logger.log("Loaded configuration from " + path.toAbsolutePath());
++			return config;
++		} catch (IOException e) {
++			logger.log("No " + CONFIG_FILE + " found; using built-in defaults.");
++			return SimulationConfig.defaults();
++		}
++	}
++
++
++	/** Translate the configured species names and weights into a populated registry. */
++	static SpeciesRegistry buildRegistry(SimulationConfig config, SpeciesCatalog catalog) {
++		SpeciesRegistry registry = new SpeciesRegistry();
++		for (SimulationConfig.SpeciesWeight rule : config.plantRules()) {
++			registry.registerPlant(rule.probability(), catalog.plant(rule.name()));
++		}
++		registry.defaultPlant(catalog.plant(config.defaultPlant()));
++		for (SimulationConfig.SpeciesWeight rule : config.animalRules()) {
++			registry.registerAnimal(rule.probability(), catalog.animal(rule.name()));
++		}
++		return registry;
+ 	}
+ }
+diff --git a/app/SpeciesCatalog.java b/app/SpeciesCatalog.java
+new file mode 100644
+index 0000000..1332b94
+--- /dev/null
++++ b/app/SpeciesCatalog.java
+@@ -0,0 +1,52 @@
++package app;
++
++import model.AnimalFactory;
++import model.Bear;
++import model.Bird;
++import model.Duck;
++import model.Flower;
++import model.Grass;
++import model.Mouse;
++import model.PlantFactory;
++import model.Wolf;
++
++import java.util.Map;
++
++
++/**
++ * Resolves the species names used in configuration to the factories that build
++ * them. This is the one spot coupled to concrete species: adding a creature
++ * means a new class plus one entry here, after which it can be enabled and
++ * weighted purely from the configuration file.
++ */
++final class SpeciesCatalog {
++
++	private final Map<String, AnimalFactory> animals = Map.of(
++			"Bird", (field, location) -> new Bird(true, field, location),
++			"Mouse", (field, location) -> new Mouse(true, field, location),
++			"Duck", (field, location) -> new Duck(true, field, location),
++			"Wolf", (field, location) -> new Wolf(true, field, location),
++			"Bear", (field, location) -> new Bear(true, field, location));
++
++	private final Map<String, PlantFactory> plants = Map.of(
++			"Flower", Flower::new,
++			"Grass", Grass::new);
++
++
++	AnimalFactory animal(String name) {
++		AnimalFactory factory = animals.get(name);
++		if (factory == null) {
++			throw new IllegalArgumentException("Unknown animal species in configuration: " + name);
++		}
++		return factory;
++	}
++
++
++	PlantFactory plant(String name) {
++		PlantFactory factory = plants.get(name);
++		if (factory == null) {
++			throw new IllegalArgumentException("Unknown plant species in configuration: " + name);
++		}
++		return factory;
++	}
++}
+diff --git a/config/SimulationConfig.java b/config/SimulationConfig.java
+new file mode 100644
+index 0000000..acdf1a9
+--- /dev/null
++++ b/config/SimulationConfig.java
+@@ -0,0 +1,162 @@
++package config;
++
++import java.io.IOException;
++import java.io.InputStream;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Properties;
++
++
++/**
++ * Externalised simulation parameters, loaded from a {@code .properties} file so
++ * they can be tuned without recompiling. The class is deliberately generic — it
++ * deals only in names, numbers, and ordered weighting rules, and knows nothing
++ * about concrete species — so the composition root maps the parsed names onto
++ * real factories.
++ *
++ * <p>Expected keys (all optional; anything omitted falls back to the built-in
++ * defaults, which reproduce the original hardcoded setup):
++ * <pre>
++ *   field.depth=200
++ *   field.width=320
++ *   plant.order=Flower            # ordered weighted plant rules
++ *   plant.Flower.probability=0.07
++ *   plant.default=Grass           # fallback when no plant rule wins
++ *   animal.order=Bird,Mouse,Duck,Wolf,Bear   # cascade priority order
++ *   animal.Bird.probability=0.07
++ *   ...
++ * </pre>
++ */
++public final class SimulationConfig {
++
++	/** A species name paired with the probability it is chosen for a cell. */
++	public record SpeciesWeight(String name, double probability) {
++	}
++
++	private static final int DEFAULT_DEPTH = 200;
++	private static final int DEFAULT_WIDTH = 320;
++	private static final String DEFAULT_PLANT = "Grass";
++	private static final List<SpeciesWeight> DEFAULT_PLANT_RULES =
++			List.of(new SpeciesWeight("Flower", 0.07));
++	private static final List<SpeciesWeight> DEFAULT_ANIMAL_RULES = List.of(
++			new SpeciesWeight("Bird", 0.07),
++			new SpeciesWeight("Mouse", 0.07),
++			new SpeciesWeight("Duck", 0.07),
++			new SpeciesWeight("Wolf", 0.03),
++			new SpeciesWeight("Bear", 0.03));
++
++	private final int fieldDepth;
++	private final int fieldWidth;
++	private final List<SpeciesWeight> plantRules;
++	private final String defaultPlant;
++	private final List<SpeciesWeight> animalRules;
++
++
++	private SimulationConfig(int fieldDepth, int fieldWidth, List<SpeciesWeight> plantRules,
++			String defaultPlant, List<SpeciesWeight> animalRules) {
++		this.fieldDepth = fieldDepth;
++		this.fieldWidth = fieldWidth;
++		this.plantRules = List.copyOf(plantRules);
++		this.defaultPlant = defaultPlant;
++		this.animalRules = List.copyOf(animalRules);
++	}
++
++
++	/** Load configuration from a properties file. */
++	public static SimulationConfig load(Path path) throws IOException {
++		Properties props = new Properties();
++		try (InputStream in = Files.newInputStream(path)) {
++			props.load(in);
++		}
++		return fromProperties(props);
++	}
++
++
++	/** The built-in configuration, matching the original hardcoded simulation. */
++	public static SimulationConfig defaults() {
++		return fromProperties(new Properties());
++	}
++
++
++	/** Parse a {@link Properties} table, filling any missing key with its default. */
++	public static SimulationConfig fromProperties(Properties props) {
++		return new SimulationConfig(
++				intValue(props, "field.depth", DEFAULT_DEPTH),
++				intValue(props, "field.width", DEFAULT_WIDTH),
++				rules(props, "plant", DEFAULT_PLANT_RULES),
++				props.getProperty("plant.default", DEFAULT_PLANT).trim(),
++				rules(props, "animal", DEFAULT_ANIMAL_RULES));
++	}
++
++
++	public int fieldDepth() {
++		return fieldDepth;
++	}
++
++	public int fieldWidth() {
++		return fieldWidth;
++	}
++
++	public List<SpeciesWeight> plantRules() {
++		return plantRules;
++	}
++
++	public String defaultPlant() {
++		return defaultPlant;
++	}
++
++	public List<SpeciesWeight> animalRules() {
++		return animalRules;
++	}
++
++
++	/**
++	 * Read the ordered, weighted rules for a category ("plant" / "animal").
++	 * If no {@code <prefix>.order} key is present the defaults are used; otherwise
++	 * every listed species must supply a {@code <prefix>.<name>.probability}.
++	 */
++	private static List<SpeciesWeight> rules(Properties props, String prefix, List<SpeciesWeight> defaults) {
++		String order = props.getProperty(prefix + ".order");
++		if (order == null || order.isBlank()) {
++			return defaults;
++		}
++		List<SpeciesWeight> rules = new ArrayList<>();
++		for (String raw : order.split(",")) {
++			String name = raw.trim();
++			if (name.isEmpty()) {
++				continue;
++			}
++			String key = prefix + "." + name + ".probability";
++			String value = props.getProperty(key);
++			if (value == null) {
++				throw new IllegalArgumentException("Missing required property: " + key);
++			}
++			rules.add(new SpeciesWeight(name, doubleValue(key, value)));
++		}
++		return rules;
++	}
++
++
++	private static int intValue(Properties props, String key, int fallback) {
++		String value = props.getProperty(key);
++		if (value == null) {
++			return fallback;
++		}
++		try {
++			return Integer.parseInt(value.trim());
++		} catch (NumberFormatException e) {
++			throw new IllegalArgumentException("Invalid integer for " + key + ": '" + value + "'");
++		}
++	}
++
++
++	private static double doubleValue(String key, String value) {
++		try {
++			return Double.parseDouble(value.trim());
++		} catch (NumberFormatException e) {
++			throw new IllegalArgumentException("Invalid number for " + key + ": '" + value + "'");
++		}
++	}
++}
+diff --git a/simulation.properties b/simulation.properties
+new file mode 100644
+index 0000000..f3b58da
+--- /dev/null
++++ b/simulation.properties
+@@ -0,0 +1,21 @@
++# Predator-Prey simulation configuration.
++# Edit these values and re-run — no recompilation required.
++
++# Field dimensions (grid rows x columns).
++field.depth=200
++field.width=320
++
++# Plants: ordered weighted rules, plus the fallback grown where no rule wins.
++# Each cell gets one plant; a Flower with the probability below, otherwise the default.
++plant.order=Flower
++plant.Flower.probability=0.07
++plant.default=Grass
++
++# Animals: cascade evaluated in this priority order — the first to win its roll
++# claims the cell, so earlier entries take precedence.
++animal.order=Bird,Mouse,Duck,Wolf,Bear
++animal.Bird.probability=0.07
++animal.Mouse.probability=0.07
++animal.Duck.probability=0.07
++animal.Wolf.probability=0.03
++animal.Bear.probability=0.03

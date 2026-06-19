@@ -1,0 +1,197 @@
+diff --git a/app/Main.java b/app/Main.java
+index 7240cd9..3470d11 100644
+--- a/app/Main.java
++++ b/app/Main.java
+@@ -1,6 +1,9 @@
+ package app;
+ 
+ import events.EventBus;
++import logging.ConsoleLogger;
++import logging.EventLogger;
++import logging.Logger;
+ import model.Bear;
+ import model.Bird;
+ import model.Duck;
+@@ -15,10 +18,11 @@ import view.SimulatorView;
+ 
+ /**
+  * Entry point and composition root: the one place that knows the concrete
+- * species and views. It wires the species into a {@link SpeciesRegistry},
+- * subscribes the views to an {@link EventBus}, and hands the simulator only the
+- * registry and the publish side of the bus — so the engine stays oblivious to
+- * both which creatures exist and who is watching.
++ * species, views, and log destination. It wires the species into a
++ * {@link SpeciesRegistry}, subscribes the views and an {@link EventLogger} to an
++ * {@link EventBus}, and hands the simulator only the registry, the publish side
++ * of the bus, and a {@link Logger} — so the engine stays oblivious to which
++ * creatures exist, who is watching, and where output goes.
+  */
+ public class Main {
+ 
+@@ -26,11 +30,14 @@ public class Main {
+ 	private static final int WIDTH = 320;
+ 
+ 	public static void main(String[] args) {
++		Logger logger = new ConsoleLogger();
++
+ 		EventBus events = new EventBus();
+ 		events.register(new SimulatorView(DEPTH, WIDTH));
+ 		events.register(new GraphView(1000, 500, 500));
++		events.register(new EventLogger(logger));
+ 
+-		Simulator simulator = new Simulator(standardSpecies(), events, DEPTH, WIDTH);
++		Simulator simulator = new Simulator(standardSpecies(), events, logger, DEPTH, WIDTH);
+ 		simulator.runLongSimulation();
+ 	}
+ 
+diff --git a/app/Simulator.java b/app/Simulator.java
+index 534531e..c14ff79 100644
+--- a/app/Simulator.java
++++ b/app/Simulator.java
+@@ -3,6 +3,7 @@ package app;
+ import events.EventPublisher;
+ import events.SimulationEvent;
+ import events.SimulationState;
++import logging.Logger;
+ import model.*;
+ import config.Randomizer;
+ 
+@@ -37,6 +38,9 @@ public class Simulator {
+ 	/** Where the engine announces everything observers might care about. */
+ 	private final EventPublisher events;
+ 
++	/** Sink for diagnostic messages that aren't simulation events. */
++	private final Logger logger;
++
+ 	private final List<Animal> animals;
+ 
+ 	private final List<Plant> plants;
+@@ -55,15 +59,16 @@ public class Simulator {
+ 	private int sickPercentage;
+ 
+ 
+-	public Simulator(SpeciesRegistry registry, EventPublisher events) {
+-		this(registry, events, DEFAULT_DEPTH, DEFAULT_WIDTH);
++	public Simulator(SpeciesRegistry registry, EventPublisher events, Logger logger) {
++		this(registry, events, logger, DEFAULT_DEPTH, DEFAULT_WIDTH);
+ 	}
+ 
+ 
+-	public Simulator(SpeciesRegistry registry, EventPublisher events, int depth, int width) {
++	public Simulator(SpeciesRegistry registry, EventPublisher events, Logger logger, int depth, int width) {
++		this.logger = logger;
+ 		if (width <= 0 || depth <= 0) {
+-			System.out.println("The dimensions must be greater than zero.");
+-			System.out.println("Using default values.");
++			logger.log("The dimensions must be greater than zero.");
++			logger.log("Using default values.");
+ 			depth = DEFAULT_DEPTH;
+ 			width = DEFAULT_WIDTH;
+ 		}
+diff --git a/logging/ConsoleLogger.java b/logging/ConsoleLogger.java
+new file mode 100644
+index 0000000..52d9031
+--- /dev/null
++++ b/logging/ConsoleLogger.java
+@@ -0,0 +1,15 @@
++package logging;
++
++
++/**
++ * A {@link Logger} that writes to standard output. This is the single place in
++ * the codebase that touches the console, so swapping the destination (file,
++ * test buffer, silence) is a one-line change at the composition root.
++ */
++public class ConsoleLogger implements Logger {
++
++	@Override
++	public void log(String message) {
++		System.out.println(message);
++	}
++}
+diff --git a/logging/EventLogger.java b/logging/EventLogger.java
+new file mode 100644
+index 0000000..35f35f7
+--- /dev/null
++++ b/logging/EventLogger.java
+@@ -0,0 +1,62 @@
++package logging;
++
++import events.SimulationEvent;
++import events.SimulationListener;
++import events.SimulationState;
++
++import java.util.HashSet;
++import java.util.Set;
++
++
++/**
++ * Records the simulation's activity by subscribing to the event bus and writing
++ * a line through a {@link Logger} for each event. It is just another listener,
++ * so logging is added or removed purely by registering it (or not) — the engine
++ * is unaware it exists.
++ */
++public class EventLogger implements SimulationListener {
++
++	private final Logger logger;
++
++	/** Species already announced, so a run start logs each species once, not once per individual. */
++	private final Set<Class<?>> knownSpecies = new HashSet<>();
++
++
++	public EventLogger(Logger logger) {
++		this.logger = logger;
++	}
++
++
++	@Override
++	public void onEvent(SimulationEvent event) {
++		switch (event) {
++			case SimulationEvent.StatusUpdated e -> logStatus(e.state());
++			case SimulationEvent.SimulationReset e -> reset();
++			case SimulationEvent.SpeciesRegistered e -> logNewSpecies(e.species());
++		}
++	}
++
++
++	private void reset() {
++		knownSpecies.clear();
++		logger.log("Simulation reset.");
++	}
++
++
++	private void logNewSpecies(Class<?> species) {
++		if (knownSpecies.add(species)) {
++			logger.log("Registered species: " + species.getSimpleName());
++		}
++	}
++
++
++	private void logStatus(SimulationState state) {
++		logger.log(String.format(
++				"Step %d | %s | %s | humidity %d%% | infection %d%%",
++				state.step(),
++				state.timeCycle(),
++				state.climate().getCurrentSeason(),
++				state.climate().getHumidity(),
++				state.sickPercentage()));
++	}
++}
+diff --git a/logging/Logger.java b/logging/Logger.java
+new file mode 100644
+index 0000000..56ead3b
+--- /dev/null
++++ b/logging/Logger.java
+@@ -0,0 +1,12 @@
++package logging;
++
++
++/**
++ * A destination for human-readable log lines. Abstracting the sink lets the
++ * rest of the codebase record messages without knowing (or caring) whether they
++ * end up on the console, in a file, or nowhere at all.
++ */
++@FunctionalInterface
++public interface Logger {
++	void log(String message);
++}

@@ -1,0 +1,847 @@
+diff --git a/Animal.java b/Animal.java
+index 70a707e..b5b3f05 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -36,7 +36,7 @@ public abstract class Animal extends Entity {
+ 	public Animal(Field field, Location location) {
+ 		super(field, location);
+ 		alive = true;
+-		gender = gender.randomGender();
++		gender = Gender.randomGender();
+ 		nocturnal = false;
+ 		sick = false;
+ 		sickProbability = 16;
+@@ -50,17 +50,8 @@ public abstract class Animal extends Entity {
+ 		incrementAge();
+ 		incrementHunger();
+ 		battleSickness();
+-		if (isAlive()) {
+-			if (time == TimeCycle.NIGHT && isNocturnal()) {
+-
+-				normalAct(newAnimals);
+-			} else if (time == TimeCycle.DAY && isNocturnal()) {
+-
+-				normalAct(newAnimals);
+-			} else if (time == TimeCycle.DAY && !isNocturnal()) {
+-
+-				normalAct(newAnimals);
+-			}
++		if (isAlive() && isActiveDuring(time)) {
++			normalAct(newAnimals);
+ 		}
+ 	}
+ 
+@@ -74,22 +65,23 @@ public abstract class Animal extends Entity {
+ 
+ 
+ 	private boolean canBreed() {
++		if (age < getBreedingAge()) {
++			return false;
++		}
++
+ 		Field field = getField();
+-		List<Location> adjacent = field.adjacentAnimalLocations(getLocation());
++		List<Location> adjacent = field.getAdjacentAnimalLocations(getLocation());
+ 		Iterator<Location> it = adjacent.iterator();
+-		boolean returnValue = age >= getBreedingAge();
+ 		while (it.hasNext()) {
+ 			Location where = it.next();
+-			Object animal = field.getAnimalAt(where);
+-			if (animal instanceof Animal) {
+-				Animal animalNear = (Animal) animal;
+-
+-				if (animalNear.getClass().equals(this.getClass()) && getGender() != animalNear.getGender()) {
+-					return returnValue;
+-				}
++			Animal animalNear = field.getAnimalAt(where);
++			if (animalNear != null
++					&& animalNear.getClass().equals(getClass())
++					&& getGender() != animalNear.getGender()) {
++				return true;
+ 			}
+ 		}
+-		return returnValue;
++		return false;
+ 	}
+ 
+ 
+@@ -126,7 +118,7 @@ public abstract class Animal extends Entity {
+ 	protected void setDead() {
+ 		alive = false;
+ 		if (getLocation() != null) {
+-			getField().clear(getLocation());
++			clearFieldLocation(getField(), getLocation());
+ 			setLocationNull();
+ 			setFieldNull();
+ 		}
+@@ -163,16 +155,13 @@ public abstract class Animal extends Entity {
+ 			sickStep++;
+ 			Field field = getField();
+ 			if (field != null) {
+-				List<Location> adjacent = field.adjacentAnimalLocations(getLocation());
++				List<Location> adjacent = field.getAdjacentAnimalLocations(getLocation());
+ 				Iterator<Location> it = adjacent.iterator();
+ 				while (it.hasNext()) {
+ 					Location where = it.next();
+-					Object animal = field.getAnimalAt(where);
+-					if (animal instanceof Animal) {
+-						Animal nearAnimal = (Animal) animal;
+-						if (nearAnimal.getClass().equals(this.getClass())) {
+-							nearAnimal.becomeSick();
+-						}
++					Animal nearAnimal = field.getAnimalAt(where);
++					if (nearAnimal != null && nearAnimal.getClass().equals(getClass())) {
++						nearAnimal.becomeSick();
+ 					}
+ 				}
+ 				this.notSick();
+@@ -258,6 +247,18 @@ public abstract class Animal extends Entity {
+ 	}
+ 
+ 
++	@Override
++	protected void placeInField(Field field, Location location) {
++		field.placeAnimal(this, location);
++	}
++
++
++	@Override
++	protected void clearFieldLocation(Field field, Location location) {
++		field.clearAnimalAt(location);
++	}
++
++
+ 	protected void setAge(int age) {
+ 		this.age = age;
+ 	}
+@@ -293,6 +294,11 @@ public abstract class Animal extends Entity {
+ 	}
+ 
+ 
++	private boolean isActiveDuring(TimeCycle time) {
++		return time == TimeCycle.NIGHT ? isNocturnal() : !isNocturnal();
++	}
++
++
+ 	abstract protected int getBreedingAge();
+ 
+ 
+diff --git a/Entity.java b/Entity.java
+index 6ad7624..472b20a 100644
+--- a/Entity.java
++++ b/Entity.java
+@@ -34,20 +34,11 @@ public abstract class Entity {
+ 
+ 
+ 	protected void setLocation(Location newLocation) {
+-		if (location == null) {
+-			location = null;
+-		}
+-
+ 		if (location != null) {
+-			field.clear(location);
++			clearFieldLocation(field, location);
+ 		}
+ 		location = newLocation;
+-
+-		if (this instanceof Animal) {
+-			field.placeAnimal(this, newLocation);
+-		} else {
+-			field.placePlant(this, newLocation);
+-		}
++		placeInField(field, newLocation);
+ 	}
+ 
+ 
+@@ -55,4 +46,9 @@ public abstract class Entity {
+ 		location = null;
+ 	}
+ 
++
++	protected abstract void placeInField(Field field, Location location);
++
++
++	protected abstract void clearFieldLocation(Field field, Location location);
+ }
+diff --git a/Field.java b/Field.java
+index eaf3560..260c571 100644
+--- a/Field.java
++++ b/Field.java
+@@ -9,18 +9,19 @@ public class Field {
+ 	private static final Random rand = Randomizer.getRandom();
+ 
+ 
+-	private int depth, width;
++	private final int depth;
++	private final int width;
+ 
+-	private Object[][] animalField;
++	private final Animal[][] animalField;
+ 
+-	private Object[][] plantField;
++	private final Plant[][] plantField;
+ 
+ 
+ 	public Field(int depth, int width) {
+ 		this.depth = depth;
+ 		this.width = width;
+-		animalField = new Object[depth][width];
+-		plantField = new Object[depth][width];
++		animalField = new Animal[depth][width];
++		plantField = new Plant[depth][width];
+ 	}
+ 
+ 
+@@ -34,55 +35,55 @@ public class Field {
+ 	}
+ 
+ 
+-	public void clear(Location location) {
++	public void clearAnimalAt(Location location) {
+ 		animalField[location.getRow()][location.getCol()] = null;
+ 	}
+ 
+ 
+-	public void placeAnimal(Object animal, int row, int col) {
+-		placeAnimal(animal, new Location(row, col));
++	public void clearPlantAt(Location location) {
++		plantField[location.getRow()][location.getCol()] = null;
+ 	}
+ 
+ 
+-	public void placeAnimal(Object animal, Location location) {
++	public void placeAnimal(Animal animal, Location location) {
+ 		animalField[location.getRow()][location.getCol()] = animal;
+ 	}
+ 
+ 
+-	public void placePlant(Object plant, Location location) {
++	public void placePlant(Plant plant, Location location) {
+ 		plantField[location.getRow()][location.getCol()] = plant;
+ 	}
+ 
+ 
+-	public Object getAnimalAt(Location location) {
++	public Animal getAnimalAt(Location location) {
+ 		return getAnimalAt(location.getRow(), location.getCol());
+ 	}
+ 
+ 
+-	public Object getAnimalAt(int row, int col) {
++	public Animal getAnimalAt(int row, int col) {
+ 		return animalField[row][col];
+ 	}
+ 
+ 
+-	public Object getPlantAt(Location location) {
++	public Plant getPlantAt(Location location) {
+ 		return getPlantAt(location.getRow(), location.getCol());
+ 	}
+ 
+ 
+-	public Object getPlantAt(int row, int col) {
++	public Plant getPlantAt(int row, int col) {
+ 		return plantField[row][col];
+ 	}
+ 
+ 
+ 	public Location randomAnimalAdjacentLocation(Location location) {
+-		List<Location> adjacent = adjacentAnimalLocations(location);
++		List<Location> adjacent = getAdjacentAnimalLocations(location);
+ 		return adjacent.get(0);
+ 	}
+ 
+ 
+ 	public List<Location> getFreeAnimalAdjacentLocations(Location location) {
+ 		List<Location> free = new LinkedList<>();
+-		List<Location> adjacent = adjacentAnimalLocations(location);
++		List<Location> adjacent = getAdjacentAnimalLocations(location);
+ 		for (Location next : adjacent) {
+ 			if (getAnimalAt(next) == null) {
+ 				free.add(next);
+@@ -95,7 +96,7 @@ public class Field {
+ 	public Location freeAnimalAdjacentLocation(Location location) {
+ 
+ 		List<Location> free = getFreeAnimalAdjacentLocations(location);
+-		if (free.size() > 0) {
++		if (!free.isEmpty()) {
+ 			return free.get(0);
+ 		} else {
+ 			return null;
+@@ -103,8 +104,8 @@ public class Field {
+ 	}
+ 
+ 
+-	public List<Location> adjacentAnimalLocations(Location location) {
+-		assert location != null : "Null location passed to adjacentLocations";
++	public List<Location> getAdjacentAnimalLocations(Location location) {
++		assert location != null : "Null location passed to getAdjacentAnimalLocations";
+ 
+ 		List<Location> locations = new LinkedList<>();
+ 		if (location != null) {
+diff --git a/FieldPopulator.java b/FieldPopulator.java
+new file mode 100644
+index 0000000..46151cf
+--- /dev/null
++++ b/FieldPopulator.java
+@@ -0,0 +1,126 @@
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Random;
++
++
++public class FieldPopulator {
++
++	private static final double FLOWER_CREATION_PROBABILITY = 0.07;
++
++	private static final double MOUSE_CREATION_PROBABILITY = 0.07;
++
++	private static final double DUCK_CREATION_PROBABILITY = 0.07;
++
++	private static final double BIRD_CREATION_PROBABILITY = 0.07;
++
++	private static final double WOLF_CREATION_PROBABILITY = 0.03;
++
++	private static final double BEAR_CREATION_PROBABILITY = 0.03;
++
++	private final Random random;
++
++	private final GraphView graphView;
++
++	private final Climate climate;
++
++	private final List<AnimalSpawnRule> animalSpawnRules;
++
++
++	public FieldPopulator(GraphView graphView, Climate climate) {
++		this.random = Randomizer.getRandom();
++		this.graphView = graphView;
++		this.climate = climate;
++		this.animalSpawnRules = new ArrayList<>();
++		registerAnimalSpawnRules();
++	}
++
++
++	public void populate(Field field, List<Animal> animals, List<Plant> plants) {
++		field.clear();
++		animals.clear();
++		plants.clear();
++
++		for (int row = 0; row < field.getDepth(); row++) {
++			for (int col = 0; col < field.getWidth(); col++) {
++				Location location = new Location(row, col);
++				plants.add(createPlant(field, location));
++
++				Animal animal = createAnimal(field, location);
++				if (animal != null) {
++					animals.add(animal);
++					graphView.setColor(animal.getClass(), animal.getObjectColor(climate));
++				}
++			}
++		}
++	}
++
++
++	private Plant createPlant(Field field, Location location) {
++		if (random.nextDouble() <= FLOWER_CREATION_PROBABILITY) {
++			return new Flower(field, location);
++		}
++		return new Grass(field, location);
++	}
++
++
++	private Animal createAnimal(Field field, Location location) {
++		for (AnimalSpawnRule rule : animalSpawnRules) {
++			if (rule.shouldSpawn(random)) {
++				return rule.createAnimal(field, location);
++			}
++		}
++		return null;
++	}
++
++
++	private void registerAnimalSpawnRules() {
++		animalSpawnRules.add(new AnimalSpawnRule(BIRD_CREATION_PROBABILITY) {
++			@Override
++			Animal createAnimal(Field field, Location location) {
++				return new Bird(true, field, location);
++			}
++		});
++		animalSpawnRules.add(new AnimalSpawnRule(MOUSE_CREATION_PROBABILITY) {
++			@Override
++			Animal createAnimal(Field field, Location location) {
++				return new Mouse(true, field, location);
++			}
++		});
++		animalSpawnRules.add(new AnimalSpawnRule(DUCK_CREATION_PROBABILITY) {
++			@Override
++			Animal createAnimal(Field field, Location location) {
++				return new Duck(true, field, location);
++			}
++		});
++		animalSpawnRules.add(new AnimalSpawnRule(WOLF_CREATION_PROBABILITY) {
++			@Override
++			Animal createAnimal(Field field, Location location) {
++				return new Wolf(true, field, location);
++			}
++		});
++		animalSpawnRules.add(new AnimalSpawnRule(BEAR_CREATION_PROBABILITY) {
++			@Override
++			Animal createAnimal(Field field, Location location) {
++				return new Bear(true, field, location);
++			}
++		});
++	}
++
++
++	private abstract static class AnimalSpawnRule {
++		private final double spawnProbability;
++
++
++		private AnimalSpawnRule(double spawnProbability) {
++			this.spawnProbability = spawnProbability;
++		}
++
++
++		private boolean shouldSpawn(Random random) {
++			return random.nextDouble() <= spawnProbability;
++		}
++
++
++		abstract Animal createAnimal(Field field, Location location);
++	}
++}
+diff --git a/FieldStats.java b/FieldStats.java
+index dcaeb5c..f2d41f4 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -1,27 +1,26 @@
+ import java.util.HashMap;
++import java.util.Map;
+ 
+ 
+ public class FieldStats {
+ 
+-	private HashMap<Class, Counter> counters;
++	private final Map<Class<?>, Counter> counters;
+ 
+ 	private boolean countsValid;
+ 
+ 
+ 	public FieldStats() {
+-
+-
+ 		counters = new HashMap<>();
+ 		countsValid = true;
+ 	}
+ 
+ 
+ 	public String getPopulationDetails(Field field) {
+-		StringBuffer buffer = new StringBuffer();
++		StringBuilder buffer = new StringBuilder();
+ 		if (!countsValid) {
+ 			generateCounts(field);
+ 		}
+-		for (Class key : counters.keySet()) {
++		for (Class<?> key : counters.keySet()) {
+ 			Counter info = counters.get(key);
+ 			buffer.append(info.getName());
+ 			buffer.append(": ");
+@@ -34,18 +33,16 @@ public class FieldStats {
+ 
+ 	public void reset() {
+ 		countsValid = false;
+-		for (Class key : counters.keySet()) {
++		for (Class<?> key : counters.keySet()) {
+ 			Counter count = counters.get(key);
+ 			count.reset();
+ 		}
+ 	}
+ 
+ 
+-	public void incrementCount(Class animalClass) {
++	public void incrementCount(Class<?> animalClass) {
+ 		Counter count = counters.get(animalClass);
+ 		if (count == null) {
+-
+-
+ 			count = new Counter(animalClass.getName());
+ 			counters.put(animalClass, count);
+ 		}
+@@ -64,7 +61,7 @@ public class FieldStats {
+ 		if (!countsValid) {
+ 			generateCounts(field);
+ 		}
+-		for (Class key : counters.keySet()) {
++		for (Class<?> key : counters.keySet()) {
+ 			Counter info = counters.get(key);
+ 			if (info.getCount() > 0) {
+ 				nonZero++;
+@@ -78,7 +75,7 @@ public class FieldStats {
+ 		reset();
+ 		for (int row = 0; row < field.getDepth(); row++) {
+ 			for (int col = 0; col < field.getWidth(); col++) {
+-				Object animal = field.getAnimalAt(row, col);
++				Animal animal = field.getAnimalAt(row, col);
+ 				if (animal != null) {
+ 					incrementCount(animal.getClass());
+ 				}
+@@ -88,12 +85,12 @@ public class FieldStats {
+ 	}
+ 
+ 
+-	public int getPopulationCount(Field field, Class key) {
++	public int getPopulationCount(Field field, Class<?> key) {
+ 		if (!countsValid) {
+ 			generateCounts(field);
+ 		}
+ 		int total = 0;
+-		for (Class currentKey : counters.keySet()) {
++		for (Class<?> currentKey : counters.keySet()) {
+ 			if (currentKey.equals(key)) {
+ 				Counter counter = counters.get(currentKey);
+ 				total = total + counter.getCount();
+diff --git a/Gender.java b/Gender.java
+index cdbae9e..bffead3 100644
+--- a/Gender.java
++++ b/Gender.java
+@@ -6,7 +6,7 @@ public enum Gender {
+ 	MALE;
+ 
+ 
+-	public Gender randomGender() {
++	public static Gender randomGender() {
+ 		Random rand = Randomizer.getRandom();
+ 		if (rand.nextInt(2) == 0) {
+ 			return Gender.FEMALE;
+diff --git a/Location.java b/Location.java
+index fb32fa1..0eda8e0 100644
+--- a/Location.java
++++ b/Location.java
+@@ -1,8 +1,8 @@
+ 
+ public class Location {
+ 
+-	private int row;
+-	private int col;
++	private final int row;
++	private final int col;
+ 
+ 
+ 	public Location(int row, int col) {
+@@ -11,6 +11,7 @@ public class Location {
+ 	}
+ 
+ 
++	@Override
+ 	public boolean equals(Object obj) {
+ 		if (obj instanceof Location) {
+ 			Location other = (Location) obj;
+@@ -21,11 +22,13 @@ public class Location {
+ 	}
+ 
+ 
++	@Override
+ 	public String toString() {
+ 		return row + "," + col;
+ 	}
+ 
+ 
++	@Override
+ 	public int hashCode() {
+ 		return (row << 16) + col;
+ 	}
+diff --git a/Plant.java b/Plant.java
+index 50b7291..e1de0b8 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -55,4 +55,16 @@ public abstract class Plant extends Entity {
+ 	protected void setStage(int stage) {
+ 		this.stage = stage;
+ 	}
++
++
++	@Override
++	protected void placeInField(Field field, Location location) {
++		field.placePlant(this, location);
++	}
++
++
++	@Override
++	protected void clearFieldLocation(Field field, Location location) {
++		field.clearPlantAt(location);
++	}
+ }
+diff --git a/Predator.java b/Predator.java
+index 09d5e69..5887424 100644
+--- a/Predator.java
++++ b/Predator.java
+@@ -50,16 +50,13 @@ public abstract class Predator extends Animal {
+ 
+ 	private Location findFood() {
+ 		Field field = getField();
+-		List<Location> adjacent = field.adjacentAnimalLocations(getLocation());
++		List<Location> adjacent = field.getAdjacentAnimalLocations(getLocation());
+ 		Iterator<Location> it = adjacent.iterator();
+ 		while (it.hasNext()) {
+ 			Location where = it.next();
+-			Object animal = field.getAnimalAt(where);
+-			if (animal instanceof Animal) {
+-				Animal nearAnimal = (Animal) animal;
+-
++			Animal nearAnimal = field.getAnimalAt(where);
++			if (nearAnimal != null) {
+ 				if (nearAnimal.getFoodChainLevel() < this.getFoodChainLevel()) {
+-
+ 					if (nearAnimal.isAlive()) {
+ 						nearAnimal.setDead();
+ 						setFoodLevel(nearAnimal.getFoodValue() + additionalFoodValue);
+@@ -67,7 +64,6 @@ public abstract class Predator extends Animal {
+ 					}
+ 				}
+ 
+-
+ 				if (nearAnimal.getFoodChainLevel() == this.getFoodChainLevel()) {
+ 					if (nearAnimal.isAlive() && this.isCannibal()) {
+ 						if (getFoodLevel() < 2 && nearAnimal.getClass().equals(this.getClass())) {
+diff --git a/Prey.java b/Prey.java
+index a4a991b..6a05265 100644
+--- a/Prey.java
++++ b/Prey.java
+@@ -35,15 +35,11 @@ public abstract class Prey extends Animal {
+ 	private void findFood() {
+ 		Field field = getField();
+ 		Location where = getLocation();
+-		Object plant = field.getPlantAt(where);
++		Plant nearPlant = field.getPlantAt(where);
+ 
+-		if (plant instanceof Plant) {
+-			Plant nearPlant = (Plant) plant;
+-
+-			if (nearPlant.canEat()) {
+-				nearPlant.reduceStage();
+-				setFoodLevel(8);
+-			}
++		if (nearPlant != null && nearPlant.canEat()) {
++			nearPlant.reduceStage();
++			setFoodLevel(8);
+ 		}
+ 	}
+ }
+diff --git a/Simulator.java b/Simulator.java
+index 65303a6..1c3edc0 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -1,7 +1,6 @@
+ import java.util.ArrayList;
+ import java.util.Iterator;
+ import java.util.List;
+-import java.util.Random;
+ 
+ 
+ public class Simulator {
+@@ -11,18 +10,6 @@ public class Simulator {
+ 
+ 	private static final int DEFAULT_DEPTH = 200;
+ 
+-	private static final double FLOWER_CREATION_PROBABILITY = 0.07;
+-
+-	private static final double MOUSE_CREATION_PROBABILITY = 0.07;
+-
+-	private static final double DUCK_CREATION_PROBABILITY = 0.07;
+-
+-	private static final double BIRD_CREATION_PROBABILITY = 0.07;
+-
+-	private static final double WOLF_CREATION_PROBABILITY = 0.03;
+-
+-	private static final double BEAR_CREATION_PROBABILITY = 0.03;
+-
+ 	private static final TimeCycle DEFAULT_TIMECYCLE = TimeCycle.DAY;
+ 
+ 	private static final Weather DEFAULT_WEATHER = Weather.SUN;
+@@ -46,6 +33,8 @@ public class Simulator {
+ 
+ 	private Climate climate;
+ 
++	private FieldPopulator fieldPopulator;
++
+ 	private int sickPercentage;
+ 
+ 
+@@ -75,6 +64,7 @@ public class Simulator {
+ 
+ 
+ 		graphView = new GraphView(1000, 500, 500);
++		fieldPopulator = new FieldPopulator(graphView, climate);
+ 
+ 
+ 		reset();
+@@ -120,79 +110,44 @@ public class Simulator {
+ 
+ 
+ 		if (step % TIMECYCLE_LENGTH == 0) {
+-			currentTimeCycle = currentTimeCycle.toggleTimeCycle(currentTimeCycle);
+-		}
+-
+-
+-		int count = 0;
+-		for (Animal i : animals) {
+-			if (i.isSick()) {
+-				count++;
+-			}
++			currentTimeCycle = currentTimeCycle.toggle();
+ 		}
+ 
+-		sickPercentage = (count * 100) / animals.size();
+-		gridView.showStatus(step, currentTimeCycle, field, climate, sickPercentage);
+-		graphView.showStatus(step, field);
++		updateViews();
+ 	}
+ 
+ 
+ 	public void reset() {
+ 		step = 0;
+-		animals.clear();
+-		populate();
+-		currentTimeCycle = TimeCycle.DAY;
++		fieldPopulator.populate(field, animals, plants);
++		currentTimeCycle = DEFAULT_TIMECYCLE;
+ 		climate.setCurrentWeather(Weather.SUN);
+ 
+ 		sickPercentage = 0;
+ 		graphView.reset();
++		updateViews();
++	}
++
++
++	private void updateViews() {
++		sickPercentage = calculateSickPercentage();
+ 		gridView.showStatus(step, currentTimeCycle, field, climate, sickPercentage);
+ 		graphView.showStatus(step, field);
+ 	}
+ 
+ 
+-	private void populate() {
+-		Random rand = Randomizer.getRandom();
+-		field.clear();
+-
+-		for (int row = 0; row < field.getDepth(); row++) {
+-			for (int col = 0; col < field.getWidth(); col++) {
+-				Location location = new Location(row, col);
+-
+-
+-				if (rand.nextDouble() <= FLOWER_CREATION_PROBABILITY) {
+-					Flower flower = new Flower(field, location);
+-					plants.add(flower);
+-				} else {
+-					Grass grass = new Grass(field, location);
+-					plants.add(grass);
+-				}
+-
+-
+-				if (rand.nextDouble() <= BIRD_CREATION_PROBABILITY) {
+-					Bird bird = new Bird(true, field, location);
+-					animals.add(bird);
+-					graphView.setColor(Bird.class, bird.getObjectColor(climate));
+-				} else if (rand.nextDouble() <= MOUSE_CREATION_PROBABILITY) {
+-					Mouse mouse = new Mouse(true, field, location);
+-					animals.add(mouse);
+-					graphView.setColor(Mouse.class, mouse.getObjectColor(climate));
+-				} else if (rand.nextDouble() <= DUCK_CREATION_PROBABILITY) {
+-					Duck duck = new Duck(true, field, location);
+-					animals.add(duck);
+-					graphView.setColor(Duck.class, duck.getObjectColor(climate));
+-				} else if (rand.nextDouble() <= WOLF_CREATION_PROBABILITY) {
+-					Wolf wolf = new Wolf(true, field, location);
+-					animals.add(wolf);
+-					graphView.setColor(Wolf.class, wolf.getObjectColor(climate));
+-				} else if (rand.nextDouble() <= BEAR_CREATION_PROBABILITY) {
+-					Bear bear = new Bear(true, field, location);
+-					animals.add(bear);
+-					graphView.setColor(Bear.class, bear.getObjectColor(climate));
+-				}
++	private int calculateSickPercentage() {
++		if (animals.isEmpty()) {
++			return 0;
++		}
+ 
++		int sickAnimals = 0;
++		for (Animal animal : animals) {
++			if (animal.isSick()) {
++				sickAnimals++;
+ 			}
+ 		}
++		return (sickAnimals * 100) / animals.size();
+ 	}
+ 
+ 
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 5f0530f..3ee2371 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -1,16 +1,11 @@
+ import javax.swing.*;
+ import java.awt.*;
+-import java.util.LinkedHashMap;
+-import java.util.Map;
+ 
+ 
+ public class SimulatorView extends JFrame {
+ 
+ 	private static final Color EMPTY_COLOR = Color.white;
+ 
+-
+-	private static final Color UNKNOWN_COLOR = Color.gray;
+-
+ 	private final String STEP_PREFIX = "Step: ";
+ 	private final String POPULATION_PREFIX = "Population: ";
+ 	private final String DAYCYCLE_PREFIX = "Day cycle: ";
+@@ -21,15 +16,11 @@ public class SimulatorView extends JFrame {
+ 	private JLabel stepLabel, populationLabel, dayCycleLabel, climateLabel, infectLabel, weatherLabel, humidityLabel;
+ 	private FieldView fieldView;
+ 
+-
+-	private Map<Class, Color> colors;
+-
+ 	private FieldStats stats;
+ 
+ 
+ 	public SimulatorView(int height, int width) {
+ 		stats = new FieldStats();
+-		colors = new LinkedHashMap<>();
+ 
+ 		setTitle("Predator-Prey Simulation");
+ 		stepLabel = new JLabel(STEP_PREFIX, JLabel.CENTER);
+@@ -83,14 +74,13 @@ public class SimulatorView extends JFrame {
+ 
+ 		for (int row = 0; row < field.getDepth(); row++) {
+ 			for (int col = 0; col < field.getWidth(); col++) {
+-				Animal animal = (Animal) field.getAnimalAt(row, col);
+-				Object plant = field.getPlantAt(row, col);
++				Animal animal = field.getAnimalAt(row, col);
++				Plant plant = field.getPlantAt(row, col);
+ 				if (animal != null) {
+ 					stats.incrementCount(animal.getClass());
+ 					fieldView.drawMark(col, row, animal.getObjectColor(climate));
+ 				} else if (plant != null) {
+-					Plant newPlant = (Plant) plant;
+-					fieldView.drawMark(col, row, newPlant.getObjectColor(climate));
++					fieldView.drawMark(col, row, plant.getObjectColor(climate));
+ 				} else {
+ 					fieldView.drawMark(col, row, EMPTY_COLOR);
+ 				}
+diff --git a/TimeCycle.java b/TimeCycle.java
+index 514b5c9..d9da469 100644
+--- a/TimeCycle.java
++++ b/TimeCycle.java
+@@ -4,8 +4,8 @@ public enum TimeCycle {
+ 	NIGHT;
+ 
+ 
+-	public TimeCycle toggleTimeCycle(TimeCycle currentTimeCycle) {
+-		if (currentTimeCycle == TimeCycle.DAY) {
++	public TimeCycle toggle() {
++		if (this == TimeCycle.DAY) {
+ 			return TimeCycle.NIGHT;
+ 		} else {
+ 			return TimeCycle.DAY;
