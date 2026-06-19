@@ -1,0 +1,670 @@
+diff --git a/ConcurrentGraphTraversal.java b/ConcurrentGraphTraversal.java
+new file mode 100644
+index 0000000..945d795
+--- /dev/null
++++ b/ConcurrentGraphTraversal.java
+@@ -0,0 +1,68 @@
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ConcurrentLinkedQueue;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++
++public class ConcurrentGraphTraversal implements GraphTraversal {
++    private final int threadCount;
++
++    public ConcurrentGraphTraversal(int threadCount) {
++        if (threadCount <= 0) {
++            throw new IllegalArgumentException("Thread count must be positive");
++        }
++        this.threadCount = threadCount;
++    }
++
++    @Override
++    public TraversalResult traverse(Graph graph) {
++        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
++        ConcurrentHashMap<Integer, Boolean> visited = new ConcurrentHashMap<>();
++        ConcurrentLinkedQueue<Integer> resultQueue = new ConcurrentLinkedQueue<>();
++        int componentCount = 0;
++
++        try {
++            for (int i = 0; i < graph.getVertexCount(); i++) {
++                if (!visited.containsKey(i)) {
++                    bfsAsync(graph, i, visited, resultQueue, executor);
++                    componentCount++;
++                }
++            }
++
++            executor.shutdown();
++            executor.awaitTermination(Long.MAX_VALUE, java.util.concurrent.TimeUnit.NANOSECONDS);
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++            Logger.error("Concurrent traversal interrupted", e);
++        }
++
++        List<Integer> result = new ArrayList<>(resultQueue);
++        return new TraversalResult(result, componentCount);
++    }
++
++    private void bfsAsync(Graph graph, int start, ConcurrentHashMap<Integer, Boolean> visited,
++                         ConcurrentLinkedQueue<Integer> result, ExecutorService executor) {
++        visited.putIfAbsent(start, true);
++        executor.submit(() -> {
++            ConcurrentLinkedQueue<Integer> queue = new ConcurrentLinkedQueue<>();
++            queue.add(start);
++
++            while (!queue.isEmpty()) {
++                Integer current = queue.poll();
++                if (current == null) continue;
++
++                result.add(current);
++
++                for (int neighbor : graph.getAdjacent(current)) {
++                    if (!visited.containsKey(neighbor)) {
++                        visited.putIfAbsent(neighbor, true);
++                        queue.add(neighbor);
++                    }
++                }
++            }
++        });
++    }
++}
+diff --git a/GraphBenchmark.java b/GraphBenchmark.java
+new file mode 100644
+index 0000000..86ab0ea
+--- /dev/null
++++ b/GraphBenchmark.java
+@@ -0,0 +1,77 @@
++import java.util.ArrayList;
++import java.util.List;
++
++public class GraphBenchmark {
++    private final Graph graph;
++    private List<BenchmarkResult> results = new ArrayList<>();
++
++    public GraphBenchmark(Graph graph) {
++        this.graph = graph;
++    }
++
++    public void benchmarkTraversal(GraphTraversal algorithm, String name, int iterations) {
++        Logger.info("Benchmarking " + name + " with " + iterations + " iterations");
++
++        long totalTime = 0;
++        long minTime = Long.MAX_VALUE;
++        long maxTime = 0;
++
++        for (int i = 0; i < iterations; i++) {
++            long start = System.nanoTime();
++            algorithm.traverse(graph);
++            long duration = System.nanoTime() - start;
++
++            totalTime += duration;
++            minTime = Math.min(minTime, duration);
++            maxTime = Math.max(maxTime, duration);
++        }
++
++        double avgTime = totalTime / (double) iterations;
++        BenchmarkResult result = new BenchmarkResult(name, minTime, maxTime, avgTime, iterations);
++        results.add(result);
++
++        Logger.debug(name + " benchmark complete: " + result);
++    }
++
++    public void printResults() {
++        System.out.println("\n=== Benchmark Results ===");
++        System.out.printf("%-20s %-15s %-15s %-15s %-10s%n",
++            "Algorithm", "Min (μs)", "Max (μs)", "Avg (μs)", "Iterations");
++        System.out.println("-".repeat(75));
++
++        for (BenchmarkResult result : results) {
++            System.out.printf("%-20s %-15.2f %-15.2f %-15.2f %-10d%n",
++                result.name,
++                result.minNanos / 1000.0,
++                result.maxNanos / 1000.0,
++                result.avgNanos / 1000.0,
++                result.iterations);
++        }
++    }
++
++    public List<BenchmarkResult> getResults() {
++        return new ArrayList<>(results);
++    }
++
++    public static class BenchmarkResult {
++        public final String name;
++        public final long minNanos;
++        public final long maxNanos;
++        public final double avgNanos;
++        public final int iterations;
++
++        public BenchmarkResult(String name, long minNanos, long maxNanos, double avgNanos, int iterations) {
++            this.name = name;
++            this.minNanos = minNanos;
++            this.maxNanos = maxNanos;
++            this.avgNanos = avgNanos;
++            this.iterations = iterations;
++        }
++
++        @Override
++        public String toString() {
++            return String.format("%s [min: %.0f ns, max: %.0f ns, avg: %.0f ns]",
++                name, (double) minNanos, (double) maxNanos, avgNanos);
++        }
++    }
++}
+diff --git a/GraphHealthCheck.java b/GraphHealthCheck.java
+new file mode 100644
+index 0000000..d54aed1
+--- /dev/null
++++ b/GraphHealthCheck.java
+@@ -0,0 +1,94 @@
++public class GraphHealthCheck {
++    private final Graph graph;
++    private boolean valid = true;
++    private java.util.List<String> issues = new java.util.ArrayList<>();
++
++    public GraphHealthCheck(Graph graph) {
++        this.graph = graph;
++    }
++
++    public HealthReport check() {
++        issues.clear();
++        valid = true;
++
++        checkGraphStructure();
++        checkVertexIntegrity();
++        checkEdgeConsistency();
++
++        return new HealthReport(valid, issues);
++    }
++
++    private void checkGraphStructure() {
++        if (graph.getVertexCount() < 0) {
++            addIssue("Negative vertex count: " + graph.getVertexCount());
++        }
++        if (graph.getVertexCount() == 0) {
++            Logger.warn("Empty graph detected");
++        }
++    }
++
++    private void checkVertexIntegrity() {
++        for (int i = 0; i < graph.getVertexCount(); i++) {
++            if (!graph.isValidVertex(i)) {
++                addIssue("Vertex " + i + " marked invalid in valid range");
++            }
++
++            for (int neighbor : graph.getAdjacent(i)) {
++                if (!graph.isValidVertex(neighbor)) {
++                    addIssue("Vertex " + i + " references invalid neighbor " + neighbor);
++                }
++            }
++        }
++    }
++
++    private void checkEdgeConsistency() {
++        for (int i = 0; i < graph.getVertexCount(); i++) {
++            for (int neighbor : graph.getAdjacent(i)) {
++                boolean found = false;
++                for (int other : graph.getAdjacent(neighbor)) {
++                    if (other == i) {
++                        found = true;
++                        break;
++                    }
++                }
++                if (!found && graph instanceof UndirectedGraph) {
++                    addIssue("Undirected graph edge inconsistency: " + i + " -> " + neighbor);
++                }
++            }
++        }
++    }
++
++    private void addIssue(String issue) {
++        valid = false;
++        issues.add(issue);
++    }
++
++    public static class HealthReport {
++        private final boolean healthy;
++        private final java.util.List<String> issues;
++
++        public HealthReport(boolean healthy, java.util.List<String> issues) {
++            this.healthy = healthy;
++            this.issues = new java.util.ArrayList<>(issues);
++        }
++
++        public boolean isHealthy() {
++            return healthy;
++        }
++
++        public java.util.List<String> getIssues() {
++            return java.util.Collections.unmodifiableList(issues);
++        }
++
++        public void print() {
++            System.out.println("=== Graph Health Report ===");
++            System.out.println("Status: " + (healthy ? "HEALTHY ✓" : "ISSUES DETECTED ✗"));
++            if (!issues.isEmpty()) {
++                System.out.println("Issues:");
++                for (String issue : issues) {
++                    System.out.println("  - " + issue);
++                }
++            }
++        }
++    }
++}
+diff --git a/GraphSerializer.java b/GraphSerializer.java
+new file mode 100644
+index 0000000..9022c92
+--- /dev/null
++++ b/GraphSerializer.java
+@@ -0,0 +1,70 @@
++import java.io.*;
++
++public class GraphSerializer {
++
++    public static String toJSON(Graph graph) {
++        StringBuilder json = new StringBuilder();
++        json.append("{\n");
++        json.append("  \"vertices\": ").append(graph.getVertexCount()).append(",\n");
++        json.append("  \"edges\": [\n");
++
++        boolean first = true;
++        for (int i = 0; i < graph.getVertexCount(); i++) {
++            for (int neighbor : graph.getAdjacent(i)) {
++                if (!first) json.append(",\n");
++                json.append(String.format("    {\"from\": %d, \"to\": %d}", i, neighbor));
++                first = false;
++            }
++        }
++
++        json.append("\n  ]\n");
++        json.append("}");
++        return json.toString();
++    }
++
++    public static String toDOT(Graph graph) {
++        StringBuilder dot = new StringBuilder();
++        dot.append("graph {\n");
++
++        for (int i = 0; i < graph.getVertexCount(); i++) {
++            for (int neighbor : graph.getAdjacent(i)) {
++                if (i < neighbor) {
++                    dot.append(String.format("  %d -- %d;\n", i, neighbor));
++                }
++            }
++        }
++
++        dot.append("}");
++        return dot.toString();
++    }
++
++    public static void writeToFile(Graph graph, String filename, Format format) throws IOException {
++        String content = format == Format.JSON ? toJSON(graph) : toDOT(graph);
++
++        try (FileWriter writer = new FileWriter(filename)) {
++            writer.write(content);
++            Logger.info("Graph serialized to " + filename);
++        }
++    }
++
++    public static String toString(Graph graph) {
++        StringBuilder sb = new StringBuilder();
++        sb.append("Graph{vertices=").append(graph.getVertexCount()).append(", edges=[");
++
++        boolean first = true;
++        for (int i = 0; i < graph.getVertexCount(); i++) {
++            for (int neighbor : graph.getAdjacent(i)) {
++                if (!first) sb.append(", ");
++                sb.append(i).append("->").append(neighbor);
++                first = false;
++            }
++        }
++
++        sb.append("]}");
++        return sb.toString();
++    }
++
++    public enum Format {
++        JSON, DOT
++    }
++}
+diff --git a/GraphTest.java b/GraphTest.java
+new file mode 100644
+index 0000000..f32b379
+--- /dev/null
++++ b/GraphTest.java
+@@ -0,0 +1,190 @@
++public class GraphTest {
++    private static int passed = 0;
++    private static int failed = 0;
++
++    public static void main(String[] args) {
++        Logger.setLevel(Logger.Level.INFO);
++        Logger.info("Starting Graph Library Tests");
++
++        testGraphCreation();
++        testBFSTraversal();
++        testDFSTraversal();
++        testConnectivity();
++        testGraphOperations();
++        testValidation();
++        testGraphHealth();
++
++        printResults();
++    }
++
++    private static void testGraphCreation() {
++        Logger.info("Testing graph creation...");
++        try {
++            Graph g = new UndirectedGraph(5);
++            assertEquals(g.getVertexCount(), 5, "Graph vertex count");
++            assertTrue(g.isValidVertex(0), "Vertex 0 valid");
++            assertTrue(g.isValidVertex(4), "Vertex 4 valid");
++            assertFalse(g.isValidVertex(5), "Vertex 5 invalid");
++            passed++;
++        } catch (AssertionError e) {
++            Logger.error("testGraphCreation failed: " + e.getMessage());
++            failed++;
++        }
++    }
++
++    private static void testBFSTraversal() {
++        Logger.info("Testing BFS traversal...");
++        try {
++            Graph g = GraphBuilder.undirected(4)
++                .addEdge(0, 1)
++                .addEdge(0, 2)
++                .addEdge(1, 3)
++                .build();
++
++            BreadthFirstSearch bfs = new BreadthFirstSearch();
++            TraversalResult result = bfs.traverse(g);
++
++            assertEquals(result.getVertices().size(), 4, "All vertices visited");
++            assertEquals(result.getComponentCount(), 1, "Single component");
++            passed++;
++        } catch (AssertionError e) {
++            Logger.error("testBFSTraversal failed: " + e.getMessage());
++            failed++;
++        }
++    }
++
++    private static void testDFSTraversal() {
++        Logger.info("Testing DFS traversal...");
++        try {
++            Graph g = GraphBuilder.undirected(4)
++                .addEdge(0, 1)
++                .addEdge(0, 2)
++                .addEdge(1, 3)
++                .build();
++
++            DepthFirstSearch dfs = new DepthFirstSearch();
++            TraversalResult result = dfs.traverse(g);
++
++            assertEquals(result.getVertices().size(), 4, "All vertices visited");
++            assertEquals(result.getComponentCount(), 1, "Single component");
++            passed++;
++        } catch (AssertionError e) {
++            Logger.error("testDFSTraversal failed: " + e.getMessage());
++            failed++;
++        }
++    }
++
++    private static void testConnectivity() {
++        Logger.info("Testing connectivity...");
++        try {
++            Graph g = GraphBuilder.undirected(6)
++                .addEdge(0, 1)
++                .addEdge(1, 2)
++                .addEdge(3, 4)
++                .addEdge(4, 5)
++                .build();
++
++            ConnectivityQuery conn = new ConnectivityQuery(g);
++            assertTrue(conn.areConnected(0, 2), "0 and 2 connected");
++            assertFalse(conn.areConnected(0, 5), "0 and 5 not connected");
++            assertEquals(conn.getTotalComponents(), 2, "Two components");
++            passed++;
++        } catch (AssertionError e) {
++            Logger.error("testConnectivity failed: " + e.getMessage());
++            failed++;
++        }
++    }
++
++    private static void testGraphOperations() {
++        Logger.info("Testing graph operations...");
++        try {
++            Graph g = GraphBuilder.directed(4)
++                .addEdge(0, 1)
++                .addEdge(1, 2)
++                .addEdge(2, 3)
++                .build();
++
++            GraphOperations ops = new GraphOperations(g);
++            assertFalse(ops.hasCycle(), "No cycle in directed path");
++            assertTrue(ops.isConnected(), "All vertices reachable from 0");
++            passed++;
++        } catch (AssertionError e) {
++            Logger.error("testGraphOperations failed: " + e.getMessage());
++            failed++;
++        }
++    }
++
++    private static void testValidation() {
++        Logger.info("Testing validation...");
++        try {
++            Graph g = GraphBuilder.undirected(3)
++                .addEdge(0, 1)
++                .addEdge(1, 2)
++                .build();
++
++            BreadthFirstSearch bfs = new BreadthFirstSearch();
++            TraversalResult result = bfs.traverse(g);
++
++            ResultValidator validator = new ResultValidator(result, g);
++            ResultValidator.ValidationReport report = validator.validate();
++            assertTrue(report.isValid(), "Result is valid");
++            passed++;
++        } catch (AssertionError e) {
++            Logger.error("testValidation failed: " + e.getMessage());
++            failed++;
++        }
++    }
++
++    private static void testGraphHealth() {
++        Logger.info("Testing graph health checks...");
++        try {
++            Graph g = GraphBuilder.undirected(4)
++                .addEdge(0, 1)
++                .addEdge(1, 2)
++                .build();
++
++            GraphHealthCheck health = new GraphHealthCheck(g);
++            GraphHealthCheck.HealthReport report = health.check();
++            assertTrue(report.isHealthy(), "Graph is healthy");
++            passed++;
++        } catch (AssertionError e) {
++            Logger.error("testGraphHealth failed: " + e.getMessage());
++            failed++;
++        }
++    }
++
++    private static void assertEquals(Object actual, Object expected, String testName) {
++        if (!actual.equals(expected)) {
++            throw new AssertionError(testName + ": expected " + expected + " but got " + actual);
++        }
++    }
++
++    private static void assertEquals(double actual, double expected, double delta, String testName) {
++        if (Math.abs(actual - expected) > delta) {
++            throw new AssertionError(testName + ": expected " + expected + " but got " + actual);
++        }
++    }
++
++    private static void assertTrue(boolean condition, String testName) {
++        if (!condition) {
++            throw new AssertionError(testName + " failed: expected true but got false");
++        }
++    }
++
++    private static void assertFalse(boolean condition, String testName) {
++        if (condition) {
++            throw new AssertionError(testName + " failed: expected false but got true");
++        }
++    }
++
++    private static void printResults() {
++        System.out.println("\n╔════════════════════════════════════════╗");
++        System.out.println("║           TEST RESULTS                 ║");
++        System.out.println("╠════════════════════════════════════════╣");
++        System.out.printf("║ Passed: %-33d ║%n", passed);
++        System.out.printf("║ Failed: %-33d ║%n", failed);
++        System.out.printf("║ Total:  %-33d ║%n", passed + failed);
++        System.out.println("╚════════════════════════════════════════╝");
++        System.exit(failed > 0 ? 1 : 0);
++    }
++}
+diff --git a/Logger.java b/Logger.java
+new file mode 100644
+index 0000000..7aefdf0
+--- /dev/null
++++ b/Logger.java
+@@ -0,0 +1,49 @@
++public class Logger {
++    public enum Level {
++        DEBUG(0), INFO(1), WARN(2), ERROR(3), NONE(4);
++
++        final int priority;
++        Level(int priority) { this.priority = priority; }
++    }
++
++    private static Level currentLevel = Level.INFO;
++    private static boolean enabled = true;
++
++    public static void setLevel(Level level) {
++        currentLevel = level;
++    }
++
++    public static void setEnabled(boolean enable) {
++        enabled = enable;
++    }
++
++    public static void debug(String message) {
++        log(Level.DEBUG, message);
++    }
++
++    public static void info(String message) {
++        log(Level.INFO, message);
++    }
++
++    public static void warn(String message) {
++        log(Level.WARN, message);
++    }
++
++    public static void error(String message) {
++        log(Level.ERROR, message);
++    }
++
++    public static void error(String message, Throwable throwable) {
++        log(Level.ERROR, message + ": " + throwable.getMessage());
++    }
++
++    private static void log(Level level, String message) {
++        if (!enabled || level.priority < currentLevel.priority) {
++            return;
++        }
++
++        String timestamp = java.time.LocalDateTime.now().toString();
++        String formatted = String.format("[%s] [%s] %s", timestamp, level, message);
++        System.out.println(formatted);
++    }
++}
+diff --git a/Main.java b/Main.java
+index 39c94b4..0fc4dda 100644
+--- a/Main.java
++++ b/Main.java
+@@ -1,9 +1,13 @@
+ public class Main {
+     public static void main(String[] args) {
+         try {
+-            System.out.println("╔════════════════════════════════════════════╗");
+-            System.out.println("║   ENTERPRISE GRAPH LIBRARY - FULL DEMO    ║");
+-            System.out.println("╚════════════════════════════════════════════╝");
++            Logger.setLevel(Logger.Level.INFO);
++            Logger.info("Starting Enterprise Graph Library - Level 6 Demo");
++
++            System.out.println("╔═════════════════════════════════════════════╗");
++            System.out.println("║  ENTERPRISE GRAPH LIBRARY - LEVEL 6 DEMO   ║");
++            System.out.println("║   (Production + Testing + Logging)          ║");
++            System.out.println("╚═════════════════════════════════════════════╝");
+ 
+             Graph graph = GraphBuilder.undirected(6)
+                     .addEdge(1, 2)
+@@ -97,14 +101,64 @@ public class Main {
+             System.out.println("\n--- Result Validation ---");
+             demonstrateValidation(service, graph);
+ 
++            System.out.println("\n--- Logging & Health Checks ---");
++            demonstrateLoggingAndHealth(graph);
++
++            System.out.println("\n--- Benchmarking ---");
++            demonstrateBenchmarking(graph);
++
++            System.out.println("\n--- Serialization ---");
++            try {
++                demonstrateSerialization(graph);
++            } catch (java.io.IOException e) {
++                Logger.error("Serialization failed", e);
++            }
++
++            System.out.println("\n--- Concurrent Traversal ---");
++            demonstrateConcurrency(graph);
++
+             System.out.println("\n--- Error Handling ---");
+             demonstrateErrorHandling();
+ 
+         } catch (GraphException e) {
++            Logger.error("Graph error: " + e.getMessage());
+             System.err.println("Graph error: " + e.getMessage());
+         }
+     }
+ 
++    private static void demonstrateLoggingAndHealth(Graph graph) {
++        Logger.debug("Starting health check on graph");
++        GraphHealthCheck health = new GraphHealthCheck(graph);
++        health.check().print();
++    }
++
++    private static void demonstrateBenchmarking(Graph graph) {
++        GraphBenchmark benchmark = new GraphBenchmark(graph);
++        benchmark.benchmarkTraversal(new BreadthFirstSearch(), "BFS", 100);
++        benchmark.benchmarkTraversal(new DepthFirstSearch(), "DFS", 100);
++        benchmark.printResults();
++    }
++
++    private static void demonstrateSerialization(Graph graph) throws java.io.IOException {
++        Logger.info("Serializing graph to JSON format");
++        String json = GraphSerializer.toJSON(graph);
++        System.out.println("JSON representation (first 200 chars):");
++        System.out.println(json.substring(0, Math.min(200, json.length())) + "...");
++
++        Logger.info("Serializing graph to DOT format");
++        String dot = GraphSerializer.toDOT(graph);
++        System.out.println("\nDOT representation:");
++        System.out.println(dot);
++    }
++
++    private static void demonstrateConcurrency(Graph graph) {
++        Logger.info("Testing concurrent traversal with 4 threads");
++        ConcurrentGraphTraversal concurrent = new ConcurrentGraphTraversal(4);
++        TraversalResult result = concurrent.traverse(graph);
++        System.out.println("Concurrent traversal result: " + result.getVertices());
++        System.out.println("Components: " + result.getComponentCount());
++    }
++
+     private static void demonstrateGraphOperations(Graph graph) {
+         GraphOperations ops = new GraphOperations(graph);
+         System.out.println("Is connected? " + ops.isConnected());

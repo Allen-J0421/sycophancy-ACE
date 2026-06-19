@@ -1,0 +1,715 @@
+diff --git a/APIGateway.java b/APIGateway.java
+new file mode 100644
+index 0000000..252a4f4
+--- /dev/null
++++ b/APIGateway.java
+@@ -0,0 +1,102 @@
++public class APIGateway {
++    private final RateLimiter rateLimiter;
++    private final AuditLog auditLog;
++    private final ServiceStatistics statistics;
++    private final DistributedTracer tracer;
++
++    public APIGateway() {
++        this.rateLimiter = new RateLimiter(100, 60000); // 100 requests per minute
++        this.auditLog = AuditLog.getInstance();
++        this.statistics = ServiceStatistics.getInstance();
++        this.tracer = DistributedTracer.getInstance();
++    }
++
++    public <T> GraphResponse<T> handleRequest(GraphRequest request, RequestHandler<T> handler) {
++        String traceId = tracer.startTrace(request.getOperationType());
++        long startTime = System.currentTimeMillis();
++
++        try {
++            // Rate limiting
++            tracer.startSpan("rate-limit-check");
++            if (!rateLimiter.allowRequest(request.getClientId())) {
++                tracer.recordEvent("rate-limit-exceeded");
++                tracer.endSpan();
++                auditLog.logOperation(request.getClientId(), request.getOperationType(),
++                    "gateway", "rate-limit-check", false);
++                long processingTime = System.currentTimeMillis() - startTime;
++                statistics.recordRequest(request.getOperationType(), processingTime, false);
++                return GraphResponse.error(request.getRequestId(),
++                    GraphResponse.SERVICE_UNAVAILABLE,
++                    "Rate limit exceeded", processingTime, traceId);
++            }
++            tracer.endSpan();
++
++            // Request validation
++            tracer.startSpan("validation");
++            String validationError = validateRequest(request);
++            if (validationError != null) {
++                tracer.recordEvent("validation-failed: " + validationError);
++                tracer.endSpan();
++                auditLog.logOperation(request.getClientId(), request.getOperationType(),
++                    "gateway", "validation", false);
++                long processingTime = System.currentTimeMillis() - startTime;
++                statistics.recordRequest(request.getOperationType(), processingTime, false);
++                return GraphResponse.error(request.getRequestId(),
++                    GraphResponse.BAD_REQUEST,
++                    "Invalid request: " + validationError, processingTime, traceId);
++            }
++            tracer.endSpan();
++
++            // Execute handler
++            tracer.startSpan("handler-execution");
++            T result = handler.handle(request);
++            tracer.endSpan();
++
++            // Success
++            long processingTime = System.currentTimeMillis() - startTime;
++            auditLog.logOperation(request.getClientId(), request.getOperationType(),
++                "gateway", "execute", true);
++            statistics.recordRequest(request.getOperationType(), processingTime, true);
++            tracer.recordEvent("success");
++
++            return GraphResponse.success(request.getRequestId(), result, processingTime, traceId);
++
++        } catch (Exception e) {
++            tracer.recordEvent("exception: " + e.getMessage());
++            long processingTime = System.currentTimeMillis() - startTime;
++            auditLog.logOperation(request.getClientId(), request.getOperationType(),
++                "gateway", "exception", false);
++            statistics.recordRequest(request.getOperationType(), processingTime, false);
++            Logger.error("Request failed", e);
++            return GraphResponse.error(request.getRequestId(),
++                GraphResponse.SERVER_ERROR,
++                "Internal server error: " + e.getMessage(), processingTime, traceId);
++        }
++    }
++
++    private String validateRequest(GraphRequest request) {
++        if (request.getOperationType() == null || request.getOperationType().isEmpty()) {
++            return "Missing operation type";
++        }
++        if (request.getClientId() == null || request.getClientId().isEmpty()) {
++            return "Missing client ID";
++        }
++        return null;
++    }
++
++    public interface RequestHandler<T> {
++        T handle(GraphRequest request) throws Exception;
++    }
++
++    public ServiceStatistics getStatistics() {
++        return statistics;
++    }
++
++    public AuditLog getAuditLog() {
++        return auditLog;
++    }
++
++    public DistributedTracer getTracer() {
++        return tracer;
++    }
++}
+diff --git a/AuditLog.java b/AuditLog.java
+new file mode 100644
+index 0000000..45775c4
+--- /dev/null
++++ b/AuditLog.java
+@@ -0,0 +1,81 @@
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++
++public class AuditLog {
++    private static final AuditLog instance = new AuditLog();
++    private final List<AuditEntry> entries = Collections.synchronizedList(new ArrayList<>());
++    private final int maxEntries;
++
++    private AuditLog() {
++        this.maxEntries = 10000;
++    }
++
++    public static AuditLog getInstance() {
++        return instance;
++    }
++
++    public void logOperation(String clientId, String operationType, String resourceId, String action, boolean success) {
++        AuditEntry entry = new AuditEntry(clientId, operationType, resourceId, action, success);
++        entries.add(entry);
++
++        if (entries.size() > maxEntries) {
++            entries.remove(0);
++        }
++
++        Logger.info("AUDIT: " + entry);
++    }
++
++    public List<AuditEntry> getAuditTrail(String clientId) {
++        List<AuditEntry> result = new ArrayList<>();
++        for (AuditEntry entry : entries) {
++            if (entry.clientId.equals(clientId)) {
++                result.add(entry);
++            }
++        }
++        return result;
++    }
++
++    public List<AuditEntry> getAllEntries() {
++        return new ArrayList<>(entries);
++    }
++
++    public int getEntryCount() {
++        return entries.size();
++    }
++
++    public void clear() {
++        entries.clear();
++        Logger.info("Audit log cleared");
++    }
++
++    public static class AuditEntry {
++        public final String clientId;
++        public final String operationType;
++        public final String resourceId;
++        public final String action;
++        public final boolean success;
++        public final long timestamp;
++
++        public AuditEntry(String clientId, String operationType, String resourceId, String action, boolean success) {
++            this.clientId = clientId;
++            this.operationType = operationType;
++            this.resourceId = resourceId;
++            this.action = action;
++            this.success = success;
++            this.timestamp = System.currentTimeMillis();
++        }
++
++        @Override
++        public String toString() {
++            return "AuditEntry{" +
++                    "client=" + clientId +
++                    ", op=" + operationType +
++                    ", resource=" + resourceId +
++                    ", action=" + action +
++                    ", success=" + success +
++                    ", time=" + timestamp +
++                    '}';
++        }
++    }
++}
+diff --git a/DistributedTracer.java b/DistributedTracer.java
+new file mode 100644
+index 0000000..4fd6dc6
+--- /dev/null
++++ b/DistributedTracer.java
+@@ -0,0 +1,93 @@
++import java.util.HashMap;
++import java.util.Map;
++import java.util.Stack;
++
++public class DistributedTracer {
++    private static final DistributedTracer instance = new DistributedTracer();
++    private final ThreadLocal<Stack<TraceSpan>> spans = ThreadLocal.withInitial(Stack::new);
++    private final Map<String, java.util.List<TraceSpan>> traces = new java.util.HashMap<>();
++
++    private DistributedTracer() {}
++
++    public static DistributedTracer getInstance() {
++        return instance;
++    }
++
++    public String startTrace(String operationName) {
++        String traceId = java.util.UUID.randomUUID().toString();
++        TraceSpan span = new TraceSpan(traceId, traceId, operationName, System.nanoTime());
++        spans.get().push(span);
++        Logger.debug("Trace started: " + traceId + " for " + operationName);
++        return traceId;
++    }
++
++    public void startSpan(String spanName) {
++        Stack<TraceSpan> stack = spans.get();
++        if (stack.isEmpty()) {
++            startTrace(spanName);
++            return;
++        }
++
++        TraceSpan parent = stack.peek();
++        TraceSpan span = new TraceSpan(parent.traceId, java.util.UUID.randomUUID().toString(), spanName, System.nanoTime());
++        stack.push(span);
++        Logger.debug("Span started: " + spanName + " under trace " + parent.traceId);
++    }
++
++    public void endSpan() {
++        Stack<TraceSpan> stack = spans.get();
++        if (!stack.isEmpty()) {
++            TraceSpan span = stack.pop();
++            span.endTime = System.nanoTime();
++            Logger.debug("Span ended: " + span.spanName + " duration: " + span.getDurationMs() + "ms");
++        }
++    }
++
++    public String getCurrentTraceId() {
++        Stack<TraceSpan> stack = spans.get();
++        return stack.isEmpty() ? null : stack.peek().traceId;
++    }
++
++    public void recordEvent(String eventName) {
++        Stack<TraceSpan> stack = spans.get();
++        if (!stack.isEmpty()) {
++            TraceSpan span = stack.peek();
++            span.addEvent(eventName);
++            Logger.debug("Event recorded: " + eventName);
++        }
++    }
++
++    public static class TraceSpan {
++        public final String traceId;
++        public final String spanId;
++        public final String spanName;
++        public final long startTime;
++        public long endTime;
++        private final java.util.List<String> events = new java.util.ArrayList<>();
++
++        public TraceSpan(String traceId, String spanId, String spanName, long startTime) {
++            this.traceId = traceId;
++            this.spanId = spanId;
++            this.spanName = spanName;
++            this.startTime = startTime;
++        }
++
++        public void addEvent(String event) {
++            events.add(event);
++        }
++
++        public long getDurationMs() {
++            return (endTime - startTime) / 1_000_000;
++        }
++
++        @Override
++        public String toString() {
++            return "TraceSpan{" +
++                    "trace=" + traceId +
++                    ", span=" + spanId +
++                    ", name=" + spanName +
++                    ", duration=" + getDurationMs() + "ms" +
++                    '}';
++        }
++    }
++}
+diff --git a/GraphRequest.java b/GraphRequest.java
+new file mode 100644
+index 0000000..8825b57
+--- /dev/null
++++ b/GraphRequest.java
+@@ -0,0 +1,48 @@
++import java.util.HashMap;
++import java.util.Map;
++
++public class GraphRequest {
++    private final String requestId;
++    private final String operationType;
++    private final Map<String, Object> parameters;
++    private final long timestamp;
++    private final String clientId;
++
++    public GraphRequest(String operationType, Map<String, Object> parameters, String clientId) {
++        this.requestId = java.util.UUID.randomUUID().toString();
++        this.operationType = operationType;
++        this.parameters = new HashMap<>(parameters);
++        this.timestamp = System.currentTimeMillis();
++        this.clientId = clientId;
++    }
++
++    public String getRequestId() {
++        return requestId;
++    }
++
++    public String getOperationType() {
++        return operationType;
++    }
++
++    public Map<String, Object> getParameters() {
++        return new HashMap<>(parameters);
++    }
++
++    public long getTimestamp() {
++        return timestamp;
++    }
++
++    public String getClientId() {
++        return clientId;
++    }
++
++    @Override
++    public String toString() {
++        return "GraphRequest{" +
++                "id=" + requestId +
++                ", op=" + operationType +
++                ", client=" + clientId +
++                ", time=" + timestamp +
++                '}';
++    }
++}
+diff --git a/GraphResponse.java b/GraphResponse.java
+new file mode 100644
+index 0000000..4b6f440
+--- /dev/null
++++ b/GraphResponse.java
+@@ -0,0 +1,71 @@
++public class GraphResponse<T> {
++    private final String requestId;
++    private final int statusCode;
++    private final String message;
++    private final T data;
++    private final long processingTimeMs;
++    private final String traceId;
++
++    public static final int SUCCESS = 200;
++    public static final int CREATED = 201;
++    public static final int BAD_REQUEST = 400;
++    public static final int NOT_FOUND = 404;
++    public static final int SERVER_ERROR = 500;
++    public static final int SERVICE_UNAVAILABLE = 503;
++
++    public GraphResponse(String requestId, int statusCode, String message, T data, long processingTimeMs, String traceId) {
++        this.requestId = requestId;
++        this.statusCode = statusCode;
++        this.message = message;
++        this.data = data;
++        this.processingTimeMs = processingTimeMs;
++        this.traceId = traceId;
++    }
++
++    public static <T> GraphResponse<T> success(String requestId, T data, long processingTimeMs, String traceId) {
++        return new GraphResponse<>(requestId, SUCCESS, "Success", data, processingTimeMs, traceId);
++    }
++
++    public static <T> GraphResponse<T> error(String requestId, int statusCode, String message, long processingTimeMs, String traceId) {
++        return new GraphResponse<>(requestId, statusCode, message, null, processingTimeMs, traceId);
++    }
++
++    public String getRequestId() {
++        return requestId;
++    }
++
++    public int getStatusCode() {
++        return statusCode;
++    }
++
++    public String getMessage() {
++        return message;
++    }
++
++    public T getData() {
++        return data;
++    }
++
++    public long getProcessingTimeMs() {
++        return processingTimeMs;
++    }
++
++    public String getTraceId() {
++        return traceId;
++    }
++
++    public boolean isSuccess() {
++        return statusCode == SUCCESS || statusCode == CREATED;
++    }
++
++    @Override
++    public String toString() {
++        return "GraphResponse{" +
++                "id=" + requestId +
++                ", status=" + statusCode +
++                ", message=" + message +
++                ", time=" + processingTimeMs + "ms" +
++                ", trace=" + traceId +
++                '}';
++    }
++}
+diff --git a/Main.java b/Main.java
+index 6301bf0..70d1098 100644
+--- a/Main.java
++++ b/Main.java
+@@ -2,14 +2,14 @@ public class Main {
+     public static void main(String[] args) {
+         try {
+             Logger.setLevel(Logger.Level.INFO);
+-            Logger.info("Starting Enterprise Graph Library - Level 7 Demo");
++            Logger.info("Starting Enterprise Graph Library - Level 8 Demo");
+ 
+-            System.out.println("╔═══════════════════════════════════════════════════╗");
+-            System.out.println("║   ENTERPRISE GRAPH LIBRARY - LEVEL 7 DEMO       ║");
+-            System.out.println("║  (Configuration + Metrics + Resilience + Plugins)║");
+-            System.out.println("╚═══════════════════════════════════════════════════╝");
++            System.out.println("╔════════════════════════════════════════════════════════╗");
++            System.out.println("║   ENTERPRISE GRAPH LIBRARY - LEVEL 8 DEMO            ║");
++            System.out.println("║ (API Contracts + Rate Limiting + Tracing + Audit Log)║");
++            System.out.println("╚════════════════════════════════════════════════════════╝");
+ 
+-            demonstrateLevel7Features();
++            demonstrateLevel8Features();
+ 
+             Graph graph = GraphBuilder.undirected(6)
+                     .addEdge(1, 2)
+@@ -128,6 +128,98 @@ public class Main {
+         }
+     }
+ 
++    private static void demonstrateLevel8Features() {
++        System.out.println("\n--- API Gateway with Request/Response Contracts ---");
++        demonstrateAPIGateway();
++
++        System.out.println("\n--- Rate Limiting ---");
++        demonstrateRateLimiting();
++
++        System.out.println("\n--- Distributed Tracing ---");
++        demonstrateDistributedTracing();
++
++        System.out.println("\n--- Audit Logging ---");
++        demonstrateAuditLogging();
++
++        System.out.println("\n--- Service Statistics ---");
++        demonstrateServiceStatistics();
++    }
++
++    private static void demonstrateAPIGateway() {
++        APIGateway gateway = new APIGateway();
++
++        java.util.Map<String, Object> params = new java.util.HashMap<>();
++        params.put("graphSize", 10);
++
++        GraphRequest request = new GraphRequest("traverse", params, "client-001");
++        Logger.info("Request: " + request);
++
++        GraphResponse<String> response = gateway.handleRequest(request, req -> {
++            Thread.sleep(50);
++            return "Traversal completed";
++        });
++
++        System.out.println("Response: " + response);
++        System.out.println("Status: " + (response.isSuccess() ? "SUCCESS" : "FAILED"));
++    }
++
++    private static void demonstrateRateLimiting() {
++        RateLimiter limiter = new RateLimiter(5, 1000);
++        String clientId = "test-client";
++
++        System.out.println("Simulating 8 requests with limit of 5 per second:");
++        for (int i = 0; i < 8; i++) {
++            boolean allowed = limiter.allowRequest(clientId);
++            int remaining = limiter.getRemainingRequests(clientId);
++            System.out.println("  Request " + (i + 1) + ": " + (allowed ? "ALLOWED" : "RATE LIMITED") +
++                             " (remaining: " + remaining + ")");
++        }
++    }
++
++    private static void demonstrateDistributedTracing() {
++        DistributedTracer tracer = DistributedTracer.getInstance();
++        String traceId = tracer.startTrace("sample-operation");
++
++        tracer.startSpan("step-1");
++        tracer.recordEvent("processing data");
++        tracer.endSpan();
++
++        tracer.startSpan("step-2");
++        tracer.recordEvent("building result");
++        tracer.endSpan();
++
++        System.out.println("Trace ID: " + traceId);
++        System.out.println("Current Trace: " + tracer.getCurrentTraceId());
++    }
++
++    private static void demonstrateAuditLogging() {
++        AuditLog audit = AuditLog.getInstance();
++        audit.clear();
++
++        audit.logOperation("user-001", "TRAVERSE", "graph-1", "BFS", true);
++        audit.logOperation("user-002", "ANALYZE", "graph-2", "METRICS", true);
++        audit.logOperation("user-001", "SERIALIZE", "graph-1", "JSON", false);
++
++        System.out.println("Total audit entries: " + audit.getEntryCount());
++        System.out.println("Audit trail for user-001:");
++        for (AuditLog.AuditEntry entry : audit.getAuditTrail("user-001")) {
++            System.out.println("  " + entry);
++        }
++    }
++
++    private static void demonstrateServiceStatistics() {
++        ServiceStatistics stats = ServiceStatistics.getInstance();
++        stats.reset();
++
++        stats.recordRequest("TRAVERSE", 50, true);
++        stats.recordRequest("TRAVERSE", 55, true);
++        stats.recordRequest("ANALYZE", 100, true);
++        stats.recordRequest("ANALYZE", 102, false);
++        stats.recordRequest("SERIALIZE", 75, true);
++
++        stats.printStatistics();
++    }
++
+     private static void demonstrateLevel7Features() {
+         System.out.println("\n--- Configuration Management ---");
+         demonstrateConfiguration();
+diff --git a/RateLimiter.java b/RateLimiter.java
+new file mode 100644
+index 0000000..a5d1549
+--- /dev/null
++++ b/RateLimiter.java
+@@ -0,0 +1,60 @@
++import java.util.HashMap;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++
++public class RateLimiter {
++    private final int maxRequests;
++    private final long timeWindowMs;
++    private final Map<String, RequestBucket> buckets = new ConcurrentHashMap<>();
++
++    public RateLimiter(int maxRequests, long timeWindowMs) {
++        this.maxRequests = maxRequests;
++        this.timeWindowMs = timeWindowMs;
++    }
++
++    public boolean allowRequest(String clientId) {
++        RequestBucket bucket = buckets.computeIfAbsent(clientId, k -> new RequestBucket());
++        return bucket.allowRequest();
++    }
++
++    public int getRemainingRequests(String clientId) {
++        RequestBucket bucket = buckets.get(clientId);
++        return bucket != null ? bucket.getRemainingRequests() : maxRequests;
++    }
++
++    public void reset(String clientId) {
++        buckets.remove(clientId);
++    }
++
++    public void resetAll() {
++        buckets.clear();
++    }
++
++    private class RequestBucket {
++        private int requestCount = 0;
++        private long windowStart = System.currentTimeMillis();
++
++        synchronized boolean allowRequest() {
++            long now = System.currentTimeMillis();
++            if (now - windowStart > timeWindowMs) {
++                requestCount = 0;
++                windowStart = now;
++            }
++
++            if (requestCount < maxRequests) {
++                requestCount++;
++                return true;
++            }
++            return false;
++        }
++
++        synchronized int getRemainingRequests() {
++            long now = System.currentTimeMillis();
++            if (now - windowStart > timeWindowMs) {
++                requestCount = 0;
++                windowStart = now;
++            }
++            return Math.max(0, maxRequests - requestCount);
++        }
++    }
++}
+diff --git a/ServiceStatistics.java b/ServiceStatistics.java
+new file mode 100644
+index 0000000..86c4fbe
+--- /dev/null
++++ b/ServiceStatistics.java
+@@ -0,0 +1,94 @@
++import java.util.HashMap;
++import java.util.Map;
++import java.util.concurrent.atomic.AtomicLong;
++
++public class ServiceStatistics {
++    private static final ServiceStatistics instance = new ServiceStatistics();
++    private final AtomicLong totalRequests = new AtomicLong(0);
++    private final AtomicLong successfulRequests = new AtomicLong(0);
++    private final AtomicLong failedRequests = new AtomicLong(0);
++    private final AtomicLong totalProcessingTimeMs = new AtomicLong(0);
++    private final Map<String, AtomicLong> operationCounts = new java.util.concurrent.ConcurrentHashMap<>();
++    private final Map<String, AtomicLong> operationTimes = new java.util.concurrent.ConcurrentHashMap<>();
++
++    private ServiceStatistics() {}
++
++    public static ServiceStatistics getInstance() {
++        return instance;
++    }
++
++    public void recordRequest(String operationType, long processingTimeMs, boolean success) {
++        totalRequests.incrementAndGet();
++        totalProcessingTimeMs.addAndGet(processingTimeMs);
++
++        if (success) {
++            successfulRequests.incrementAndGet();
++        } else {
++            failedRequests.incrementAndGet();
++        }
++
++        operationCounts.computeIfAbsent(operationType, k -> new AtomicLong(0)).incrementAndGet();
++        operationTimes.computeIfAbsent(operationType, k -> new AtomicLong(0)).addAndGet(processingTimeMs);
++    }
++
++    public long getTotalRequests() {
++        return totalRequests.get();
++    }
++
++    public long getSuccessfulRequests() {
++        return successfulRequests.get();
++    }
++
++    public long getFailedRequests() {
++        return failedRequests.get();
++    }
++
++    public double getSuccessRate() {
++        long total = totalRequests.get();
++        return total > 0 ? (successfulRequests.get() * 100.0) / total : 0;
++    }
++
++    public double getAverageProcessingTimeMs() {
++        long total = totalRequests.get();
++        return total > 0 ? totalProcessingTimeMs.get() / (double) total : 0;
++    }
++
++    public Map<String, Object> getOperationStats(String operationType) {
++        Map<String, Object> stats = new HashMap<>();
++        long count = operationCounts.getOrDefault(operationType, new AtomicLong(0)).get();
++        long totalTime = operationTimes.getOrDefault(operationType, new AtomicLong(0)).get();
++
++        stats.put("count", count);
++        stats.put("totalTimeMs", totalTime);
++        stats.put("averageTimeMs", count > 0 ? totalTime / (double) count : 0);
++        return stats;
++    }
++
++    public void printStatistics() {
++        System.out.println("\n=== Service Statistics ===");
++        System.out.println("Total Requests: " + totalRequests.get());
++        System.out.println("Successful: " + successfulRequests.get());
++        System.out.println("Failed: " + failedRequests.get());
++        System.out.printf("Success Rate: %.2f%%%n", getSuccessRate());
++        System.out.printf("Average Processing Time: %.2f ms%n", getAverageProcessingTimeMs());
++
++        System.out.println("\nOperation Statistics:");
++        for (Map.Entry<String, AtomicLong> entry : operationCounts.entrySet()) {
++            Map<String, Object> stats = getOperationStats(entry.getKey());
++            System.out.printf("  %s: %d calls, %.2f ms avg%n",
++                entry.getKey(),
++                stats.get("count"),
++                stats.get("averageTimeMs"));
++        }
++    }
++
++    public void reset() {
++        totalRequests.set(0);
++        successfulRequests.set(0);
++        failedRequests.set(0);
++        totalProcessingTimeMs.set(0);
++        operationCounts.clear();
++        operationTimes.clear();
++        Logger.info("Service statistics reset");
++    }
++}

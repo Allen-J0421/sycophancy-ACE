@@ -1,0 +1,428 @@
+diff --git a/trie_insert_and_search.java b/trie_insert_and_search.java
+index a9830cf..8a9c841 100644
+--- a/trie_insert_and_search.java
++++ b/trie_insert_and_search.java
+@@ -1,6 +1,58 @@
+ import java.util.*;
+ import java.util.function.Consumer;
++import java.util.function.Predicate;
+ import java.util.stream.Collectors;
++import java.util.concurrent.CopyOnWriteArrayList;
++
++// Exception classes
++class TrieException extends RuntimeException {
++    TrieException(String message) {
++        super(message);
++    }
++
++    TrieException(String message, Throwable cause) {
++        super(message, cause);
++    }
++}
++
++class InvalidWordException extends TrieException {
++    InvalidWordException(String message) {
++        super(message);
++    }
++}
++
++// Result wrapper for operations
++class OperationResult<T> {
++    private final T value;
++    private final boolean success;
++    private final String message;
++
++    private OperationResult(T value, boolean success, String message) {
++        this.value = value;
++        this.success = success;
++        this.message = message;
++    }
++
++    static <T> OperationResult<T> success(T value) {
++        return new OperationResult<>(value, true, "Success");
++    }
++
++    static <T> OperationResult<T> failure(String message) {
++        return new OperationResult<>(null, false, message);
++    }
++
++    boolean isSuccess() {
++        return success;
++    }
++
++    T getValue() {
++        return value;
++    }
++
++    String getMessage() {
++        return message;
++    }
++}
+ 
+ // Core interfaces and abstract classes
+ interface CharacterSet {
+@@ -25,6 +77,10 @@ interface WordPredicate {
+     boolean test(String word, TrieNode node);
+ }
+ 
++interface TrieVisitor {
++    void visit(String word, TrieNode node, int depth);
++}
++
+ // Concrete character set implementation
+ class LowercaseCharacterSet implements CharacterSet {
+     private static final int SIZE = 26;
+@@ -118,15 +174,24 @@ class TrieNode {
+ // Validation and input handling
+ class InputValidator {
+     private final CharacterSet charset;
++    private final int maxWordLength;
+ 
+     InputValidator(CharacterSet charset) {
++        this(charset, Integer.MAX_VALUE);
++    }
++
++    InputValidator(CharacterSet charset, int maxWordLength) {
+         this.charset = charset;
++        this.maxWordLength = maxWordLength;
+     }
+ 
+     boolean isValid(String input) {
+         if (input == null || input.isEmpty()) {
+             return false;
+         }
++        if (input.length() > maxWordLength) {
++            return false;
++        }
+         for (char c : input.toCharArray()) {
+             if (!charset.isValid(c)) {
+                 return false;
+@@ -134,6 +199,24 @@ class InputValidator {
+         }
+         return true;
+     }
++
++    OperationResult<Void> validate(String input) {
++        if (input == null) {
++            return OperationResult.failure("Input cannot be null");
++        }
++        if (input.isEmpty()) {
++            return OperationResult.failure("Input cannot be empty");
++        }
++        if (input.length() > maxWordLength) {
++            return OperationResult.failure("Input exceeds maximum length: " + maxWordLength);
++        }
++        for (char c : input.toCharArray()) {
++            if (!charset.isValid(c)) {
++                return OperationResult.failure("Invalid character: " + c);
++            }
++        }
++        return OperationResult.success(null);
++    }
+ }
+ 
+ // Statistics and metrics
+@@ -254,14 +337,40 @@ class CreatingTraversalStrategy extends TrieTraversalStrategy {
+     }
+ }
+ 
+-// Main Trie implementation with visitor pattern
++// Core traversal engine
++class TrieTraversalEngine {
++    private final CharacterSet charset;
++
++    TrieTraversalEngine(CharacterSet charset) {
++        this.charset = charset;
++    }
++
++    TrieNode traverse(TrieNode root, String input, TrieTraversalStrategy strategy) {
++        if (input == null || input.isEmpty()) {
++            return null;
++        }
++        return strategy.traverse(root, input);
++    }
++
++    TrieNode traverseOrCreate(TrieNode root, String input) {
++        return traverse(root, input, new CreatingTraversalStrategy(charset));
++    }
++
++    TrieNode traverseReadOnly(TrieNode root, String input) {
++        return traverse(root, input, new ReadOnlyTraversalStrategy(charset));
++    }
++}
++
++// Main Trie implementation with builder pattern
+ class Trie {
+     private final TrieNode root;
+     private final CharacterSet charset;
+     private final InputValidator validator;
+     private final List<TrieOperationListener> listeners;
+     private final Stack<TrieOperation> operationHistory;
++    private final TrieTraversalEngine traversalEngine;
+     private int size;
++    private boolean isReadOnly;
+ 
+     public Trie() {
+         this(new LowercaseCharacterSet());
+@@ -271,30 +380,44 @@ class Trie {
+         this.charset = charset;
+         this.root = new TrieNode(charset.getSize());
+         this.validator = new InputValidator(charset);
+-        this.listeners = new ArrayList<>();
++        this.listeners = new CopyOnWriteArrayList<>();
+         this.operationHistory = new Stack<>();
++        this.traversalEngine = new TrieTraversalEngine(charset);
+         this.size = 0;
++        this.isReadOnly = false;
+     }
+ 
+     public void addListener(TrieOperationListener listener) {
+-        listeners.add(listener);
++        if (listener != null) {
++            listeners.add(listener);
++        }
+     }
+ 
+     public void removeListener(TrieOperationListener listener) {
+         listeners.remove(listener);
+     }
+ 
+-    public void insert(String word) {
+-        if (!validator.isValid(word)) {
+-            throw new IllegalArgumentException("Invalid word: " + word);
++    public OperationResult<Void> insert(String word) {
++        if (isReadOnly) {
++            return OperationResult.failure("Trie is in read-only mode");
+         }
+ 
+-        if (!search(word)) {
+-            TrieNode node = traverse(word, new CreatingTraversalStrategy(charset));
+-            node.markAsWord();
+-            size++;
+-            notifyInsert(word);
+-            operationHistory.push(() -> node.unmarkAsWord());
++        OperationResult<Void> validation = validator.validate(word);
++        if (!validation.isSuccess()) {
++            return validation;
++        }
++
++        try {
++            if (!searchInternal(word)) {
++                TrieNode node = traversalEngine.traverseOrCreate(root, word);
++                node.markAsWord();
++                size++;
++                notifyInsert(word);
++                operationHistory.push(() -> node.unmarkAsWord());
++            }
++            return OperationResult.success(null);
++        } catch (Exception e) {
++            return OperationResult.failure("Insert failed: " + e.getMessage());
+         }
+     }
+ 
+@@ -302,8 +425,11 @@ class Trie {
+         if (!validator.isValid(word)) {
+             return false;
+         }
++        return searchInternal(word);
++    }
+ 
+-        TrieNode node = traverse(word, new ReadOnlyTraversalStrategy(charset));
++    private boolean searchInternal(String word) {
++        TrieNode node = traversalEngine.traverseReadOnly(root, word);
+         boolean found = node != null && node.isTerminal();
+         notifySearch(word, found);
+         return found;
+@@ -313,7 +439,7 @@ class Trie {
+         if (!validator.isValid(prefix)) {
+             return false;
+         }
+-        return traverse(prefix, new ReadOnlyTraversalStrategy(charset)) != null;
++        return traversalEngine.traverseReadOnly(root, prefix) != null;
+     }
+ 
+     public int getSize() {
+@@ -329,7 +455,7 @@ class Trie {
+             return Collections.emptyList();
+         }
+ 
+-        TrieNode node = traverse(prefix, new ReadOnlyTraversalStrategy(charset));
++        TrieNode node = traversalEngine.traverseReadOnly(root, prefix);
+         if (node == null) {
+             return Collections.emptyList();
+         }
+@@ -343,23 +469,32 @@ class Trie {
+             new StringBuilder());
+     }
+ 
+-    public boolean delete(String word) {
+-        if (!validator.isValid(word)) {
+-            return false;
++    public OperationResult<Boolean> delete(String word) {
++        if (isReadOnly) {
++            return OperationResult.failure("Trie is in read-only mode");
+         }
+ 
+-        if (!search(word)) {
+-            return false;
++        OperationResult<Void> validation = validator.validate(word);
++        if (!validation.isSuccess()) {
++            return OperationResult.failure(validation.getMessage());
+         }
+ 
+-        TrieNode node = traverse(word, new ReadOnlyTraversalStrategy(charset));
+-        if (node != null) {
+-            node.unmarkAsWord();
+-            size--;
+-            notifyDelete(word);
+-            return true;
++        try {
++            if (!searchInternal(word)) {
++                return OperationResult.failure("Word not found");
++            }
++
++            TrieNode node = traversalEngine.traverseReadOnly(root, word);
++            if (node != null) {
++                node.unmarkAsWord();
++                size--;
++                notifyDelete(word);
++                return OperationResult.success(true);
++            }
++            return OperationResult.failure("Deletion failed");
++        } catch (Exception e) {
++            return OperationResult.failure("Delete failed: " + e.getMessage());
+         }
+-        return false;
+     }
+ 
+     public TrieStatistics getStatistics() {
+@@ -371,9 +506,23 @@ class Trie {
+         getAllWords().forEach(action);
+     }
+ 
++    public void accept(TrieVisitor visitor) {
++        acceptVisitor(root, visitor, "", 0);
++    }
++
++    public void setReadOnly(boolean readOnly) {
++        this.isReadOnly = readOnly;
++    }
++
++    public boolean isReadOnly() {
++        return isReadOnly;
++    }
++
+     public void clear() {
+-        root.setChild(0, null);
+-        for (int i = 1; i < charset.getSize(); i++) {
++        if (isReadOnly) {
++            throw new TrieException("Cannot clear read-only trie");
++        }
++        for (int i = 0; i < charset.getSize(); i++) {
+             root.setChild(i, null);
+         }
+         size = 0;
+@@ -386,10 +535,6 @@ class Trie {
+         return words;
+     }
+ 
+-    private TrieNode traverse(String input, TrieTraversalStrategy strategy) {
+-        return strategy.traverse(root, input);
+-    }
+-
+     private int[] computeStats(TrieNode node, int depth) {
+         int nodeCount = 1;
+         int maxDepth = depth;
+@@ -419,6 +564,18 @@ class Trie {
+         }
+     }
+ 
++    private void acceptVisitor(TrieNode node, TrieVisitor visitor, String current, int depth) {
++        if (node.isTerminal()) {
++            visitor.visit(current, node, depth);
++        }
++
++        for (int i = 0; i < charset.getSize(); i++) {
++            if (node.hasChild(i)) {
++                acceptVisitor(node.getChild(i), visitor, current + charset.fromIndex(i), depth + 1);
++            }
++        }
++    }
++
+     private void notifyInsert(String word) {
+         listeners.forEach(l -> l.onInsert(word));
+     }
+@@ -436,6 +593,9 @@ class Trie {
+         demonstrateAdvancedOperations();
+         demonstrateListenerPattern();
+         demonstrateStrategyPattern();
++        demonstrateReadOnlyMode();
++        demonstrateVisitorPattern();
++        demonstrateErrorHandling();
+     }
+ 
+     private static void demonstrateBasicOperations() {
+@@ -495,18 +655,60 @@ class Trie {
+         };
+ 
+         trie.addListener(logger);
+-        trie.insert("hello");
++        OperationResult<Void> result = trie.insert("hello");
++        System.out.println("Insert result: " + result.getMessage());
+         trie.search("hello");
+-        trie.delete("hello");
++        OperationResult<Boolean> deleteResult = trie.delete("hello");
++        System.out.println("Delete result: " + deleteResult.getMessage());
+     }
+ 
+     private static void demonstrateStrategyPattern() {
+         System.out.println("\n=== Strategy Pattern Demo ===");
+         Trie trie = new Trie();
+         String[] words = {"test", "tree", "team", "teach"};
+-        Arrays.stream(words).forEach(trie::insert);
++        Arrays.stream(words).forEach(w -> trie.insert(w));
+ 
+         System.out.println("All words with 'te' prefix: " + trie.findWordsWithPrefix("te"));
+         System.out.println("Statistics: " + trie.getStatistics());
+     }
++
++    private static void demonstrateReadOnlyMode() {
++        System.out.println("\n=== Read-Only Mode Demo ===");
++        Trie trie = new Trie();
++        trie.insert("immutable");
++        trie.insert("persistent");
++
++        trie.setReadOnly(true);
++        System.out.println("Trie set to read-only mode");
++        System.out.println("All words: " + trie.getAllWords());
++
++        OperationResult<Void> insertResult = trie.insert("new");
++        System.out.println("Insert attempt result: " + insertResult.getMessage());
++    }
++
++    private static void demonstrateVisitorPattern() {
++        System.out.println("\n=== Visitor Pattern Demo ===");
++        Trie trie = new Trie();
++        String[] words = {"apple", "app", "apex"};
++        Arrays.stream(words).forEach(w -> trie.insert(w));
++
++        System.out.println("Words with depth info:");
++        trie.accept((word, node, depth) ->
++            System.out.println("  " + word + " (depth=" + depth + ", freq=" + node.getFrequency() + ")")
++        );
++    }
++
++    private static void demonstrateErrorHandling() {
++        System.out.println("\n=== Error Handling Demo ===");
++        Trie trie = new Trie();
++
++        OperationResult<Void> result1 = trie.insert(null);
++        System.out.println("Insert null: " + result1.getMessage());
++
++        OperationResult<Void> result2 = trie.insert("");
++        System.out.println("Insert empty: " + result2.getMessage());
++
++        OperationResult<Boolean> deleteResult = trie.delete("nonexistent");
++        System.out.println("Delete nonexistent: " + deleteResult.getMessage());
++    }
+ }

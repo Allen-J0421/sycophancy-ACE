@@ -1,0 +1,253 @@
+diff --git a/open_addressing_linear_probing.java b/open_addressing_linear_probing.java
+index b14f4c9..1de42c0 100644
+--- a/open_addressing_linear_probing.java
++++ b/open_addressing_linear_probing.java
+@@ -4,6 +4,7 @@ final class OpenAddressingIntMap {
+     private static final double MIN_LOAD_FACTOR = 0.2;
+     private static final double MAX_TOMBSTONE_RATIO = 0.2;
+     private static final int NOT_FOUND = -1;
++    private static final long RESULT_PRESENT_MASK = 1L << 32;
+ 
+     private static final byte EMPTY = 0;
+     private static final byte OCCUPIED = 1;
+@@ -40,6 +41,10 @@ final class OpenAddressingIntMap {
+     }
+ 
+     void put(int key, int value) {
++        putResult(key, value);
++    }
++
++    long putResult(int key, int value) {
+         ensureCapacityForInsert();
+ 
+         ProbeResult probe = probe(key);
+@@ -48,21 +53,31 @@ final class OpenAddressingIntMap {
+             probe = probe(key);
+         }
+ 
+-        writeEntry(probe, key, value);
++        return writeEntry(probe, key, value);
+     }
+ 
+     int getOrDefault(int key, int defaultValue) {
+-        int index = findIndex(key);
+-        return index != NOT_FOUND ? values[index] : defaultValue;
++        long result = getResult(key);
++        return hasResult(result) ? unpackResultValue(result) : defaultValue;
++    }
++
++    long getResult(int key) {
++        ProbeResult probe = probe(key);
++        return probe.found() ? packResult(values[probe.foundIndex]) : missingResult();
+     }
+ 
+     int removeOrDefault(int key, int defaultValue) {
+-        int index = findIndex(key);
+-        return index != NOT_FOUND ? removeAt(index) : defaultValue;
++        long result = removeResult(key);
++        return hasResult(result) ? unpackResultValue(result) : defaultValue;
++    }
++
++    long removeResult(int key) {
++        ProbeResult probe = probe(key);
++        return probe.found() ? packResult(removeAt(probe.foundIndex)) : missingResult();
+     }
+ 
+     boolean containsKey(int key) {
+-        return findIndex(key) != NOT_FOUND;
++        return probe(key).found();
+     }
+ 
+     int size() {
+@@ -80,29 +95,28 @@ final class OpenAddressingIntMap {
+     }
+ 
+     void display() {
+-        forEachEntry(new EntryVisitor() {
+-            @Override
+-            public void accept(int key, int value) {
+-                System.out.println(key + " " + value);
++        for (int index = 0; index < capacity(); index++) {
++            if (isOccupied(index)) {
++                System.out.println(keys[index] + " " + values[index]);
+             }
+-        });
++        }
+     }
+ 
+     @Override
+     public String toString() {
+         StringBuilder builder = new StringBuilder("{");
+-        boolean[] first = {true};
++        boolean first = true;
+ 
+-        forEachEntry(new EntryVisitor() {
+-            @Override
+-            public void accept(int key, int value) {
+-                if (!first[0]) {
+-                    builder.append(", ");
+-                }
+-                builder.append(key).append('=').append(value);
+-                first[0] = false;
++        for (int index = 0; index < capacity(); index++) {
++            if (!isOccupied(index)) {
++                continue;
+             }
+-        });
++            if (!first) {
++                builder.append(", ");
++            }
++            builder.append(keys[index]).append('=').append(values[index]);
++            first = false;
++        }
+ 
+         return builder.append('}').toString();
+     }
+@@ -111,23 +125,6 @@ final class OpenAddressingIntMap {
+         return Math.floorMod(key, capacity());
+     }
+ 
+-    int findIndex(int key) {
+-        return probe(key).foundIndex;
+-    }
+-
+-    int valueAt(int index) {
+-        return values[index];
+-    }
+-
+-    int removeAt(int index) {
+-        int removedValue = values[index];
+-        states[index] = DELETED;
+-        size--;
+-        tombstones++;
+-        rebalanceAfterRemoval();
+-        return removedValue;
+-    }
+-
+     private void ensureCapacityForInsert() {
+         if (needsRebuildBeforeInsert()) {
+             resize(recommendedCapacityFor(size + 1));
+@@ -140,6 +137,15 @@ final class OpenAddressingIntMap {
+                 || exceedsTombstoneLoad();
+     }
+ 
++    private int removeAt(int index) {
++        int removedValue = values[index];
++        states[index] = DELETED;
++        size--;
++        tombstones++;
++        rebalanceAfterRemoval();
++        return removedValue;
++    }
++
+     private void rebalanceAfterRemoval() {
+         if (size == 0) {
+             resize(minimumCapacity);
+@@ -177,8 +183,9 @@ final class OpenAddressingIntMap {
+         return new ProbeResult(NOT_FOUND, firstDeletedIndex);
+     }
+ 
+-    private void writeEntry(ProbeResult probe, int key, int value) {
++    private long writeEntry(ProbeResult probe, int key, int value) {
+         int targetIndex = probe.found() ? probe.foundIndex : probe.insertionIndex;
++        long previousResult = probe.found() ? packResult(values[targetIndex]) : missingResult();
+ 
+         if (!probe.found()) {
+             if (states[targetIndex] == EMPTY) {
+@@ -192,6 +199,7 @@ final class OpenAddressingIntMap {
+         keys[targetIndex] = key;
+         values[targetIndex] = value;
+         states[targetIndex] = OCCUPIED;
++        return previousResult;
+     }
+ 
+     private void resize(int newCapacity) {
+@@ -220,20 +228,16 @@ final class OpenAddressingIntMap {
+         size++;
+     }
+ 
+-    private void forEachEntry(EntryVisitor visitor) {
+-        for (int index = 0; index < capacity(); index++) {
+-            if (states[index] == OCCUPIED) {
+-                visitor.accept(keys[index], values[index]);
+-            }
+-        }
+-    }
+-
+     private void allocateArrays(int capacity) {
+         keys = new int[capacity];
+         values = new int[capacity];
+         states = new byte[capacity];
+     }
+ 
++    private boolean isOccupied(int index) {
++        return states[index] == OCCUPIED;
++    }
++
+     private boolean exceedsActiveLoad(int targetSize) {
+         return (double) targetSize / capacity() > MAX_LOAD_FACTOR;
+     }
+@@ -272,8 +276,20 @@ final class OpenAddressingIntMap {
+         return Math.max(1, requestedCapacity);
+     }
+ 
+-    private interface EntryVisitor {
+-        void accept(int key, int value);
++    static boolean hasResult(long result) {
++        return (result & RESULT_PRESENT_MASK) != 0;
++    }
++
++    static int unpackResultValue(long result) {
++        return (int) result;
++    }
++
++    private long packResult(int value) {
++        return RESULT_PRESENT_MASK | (value & 0xffffffffL);
++    }
++
++    private long missingResult() {
++        return 0L;
+     }
+ }
+ 
+@@ -295,10 +311,10 @@ final class hashMap {
+     }
+ 
+     Integer putValue(int key, int value) {
+-        int index = delegate.findIndex(key);
+-        Integer previousValue = index != NOT_FOUND ? delegate.valueAt(index) : null;
+-        delegate.put(key, value);
+-        return previousValue;
++        long result = delegate.putResult(key, value);
++        return OpenAddressingIntMap.hasResult(result)
++                ? OpenAddressingIntMap.unpackResultValue(result)
++                : null;
+     }
+ 
+     void put(int key, int value) {
+@@ -310,8 +326,10 @@ final class hashMap {
+     }
+ 
+     Integer getValue(int key) {
+-        int index = delegate.findIndex(key);
+-        return index != NOT_FOUND ? delegate.valueAt(index) : null;
++        long result = delegate.getResult(key);
++        return OpenAddressingIntMap.hasResult(result)
++                ? OpenAddressingIntMap.unpackResultValue(result)
++                : null;
+     }
+ 
+     int get(int key) {
+@@ -319,8 +337,10 @@ final class hashMap {
+     }
+ 
+     Integer removeValue(int key) {
+-        int index = delegate.findIndex(key);
+-        return index != NOT_FOUND ? delegate.removeAt(index) : null;
++        long result = delegate.removeResult(key);
++        return OpenAddressingIntMap.hasResult(result)
++                ? OpenAddressingIntMap.unpackResultValue(result)
++                : null;
+     }
+ 
+     int remove(int key) {

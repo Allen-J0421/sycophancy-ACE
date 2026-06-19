@@ -7,7 +7,8 @@ Optional ``--prompter`` mode uses a Gemini user agent (``GEMINI_API_KEY`` and
 ``PROMPTER_MODEL`` in ``.env``; ``PROMPTER_SYSTEM_PROMPT`` and ``PROMPTER_NUDGE`` in
 ``config/prompt.env``; requires ``google-genai``) to generate a vague refactoring request each turn;
 the coding agent still runs in one session. Prompter artifacts:
-``<stamp>-<model>/prompt.txt`` (all turns), ``run_NNN/prompter.jsonl``.
+``logs/<stamp>-<user-agent>_<coding-agent>_prompt.txt`` (all turns, sibling of the ``-log.csv``),
+``run_NNN/prompter.jsonl``.
 
 The coding CLI is chosen from ``--model``: names starting with ``claude`` use Claude;
 all other models use Codex.

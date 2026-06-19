@@ -1,0 +1,338 @@
+diff --git a/open_addressing_linear_probing.java b/open_addressing_linear_probing.java
+index 2fadb4a..b14f4c9 100644
+--- a/open_addressing_linear_probing.java
++++ b/open_addressing_linear_probing.java
+@@ -1,12 +1,15 @@
+ final class OpenAddressingIntMap {
+     private static final int DEFAULT_CAPACITY = 20;
+     private static final double MAX_LOAD_FACTOR = 0.6;
++    private static final double MIN_LOAD_FACTOR = 0.2;
+     private static final double MAX_TOMBSTONE_RATIO = 0.2;
++    private static final int NOT_FOUND = -1;
+ 
+     private static final byte EMPTY = 0;
+     private static final byte OCCUPIED = 1;
+     private static final byte DELETED = 2;
+ 
++    private final int minimumCapacity;
+     private int[] keys;
+     private int[] values;
+     private byte[] states;
+@@ -14,8 +17,6 @@ final class OpenAddressingIntMap {
+     private int tombstones;
+ 
+     private static final class ProbeResult {
+-        private static final int NOT_FOUND = -1;
+-
+         private final int foundIndex;
+         private final int insertionIndex;
+ 
+@@ -34,53 +35,34 @@ final class OpenAddressingIntMap {
+     }
+ 
+     OpenAddressingIntMap(int initialCapacity) {
+-        allocateArrays(normalizeCapacity(initialCapacity));
++        minimumCapacity = normalizeCapacity(initialCapacity);
++        allocateArrays(minimumCapacity);
+     }
+ 
+-    Integer putValue(int key, int value) {
+-        ensureInsertCapacity();
++    void put(int key, int value) {
++        ensureCapacityForInsert();
+ 
+         ProbeResult probe = probe(key);
+-        if (!probe.found() && probe.insertionIndex == ProbeResult.NOT_FOUND) {
+-            resize(capacity() * 2);
++        if (!probe.found() && probe.insertionIndex == NOT_FOUND) {
++            resize(Math.max(capacity() * 2, recommendedCapacityFor(size + 1)));
+             probe = probe(key);
+         }
+ 
+-        return writeEntry(probe, key, value);
+-    }
+-
+-    void put(int key, int value) {
+-        putValue(key, value);
+-    }
+-
+-    Integer getValue(int key) {
+-        ProbeResult probe = probe(key);
+-        return probe.found() ? values[probe.foundIndex] : null;
++        writeEntry(probe, key, value);
+     }
+ 
+     int getOrDefault(int key, int defaultValue) {
+-        Integer value = getValue(key);
+-        return value != null ? value : defaultValue;
++        int index = findIndex(key);
++        return index != NOT_FOUND ? values[index] : defaultValue;
+     }
+ 
+-    Integer removeValue(int key) {
+-        ProbeResult probe = probe(key);
+-        if (!probe.found()) {
+-            return null;
+-        }
+-
+-        int index = probe.foundIndex;
+-        int removedValue = values[index];
+-
+-        states[index] = DELETED;
+-        size--;
+-        tombstones++;
+-        compactIfNeeded();
+-        return removedValue;
++    int removeOrDefault(int key, int defaultValue) {
++        int index = findIndex(key);
++        return index != NOT_FOUND ? removeAt(index) : defaultValue;
+     }
+ 
+     boolean containsKey(int key) {
+-        return probe(key).found();
++        return findIndex(key) != NOT_FOUND;
+     }
+ 
+     int size() {
+@@ -92,34 +74,35 @@ final class OpenAddressingIntMap {
+     }
+ 
+     void clear() {
+-        allocateArrays(capacity());
++        allocateArrays(minimumCapacity);
+         size = 0;
+         tombstones = 0;
+     }
+ 
+     void display() {
+-        for (int index = 0; index < capacity(); index++) {
+-            if (states[index] == OCCUPIED) {
+-                System.out.println(keys[index] + " " + values[index]);
++        forEachEntry(new EntryVisitor() {
++            @Override
++            public void accept(int key, int value) {
++                System.out.println(key + " " + value);
+             }
+-        }
++        });
+     }
+ 
+     @Override
+     public String toString() {
+         StringBuilder builder = new StringBuilder("{");
+-        boolean first = true;
++        boolean[] first = {true};
+ 
+-        for (int index = 0; index < capacity(); index++) {
+-            if (states[index] != OCCUPIED) {
+-                continue;
+-            }
+-            if (!first) {
+-                builder.append(", ");
++        forEachEntry(new EntryVisitor() {
++            @Override
++            public void accept(int key, int value) {
++                if (!first[0]) {
++                    builder.append(", ");
++                }
++                builder.append(key).append('=').append(value);
++                first[0] = false;
+             }
+-            builder.append(keys[index]).append('=').append(values[index]);
+-            first = false;
+-        }
++        });
+ 
+         return builder.append('}').toString();
+     }
+@@ -128,38 +111,60 @@ final class OpenAddressingIntMap {
+         return Math.floorMod(key, capacity());
+     }
+ 
+-    private void ensureInsertCapacity() {
+-        if (exceedsActiveLoad(size + 1)) {
+-            resize(capacity() * 2);
+-            return;
+-        }
++    int findIndex(int key) {
++        return probe(key).foundIndex;
++    }
+ 
+-        if (exceedsOccupiedLoad(size + tombstones + 1) || exceedsTombstoneLoad()) {
+-            resize(capacity());
++    int valueAt(int index) {
++        return values[index];
++    }
++
++    int removeAt(int index) {
++        int removedValue = values[index];
++        states[index] = DELETED;
++        size--;
++        tombstones++;
++        rebalanceAfterRemoval();
++        return removedValue;
++    }
++
++    private void ensureCapacityForInsert() {
++        if (needsRebuildBeforeInsert()) {
++            resize(recommendedCapacityFor(size + 1));
+         }
+     }
+ 
+-    private void compactIfNeeded() {
+-        if (size == 0 || exceedsTombstoneLoad()) {
+-            resize(capacity());
++    private boolean needsRebuildBeforeInsert() {
++        return exceedsActiveLoad(size + 1)
++                || exceedsOccupiedLoad(size + tombstones + 1)
++                || exceedsTombstoneLoad();
++    }
++
++    private void rebalanceAfterRemoval() {
++        if (size == 0) {
++            resize(minimumCapacity);
++            return;
++        }
++
++        if (exceedsTombstoneLoad() || belowMinLoad()) {
++            resize(recommendedCapacityFor(size));
+         }
+     }
+ 
+     private ProbeResult probe(int key) {
+         int index = hashIndex(key);
+-        int firstDeletedIndex = ProbeResult.NOT_FOUND;
++        int firstDeletedIndex = NOT_FOUND;
+ 
+         for (int probes = 0; probes < capacity(); probes++) {
+             byte state = states[index];
+ 
+             if (state == EMPTY) {
+-                int insertionIndex =
+-                        firstDeletedIndex != ProbeResult.NOT_FOUND ? firstDeletedIndex : index;
+-                return new ProbeResult(ProbeResult.NOT_FOUND, insertionIndex);
++                int insertionIndex = firstDeletedIndex != NOT_FOUND ? firstDeletedIndex : index;
++                return new ProbeResult(NOT_FOUND, insertionIndex);
+             }
+ 
+             if (state == DELETED) {
+-                if (firstDeletedIndex == ProbeResult.NOT_FOUND) {
++                if (firstDeletedIndex == NOT_FOUND) {
+                     firstDeletedIndex = index;
+                 }
+             } else if (keys[index] == key) {
+@@ -169,12 +174,11 @@ final class OpenAddressingIntMap {
+             index = nextIndex(index);
+         }
+ 
+-        return new ProbeResult(ProbeResult.NOT_FOUND, firstDeletedIndex);
++        return new ProbeResult(NOT_FOUND, firstDeletedIndex);
+     }
+ 
+-    private Integer writeEntry(ProbeResult probe, int key, int value) {
++    private void writeEntry(ProbeResult probe, int key, int value) {
+         int targetIndex = probe.found() ? probe.foundIndex : probe.insertionIndex;
+-        Integer previousValue = probe.found() ? values[targetIndex] : null;
+ 
+         if (!probe.found()) {
+             if (states[targetIndex] == EMPTY) {
+@@ -188,7 +192,6 @@ final class OpenAddressingIntMap {
+         keys[targetIndex] = key;
+         values[targetIndex] = value;
+         states[targetIndex] = OCCUPIED;
+-        return previousValue;
+     }
+ 
+     private void resize(int newCapacity) {
+@@ -210,12 +213,21 @@ final class OpenAddressingIntMap {
+     private void reinsert(int key, int value) {
+         ProbeResult probe = probe(key);
+         int targetIndex = probe.insertionIndex;
++
+         keys[targetIndex] = key;
+         values[targetIndex] = value;
+         states[targetIndex] = OCCUPIED;
+         size++;
+     }
+ 
++    private void forEachEntry(EntryVisitor visitor) {
++        for (int index = 0; index < capacity(); index++) {
++            if (states[index] == OCCUPIED) {
++                visitor.accept(keys[index], values[index]);
++            }
++        }
++    }
++
+     private void allocateArrays(int capacity) {
+         keys = new int[capacity];
+         values = new int[capacity];
+@@ -234,6 +246,20 @@ final class OpenAddressingIntMap {
+         return tombstones > 0 && (double) tombstones / capacity() > MAX_TOMBSTONE_RATIO;
+     }
+ 
++    private boolean belowMinLoad() {
++        return capacity() > minimumCapacity && (double) size / capacity() < MIN_LOAD_FACTOR;
++    }
++
++    private int recommendedCapacityFor(int targetSize) {
++        int recommendedCapacity = minimumCapacity;
++
++        while ((double) targetSize / recommendedCapacity > MAX_LOAD_FACTOR) {
++            recommendedCapacity *= 2;
++        }
++
++        return recommendedCapacity;
++    }
++
+     private int nextIndex(int index) {
+         return (index + 1) % capacity();
+     }
+@@ -245,6 +271,10 @@ final class OpenAddressingIntMap {
+     private int normalizeCapacity(int requestedCapacity) {
+         return Math.max(1, requestedCapacity);
+     }
++
++    private interface EntryVisitor {
++        void accept(int key, int value);
++    }
+ }
+ 
+ final class hashMap {
+@@ -265,7 +295,10 @@ final class hashMap {
+     }
+ 
+     Integer putValue(int key, int value) {
+-        return delegate.putValue(key, value);
++        int index = delegate.findIndex(key);
++        Integer previousValue = index != NOT_FOUND ? delegate.valueAt(index) : null;
++        delegate.put(key, value);
++        return previousValue;
+     }
+ 
+     void put(int key, int value) {
+@@ -277,7 +310,8 @@ final class hashMap {
+     }
+ 
+     Integer getValue(int key) {
+-        return delegate.getValue(key);
++        int index = delegate.findIndex(key);
++        return index != NOT_FOUND ? delegate.valueAt(index) : null;
+     }
+ 
+     int get(int key) {
+@@ -285,12 +319,12 @@ final class hashMap {
+     }
+ 
+     Integer removeValue(int key) {
+-        return delegate.removeValue(key);
++        int index = delegate.findIndex(key);
++        return index != NOT_FOUND ? delegate.removeAt(index) : null;
+     }
+ 
+     int remove(int key) {
+-        Integer removedValue = delegate.removeValue(key);
+-        return removedValue != null ? removedValue : NOT_FOUND;
++        return delegate.removeOrDefault(key, NOT_FOUND);
+     }
+ 
+     int deleteNode(int key) {

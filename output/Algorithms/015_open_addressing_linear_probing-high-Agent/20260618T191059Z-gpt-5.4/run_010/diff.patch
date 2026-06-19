@@ -1,0 +1,197 @@
+diff --git a/open_addressing_linear_probing.java b/open_addressing_linear_probing.java
+index 9ba4fc6..5d38018 100644
+--- a/open_addressing_linear_probing.java
++++ b/open_addressing_linear_probing.java
+@@ -16,20 +16,6 @@ class OpenAddressingIntMap {
+     private int size;
+     private int tombstones;
+ 
+-    private static final class ProbeResult {
+-        private final int foundIndex;
+-        private final int insertionIndex;
+-
+-        private ProbeResult(int foundIndex, int insertionIndex) {
+-            this.foundIndex = foundIndex;
+-            this.insertionIndex = insertionIndex;
+-        }
+-
+-        private boolean found() {
+-            return foundIndex != NOT_FOUND;
+-        }
+-    }
+-
+     static final class ValueResult {
+         private static final ValueResult MISSING = new ValueResult(false, 0);
+ 
+@@ -66,6 +52,28 @@ class OpenAddressingIntMap {
+         }
+     }
+ 
++    private static final class SlotResult {
++        private final int entryIndex;
++        private final int insertionIndex;
++
++        private SlotResult(int entryIndex, int insertionIndex) {
++            this.entryIndex = entryIndex;
++            this.insertionIndex = insertionIndex;
++        }
++
++        private boolean isPresent() {
++            return entryIndex != NOT_FOUND;
++        }
++
++        private int targetIndex() {
++            return isPresent() ? entryIndex : insertionIndex;
++        }
++
++        private ValueResult valueResult(int[] values) {
++            return isPresent() ? ValueResult.present(values[entryIndex]) : ValueResult.missing();
++        }
++    }
++
+     OpenAddressingIntMap() {
+         this(DEFAULT_CAPACITY);
+     }
+@@ -80,12 +88,12 @@ class OpenAddressingIntMap {
+     }
+ 
+     ValueResult putResult(int key, int value) {
+-        ProbeResult probe = probe(key);
+-        if (!probe.found()) {
+-            probe = prepareInsertionSlot(key, probe);
++        SlotResult slot = findSlot(key);
++        if (!slot.isPresent()) {
++            slot = prepareInsertionSlot(key, slot);
+         }
+ 
+-        return writeEntry(probe, key, value);
++        return writeEntry(slot, key, value);
+     }
+ 
+     int getOrDefault(int key, int defaultValue) {
+@@ -93,8 +101,7 @@ class OpenAddressingIntMap {
+     }
+ 
+     ValueResult getResult(int key) {
+-        ProbeResult probe = probe(key);
+-        return probe.found() ? ValueResult.present(values[probe.foundIndex]) : ValueResult.missing();
++        return findSlot(key).valueResult(values);
+     }
+ 
+     int removeOrDefault(int key, int defaultValue) {
+@@ -102,14 +109,12 @@ class OpenAddressingIntMap {
+     }
+ 
+     ValueResult removeResult(int key) {
+-        ProbeResult probe = probe(key);
+-        return probe.found()
+-                ? ValueResult.present(removeAt(probe.foundIndex))
+-                : ValueResult.missing();
++        SlotResult slot = findSlot(key);
++        return slot.isPresent() ? ValueResult.present(removeAt(slot.entryIndex)) : ValueResult.missing();
+     }
+ 
+     boolean containsKey(int key) {
+-        return probe(key).found();
++        return findSlot(key).isPresent();
+     }
+ 
+     int size() {
+@@ -157,17 +162,17 @@ class OpenAddressingIntMap {
+         return Math.floorMod(key, capacity());
+     }
+ 
+-    private ProbeResult prepareInsertionSlot(int key, ProbeResult probe) {
+-        if (!needsRebuildBeforeInsert(probe)) {
+-            return probe;
++    private SlotResult prepareInsertionSlot(int key, SlotResult slot) {
++        if (!needsRebuildBeforeInsert(slot)) {
++            return slot;
+         }
+ 
+         resize(recommendedCapacityFor(size + 1));
+-        return probe(key);
++        return findSlot(key);
+     }
+ 
+-    private boolean needsRebuildBeforeInsert(ProbeResult probe) {
+-        if (probe.insertionIndex == NOT_FOUND) {
++    private boolean needsRebuildBeforeInsert(SlotResult slot) {
++        if (slot.insertionIndex == NOT_FOUND) {
+             return true;
+         }
+ 
+@@ -196,7 +201,7 @@ class OpenAddressingIntMap {
+         }
+     }
+ 
+-    private ProbeResult probe(int key) {
++    private SlotResult findSlot(int key) {
+         int index = hashIndex(key);
+         int firstDeletedIndex = NOT_FOUND;
+ 
+@@ -205,7 +210,7 @@ class OpenAddressingIntMap {
+ 
+             if (state == EMPTY) {
+                 int insertionIndex = firstDeletedIndex != NOT_FOUND ? firstDeletedIndex : index;
+-                return new ProbeResult(NOT_FOUND, insertionIndex);
++                return new SlotResult(NOT_FOUND, insertionIndex);
+             }
+ 
+             if (state == DELETED) {
+@@ -213,22 +218,20 @@ class OpenAddressingIntMap {
+                     firstDeletedIndex = index;
+                 }
+             } else if (keys[index] == key) {
+-                return new ProbeResult(index, index);
++                return new SlotResult(index, index);
+             }
+ 
+             index = nextIndex(index);
+         }
+ 
+-        return new ProbeResult(NOT_FOUND, firstDeletedIndex);
++        return new SlotResult(NOT_FOUND, firstDeletedIndex);
+     }
+ 
+-    private ValueResult writeEntry(ProbeResult probe, int key, int value) {
+-        int targetIndex = probe.found() ? probe.foundIndex : probe.insertionIndex;
+-        ValueResult previousResult = probe.found()
+-                ? ValueResult.present(values[targetIndex])
+-                : ValueResult.missing();
++    private ValueResult writeEntry(SlotResult slot, int key, int value) {
++        int targetIndex = slot.targetIndex();
++        ValueResult previousResult = slot.valueResult(values);
+ 
+-        if (!probe.found()) {
++        if (!slot.isPresent()) {
+             if (states[targetIndex] == EMPTY) {
+                 size++;
+             } else if (states[targetIndex] == DELETED) {
+@@ -260,12 +263,7 @@ class OpenAddressingIntMap {
+     }
+ 
+     private void reinsert(int key, int value) {
+-        ProbeResult probe = probe(key);
+-        int targetIndex = probe.insertionIndex;
+-
+-        keys[targetIndex] = key;
+-        values[targetIndex] = value;
+-        states[targetIndex] = OCCUPIED;
++        occupySlot(findSlot(key).insertionIndex, key, value);
+         size++;
+     }
+ 
+@@ -279,6 +277,12 @@ class OpenAddressingIntMap {
+         return states[index] == OCCUPIED;
+     }
+ 
++    private void occupySlot(int index, int key, int value) {
++        keys[index] = key;
++        values[index] = value;
++        states[index] = OCCUPIED;
++    }
++
+     private boolean exceedsActiveLoad(int targetSize) {
+         return (double) targetSize / capacity() > MAX_LOAD_FACTOR;
+     }

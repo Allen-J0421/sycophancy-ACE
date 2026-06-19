@@ -1,0 +1,274 @@
+diff --git a/BinarySearchDemo.java b/BinarySearchDemo.java
+index 1734e34..d22630a 100644
+--- a/BinarySearchDemo.java
++++ b/BinarySearchDemo.java
+@@ -7,6 +7,26 @@ class BinarySearchDemo {
+         runBasicSearch();
+         runSearchWithStats();
+         runFirstOccurrence();
++        runLastOccurrence();
++    }
++
++    private static void runLastOccurrence() {
++        System.out.println("\n=== Find Last Occurrence ===");
++        BinarySearch<Integer> searcher = BinarySearch.withStats();
++        Integer[] array = {1, 2, 2, 2, 3, 4, 5};
++        Integer target = 2;
++
++        SearchResult result = searcher.searchLast(array, target);
++        if (result.isFound()) {
++            System.out.println("Last occurrence at index: " + result.getIndex());
++        } else {
++            System.out.println("Element not found");
++        }
++
++        if (result instanceof SearchResultWithStats) {
++            SearchStats stats = ((SearchResultWithStats) result).getStats();
++            System.out.println("Statistics: " + stats);
++        }
+     }
+ 
+     private static void runBasicSearch() {
+@@ -21,7 +41,7 @@ class BinarySearchDemo {
+ 
+     private static void runSearchWithStats() {
+         System.out.println("\n=== Search with Statistics ===");
+-        SearchEngine<Integer> searcher = new SearchEngine<Integer>().withStats();
++        BinarySearch<Integer> searcher = BinarySearch.withStats();
+         Integer[] array = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+         Integer target = 8;
+ 
+@@ -31,7 +51,7 @@ class BinarySearchDemo {
+ 
+     private static void runFirstOccurrence() {
+         System.out.println("\n=== Find First Occurrence ===");
+-        SearchEngine<Integer> searcher = new SearchEngine<Integer>().withStats();
++        BinarySearch<Integer> searcher = BinarySearch.withStats();
+         Integer[] array = {1, 2, 2, 2, 3, 4, 5};
+         Integer target = 2;
+ 
+diff --git a/SearchConfig.java b/SearchConfig.java
+new file mode 100644
+index 0000000..346f7c1
+--- /dev/null
++++ b/SearchConfig.java
+@@ -0,0 +1,36 @@
++/**
++ * Configuration for binary search operations.
++ * Encapsulates settings that control search behavior.
++ */
++class SearchConfig {
++    private final boolean trackStats;
++
++    private SearchConfig(Builder builder) {
++        this.trackStats = builder.trackStats;
++    }
++
++    boolean isTrackStats() {
++        return trackStats;
++    }
++
++    static Builder builder() {
++        return new Builder();
++    }
++
++    static SearchConfig defaults() {
++        return new Builder().build();
++    }
++
++    static class Builder {
++        private boolean trackStats = false;
++
++        public Builder withStats() {
++            this.trackStats = true;
++            return this;
++        }
++
++        public SearchConfig build() {
++            return new SearchConfig(this);
++        }
++    }
++}
+diff --git a/SearchEngine.java b/SearchEngine.java
+index a8565e4..4dfba8a 100644
+--- a/SearchEngine.java
++++ b/SearchEngine.java
+@@ -5,16 +5,14 @@
+  * @param <T> the type of elements in the array (must implement Comparable)
+  */
+ class SearchEngine<T extends Comparable<T>> {
+-    private boolean trackStats = false;
++    private final SearchConfig config;
+ 
+-    /**
+-     * Enables statistics tracking.
+-     *
+-     * @return this for method chaining
+-     */
+-    SearchEngine<T> withStats() {
+-        this.trackStats = true;
+-        return this;
++    SearchEngine(SearchConfig config) {
++        this.config = config;
++    }
++
++    SearchEngine() {
++        this(SearchConfig.defaults());
+     }
+ 
+     /**
+@@ -39,6 +37,17 @@ class SearchEngine<T extends Comparable<T>> {
+         return performSearch(array, target, new FirstOccurrenceStrategy<>(0, array.length - 1));
+     }
+ 
++    /**
++     * Finds the last (rightmost) occurrence of target.
++     *
++     * @param array the sorted array to search
++     * @param target the value to find
++     * @return SearchResult with outcome
++     */
++    SearchResult searchLast(T[] array, T target) {
++        return performSearch(array, target, new LastOccurrenceStrategy<>(0, array.length - 1));
++    }
++
+     /**
+      * Checks if target exists in array.
+      *
+@@ -63,7 +72,7 @@ class SearchEngine<T extends Comparable<T>> {
+             return SearchResult.notFound();
+         }
+ 
+-        long startTime = trackStats ? System.nanoTime() : 0;
++        long startTime = config.isTrackStats() ? System.nanoTime() : 0;
+         int comparisons = 0;
+ 
+         if (strategy instanceof StandardSearchStrategy) {
+@@ -86,6 +95,15 @@ class SearchEngine<T extends Comparable<T>> {
+ 
+                 first.processBoundary(comparison, mid);
+             }
++        } else if (strategy instanceof LastOccurrenceStrategy) {
++            LastOccurrenceStrategy<T> last = (LastOccurrenceStrategy<T>) strategy;
++            while (last.getLow() <= last.getHigh()) {
++                int mid = last.getLow() + (last.getHigh() - last.getLow()) / 2;
++                int comparison = array[mid].compareTo(target);
++                comparisons++;
++
++                last.processBoundary(comparison, mid);
++            }
+         }
+ 
+         int resultIndex = strategy.getResult();
+@@ -97,7 +115,7 @@ class SearchEngine<T extends Comparable<T>> {
+     }
+ 
+     private SearchResult buildResult(SearchResult result, long startTime, int comparisons) {
+-        if (!trackStats) {
++        if (!config.isTrackStats()) {
+             return result;
+         }
+         long elapsed = System.nanoTime() - startTime;
+diff --git a/SearchStrategy.java b/SearchStrategy.java
+index 28ba55e..cedd936 100644
+--- a/SearchStrategy.java
++++ b/SearchStrategy.java
+@@ -101,3 +101,44 @@ class FirstOccurrenceStrategy<T extends Comparable<T>> implements SearchStrategy
+         return high;
+     }
+ }
++
++/**
++ * Search strategy that finds the last (rightmost) occurrence.
++ */
++class LastOccurrenceStrategy<T extends Comparable<T>> implements SearchStrategy<T> {
++    private int low;
++    private int high;
++    private int result = -1;
++
++    LastOccurrenceStrategy(int low, int high) {
++        this.low = low;
++        this.high = high;
++    }
++
++    @Override
++    public boolean processBoundary(int comparison, int mid) {
++        if (comparison == 0) {
++            result = mid;
++            low = mid + 1;
++            return true;
++        } else if (comparison < 0) {
++            low = mid + 1;
++        } else {
++            high = mid - 1;
++        }
++        return true;
++    }
++
++    @Override
++    public int getResult() {
++        return result;
++    }
++
++    int getLow() {
++        return low;
++    }
++
++    int getHigh() {
++        return high;
++    }
++}
+diff --git a/binary_search.java b/binary_search.java
+index d6632fc..b003c94 100644
+--- a/binary_search.java
++++ b/binary_search.java
+@@ -5,18 +5,23 @@
+  * @param <T> the type of elements in the array (must implement Comparable)
+  */
+ class BinarySearch<T extends Comparable<T>> {
+-    private final SearchEngine<T> engine = new SearchEngine<>();
+-    private boolean statsEnabled = false;
++    private final SearchEngine<T> engine;
++
++    public BinarySearch() {
++        this(SearchConfig.defaults());
++    }
++
++    public BinarySearch(SearchConfig config) {
++        this.engine = new SearchEngine<>(config);
++    }
+ 
+     /**
+-     * Enables statistics tracking for search operations.
++     * Creates a new BinarySearch with statistics tracking enabled.
+      *
+-     * @return this for method chaining
++     * @return new BinarySearch instance with stats enabled
+      */
+-    public BinarySearch<T> withStats() {
+-        this.statsEnabled = true;
+-        engine.withStats();
+-        return this;
++    public static <T extends Comparable<T>> BinarySearch<T> withStats() {
++        return new BinarySearch<>(SearchConfig.builder().withStats().build());
+     }
+ 
+     /**
+@@ -41,6 +46,17 @@ class BinarySearch<T extends Comparable<T>> {
+         return engine.searchFirst(array, target);
+     }
+ 
++    /**
++     * Finds the last occurrence of target in sorted array.
++     *
++     * @param array the sorted array to search
++     * @param target the value to find
++     * @return SearchResult with last occurrence, or not found
++     */
++    public SearchResult searchLast(T[] array, T target) {
++        return engine.searchLast(array, target);
++    }
++
+     /**
+      * Checks if a target value exists in a sorted array.
+      *

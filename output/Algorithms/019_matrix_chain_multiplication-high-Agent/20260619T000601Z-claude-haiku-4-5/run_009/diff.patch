@@ -1,0 +1,395 @@
+diff --git a/matrix_chain_multiplication.java b/matrix_chain_multiplication.java
+index aadebd4..d3aa269 100644
+--- a/matrix_chain_multiplication.java
++++ b/matrix_chain_multiplication.java
+@@ -3,6 +3,178 @@
+  */
+ public class MatrixChainMultiplication {
+ 
++    /**
++     * Event published during solver execution.
++     */
++    public static abstract class ExecutionEvent {
++        private final long timestamp = System.currentTimeMillis();
++
++        public long getTimestamp() {
++            return timestamp;
++        }
++    }
++
++    /**
++     * Fired when solver starts execution.
++     */
++    public static class SolverStartedEvent extends ExecutionEvent {
++        private final int matrixCount;
++
++        public SolverStartedEvent(int matrixCount) {
++            this.matrixCount = matrixCount;
++        }
++
++        public int getMatrixCount() {
++            return matrixCount;
++        }
++    }
++
++    /**
++     * Fired when an iteration completes.
++     */
++    public static class IterationCompleteEvent extends ExecutionEvent {
++        private final int chainLength;
++        private final int cellsComputed;
++
++        public IterationCompleteEvent(int chainLength, int cellsComputed) {
++            this.chainLength = chainLength;
++            this.cellsComputed = cellsComputed;
++        }
++
++        public int getChainLength() {
++            return chainLength;
++        }
++
++        public int getCellsComputed() {
++            return cellsComputed;
++        }
++    }
++
++    /**
++     * Fired when solver completes execution.
++     */
++    public static class SolverCompletedEvent extends ExecutionEvent {
++        private final Solution solution;
++        private final long totalTimeMs;
++
++        public SolverCompletedEvent(Solution solution, long totalTimeMs) {
++            this.solution = solution;
++            this.totalTimeMs = totalTimeMs;
++        }
++
++        public Solution getSolution() {
++            return solution;
++        }
++
++        public long getTotalTimeMs() {
++            return totalTimeMs;
++        }
++    }
++
++    /**
++     * Listener for execution events.
++     */
++    public interface ExecutionListener {
++        void onSolverStarted(SolverStartedEvent event);
++
++        void onIterationComplete(IterationCompleteEvent event);
++
++        void onSolverCompleted(SolverCompletedEvent event);
++
++        void onError(Exception error);
++    }
++
++    /**
++     * Default no-op listener.
++     */
++    public static class NoOpExecutionListener implements ExecutionListener {
++        @Override
++        public void onSolverStarted(SolverStartedEvent event) {
++        }
++
++        @Override
++        public void onIterationComplete(IterationCompleteEvent event) {
++        }
++
++        @Override
++        public void onSolverCompleted(SolverCompletedEvent event) {
++        }
++
++        @Override
++        public void onError(Exception error) {
++        }
++    }
++
++    /**
++     * Pluggable cost calculation strategy.
++     */
++    public interface CostCalculator {
++        int calculateCost(int leftCost, int rightCost, int leftDim, int commonDim, int rightDim);
++    }
++
++    /**
++     * Standard cost calculator for matrix chain multiplication.
++     */
++    public static class StandardCostCalculator implements CostCalculator {
++        @Override
++        public int calculateCost(int leftCost, int rightCost, int leftDim, int commonDim, int rightDim) {
++            return leftCost + rightCost + leftDim * commonDim * rightDim;
++        }
++    }
++
++    /**
++     * Input validator abstraction.
++     */
++    public interface InputValidator {
++        void validate(MatrixDimensions dimensions) throws IllegalArgumentException;
++    }
++
++    /**
++     * Composite validator that chains multiple validators.
++     */
++    public static class CompositeValidator implements InputValidator {
++        private final InputValidator[] validators;
++
++        public CompositeValidator(InputValidator... validators) {
++            this.validators = validators;
++        }
++
++        @Override
++        public void validate(MatrixDimensions dimensions) throws IllegalArgumentException {
++            for (InputValidator validator : validators) {
++                validator.validate(dimensions);
++            }
++        }
++    }
++
++    /**
++     * Validates minimum matrix count.
++     */
++    public static class MinimumMatrixCountValidator implements InputValidator {
++        private static final int MIN_MATRICES = 2;
++
++        @Override
++        public void validate(MatrixDimensions dimensions) throws IllegalArgumentException {
++            if (dimensions.size() < MIN_MATRICES) {
++                throw new IllegalArgumentException("At least " + MIN_MATRICES + " matrices required");
++            }
++        }
++    }
++
++    /**
++     * Validates that all dimensions are positive.
++     */
++    public static class PositiveDimensionsValidator implements InputValidator {
++        @Override
++        public void validate(MatrixDimensions dimensions) throws IllegalArgumentException {
++            for (int i = 0; i < dimensions.size(); i++) {
++                if (dimensions.get(i) <= 0) {
++                    throw new IllegalArgumentException("All dimensions must be positive, but got " + dimensions.get(i) + " at index " + i);
++                }
++            }
++        }
++    }
++
+     public static SolverBuilder builder() {
+         return new SolverBuilder();
+     }
+@@ -175,13 +347,52 @@ public class MatrixChainMultiplication {
+         }
+     }
+ 
++    /**
++     * Configuration for solver behavior.
++     */
++    public static class SolverOptions {
++        private final ExecutionListener executionListener;
++        private final CostCalculator costCalculator;
++        private final InputValidator inputValidator;
++        private final boolean cachingEnabled;
++
++        private SolverOptions(ExecutionListener executionListener, CostCalculator costCalculator,
++                              InputValidator inputValidator, boolean cachingEnabled) {
++            this.executionListener = executionListener;
++            this.costCalculator = costCalculator;
++            this.inputValidator = inputValidator;
++            this.cachingEnabled = cachingEnabled;
++        }
++
++        public ExecutionListener getExecutionListener() {
++            return executionListener;
++        }
++
++        public CostCalculator getCostCalculator() {
++            return costCalculator;
++        }
++
++        public InputValidator getInputValidator() {
++            return inputValidator;
++        }
++
++        public boolean isCachingEnabled() {
++            return cachingEnabled;
++        }
++    }
++
+     /**
+      * Fluent builder for configuring and creating solvers.
+      */
+     public static class SolverBuilder {
+         private MatrixDimensions dimensions;
+         private boolean cachingEnabled = false;
+-        private String algorithm = "DP";
++        private ExecutionListener executionListener = new NoOpExecutionListener();
++        private CostCalculator costCalculator = new StandardCostCalculator();
++        private InputValidator inputValidator = new CompositeValidator(
++                new MinimumMatrixCountValidator(),
++                new PositiveDimensionsValidator()
++        );
+ 
+         public SolverBuilder withDimensions(int[] dimensions) {
+             this.dimensions = new MatrixDimensions(dimensions);
+@@ -193,9 +404,27 @@ public class MatrixChainMultiplication {
+             return this;
+         }
+ 
++        public SolverBuilder withExecutionListener(ExecutionListener listener) {
++            this.executionListener = listener;
++            return this;
++        }
++
++        public SolverBuilder withCostCalculator(CostCalculator calculator) {
++            this.costCalculator = calculator;
++            return this;
++        }
++
++        public SolverBuilder withInputValidator(InputValidator validator) {
++            this.inputValidator = validator;
++            return this;
++        }
++
+         public Solver build() {
+-            SolverConfig config = new SolverConfig(dimensions, cachingEnabled, algorithm);
+-            Solver solver = new BottomUpDynamicProgrammingSolver(config);
++            inputValidator.validate(dimensions);
++            SolverOptions options = new SolverOptions(executionListener, costCalculator,
++                    inputValidator, cachingEnabled);
++            SolverConfig config = new SolverConfig(dimensions, cachingEnabled, "DP");
++            Solver solver = new BottomUpDynamicProgrammingSolver(config, options);
+             return cachingEnabled ? new CachingSolver(solver) : solver;
+         }
+ 
+@@ -344,35 +573,47 @@ public class MatrixChainMultiplication {
+      */
+     static class BottomUpDynamicProgrammingSolver implements Solver {
+         private final SolverConfig config;
++        private final SolverOptions options;
+         private final DPTable table;
+ 
+-        BottomUpDynamicProgrammingSolver(SolverConfig config) {
++        BottomUpDynamicProgrammingSolver(SolverConfig config, SolverOptions options) {
+             this.config = config;
++            this.options = options;
+             this.table = new DPTable(config.getDimensions().size());
+         }
+ 
+         @Override
+         public Solution solve() {
+             long startTime = System.currentTimeMillis();
+-            computeOptimalCosts();
+-            long endTime = System.currentTimeMillis();
+-
+-            PerformanceMetrics metrics = new PerformanceMetrics(
+-                    endTime - startTime,
+-                    config.getDimensions().size()
+-            );
++            int n = config.getDimensions().size();
+ 
+-            return new SolutionBuilder()
+-                    .withMinimumCost(table.getMinimumCost())
+-                    .withSplitPoints(table.getSplits())
+-                    .withMetrics(metrics)
+-                    .withMatrixCount(config.getDimensions().size())
+-                    .build();
++            try {
++                options.getExecutionListener().onSolverStarted(new SolverStartedEvent(n));
++                computeOptimalCosts();
++                long endTime = System.currentTimeMillis();
++
++                PerformanceMetrics metrics = new PerformanceMetrics(endTime - startTime, n);
++                Solution solution = new SolutionBuilder()
++                        .withMinimumCost(table.getMinimumCost())
++                        .withSplitPoints(table.getSplits())
++                        .withMetrics(metrics)
++                        .withMatrixCount(n)
++                        .build();
++
++                options.getExecutionListener().onSolverCompleted(
++                        new SolverCompletedEvent(solution, endTime - startTime)
++                );
++                return solution;
++            } catch (Exception e) {
++                options.getExecutionListener().onError(e);
++                throw e;
++            }
+         }
+ 
+         private void computeOptimalCosts() {
+             int n = config.getDimensions().size();
+             int[] dims = config.getDimensions().toArray();
++            CostCalculator calculator = options.getCostCalculator();
+ 
+             for (int chainLength = 2; chainLength < n; chainLength++) {
+                 for (int start = 0; start < n - chainLength; start++) {
+@@ -380,9 +621,13 @@ public class MatrixChainMultiplication {
+                     table.setCost(start, end, Integer.MAX_VALUE);
+ 
+                     for (int split = start + 1; split < end; split++) {
+-                        int cost = table.getCost(start, split)
+-                                 + table.getCost(split, end)
+-                                 + dims[start] * dims[split] * dims[end];
++                        int cost = calculator.calculateCost(
++                                table.getCost(start, split),
++                                table.getCost(split, end),
++                                dims[start],
++                                dims[split],
++                                dims[end]
++                        );
+ 
+                         if (cost < table.getCost(start, end)) {
+                             table.setCost(start, end, cost);
+@@ -390,17 +635,45 @@ public class MatrixChainMultiplication {
+                         }
+                     }
+                 }
++                options.getExecutionListener().onIterationComplete(
++                        new IterationCompleteEvent(chainLength, n - chainLength)
++                );
+             }
+         }
+     }
+ 
+     public static void main(String[] args) {
++        ExecutionListener loggingListener = new ExecutionListener() {
++            @Override
++            public void onSolverStarted(SolverStartedEvent event) {
++                System.out.println("→ Solver started with " + event.getMatrixCount() + " matrices");
++            }
++
++            @Override
++            public void onIterationComplete(IterationCompleteEvent event) {
++                System.out.println("  ✓ Chain length " + event.getChainLength() + " complete (" + event.getCellsComputed() + " cells)");
++            }
++
++            @Override
++            public void onSolverCompleted(SolverCompletedEvent event) {
++                System.out.println("← Solver completed in " + event.getTotalTimeMs() + "ms");
++            }
++
++            @Override
++            public void onError(Exception error) {
++                System.err.println("✗ Error: " + error.getMessage());
++            }
++        };
++
+         Solution solution = builder()
+                 .withDimensions(new int[] { 2, 1, 3, 4 })
+                 .enableCaching()
++                .withExecutionListener(loggingListener)
++                .withCostCalculator(new StandardCostCalculator())
+                 .solve();
+-        System.out.println("Default format: " + solution);
+-        System.out.println("Compact format: " + solution.format(new CompactFormatter()));
+-        System.out.println("JSON format: " + solution.format(new JsonFormatter()));
++
++        System.out.println("\n" + solution);
++        System.out.println("Compact: " + solution.format(new CompactFormatter()));
++        System.out.println("JSON: " + solution.format(new JsonFormatter()));
+     }
+ }

@@ -1,0 +1,341 @@
+diff --git a/matrix_chain_multiplication.java b/matrix_chain_multiplication.java
+index d3aa269..dcb6d0b 100644
+--- a/matrix_chain_multiplication.java
++++ b/matrix_chain_multiplication.java
+@@ -71,6 +71,68 @@ public class MatrixChainMultiplication {
+         }
+     }
+ 
++    /**
++     * Event bus for publishing and subscribing to execution events.
++     */
++    public interface EventBus {
++        void subscribe(ExecutionListener listener);
++
++        void unsubscribe(ExecutionListener listener);
++
++        void publish(SolverStartedEvent event);
++
++        void publish(IterationCompleteEvent event);
++
++        void publish(SolverCompletedEvent event);
++
++        void publishError(Exception error);
++    }
++
++    /**
++     * Simple in-memory event bus implementation.
++     */
++    public static class SimpleEventBus implements EventBus {
++        private final java.util.List<ExecutionListener> listeners = new java.util.ArrayList<>();
++
++        @Override
++        public void subscribe(ExecutionListener listener) {
++            listeners.add(listener);
++        }
++
++        @Override
++        public void unsubscribe(ExecutionListener listener) {
++            listeners.remove(listener);
++        }
++
++        @Override
++        public void publish(SolverStartedEvent event) {
++            for (ExecutionListener listener : listeners) {
++                listener.onSolverStarted(event);
++            }
++        }
++
++        @Override
++        public void publish(IterationCompleteEvent event) {
++            for (ExecutionListener listener : listeners) {
++                listener.onIterationComplete(event);
++            }
++        }
++
++        @Override
++        public void publish(SolverCompletedEvent event) {
++            for (ExecutionListener listener : listeners) {
++                listener.onSolverCompleted(event);
++            }
++        }
++
++        @Override
++        public void publishError(Exception error) {
++            for (ExecutionListener listener : listeners) {
++                listener.onError(error);
++            }
++        }
++    }
++
+     /**
+      * Listener for execution events.
+      */
+@@ -105,6 +167,85 @@ public class MatrixChainMultiplication {
+         }
+     }
+ 
++    /**
++     * Collects and aggregates metrics during computation.
++     */
++    public static class MetricsCollector {
++        private long totalIterations = 0;
++        private long totalCellsComputed = 0;
++        private long startTime;
++        private long endTime;
++
++        public void recordStart() {
++            this.startTime = System.currentTimeMillis();
++        }
++
++        public void recordIterationComplete(IterationCompleteEvent event) {
++            totalIterations++;
++            totalCellsComputed += event.getCellsComputed();
++        }
++
++        public void recordEnd() {
++            this.endTime = System.currentTimeMillis();
++        }
++
++        public long getTotalTime() {
++            return endTime - startTime;
++        }
++
++        public long getTotalIterations() {
++            return totalIterations;
++        }
++
++        public long getTotalCellsComputed() {
++            return totalCellsComputed;
++        }
++
++        public String getSummary() {
++            return String.format("%d iterations, %d cells, %dms total",
++                    totalIterations, totalCellsComputed, getTotalTime());
++        }
++    }
++
++    /**
++     * Computation context encapsulating state during execution.
++     */
++    public static class ComputationContext {
++        private final MatrixDimensions dimensions;
++        private final DPTable table;
++        private final MetricsCollector metricsCollector;
++        private final CostCalculator costCalculator;
++        private final EventBus eventBus;
++
++        ComputationContext(MatrixDimensions dimensions, CostCalculator costCalculator, EventBus eventBus) {
++            this.dimensions = dimensions;
++            this.table = new DPTable(dimensions.size());
++            this.metricsCollector = new MetricsCollector();
++            this.costCalculator = costCalculator;
++            this.eventBus = eventBus;
++        }
++
++        public MatrixDimensions getDimensions() {
++            return dimensions;
++        }
++
++        public DPTable getTable() {
++            return table;
++        }
++
++        public MetricsCollector getMetricsCollector() {
++            return metricsCollector;
++        }
++
++        public CostCalculator getCostCalculator() {
++            return costCalculator;
++        }
++
++        public EventBus getEventBus() {
++            return eventBus;
++        }
++    }
++
+     /**
+      * Pluggable cost calculation strategy.
+      */
+@@ -351,21 +492,21 @@ public class MatrixChainMultiplication {
+      * Configuration for solver behavior.
+      */
+     public static class SolverOptions {
+-        private final ExecutionListener executionListener;
++        private final EventBus eventBus;
+         private final CostCalculator costCalculator;
+         private final InputValidator inputValidator;
+         private final boolean cachingEnabled;
+ 
+-        private SolverOptions(ExecutionListener executionListener, CostCalculator costCalculator,
++        private SolverOptions(EventBus eventBus, CostCalculator costCalculator,
+                               InputValidator inputValidator, boolean cachingEnabled) {
+-            this.executionListener = executionListener;
++            this.eventBus = eventBus;
+             this.costCalculator = costCalculator;
+             this.inputValidator = inputValidator;
+             this.cachingEnabled = cachingEnabled;
+         }
+ 
+-        public ExecutionListener getExecutionListener() {
+-            return executionListener;
++        public EventBus getEventBus() {
++            return eventBus;
+         }
+ 
+         public CostCalculator getCostCalculator() {
+@@ -387,7 +528,7 @@ public class MatrixChainMultiplication {
+     public static class SolverBuilder {
+         private MatrixDimensions dimensions;
+         private boolean cachingEnabled = false;
+-        private ExecutionListener executionListener = new NoOpExecutionListener();
++        private EventBus eventBus = new SimpleEventBus();
+         private CostCalculator costCalculator = new StandardCostCalculator();
+         private InputValidator inputValidator = new CompositeValidator(
+                 new MinimumMatrixCountValidator(),
+@@ -404,8 +545,13 @@ public class MatrixChainMultiplication {
+             return this;
+         }
+ 
+-        public SolverBuilder withExecutionListener(ExecutionListener listener) {
+-            this.executionListener = listener;
++        public SolverBuilder withEventBus(EventBus bus) {
++            this.eventBus = bus;
++            return this;
++        }
++
++        public SolverBuilder subscribe(ExecutionListener listener) {
++            this.eventBus.subscribe(listener);
+             return this;
+         }
+ 
+@@ -421,7 +567,7 @@ public class MatrixChainMultiplication {
+ 
+         public Solver build() {
+             inputValidator.validate(dimensions);
+-            SolverOptions options = new SolverOptions(executionListener, costCalculator,
++            SolverOptions options = new SolverOptions(eventBus, costCalculator,
+                     inputValidator, cachingEnabled);
+             SolverConfig config = new SolverConfig(dimensions, cachingEnabled, "DP");
+             Solver solver = new BottomUpDynamicProgrammingSolver(config, options);
+@@ -574,46 +720,52 @@ public class MatrixChainMultiplication {
+     static class BottomUpDynamicProgrammingSolver implements Solver {
+         private final SolverConfig config;
+         private final SolverOptions options;
+-        private final DPTable table;
+ 
+         BottomUpDynamicProgrammingSolver(SolverConfig config, SolverOptions options) {
+             this.config = config;
+             this.options = options;
+-            this.table = new DPTable(config.getDimensions().size());
+         }
+ 
+         @Override
+         public Solution solve() {
+-            long startTime = System.currentTimeMillis();
+-            int n = config.getDimensions().size();
++            ComputationContext context = new ComputationContext(
++                    config.getDimensions(),
++                    options.getCostCalculator(),
++                    options.getEventBus()
++            );
+ 
+             try {
+-                options.getExecutionListener().onSolverStarted(new SolverStartedEvent(n));
+-                computeOptimalCosts();
+-                long endTime = System.currentTimeMillis();
++                context.getMetricsCollector().recordStart();
++                int n = config.getDimensions().size();
++                context.getEventBus().publish(new SolverStartedEvent(n));
++
++                computeOptimalCosts(context);
++
++                context.getMetricsCollector().recordEnd();
++                long totalTime = context.getMetricsCollector().getTotalTime();
+ 
+-                PerformanceMetrics metrics = new PerformanceMetrics(endTime - startTime, n);
++                PerformanceMetrics metrics = new PerformanceMetrics(totalTime, n);
+                 Solution solution = new SolutionBuilder()
+-                        .withMinimumCost(table.getMinimumCost())
+-                        .withSplitPoints(table.getSplits())
++                        .withMinimumCost(context.getTable().getMinimumCost())
++                        .withSplitPoints(context.getTable().getSplits())
+                         .withMetrics(metrics)
+                         .withMatrixCount(n)
+                         .build();
+ 
+-                options.getExecutionListener().onSolverCompleted(
+-                        new SolverCompletedEvent(solution, endTime - startTime)
+-                );
++                context.getEventBus().publish(new SolverCompletedEvent(solution, totalTime));
+                 return solution;
+             } catch (Exception e) {
+-                options.getExecutionListener().onError(e);
++                options.getEventBus().publishError(e);
+                 throw e;
+             }
+         }
+ 
+-        private void computeOptimalCosts() {
+-            int n = config.getDimensions().size();
+-            int[] dims = config.getDimensions().toArray();
+-            CostCalculator calculator = options.getCostCalculator();
++        private void computeOptimalCosts(ComputationContext context) {
++            int n = context.getDimensions().size();
++            int[] dims = context.getDimensions().toArray();
++            DPTable table = context.getTable();
++            CostCalculator calculator = context.getCostCalculator();
++            EventBus eventBus = context.getEventBus();
+ 
+             for (int chainLength = 2; chainLength < n; chainLength++) {
+                 for (int start = 0; start < n - chainLength; start++) {
+@@ -635,9 +787,9 @@ public class MatrixChainMultiplication {
+                         }
+                     }
+                 }
+-                options.getExecutionListener().onIterationComplete(
+-                        new IterationCompleteEvent(chainLength, n - chainLength)
+-                );
++                IterationCompleteEvent event = new IterationCompleteEvent(chainLength, n - chainLength);
++                eventBus.publish(event);
++                context.getMetricsCollector().recordIterationComplete(event);
+             }
+         }
+     }
+@@ -665,10 +817,35 @@ public class MatrixChainMultiplication {
+             }
+         };
+ 
++        ExecutionListener metricsListener = new ExecutionListener() {
++            private final MetricsCollector collector = new MetricsCollector();
++
++            @Override
++            public void onSolverStarted(SolverStartedEvent event) {
++                collector.recordStart();
++            }
++
++            @Override
++            public void onIterationComplete(IterationCompleteEvent event) {
++                collector.recordIterationComplete(event);
++            }
++
++            @Override
++            public void onSolverCompleted(SolverCompletedEvent event) {
++                collector.recordEnd();
++                System.out.println("Metrics: " + collector.getSummary());
++            }
++
++            @Override
++            public void onError(Exception error) {
++            }
++        };
++
+         Solution solution = builder()
+                 .withDimensions(new int[] { 2, 1, 3, 4 })
+                 .enableCaching()
+-                .withExecutionListener(loggingListener)
++                .subscribe(loggingListener)
++                .subscribe(metricsListener)
+                 .withCostCalculator(new StandardCostCalculator())
+                 .solve();
+ 

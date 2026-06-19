@@ -1,0 +1,497 @@
+diff --git a/trie_insert_and_search.java b/trie_insert_and_search.java
+index 749011a..a9830cf 100644
+--- a/trie_insert_and_search.java
++++ b/trie_insert_and_search.java
+@@ -1,49 +1,69 @@
+ import java.util.*;
+ import java.util.function.Consumer;
++import java.util.stream.Collectors;
+ 
+-interface CharacterValidator {
++// Core interfaces and abstract classes
++interface CharacterSet {
++    int toIndex(char c);
++    char fromIndex(int index);
++    int getSize();
+     boolean isValid(char c);
+ }
+ 
++@FunctionalInterface
++interface TrieOperation {
++    void execute();
++}
++
+ interface TrieOperationListener {
+     void onInsert(String word);
+     void onDelete(String word);
+     void onSearch(String word, boolean found);
+ }
+ 
+-class CharacterSet {
+-    private final int size;
+-    private final int offset;
++interface WordPredicate {
++    boolean test(String word, TrieNode node);
++}
+ 
+-    CharacterSet(int size, int offset) {
+-        this.size = size;
+-        this.offset = offset;
+-    }
++// Concrete character set implementation
++class LowercaseCharacterSet implements CharacterSet {
++    private static final int SIZE = 26;
++    private static final int OFFSET = 'a';
+ 
+-    int toIndex(char c) {
+-        return c - offset;
++    @Override
++    public int toIndex(char c) {
++        return c - OFFSET;
+     }
+ 
+-    char fromIndex(int index) {
+-        return (char) (index + offset);
++    @Override
++    public char fromIndex(int index) {
++        return (char) (index + OFFSET);
+     }
+ 
+-    int getSize() {
+-        return size;
++    @Override
++    public int getSize() {
++        return SIZE;
+     }
+ 
+-    static CharacterSet LOWERCASE = new CharacterSet(26, 'a');
++    @Override
++    public boolean isValid(char c) {
++        int index = toIndex(c);
++        return index >= 0 && index < SIZE;
++    }
+ }
+ 
++// Core node structure
+ class TrieNode {
+     private final TrieNode[] children;
+     private boolean isWord;
+     private int frequency;
++    private long timestamp;
+ 
+-    TrieNode(CharacterSet charset) {
+-        this.children = new TrieNode[charset.getSize()];
++    TrieNode(int charsetSize) {
++        this.children = new TrieNode[charsetSize];
+         this.isWord = false;
+         this.frequency = 0;
++        this.timestamp = System.currentTimeMillis();
+     }
+ 
+     TrieNode getChild(int index) {
+@@ -57,11 +77,13 @@ class TrieNode {
+     void markAsWord() {
+         this.isWord = true;
+         this.frequency++;
++        this.timestamp = System.currentTimeMillis();
+     }
+ 
+     void unmarkAsWord() {
+         this.isWord = false;
+         this.frequency = Math.max(0, frequency - 1);
++        this.timestamp = System.currentTimeMillis();
+     }
+ 
+     boolean isTerminal() {
+@@ -72,6 +94,10 @@ class TrieNode {
+         return frequency;
+     }
+ 
++    long getTimestamp() {
++        return timestamp;
++    }
++
+     boolean hasChild(int index) {
+         return children[index] != null;
+     }
+@@ -83,8 +109,13 @@ class TrieNode {
+         }
+         return count;
+     }
++
++    boolean isLeaf() {
++        return childCount() == 0;
++    }
+ }
+ 
++// Validation and input handling
+ class InputValidator {
+     private final CharacterSet charset;
+ 
+@@ -97,64 +128,151 @@ class InputValidator {
+             return false;
+         }
+         for (char c : input.toCharArray()) {
+-            if (!isValidChar(c)) {
++            if (!charset.isValid(c)) {
+                 return false;
+             }
+         }
+         return true;
+     }
+-
+-    private boolean isValidChar(char c) {
+-        int index = charset.toIndex(c);
+-        return index >= 0 && index < charset.getSize();
+-    }
+ }
+ 
++// Statistics and metrics
+ class TrieStatistics {
+-    private int totalWords;
+-    private int totalNodes;
+-    private int maxDepth;
++    private final int totalWords;
++    private final int totalNodes;
++    private final int maxDepth;
++    private final long timestamp;
+ 
+     TrieStatistics(int totalWords, int totalNodes, int maxDepth) {
+         this.totalWords = totalWords;
+         this.totalNodes = totalNodes;
+         this.maxDepth = maxDepth;
++        this.timestamp = System.currentTimeMillis();
+     }
+ 
+-    int getTotalWords() {
++    public int getTotalWords() {
+         return totalWords;
+     }
+ 
+-    int getTotalNodes() {
++    public int getTotalNodes() {
+         return totalNodes;
+     }
+ 
+-    int getMaxDepth() {
++    public int getMaxDepth() {
+         return maxDepth;
+     }
+ 
++    public long getTimestamp() {
++        return timestamp;
++    }
++
+     @Override
+     public String toString() {
+-        return String.format("TrieStatistics{words=%d, nodes=%d, maxDepth=%d}", totalWords, totalNodes, maxDepth);
++        return String.format("TrieStatistics{words=%d, nodes=%d, maxDepth=%d, timestamp=%d}",
++            totalWords, totalNodes, maxDepth, timestamp);
++    }
++}
++
++// Navigation context for traversal
++class NavigationContext {
++    private final String input;
++    private final CharacterSet charset;
++    private int position;
++
++    NavigationContext(String input, CharacterSet charset) {
++        this.input = input;
++        this.charset = charset;
++        this.position = 0;
++    }
++
++    int nextIndex() {
++        if (position < input.length()) {
++            return charset.toIndex(input.charAt(position++));
++        }
++        return -1;
++    }
++
++    boolean hasNext() {
++        return position < input.length();
++    }
++
++    int getPosition() {
++        return position;
++    }
++
++    void reset() {
++        position = 0;
++    }
++}
++
++// Traversal strategy pattern
++abstract class TrieTraversalStrategy {
++    protected final CharacterSet charset;
++
++    TrieTraversalStrategy(CharacterSet charset) {
++        this.charset = charset;
++    }
++
++    abstract TrieNode traverse(TrieNode root, String input);
++}
++
++class ReadOnlyTraversalStrategy extends TrieTraversalStrategy {
++    ReadOnlyTraversalStrategy(CharacterSet charset) {
++        super(charset);
++    }
++
++    @Override
++    TrieNode traverse(TrieNode root, String input) {
++        TrieNode curr = root;
++        for (char c : input.toCharArray()) {
++            int index = charset.toIndex(c);
++            if (!curr.hasChild(index)) {
++                return null;
++            }
++            curr = curr.getChild(index);
++        }
++        return curr;
++    }
++}
++
++class CreatingTraversalStrategy extends TrieTraversalStrategy {
++    CreatingTraversalStrategy(CharacterSet charset) {
++        super(charset);
++    }
++
++    @Override
++    TrieNode traverse(TrieNode root, String input) {
++        TrieNode curr = root;
++        for (char c : input.toCharArray()) {
++            int index = charset.toIndex(c);
++            if (!curr.hasChild(index)) {
++                curr.setChild(index, new TrieNode(charset.getSize()));
++            }
++            curr = curr.getChild(index);
++        }
++        return curr;
+     }
+ }
+ 
++// Main Trie implementation with visitor pattern
+ class Trie {
+     private final TrieNode root;
+     private final CharacterSet charset;
+     private final InputValidator validator;
+     private final List<TrieOperationListener> listeners;
++    private final Stack<TrieOperation> operationHistory;
+     private int size;
+ 
+     public Trie() {
+-        this(CharacterSet.LOWERCASE);
++        this(new LowercaseCharacterSet());
+     }
+ 
+     public Trie(CharacterSet charset) {
+         this.charset = charset;
+-        this.root = new TrieNode(charset);
++        this.root = new TrieNode(charset.getSize());
+         this.validator = new InputValidator(charset);
+         this.listeners = new ArrayList<>();
++        this.operationHistory = new Stack<>();
+         this.size = 0;
+     }
+ 
+@@ -172,9 +290,11 @@ class Trie {
+         }
+ 
+         if (!search(word)) {
+-            traverseAndInsert(word);
++            TrieNode node = traverse(word, new CreatingTraversalStrategy(charset));
++            node.markAsWord();
+             size++;
+             notifyInsert(word);
++            operationHistory.push(() -> node.unmarkAsWord());
+         }
+     }
+ 
+@@ -183,7 +303,7 @@ class Trie {
+             return false;
+         }
+ 
+-        TrieNode node = traverse(word, false);
++        TrieNode node = traverse(word, new ReadOnlyTraversalStrategy(charset));
+         boolean found = node != null && node.isTerminal();
+         notifySearch(word, found);
+         return found;
+@@ -193,7 +313,7 @@ class Trie {
+         if (!validator.isValid(prefix)) {
+             return false;
+         }
+-        return traverse(prefix, false) != null;
++        return traverse(prefix, new ReadOnlyTraversalStrategy(charset)) != null;
+     }
+ 
+     public int getSize() {
+@@ -201,7 +321,7 @@ class Trie {
+     }
+ 
+     public List<String> getAllWords() {
+-        return collectWords(root, new StringBuilder());
++        return collectWordsByPredicate(root, (w, n) -> true, new StringBuilder());
+     }
+ 
+     public List<String> findWordsWithPrefix(String prefix) {
+@@ -209,12 +329,18 @@ class Trie {
+             return Collections.emptyList();
+         }
+ 
+-        TrieNode node = traverse(prefix, false);
++        TrieNode node = traverse(prefix, new ReadOnlyTraversalStrategy(charset));
+         if (node == null) {
+             return Collections.emptyList();
+         }
+ 
+-        return collectWords(node, new StringBuilder(prefix));
++        return collectWordsByPredicate(node, (w, n) -> true, new StringBuilder(prefix));
++    }
++
++    public List<String> findWordsByFrequency(int minFrequency) {
++        return collectWordsByPredicate(root,
++            (w, n) -> n.getFrequency() >= minFrequency,
++            new StringBuilder());
+     }
+ 
+     public boolean delete(String word) {
+@@ -226,10 +352,14 @@ class Trie {
+             return false;
+         }
+ 
+-        deleteHelper(root, word, 0);
+-        size--;
+-        notifyDelete(word);
+-        return true;
++        TrieNode node = traverse(word, new ReadOnlyTraversalStrategy(charset));
++        if (node != null) {
++            node.unmarkAsWord();
++            size--;
++            notifyDelete(word);
++            return true;
++        }
++        return false;
+     }
+ 
+     public TrieStatistics getStatistics() {
+@@ -241,6 +371,25 @@ class Trie {
+         getAllWords().forEach(action);
+     }
+ 
++    public void clear() {
++        root.setChild(0, null);
++        for (int i = 1; i < charset.getSize(); i++) {
++            root.setChild(i, null);
++        }
++        size = 0;
++        listeners.forEach(l -> l.onDelete("*"));
++    }
++
++    private List<String> collectWordsByPredicate(TrieNode node, WordPredicate predicate, StringBuilder current) {
++        List<String> words = new ArrayList<>();
++        dfsPredicate(node, current, words, predicate);
++        return words;
++    }
++
++    private TrieNode traverse(String input, TrieTraversalStrategy strategy) {
++        return strategy.traverse(root, input);
++    }
++
+     private int[] computeStats(TrieNode node, int depth) {
+         int nodeCount = 1;
+         int maxDepth = depth;
+@@ -256,67 +405,20 @@ class Trie {
+         return new int[]{nodeCount, maxDepth};
+     }
+ 
+-    private List<String> collectWords(TrieNode node, StringBuilder current) {
+-        List<String> words = new ArrayList<>();
+-        dfs(node, current, words);
+-        return words;
+-    }
+-
+-    private void traverseAndInsert(String word) {
+-        TrieNode curr = root;
+-        for (char c : word.toCharArray()) {
+-            int index = charset.toIndex(c);
+-            if (!curr.hasChild(index)) {
+-                curr.setChild(index, new TrieNode(charset));
+-            }
+-            curr = curr.getChild(index);
+-        }
+-        curr.markAsWord();
+-    }
+-
+-    private TrieNode traverse(String word, boolean createIfMissing) {
+-        TrieNode curr = root;
+-        for (char c : word.toCharArray()) {
+-            int index = charset.toIndex(c);
+-            if (!curr.hasChild(index)) {
+-                if (!createIfMissing) {
+-                    return null;
+-                }
+-                curr.setChild(index, new TrieNode(charset));
+-            }
+-            curr = curr.getChild(index);
+-        }
+-        return curr;
+-    }
+-
+-    private void dfs(TrieNode node, StringBuilder current, List<String> words) {
+-        if (node.isTerminal()) {
++    private void dfsPredicate(TrieNode node, StringBuilder current, List<String> words, WordPredicate predicate) {
++        if (node.isTerminal() && predicate.test(current.toString(), node)) {
+             words.add(current.toString());
+         }
+ 
+         for (int i = 0; i < charset.getSize(); i++) {
+             if (node.hasChild(i)) {
+                 current.append(charset.fromIndex(i));
+-                dfs(node.getChild(i), current, words);
++                dfsPredicate(node.getChild(i), current, words, predicate);
+                 current.deleteCharAt(current.length() - 1);
+             }
+         }
+     }
+ 
+-    private void deleteHelper(TrieNode node, String word, int index) {
+-        if (index == word.length()) {
+-            node.unmarkAsWord();
+-            return;
+-        }
+-
+-        int childIndex = charset.toIndex(word.charAt(index));
+-        TrieNode child = node.getChild(childIndex);
+-
+-        if (child != null) {
+-            deleteHelper(child, word, index + 1);
+-        }
+-    }
+-
+     private void notifyInsert(String word) {
+         listeners.forEach(l -> l.onInsert(word));
+     }
+@@ -333,6 +435,7 @@ class Trie {
+         demonstrateBasicOperations();
+         demonstrateAdvancedOperations();
+         demonstrateListenerPattern();
++        demonstrateStrategyPattern();
+     }
+ 
+     private static void demonstrateBasicOperations() {
+@@ -396,4 +499,14 @@ class Trie {
+         trie.search("hello");
+         trie.delete("hello");
+     }
++
++    private static void demonstrateStrategyPattern() {
++        System.out.println("\n=== Strategy Pattern Demo ===");
++        Trie trie = new Trie();
++        String[] words = {"test", "tree", "team", "teach"};
++        Arrays.stream(words).forEach(trie::insert);
++
++        System.out.println("All words with 'te' prefix: " + trie.findWordsWithPrefix("te"));
++        System.out.println("Statistics: " + trie.getStatistics());
++    }
+ }

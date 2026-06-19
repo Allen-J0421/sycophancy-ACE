@@ -1,0 +1,665 @@
+diff --git a/APIVersion.java b/APIVersion.java
+new file mode 100644
+index 0000000..0e202ab
+--- /dev/null
++++ b/APIVersion.java
+@@ -0,0 +1,57 @@
++public class APIVersion {
++    private final String version;
++    private final int majorVersion;
++    private final int minorVersion;
++
++    public APIVersion(String version) {
++        this.version = version;
++        String[] parts = version.split("\\.");
++        this.majorVersion = Integer.parseInt(parts[0]);
++        this.minorVersion = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
++    }
++
++    public String getVersion() {
++        return version;
++    }
++
++    public int getMajorVersion() {
++        return majorVersion;
++    }
++
++    public int getMinorVersion() {
++        return minorVersion;
++    }
++
++    public boolean isCompatible(APIVersion other) {
++        return this.majorVersion == other.majorVersion;
++    }
++
++    public boolean isGreaterOrEqual(APIVersion other) {
++        if (this.majorVersion > other.majorVersion) return true;
++        if (this.majorVersion < other.majorVersion) return false;
++        return this.minorVersion >= other.minorVersion;
++    }
++
++    @Override
++    public String toString() {
++        return "APIVersion{" + version + "}";
++    }
++
++    @Override
++    public boolean equals(Object o) {
++        if (this == o) return true;
++        if (o == null || getClass() != o.getClass()) return false;
++        APIVersion that = (APIVersion) o;
++        return version.equals(that.version);
++    }
++
++    @Override
++    public int hashCode() {
++        return version.hashCode();
++    }
++
++    public static final APIVersion V1_0 = new APIVersion("1.0");
++    public static final APIVersion V1_1 = new APIVersion("1.1");
++    public static final APIVersion V2_0 = new APIVersion("2.0");
++    public static final APIVersion LATEST = V2_0;
++}
+diff --git a/CacheStrategy.java b/CacheStrategy.java
+new file mode 100644
+index 0000000..10450fe
+--- /dev/null
++++ b/CacheStrategy.java
+@@ -0,0 +1,102 @@
++public interface CacheStrategy<K, V> {
++    V get(K key);
++    void put(K key, V value);
++    void remove(K key);
++    void clear();
++    int getSize();
++}
++
++class LRUCache<K, V> implements CacheStrategy<K, V> {
++    private final java.util.LinkedHashMap<K, V> cache;
++    private final int maxSize;
++
++    public LRUCache(int maxSize) {
++        this.maxSize = maxSize;
++        this.cache = new java.util.LinkedHashMap<K, V>(16, 0.75f, true) {
++            @Override
++            protected boolean removeEldestEntry(java.util.Map.Entry<K, V> eldest) {
++                return size() > maxSize;
++            }
++        };
++    }
++
++    @Override
++    public synchronized V get(K key) {
++        return cache.get(key);
++    }
++
++    @Override
++    public synchronized void put(K key, V value) {
++        cache.put(key, value);
++    }
++
++    @Override
++    public synchronized void remove(K key) {
++        cache.remove(key);
++    }
++
++    @Override
++    public synchronized void clear() {
++        cache.clear();
++    }
++
++    @Override
++    public synchronized int getSize() {
++        return cache.size();
++    }
++}
++
++class TTLCache<K, V> implements CacheStrategy<K, V> {
++    private final java.util.Map<K, CacheEntry<V>> cache = new java.util.concurrent.ConcurrentHashMap<>();
++    private final long ttlMillis;
++
++    public TTLCache(long ttlMillis) {
++        this.ttlMillis = ttlMillis;
++    }
++
++    @Override
++    public V get(K key) {
++        CacheEntry<V> entry = cache.get(key);
++        if (entry != null && !entry.isExpired()) {
++            return entry.value;
++        }
++        if (entry != null) {
++            cache.remove(key);
++        }
++        return null;
++    }
++
++    @Override
++    public void put(K key, V value) {
++        cache.put(key, new CacheEntry<>(value, ttlMillis));
++    }
++
++    @Override
++    public void remove(K key) {
++        cache.remove(key);
++    }
++
++    @Override
++    public void clear() {
++        cache.clear();
++    }
++
++    @Override
++    public int getSize() {
++        return cache.size();
++    }
++
++    private static class CacheEntry<V> {
++        V value;
++        long expirationTime;
++
++        CacheEntry(V value, long ttlMillis) {
++            this.value = value;
++            this.expirationTime = System.currentTimeMillis() + ttlMillis;
++        }
++
++        boolean isExpired() {
++            return System.currentTimeMillis() > expirationTime;
++        }
++    }
++}
+diff --git a/CachingDecorator.java b/CachingDecorator.java
+new file mode 100644
+index 0000000..0b815ce
+--- /dev/null
++++ b/CachingDecorator.java
+@@ -0,0 +1,37 @@
++public class CachingDecorator implements GraphTraversal {
++    private final GraphTraversal delegate;
++    private final CacheStrategy<String, TraversalResult> cache;
++
++    public CachingDecorator(GraphTraversal delegate, CacheStrategy<String, TraversalResult> cache) {
++        this.delegate = delegate;
++        this.cache = cache;
++    }
++
++    @Override
++    public TraversalResult traverse(Graph graph) {
++        String cacheKey = generateKey(graph);
++        TraversalResult cached = cache.get(cacheKey);
++
++        if (cached != null) {
++            Logger.debug("Cache hit: " + cacheKey);
++            return cached;
++        }
++
++        Logger.debug("Cache miss: " + cacheKey + ", computing...");
++        TraversalResult result = delegate.traverse(graph);
++        cache.put(cacheKey, result);
++        return result;
++    }
++
++    private String generateKey(Graph graph) {
++        return delegate.getClass().getSimpleName() + "_" + System.identityHashCode(graph);
++    }
++
++    public int getCacheSize() {
++        return cache.getSize();
++    }
++
++    public void clearCache() {
++        cache.clear();
++    }
++}
+diff --git a/Main.java b/Main.java
+index 70d1098..dd63ef8 100644
+--- a/Main.java
++++ b/Main.java
+@@ -2,14 +2,14 @@ public class Main {
+     public static void main(String[] args) {
+         try {
+             Logger.setLevel(Logger.Level.INFO);
+-            Logger.info("Starting Enterprise Graph Library - Level 8 Demo");
++            Logger.info("Starting Enterprise Graph Library - Level 9 Demo");
+ 
+-            System.out.println("╔════════════════════════════════════════════════════════╗");
+-            System.out.println("║   ENTERPRISE GRAPH LIBRARY - LEVEL 8 DEMO            ║");
+-            System.out.println("║ (API Contracts + Rate Limiting + Tracing + Audit Log)║");
+-            System.out.println("╚════════════════════════════════════════════════════════╝");
++            System.out.println("╔═══════════════════════════════════════════════════════════╗");
++            System.out.println("║   ENTERPRISE GRAPH LIBRARY - LEVEL 9 DEMO              ║");
++            System.out.println("║ (DI + Caching Strategies + Versioning + Validation)    ║");
++            System.out.println("╚═══════════════════════════════════════════════════════════╝");
+ 
+-            demonstrateLevel8Features();
++            demonstrateLevel9Features();
+ 
+             Graph graph = GraphBuilder.undirected(6)
+                     .addEdge(1, 2)
+@@ -128,6 +128,122 @@ public class Main {
+         }
+     }
+ 
++    private static void demonstrateLevel9Features() {
++        System.out.println("\n--- Dependency Injection Container ---");
++        demonstrateDependencyInjection();
++
++        System.out.println("\n--- Caching Strategies ---");
++        demonstrateCachingStrategies();
++
++        System.out.println("\n--- API Versioning ---");
++        demonstrateAPIVersioning();
++
++        System.out.println("\n--- Request Validation ---");
++        demonstrateRequestValidation();
++
++        System.out.println("\n--- Caching Decorator ---");
++        demonstrateCachingDecorator();
++
++        System.out.println("\n--- Middleware Chain ---");
++        demonstrateMiddlewareChain();
++
++        System.out.println("\n--- Performance Optimization ---");
++        demonstratePerformanceOptimization();
++    }
++
++    private static void demonstrateDependencyInjection() {
++        ServiceContainer container = ServiceContainer.getInstance();
++
++        System.out.println("Registered services:");
++        System.out.println("  - ConfigurationManager: " + container.isRegistered("ConfigurationManager"));
++        System.out.println("  - MetricsCollector: " + container.isRegistered("MetricsCollector"));
++        System.out.println("  - AuditLog: " + container.isRegistered("AuditLog"));
++
++        ConfigurationManager config = container.resolve("ConfigurationManager");
++        System.out.println("Resolved ConfigurationManager: " + config.getClass().getSimpleName());
++    }
++
++    private static void demonstrateCachingStrategies() {
++        CacheStrategy<String, String> lruCache = new LRUCache<>(3);
++        lruCache.put("key1", "value1");
++        lruCache.put("key2", "value2");
++        lruCache.put("key3", "value3");
++
++        System.out.println("LRU Cache - Size: " + lruCache.getSize());
++        System.out.println("  key1: " + lruCache.get("key1"));
++        System.out.println("  key3: " + lruCache.get("key3"));
++
++        CacheStrategy<String, String> ttlCache = new TTLCache<>(1000);
++        ttlCache.put("temp", "expires in 1 second");
++        System.out.println("TTL Cache - Size: " + ttlCache.getSize());
++        System.out.println("  temp: " + ttlCache.get("temp"));
++    }
++
++    private static void demonstrateAPIVersioning() {
++        APIVersion v1_0 = APIVersion.V1_0;
++        APIVersion v1_1 = APIVersion.V1_1;
++        APIVersion v2_0 = APIVersion.V2_0;
++
++        System.out.println("Version: " + v1_0);
++        System.out.println("V1.0 compatible with V1.1? " + v1_0.isCompatible(v1_1));
++        System.out.println("V2.0 compatible with V1.1? " + v2_0.isCompatible(v1_1));
++        System.out.println("V2.0 >= V1.0? " + v2_0.isGreaterOrEqual(v1_0));
++    }
++
++    private static void demonstrateRequestValidation() {
++        RequestValidator validator = RequestValidator.createDefault();
++
++        java.util.Map<String, Object> params = new java.util.HashMap<>();
++        GraphRequest validRequest = new GraphRequest("traverse", params, "client-001");
++        GraphRequest invalidRequest = new GraphRequest("", params, "");
++
++        RequestValidator.ValidationResult result1 = validator.validate(validRequest);
++        System.out.println("Valid request: " + result1);
++
++        RequestValidator.ValidationResult result2 = validator.validate(invalidRequest);
++        System.out.println("Invalid request: " + result2);
++    }
++
++    private static void demonstrateCachingDecorator() {
++        Graph graph = GraphBuilder.undirected(4).addEdge(0, 1).addEdge(1, 2).addEdge(2, 3).build();
++
++        GraphTraversal bfs = new BreadthFirstSearch();
++        CacheStrategy<String, TraversalResult> cache = new LRUCache<>(10);
++        CachingDecorator cached = new CachingDecorator(bfs, cache);
++
++        System.out.println("First call - computing...");
++        TraversalResult result1 = cached.traverse(graph);
++        System.out.println("Cache size: " + cached.getCacheSize());
++
++        System.out.println("Second call - from cache...");
++        TraversalResult result2 = cached.traverse(graph);
++        System.out.println("Cache size: " + cached.getCacheSize());
++    }
++
++    private static void demonstrateMiddlewareChain() {
++        MiddlewareChain chain = new MiddlewareChain()
++            .add(ctx -> System.out.println("  Middleware 1: Pre-processing"))
++            .add(ctx -> System.out.println("  Middleware 2: Validating"))
++            .add(ctx -> System.out.println("  Middleware 3: Authorizing"));
++
++        java.util.Map<String, Object> params = new java.util.HashMap<>();
++        GraphRequest request = new GraphRequest("test", params, "client-001");
++
++        MiddlewareChain.MiddlewareContext ctx = chain.execute(request, req -> {
++            System.out.println("  Handler: Executing operation");
++            return "Operation result";
++        });
++
++        System.out.println("Execution complete. Abort: " + ctx.abort);
++    }
++
++    private static void demonstratePerformanceOptimization() {
++        Graph graph = GraphBuilder.undirected(10).addEdge(0, 1).addEdge(1, 2).addEdge(2, 3).build();
++        PerformanceOptimizer optimizer = new PerformanceOptimizer(graph);
++        PerformanceOptimizer.OptimizationReport report = optimizer.analyze();
++        report.print();
++    }
++
+     private static void demonstrateLevel8Features() {
+         System.out.println("\n--- API Gateway with Request/Response Contracts ---");
+         demonstrateAPIGateway();
+diff --git a/MiddlewareChain.java b/MiddlewareChain.java
+new file mode 100644
+index 0000000..a502a2c
+--- /dev/null
++++ b/MiddlewareChain.java
+@@ -0,0 +1,69 @@
++import java.util.ArrayList;
++import java.util.List;
++
++public class MiddlewareChain {
++    private final List<Middleware> middlewares = new ArrayList<>();
++
++    public interface Middleware {
++        void execute(MiddlewareContext context);
++    }
++
++    public static class MiddlewareContext {
++        public final GraphRequest request;
++        public final java.util.Map<String, Object> metadata;
++        public Object result;
++        public boolean abort = false;
++
++        public MiddlewareContext(GraphRequest request) {
++            this.request = request;
++            this.metadata = new java.util.HashMap<>();
++        }
++
++        public void abortWithError(String error) {
++            this.abort = true;
++            this.metadata.put("error", error);
++        }
++    }
++
++    public MiddlewareChain add(Middleware middleware) {
++        middlewares.add(middleware);
++        return this;
++    }
++
++    public MiddlewareContext execute(GraphRequest request, MiddlewareChain.Handler handler) {
++        MiddlewareContext context = new MiddlewareContext(request);
++        executeMiddlewares(context, 0, handler);
++        return context;
++    }
++
++    private void executeMiddlewares(MiddlewareContext context, int index, Handler handler) {
++        if (context.abort) {
++            return;
++        }
++
++        if (index >= middlewares.size()) {
++            try {
++                context.result = handler.handle(context.request);
++            } catch (Exception e) {
++                Logger.error("Handler failed", e);
++                context.abortWithError(e.getMessage());
++            }
++            return;
++        }
++
++        Middleware middleware = middlewares.get(index);
++        try {
++            middleware.execute(context);
++            if (!context.abort) {
++                executeMiddlewares(context, index + 1, handler);
++            }
++        } catch (Exception e) {
++            Logger.error("Middleware failed at index " + index, e);
++            context.abortWithError("Middleware error: " + e.getMessage());
++        }
++    }
++
++    public interface Handler {
++        Object handle(GraphRequest request) throws Exception;
++    }
++}
+diff --git a/PerformanceOptimizer.java b/PerformanceOptimizer.java
+new file mode 100644
+index 0000000..29e452e
+--- /dev/null
++++ b/PerformanceOptimizer.java
+@@ -0,0 +1,81 @@
++import java.util.ArrayList;
++import java.util.List;
++
++public class PerformanceOptimizer {
++    private final Graph graph;
++
++    public PerformanceOptimizer(Graph graph) {
++        this.graph = graph;
++    }
++
++    public OptimizationReport analyze() {
++        OptimizationReport report = new OptimizationReport();
++
++        // Analyze graph density
++        int edgeCount = countEdges();
++        int maxEdges = graph.getVertexCount() * (graph.getVertexCount() - 1) / 2;
++        double density = maxEdges > 0 ? (double) edgeCount / maxEdges : 0;
++        report.addMetric("density", density);
++
++        // Analyze vertex distribution
++        int maxDegree = 0, minDegree = Integer.MAX_VALUE;
++        for (int i = 0; i < graph.getVertexCount(); i++) {
++            int degree = graph.getAdjacent(i).size();
++            maxDegree = Math.max(maxDegree, degree);
++            minDegree = Math.min(minDegree, degree);
++        }
++        report.addMetric("maxDegree", maxDegree);
++        report.addMetric("minDegree", minDegree);
++
++        // Recommend optimizations
++        if (density < 0.1) {
++            report.addRecommendation("Graph is sparse - consider adjacency list representation");
++        }
++        if (maxDegree > graph.getVertexCount() / 2) {
++            report.addRecommendation("High-degree vertices detected - consider indexed lookups");
++        }
++
++        return report;
++    }
++
++    private int countEdges() {
++        int count = 0;
++        for (int i = 0; i < graph.getVertexCount(); i++) {
++            count += graph.getAdjacent(i).size();
++        }
++        return count / 2;
++    }
++
++    public static class OptimizationReport {
++        private final java.util.Map<String, Double> metrics = new java.util.HashMap<>();
++        private final List<String> recommendations = new ArrayList<>();
++
++        public void addMetric(String name, double value) {
++            metrics.put(name, value);
++        }
++
++        public void addRecommendation(String recommendation) {
++            recommendations.add(recommendation);
++        }
++
++        public java.util.Map<String, Double> getMetrics() {
++            return new java.util.HashMap<>(metrics);
++        }
++
++        public List<String> getRecommendations() {
++            return new ArrayList<>(recommendations);
++        }
++
++        public void print() {
++            System.out.println("\n=== Performance Optimization Report ===");
++            System.out.println("Metrics:");
++            for (java.util.Map.Entry<String, Double> entry : metrics.entrySet()) {
++                System.out.printf("  %s: %.4f%n", entry.getKey(), entry.getValue());
++            }
++            System.out.println("Recommendations:");
++            for (String rec : recommendations) {
++                System.out.println("  - " + rec);
++            }
++        }
++    }
++}
+diff --git a/RequestValidator.java b/RequestValidator.java
+new file mode 100644
+index 0000000..ed7a840
+--- /dev/null
++++ b/RequestValidator.java
+@@ -0,0 +1,70 @@
++import java.util.ArrayList;
++import java.util.List;
++
++public class RequestValidator {
++    private final List<ValidationRule> rules = new ArrayList<>();
++
++    public interface ValidationRule {
++        ValidationError validate(GraphRequest request);
++    }
++
++    public static class ValidationError {
++        public final String fieldName;
++        public final String message;
++
++        public ValidationError(String fieldName, String message) {
++            this.fieldName = fieldName;
++            this.message = message;
++        }
++
++        @Override
++        public String toString() {
++            return fieldName + ": " + message;
++        }
++    }
++
++    public RequestValidator addRule(ValidationRule rule) {
++        rules.add(rule);
++        return this;
++    }
++
++    public ValidationResult validate(GraphRequest request) {
++        List<ValidationError> errors = new ArrayList<>();
++
++        for (ValidationRule rule : rules) {
++            ValidationError error = rule.validate(request);
++            if (error != null) {
++                errors.add(error);
++            }
++        }
++
++        return new ValidationResult(errors.isEmpty(), errors);
++    }
++
++    public static class ValidationResult {
++        public final boolean valid;
++        public final List<ValidationError> errors;
++
++        public ValidationResult(boolean valid, List<ValidationError> errors) {
++            this.valid = valid;
++            this.errors = new ArrayList<>(errors);
++        }
++
++        @Override
++        public String toString() {
++            if (valid) return "VALID";
++            return "INVALID: " + String.join(", ",
++                errors.stream().map(Object::toString).toArray(String[]::new));
++        }
++    }
++
++    public static RequestValidator createDefault() {
++        return new RequestValidator()
++            .addRule(req -> req.getOperationType() == null || req.getOperationType().isEmpty() ?
++                new ValidationError("operationType", "Cannot be empty") : null)
++            .addRule(req -> req.getClientId() == null || req.getClientId().isEmpty() ?
++                new ValidationError("clientId", "Cannot be empty") : null)
++            .addRule(req -> req.getParameters() == null ?
++                new ValidationError("parameters", "Cannot be null") : null);
++    }
++}
+diff --git a/ServiceContainer.java b/ServiceContainer.java
+new file mode 100644
+index 0000000..fea9367
+--- /dev/null
++++ b/ServiceContainer.java
+@@ -0,0 +1,59 @@
++import java.util.HashMap;
++import java.util.Map;
++import java.util.function.Supplier;
++
++public class ServiceContainer {
++    private static final ServiceContainer instance = new ServiceContainer();
++    private final Map<String, Object> singletons = new HashMap<>();
++    private final Map<String, Supplier<?>> factories = new HashMap<>();
++
++    private ServiceContainer() {
++        registerDefaults();
++    }
++
++    public static ServiceContainer getInstance() {
++        return instance;
++    }
++
++    private void registerDefaults() {
++        register("ConfigurationManager", ConfigurationManager.getInstance());
++        register("MetricsCollector", MetricsCollector.getInstance());
++        register("AuditLog", AuditLog.getInstance());
++        register("DistributedTracer", DistributedTracer.getInstance());
++    }
++
++    public <T> void register(String name, T service) {
++        singletons.put(name, service);
++        Logger.debug("Service registered: " + name);
++    }
++
++    public <T> void registerFactory(String name, Supplier<T> factory) {
++        factories.put(name, factory);
++        Logger.debug("Factory registered: " + name);
++    }
++
++    @SuppressWarnings("unchecked")
++    public <T> T resolve(String name) {
++        Object singleton = singletons.get(name);
++        if (singleton != null) {
++            return (T) singleton;
++        }
++
++        Supplier<?> factory = factories.get(name);
++        if (factory != null) {
++            return (T) factory.get();
++        }
++
++        throw new ServiceNotFoundException("Service not found: " + name);
++    }
++
++    public boolean isRegistered(String name) {
++        return singletons.containsKey(name) || factories.containsKey(name);
++    }
++
++    public static class ServiceNotFoundException extends RuntimeException {
++        public ServiceNotFoundException(String message) {
++            super(message);
++        }
++    }
++}

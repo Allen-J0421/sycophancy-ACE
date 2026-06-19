@@ -1,0 +1,676 @@
+diff --git a/CircuitBreaker.java b/CircuitBreaker.java
+new file mode 100644
+index 0000000..6e3fb0e
+--- /dev/null
++++ b/CircuitBreaker.java
+@@ -0,0 +1,86 @@
++import java.util.concurrent.atomic.AtomicLong;
++
++public class CircuitBreaker {
++    public enum State {
++        CLOSED, OPEN, HALF_OPEN
++    }
++
++    private volatile State state = State.CLOSED;
++    private final int failureThreshold;
++    private final long timeoutMillis;
++    private final AtomicLong failureCount = new AtomicLong(0);
++    private volatile long lastFailureTime = 0;
++    private final String name;
++
++    public CircuitBreaker(String name, int failureThreshold, long timeoutMillis) {
++        if (failureThreshold <= 0 || timeoutMillis <= 0) {
++            throw new IllegalArgumentException("Parameters must be positive");
++        }
++        this.name = name;
++        this.failureThreshold = failureThreshold;
++        this.timeoutMillis = timeoutMillis;
++    }
++
++    public <T> T execute(Operation<T> operation) throws Exception {
++        if (state == State.OPEN) {
++            if (System.currentTimeMillis() - lastFailureTime > timeoutMillis) {
++                state = State.HALF_OPEN;
++                Logger.info("CircuitBreaker " + name + " transitioning to HALF_OPEN");
++            } else {
++                throw new CircuitBreakerOpenException(name + " is OPEN");
++            }
++        }
++
++        try {
++            T result = operation.execute();
++            onSuccess();
++            return result;
++        } catch (Exception e) {
++            onFailure();
++            throw e;
++        }
++    }
++
++    private void onSuccess() {
++        failureCount.set(0);
++        if (state == State.HALF_OPEN) {
++            state = State.CLOSED;
++            Logger.info("CircuitBreaker " + name + " closed");
++        }
++    }
++
++    private void onFailure() {
++        lastFailureTime = System.currentTimeMillis();
++        long failures = failureCount.incrementAndGet();
++
++        if (failures >= failureThreshold && state != State.OPEN) {
++            state = State.OPEN;
++            Logger.warn("CircuitBreaker " + name + " opened after " + failures + " failures");
++        }
++    }
++
++    public State getState() {
++        return state;
++    }
++
++    public long getFailureCount() {
++        return failureCount.get();
++    }
++
++    public void reset() {
++        state = State.CLOSED;
++        failureCount.set(0);
++        lastFailureTime = 0;
++        Logger.info("CircuitBreaker " + name + " reset");
++    }
++
++    public interface Operation<T> {
++        T execute() throws Exception;
++    }
++
++    public static class CircuitBreakerOpenException extends Exception {
++        public CircuitBreakerOpenException(String message) {
++            super(message);
++        }
++    }
++}
+diff --git a/ConfigurationManager.java b/ConfigurationManager.java
+new file mode 100644
+index 0000000..eaa4cfd
+--- /dev/null
++++ b/ConfigurationManager.java
+@@ -0,0 +1,76 @@
++import java.util.HashMap;
++import java.util.Map;
++
++public class ConfigurationManager {
++    private final Map<String, Object> config = new HashMap<>();
++    private static final ConfigurationManager instance = new ConfigurationManager();
++
++    private ConfigurationManager() {
++        initializeDefaults();
++    }
++
++    public static ConfigurationManager getInstance() {
++        return instance;
++    }
++
++    private void initializeDefaults() {
++        config.put("cache.enabled", true);
++        config.put("cache.ttl.millis", 300000);
++        config.put("logging.level", "INFO");
++        config.put("logging.enabled", true);
++        config.put("metrics.enabled", true);
++        config.put("health.check.enabled", true);
++        config.put("benchmark.iterations", 100);
++        config.put("concurrent.threads", 4);
++        config.put("validation.enabled", true);
++        config.put("serialization.format", "JSON");
++    }
++
++    public Object get(String key) {
++        return config.get(key);
++    }
++
++    public Object get(String key, Object defaultValue) {
++        return config.getOrDefault(key, defaultValue);
++    }
++
++    public void set(String key, Object value) {
++        config.put(key, value);
++        Logger.debug("Configuration updated: " + key + " = " + value);
++    }
++
++    public int getInt(String key, int defaultValue) {
++        Object value = config.get(key);
++        return value instanceof Integer ? (Integer) value : defaultValue;
++    }
++
++    public boolean getBoolean(String key, boolean defaultValue) {
++        Object value = config.get(key);
++        return value instanceof Boolean ? (Boolean) value : defaultValue;
++    }
++
++    public String getString(String key, String defaultValue) {
++        Object value = config.get(key);
++        return value instanceof String ? (String) value : defaultValue;
++    }
++
++    public long getLong(String key, long defaultValue) {
++        Object value = config.get(key);
++        return value instanceof Long ? (Long) value : defaultValue;
++    }
++
++    public void loadFromMap(Map<String, Object> properties) {
++        config.putAll(properties);
++        Logger.info("Configuration loaded from map");
++    }
++
++    public Map<String, Object> getAll() {
++        return new HashMap<>(config);
++    }
++
++    public void reset() {
++        config.clear();
++        initializeDefaults();
++        Logger.info("Configuration reset to defaults");
++    }
++}
+diff --git a/GraphPlugin.java b/GraphPlugin.java
+new file mode 100644
+index 0000000..939f599
+--- /dev/null
++++ b/GraphPlugin.java
+@@ -0,0 +1,7 @@
++public interface GraphPlugin {
++    String getName();
++    String getVersion();
++    void initialize(ConfigurationManager config);
++    void execute(GraphService service);
++    void cleanup();
++}
+diff --git a/LoggingPlugin.java b/LoggingPlugin.java
+new file mode 100644
+index 0000000..e31599b
+--- /dev/null
++++ b/LoggingPlugin.java
+@@ -0,0 +1,34 @@
++public class LoggingPlugin implements GraphPlugin {
++    private boolean enabled = true;
++
++    @Override
++    public String getName() {
++        return "LoggingPlugin";
++    }
++
++    @Override
++    public String getVersion() {
++        return "1.0.0";
++    }
++
++    @Override
++    public void initialize(ConfigurationManager config) {
++        enabled = config.getBoolean("logging.enabled", true);
++        Logger.setLevel(Logger.Level.valueOf(
++            config.getString("logging.level", "INFO")
++        ));
++        Logger.info("LoggingPlugin initialized");
++    }
++
++    @Override
++    public void execute(GraphService service) {
++        if (enabled) {
++            Logger.info("LoggingPlugin: Service operations will be logged");
++        }
++    }
++
++    @Override
++    public void cleanup() {
++        Logger.info("LoggingPlugin cleaned up");
++    }
++}
+diff --git a/Main.java b/Main.java
+index 0fc4dda..6301bf0 100644
+--- a/Main.java
++++ b/Main.java
+@@ -2,12 +2,14 @@ public class Main {
+     public static void main(String[] args) {
+         try {
+             Logger.setLevel(Logger.Level.INFO);
+-            Logger.info("Starting Enterprise Graph Library - Level 6 Demo");
++            Logger.info("Starting Enterprise Graph Library - Level 7 Demo");
+ 
+-            System.out.println("╔═════════════════════════════════════════════╗");
+-            System.out.println("║  ENTERPRISE GRAPH LIBRARY - LEVEL 6 DEMO   ║");
+-            System.out.println("║   (Production + Testing + Logging)          ║");
+-            System.out.println("╚═════════════════════════════════════════════╝");
++            System.out.println("╔═══════════════════════════════════════════════════╗");
++            System.out.println("║   ENTERPRISE GRAPH LIBRARY - LEVEL 7 DEMO       ║");
++            System.out.println("║  (Configuration + Metrics + Resilience + Plugins)║");
++            System.out.println("╚═══════════════════════════════════════════════════╝");
++
++            demonstrateLevel7Features();
+ 
+             Graph graph = GraphBuilder.undirected(6)
+                     .addEdge(1, 2)
+@@ -126,6 +128,105 @@ public class Main {
+         }
+     }
+ 
++    private static void demonstrateLevel7Features() {
++        System.out.println("\n--- Configuration Management ---");
++        demonstrateConfiguration();
++
++        System.out.println("\n--- Metrics Collection ---");
++        demonstrateMetrics();
++
++        System.out.println("\n--- Retry Policy ---");
++        demonstrateRetryPolicy();
++
++        System.out.println("\n--- Circuit Breaker ---");
++        demonstrateCircuitBreaker();
++
++        System.out.println("\n--- Plugin Architecture ---");
++        demonstratePlugins();
++    }
++
++    private static void demonstrateConfiguration() {
++        ConfigurationManager config = ConfigurationManager.getInstance();
++        System.out.println("Cache enabled: " + config.getBoolean("cache.enabled", false));
++        System.out.println("Cache TTL: " + config.getLong("cache.ttl.millis", 0) + " ms");
++        System.out.println("Logging level: " + config.getString("logging.level", "INFO"));
++        System.out.println("Concurrent threads: " + config.getInt("concurrent.threads", 0));
++
++        config.set("custom.setting", "custom_value");
++        System.out.println("Custom setting: " + config.getString("custom.setting", "N/A"));
++    }
++
++    private static void demonstrateMetrics() {
++        MetricsCollector metrics = MetricsCollector.getInstance();
++        metrics.reset();
++
++        metrics.startTiming("operation1");
++        try { Thread.sleep(10); } catch (InterruptedException e) {}
++        metrics.recordTiming("operation1");
++
++        metrics.incrementCounter("requests");
++        metrics.addToCounter("requests", 5);
++
++        System.out.println("Operation1 count: " + metrics.getCounter("operation1.count"));
++        System.out.println("Total requests: " + metrics.getCounter("requests"));
++        System.out.printf("Avg operation1 time: %.3f ms%n", metrics.getAverageTimingMillis("operation1"));
++    }
++
++    private static void demonstrateRetryPolicy() {
++        RetryPolicy policy = new RetryPolicy.Builder()
++            .maxRetries(3)
++            .retryDelayMillis(100)
++            .exponentialBackoff(2.0, 1000)
++            .build();
++
++        int attempts = 0;
++        try {
++            policy.executeWithRetry(() -> {
++                System.out.println("Attempting operation...");
++                return "Success";
++            });
++            System.out.println("Retry policy executed successfully");
++        } catch (Exception e) {
++            Logger.error("Retry policy failed", e);
++        }
++    }
++
++    private static void demonstrateCircuitBreaker() {
++        CircuitBreaker breaker = new CircuitBreaker("demo", 3, 1000);
++
++        System.out.println("Initial state: " + breaker.getState());
++
++        for (int i = 0; i < 5; i++) {
++            final int attempt = i;
++            try {
++                breaker.execute(() -> {
++                    if (attempt < 3) throw new Exception("Simulated failure");
++                    return "Success";
++                });
++                System.out.println("Attempt " + (attempt + 1) + ": Success");
++            } catch (Exception e) {
++                System.out.println("Attempt " + (attempt + 1) + ": Failed - " + breaker.getState());
++            }
++        }
++
++        breaker.reset();
++        System.out.println("After reset: " + breaker.getState());
++    }
++
++    private static void demonstratePlugins() {
++        PluginRegistry registry = PluginRegistry.getInstance();
++
++        GraphPlugin loggingPlugin = new LoggingPlugin();
++        registry.register(loggingPlugin);
++
++        System.out.println("Registered plugins: " + registry.getPluginNames());
++        System.out.println("Plugin count: " + registry.getPluginCount());
++
++        Graph graph = GraphBuilder.undirected(3).addEdge(0, 1).addEdge(1, 2).build();
++        GraphService service = new GraphService(graph);
++        registry.executeAll(service);
++    }
++
+     private static void demonstrateLoggingAndHealth(Graph graph) {
+         Logger.debug("Starting health check on graph");
+         GraphHealthCheck health = new GraphHealthCheck(graph);
+diff --git a/MetricsCollector.java b/MetricsCollector.java
+new file mode 100644
+index 0000000..8b3e5eb
+--- /dev/null
++++ b/MetricsCollector.java
+@@ -0,0 +1,82 @@
++import java.util.HashMap;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.atomic.AtomicLong;
++
++public class MetricsCollector {
++    private static final MetricsCollector instance = new MetricsCollector();
++    private final Map<String, AtomicLong> counters = new ConcurrentHashMap<>();
++    private final Map<String, AtomicLong> timings = new ConcurrentHashMap<>();
++    private final Map<String, Long> startTimes = new ConcurrentHashMap<>();
++
++    private MetricsCollector() {}
++
++    public static MetricsCollector getInstance() {
++        return instance;
++    }
++
++    public void incrementCounter(String name) {
++        counters.computeIfAbsent(name, k -> new AtomicLong(0)).incrementAndGet();
++    }
++
++    public void addToCounter(String name, long value) {
++        counters.computeIfAbsent(name, k -> new AtomicLong(0)).addAndGet(value);
++    }
++
++    public void startTiming(String operation) {
++        startTimes.put(operation, System.nanoTime());
++    }
++
++    public void recordTiming(String operation) {
++        Long startTime = startTimes.remove(operation);
++        if (startTime != null) {
++            long duration = System.nanoTime() - startTime;
++            timings.computeIfAbsent(operation, k -> new AtomicLong(0)).addAndGet(duration);
++            incrementCounter(operation + ".count");
++        }
++    }
++
++    public long getCounter(String name) {
++        AtomicLong counter = counters.get(name);
++        return counter != null ? counter.get() : 0;
++    }
++
++    public long getTimingNanos(String operation) {
++        AtomicLong timing = timings.get(operation);
++        return timing != null ? timing.get() : 0;
++    }
++
++    public double getAverageTimingMillis(String operation) {
++        long totalNanos = getTimingNanos(operation);
++        long count = getCounter(operation + ".count");
++        return count > 0 ? (totalNanos / 1_000_000.0) / count : 0;
++    }
++
++    public void printMetrics() {
++        System.out.println("\n=== Metrics Report ===");
++        System.out.println("Counters:");
++        for (Map.Entry<String, AtomicLong> entry : counters.entrySet()) {
++            System.out.println("  " + entry.getKey() + ": " + entry.getValue().get());
++        }
++        System.out.println("\nTimings (average ms):");
++        for (Map.Entry<String, AtomicLong> entry : timings.entrySet()) {
++            String op = entry.getKey();
++            double avgMs = getAverageTimingMillis(op);
++            System.out.printf("  %s: %.3f ms%n", op, avgMs);
++        }
++    }
++
++    public void reset() {
++        counters.clear();
++        timings.clear();
++        startTimes.clear();
++        Logger.info("Metrics reset");
++    }
++
++    public Map<String, Object> getMetricsSnapshot() {
++        Map<String, Object> snapshot = new HashMap<>();
++        snapshot.put("counters", new HashMap<>(counters));
++        snapshot.put("timings", new HashMap<>(timings));
++        return snapshot;
++    }
++}
+diff --git a/PluginRegistry.java b/PluginRegistry.java
+new file mode 100644
+index 0000000..c27449e
+--- /dev/null
++++ b/PluginRegistry.java
+@@ -0,0 +1,62 @@
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++
++public class PluginRegistry {
++    private static final PluginRegistry instance = new PluginRegistry();
++    private final Map<String, GraphPlugin> plugins = new HashMap<>();
++    private final List<GraphPlugin> executionOrder = new ArrayList<>();
++
++    private PluginRegistry() {}
++
++    public static PluginRegistry getInstance() {
++        return instance;
++    }
++
++    public void register(GraphPlugin plugin) {
++        ConfigurationManager config = ConfigurationManager.getInstance();
++        plugin.initialize(config);
++        plugins.put(plugin.getName(), plugin);
++        executionOrder.add(plugin);
++        Logger.info("Plugin registered: " + plugin.getName() + " v" + plugin.getVersion());
++    }
++
++    public void unregister(String pluginName) {
++        GraphPlugin plugin = plugins.remove(pluginName);
++        if (plugin != null) {
++            executionOrder.remove(plugin);
++            plugin.cleanup();
++            Logger.info("Plugin unregistered: " + pluginName);
++        }
++    }
++
++    public void executeAll(GraphService service) {
++        for (GraphPlugin plugin : executionOrder) {
++            try {
++                Logger.debug("Executing plugin: " + plugin.getName());
++                plugin.execute(service);
++            } catch (Exception e) {
++                Logger.error("Plugin execution failed: " + plugin.getName(), e);
++            }
++        }
++    }
++
++    public GraphPlugin getPlugin(String name) {
++        return plugins.get(name);
++    }
++
++    public List<String> getPluginNames() {
++        return new ArrayList<>(plugins.keySet());
++    }
++
++    public int getPluginCount() {
++        return plugins.size();
++    }
++
++    public void unregisterAll() {
++        for (GraphPlugin plugin : new ArrayList<>(executionOrder)) {
++            unregister(plugin.getName());
++        }
++    }
++}
+diff --git a/ResourcePool.java b/ResourcePool.java
+new file mode 100644
+index 0000000..869d671
+--- /dev/null
++++ b/ResourcePool.java
+@@ -0,0 +1,78 @@
++import java.util.concurrent.BlockingQueue;
++import java.util.concurrent.LinkedBlockingQueue;
++import java.util.concurrent.TimeUnit;
++
++public class ResourcePool<T> {
++    private final BlockingQueue<T> available;
++    private final ResourceFactory<T> factory;
++    private final int maxSize;
++    private int created = 0;
++
++    public interface ResourceFactory<T> {
++        T create();
++        void destroy(T resource);
++    }
++
++    public ResourcePool(ResourceFactory<T> factory, int maxSize) {
++        if (maxSize <= 0) {
++            throw new IllegalArgumentException("Max size must be positive");
++        }
++        this.factory = factory;
++        this.maxSize = maxSize;
++        this.available = new LinkedBlockingQueue<>(maxSize);
++        Logger.info("ResourcePool created with max size: " + maxSize);
++    }
++
++    public T acquire() throws InterruptedException {
++        T resource = available.poll();
++        if (resource == null) {
++            if (created < maxSize) {
++                resource = factory.create();
++                created++;
++                Logger.debug("Resource created, total: " + created);
++            } else {
++                Logger.debug("Waiting for available resource...");
++                resource = available.take();
++            }
++        }
++        return resource;
++    }
++
++    public T acquire(long timeout, TimeUnit unit) throws InterruptedException {
++        T resource = available.poll();
++        if (resource == null) {
++            if (created < maxSize) {
++                resource = factory.create();
++                created++;
++            } else {
++                resource = available.poll(timeout, unit);
++            }
++        }
++        return resource;
++    }
++
++    public void release(T resource) {
++        if (resource != null) {
++            if (!available.offer(resource)) {
++                factory.destroy(resource);
++                Logger.debug("Resource discarded due to pool overflow");
++            }
++        }
++    }
++
++    public void shutdown() {
++        T resource;
++        while ((resource = available.poll()) != null) {
++            factory.destroy(resource);
++        }
++        Logger.info("ResourcePool shutdown complete");
++    }
++
++    public int getAvailableCount() {
++        return available.size();
++    }
++
++    public int getCreatedCount() {
++        return created;
++    }
++}
+diff --git a/RetryPolicy.java b/RetryPolicy.java
+new file mode 100644
+index 0000000..922f990
+--- /dev/null
++++ b/RetryPolicy.java
+@@ -0,0 +1,73 @@
++public class RetryPolicy {
++    private final int maxRetries;
++    private final long retryDelayMillis;
++    private final double backoffMultiplier;
++    private final long maxBackoffMillis;
++
++    public RetryPolicy(int maxRetries, long retryDelayMillis) {
++        this(maxRetries, retryDelayMillis, 1.0, retryDelayMillis);
++    }
++
++    public RetryPolicy(int maxRetries, long retryDelayMillis, double backoffMultiplier, long maxBackoffMillis) {
++        if (maxRetries < 0 || retryDelayMillis < 0) {
++            throw new IllegalArgumentException("Retry parameters must be non-negative");
++        }
++        this.maxRetries = maxRetries;
++        this.retryDelayMillis = retryDelayMillis;
++        this.backoffMultiplier = backoffMultiplier;
++        this.maxBackoffMillis = maxBackoffMillis;
++    }
++
++    public <T> T executeWithRetry(Operation<T> operation) throws Exception {
++        int attempts = 0;
++        long delay = retryDelayMillis;
++
++        while (true) {
++            try {
++                Logger.debug("Executing operation (attempt " + (attempts + 1) + ")");
++                return operation.execute();
++            } catch (Exception e) {
++                attempts++;
++                if (attempts > maxRetries) {
++                    Logger.error("Operation failed after " + attempts + " attempts", e);
++                    throw e;
++                }
++
++                Logger.warn("Operation failed, retrying in " + delay + "ms");
++                Thread.sleep(delay);
++                delay = Math.min((long)(delay * backoffMultiplier), maxBackoffMillis);
++            }
++        }
++    }
++
++    public interface Operation<T> {
++        T execute() throws Exception;
++    }
++
++    public static class Builder {
++        private int maxRetries = 3;
++        private long retryDelayMillis = 100;
++        private double backoffMultiplier = 1.0;
++        private long maxBackoffMillis = 10000;
++
++        public Builder maxRetries(int retries) {
++            this.maxRetries = retries;
++            return this;
++        }
++
++        public Builder retryDelayMillis(long delay) {
++            this.retryDelayMillis = delay;
++            return this;
++        }
++
++        public Builder exponentialBackoff(double multiplier, long maxDelay) {
++            this.backoffMultiplier = multiplier;
++            this.maxBackoffMillis = maxDelay;
++            return this;
++        }
++
++        public RetryPolicy build() {
++            return new RetryPolicy(maxRetries, retryDelayMillis, backoffMultiplier, maxBackoffMillis);
++        }
++    }
++}
