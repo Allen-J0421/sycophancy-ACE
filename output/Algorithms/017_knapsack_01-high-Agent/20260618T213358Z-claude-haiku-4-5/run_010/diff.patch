@@ -1,0 +1,235 @@
+diff --git a/knapsack_01.java b/knapsack_01.java
+index 61d76ff..e43674d 100644
+--- a/knapsack_01.java
++++ b/knapsack_01.java
+@@ -1,5 +1,20 @@
+ import java.util.*;
+ 
++class KnapsackException extends RuntimeException {
++    KnapsackException(String message) { super(message); }
++    KnapsackException(String message, Throwable cause) { super(message, cause); }
++}
++
++class InvalidProblemException extends KnapsackException {
++    InvalidProblemException(String message) { super(message); }
++}
++
++class SolverFailedException extends KnapsackException {
++    SolverFailedException(String solverName, String message) {
++        super("Solver " + solverName + " failed: " + message);
++    }
++}
++
+ class Validation {
+     static void requireNonNegative(int value, String name) {
+         if (value < 0) throw new IllegalArgumentException(name + " must be non-negative, got: " + value);
+@@ -216,11 +231,11 @@ interface KnapsackSolver {
+ 
+ class ConstraintValidator {
+     static void validateProblem(Problem problem) {
+-        if (problem.capacity < 0) throw new IllegalArgumentException("Capacity must be non-negative");
+-        if (problem.items.isEmpty()) throw new IllegalArgumentException("Problem must have at least one item");
++        if (problem.capacity < 0) throw new InvalidProblemException("Capacity must be non-negative");
++        if (problem.items.isEmpty()) throw new InvalidProblemException("Problem must have at least one item");
+         for (Item item : problem.items) {
+-            if (item.value < 0) throw new IllegalArgumentException("Item value cannot be negative");
+-            if (item.weight < 0) throw new IllegalArgumentException("Item weight cannot be negative");
++            if (item.value < 0) throw new InvalidProblemException("Item value cannot be negative");
++            if (item.weight < 0) throw new InvalidProblemException("Item weight cannot be negative");
+         }
+     }
+ 
+@@ -234,10 +249,12 @@ class ConstraintValidator {
+             }
+         }
+         if (totalWeight > problem.capacity) {
+-            throw new IllegalStateException("Solution exceeds capacity: " + totalWeight + " > " + problem.capacity);
++            throw new SolverFailedException(solution.solverName,
++                "exceeds capacity: " + totalWeight + " > " + problem.capacity);
+         }
+         if (totalValue != solution.maxValue) {
+-            throw new IllegalStateException("Solution value mismatch: " + totalValue + " != " + solution.maxValue);
++            throw new SolverFailedException(solution.solverName,
++                "value mismatch: " + totalValue + " != " + solution.maxValue);
+         }
+     }
+ }
+@@ -455,6 +472,90 @@ class PerformanceMetrics {
+     }
+ }
+ 
++class PerformanceProfile {
++    private final Map<String, List<Long>> solverTimes = new HashMap<>();
++    private final Map<String, Integer> solverValues = new HashMap<>();
++
++    void record(Solution solution) {
++        solverTimes.computeIfAbsent(solution.solverName, k -> new ArrayList<>())
++            .add(solution.executionTimeNanos);
++        solverValues.put(solution.solverName, solution.maxValue);
++    }
++
++    double getAverageTime(String solverName) {
++        List<Long> times = solverTimes.get(solverName);
++        if (times == null || times.isEmpty()) return 0;
++        return times.stream().mapToLong(Long::longValue).average().orElse(0) / 1000.0;
++    }
++
++    String getFastest() {
++        return solverTimes.entrySet().stream()
++            .min(Comparator.comparingDouble(e -> e.getValue().stream().mapToLong(Long::longValue).average().orElse(0)))
++            .map(Map.Entry::getKey)
++            .orElse("Unknown");
++    }
++
++    void report() {
++        System.out.println("\n=== Performance Profile ===");
++        solverTimes.forEach((name, times) ->
++            System.out.printf("%s: runs=%d, avg=%.2fμs, value=%d%n",
++                name, times.size(), times.stream().mapToLong(Long::longValue).average().orElse(0) / 1000.0,
++                solverValues.get(name)));
++    }
++}
++
++class SolverRecommendation {
++    enum Criterion { SPEED, VALUE, BALANCED }
++
++    private final List<Solution> solutions;
++    private final ProblemClassifier classifier;
++
++    SolverRecommendation(List<Solution> solutions, Problem problem) {
++        this.solutions = solutions;
++        this.classifier = new ProblemClassifier(problem);
++    }
++
++    String getRecommendation() {
++        Criterion criterion = selectCriterion();
++        return findBest(criterion);
++    }
++
++    private Criterion selectCriterion() {
++        return switch (classifier.classify()) {
++            case TRIVIAL, EASY -> Criterion.SPEED;
++            case MEDIUM -> Criterion.BALANCED;
++            case HARD, VERY_HARD -> Criterion.VALUE;
++        };
++    }
++
++    private String findBest(Criterion criterion) {
++        return switch (criterion) {
++            case SPEED -> solutions.stream()
++                .min(Comparator.comparingLong(s -> s.executionTimeNanos))
++                .map(s -> s.solverName).orElse("Unknown");
++            case VALUE -> solutions.stream()
++                .max(Comparator.comparingInt(s -> s.maxValue))
++                .map(s -> s.solverName).orElse("Unknown");
++            case BALANCED -> {
++                PerformanceMetrics best = solutions.stream()
++                    .map(PerformanceMetrics::new)
++                    .max(Comparator.comparingDouble(PerformanceMetrics::getEfficiency))
++                    .orElse(null);
++                yield best != null ? best.solverName : "Unknown";
++            }
++        };
++    }
++
++    void report() {
++        Criterion criterion = selectCriterion();
++        String recommended = findBest(criterion);
++        System.out.printf("\n=== Recommendation ===");
++        System.out.printf("\nProblem Difficulty: %s%n", classifier.classify());
++        System.out.printf("Selection Criterion: %s%n", criterion);
++        System.out.printf("Recommended Solver: %s%n", recommended);
++    }
++}
++
+ abstract class SolverDecorator extends BaseSolver {
+     protected final KnapsackSolver delegate;
+ 
+@@ -885,6 +986,48 @@ class ComparisonMatrix {
+     }
+ }
+ 
++class ResultArchive {
++    static class ArchiveEntry {
++        final long timestamp;
++        final Problem problem;
++        final List<Solution> solutions;
++        final ProblemDifficulty difficulty;
++
++        ArchiveEntry(Problem problem, List<Solution> solutions, ProblemDifficulty difficulty) {
++            this.timestamp = System.currentTimeMillis();
++            this.problem = problem;
++            this.solutions = new ArrayList<>(solutions);
++            this.difficulty = difficulty;
++        }
++
++        void summarize() {
++            int maxValue = solutions.stream().mapToInt(s -> s.maxValue).max().orElse(0);
++            long minTime = solutions.stream().mapToLong(s -> s.executionTimeNanos).min().orElse(0);
++            System.out.printf("[%d] Problem(%d items, cap=%d): value=%d, fastest=%.2fμs%n",
++                timestamp, problem.items.size(), problem.capacity, maxValue, minTime / 1000.0);
++        }
++    }
++
++    private static final List<ArchiveEntry> archive = new ArrayList<>();
++
++    static void archive(Problem problem, List<Solution> solutions, ProblemDifficulty difficulty) {
++        archive.add(new ArchiveEntry(problem, solutions, difficulty));
++    }
++
++    static void printArchive() {
++        System.out.println("\n=== Result Archive ===");
++        if (archive.isEmpty()) {
++            System.out.println("No results archived");
++            return;
++        }
++        archive.forEach(ArchiveEntry::summarize);
++    }
++
++    static int getArchiveSize() {
++        return archive.size();
++    }
++}
++
+ class ResultComparison {
+     final List<Solution> solutions;
+     final ProblemAnalyzer analyzer;
+@@ -930,12 +1073,23 @@ class Benchmark {
+ 
+         List<Solution> solutions = new ArrayList<>();
+         for (String type : solverTypes) {
+-            KnapsackSolver solver = SolverFactory.create(type);
+-            Solution solution = solver.solve(problem);
+-            solutions.add(solution);
++            try {
++                KnapsackSolver solver = SolverFactory.create(type);
++                Solution solution = solver.solve(problem);
++                solutions.add(solution);
++            } catch (Exception e) {
++                System.err.printf("Error running %s: %s%n", type, e.getMessage());
++            }
+         }
+ 
+-        new ResultComparison(solutions, problem).report();
++        ProblemClassifier classifier = new ProblemClassifier(problem);
++        ResultComparison comparison = new ResultComparison(solutions, problem);
++        comparison.report();
++
++        SolverRecommendation recommendation = new SolverRecommendation(solutions, problem);
++        recommendation.report();
++
++        ResultArchive.archive(problem, solutions, classifier.classify());
+     }
+ }
+ 
+@@ -1051,5 +1205,10 @@ class Knapsack {
+ 
+         System.out.println("\n=== Traditional Benchmark ===");
+         Benchmark.compare(problem1, "dp", "sopt", "greedy", "adaptive");
++
++        System.out.println();
++        Benchmark.compare(problem2, "dp", "greedy", "adaptive");
++
++        ResultArchive.printArchive();
+     }
+ }

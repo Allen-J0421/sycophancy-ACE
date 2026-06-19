@@ -1,0 +1,364 @@
+diff --git a/open_addressing_linear_probing.java b/open_addressing_linear_probing.java
+index 957cf0b..bb36735 100644
+--- a/open_addressing_linear_probing.java
++++ b/open_addressing_linear_probing.java
+@@ -1,169 +1,263 @@
+-class hashNode {
+-    final int key;
+-    final int value;
+-    final boolean deleted;
++final class hashMap {
++    private static final int DEFAULT_CAPACITY = 20;
++    private static final double MAX_LOAD_FACTOR = 0.6;
++    private static final double MAX_TOMBSTONE_RATIO = 0.2;
++    private static final int NOT_FOUND = -1;
++    private static final Entry TOMBSTONE = Entry.tombstone();
+ 
+-    hashNode(int key, int value) {
+-        this(key, value, false);
+-    }
++    private Entry[] entries;
++    private int size;
++    private int tombstones;
+ 
+-    private hashNode(int key, int value, boolean deleted) {
+-        this.key = key;
+-        this.value = value;
+-        this.deleted = deleted;
+-    }
++    private static final class Entry {
++        private final int key;
++        private final int value;
++        private final boolean deleted;
++
++        private Entry(int key, int value, boolean deleted) {
++            this.key = key;
++            this.value = value;
++            this.deleted = deleted;
++        }
++
++        private static Entry active(int key, int value) {
++            return new Entry(key, value, false);
++        }
+ 
+-    static hashNode deletedNode() {
+-        return new hashNode(0, 0, true);
++        private static Entry tombstone() {
++            return new Entry(0, 0, true);
++        }
+     }
+-}
+ 
+-class hashMap {
+-    private static final int DEFAULT_CAPACITY = 20;
+-    private static final double MAX_LOAD_FACTOR = 0.6;
++    private static final class ProbeResult {
++        private final int foundIndex;
++        private final int insertionIndex;
+ 
+-    private hashNode[] arr;
+-    private int capacity;
+-    private int size;
+-    private final hashNode dummy;
++        private ProbeResult(int foundIndex, int insertionIndex) {
++            this.foundIndex = foundIndex;
++            this.insertionIndex = insertionIndex;
++        }
++
++        private boolean found() {
++            return foundIndex != NOT_FOUND;
++        }
++    }
+ 
+     hashMap() {
+         this(DEFAULT_CAPACITY);
+     }
+ 
+     hashMap(int initialCapacity) {
+-        capacity = Math.max(1, initialCapacity);
+-        arr = new hashNode[capacity];
+-        dummy = hashNode.deletedNode();
++        entries = new Entry[normalizeCapacity(initialCapacity)];
+     }
+ 
+     int hashCode(int key) {
+-        return Math.floorMod(key, capacity);
++        return Math.floorMod(key, capacity());
+     }
+ 
+-    void insertNode(int key, int value) {
+-        ensureCapacity(size + 1);
++    void put(int key, int value) {
++        ensureInsertCapacity();
+ 
+-        int index = findSlotForInsert(key);
+-        if (index == -1) {
+-            resize(capacity * 2);
+-            index = findSlotForInsert(key);
++        ProbeResult probe = probe(key);
++        if (!probe.found() && probe.insertionIndex == NOT_FOUND) {
++            resize(capacity() * 2);
++            probe = probe(key);
+         }
+ 
+-        if (arr[index] == null || arr[index].deleted) {
+-            size++;
+-        }
+-        arr[index] = new hashNode(key, value);
++        writeEntry(probe, key, value);
+     }
+ 
+-    int deleteNode(int key) {
+-        int index = findExistingIndex(key);
+-        if (index == -1) {
+-            return -1;
++    void insertNode(int key, int value) {
++        put(key, value);
++    }
++
++    int remove(int key) {
++        ProbeResult probe = probe(key);
++        if (!probe.found()) {
++            return NOT_FOUND;
+         }
+ 
+-        int value = arr[index].value;
+-        arr[index] = dummy;
++        int value = entries[probe.foundIndex].value;
++        entries[probe.foundIndex] = TOMBSTONE;
+         size--;
++        tombstones++;
++        compactIfNeeded();
+         return value;
+     }
+ 
++    int deleteNode(int key) {
++        return remove(key);
++    }
++
+     int get(int key) {
+-        int index = findExistingIndex(key);
+-        return index == -1 ? -1 : arr[index].value;
++        ProbeResult probe = probe(key);
++        return probe.found() ? entries[probe.foundIndex].value : NOT_FOUND;
+     }
+ 
+-    int sizeofMap() {
++    boolean containsKey(int key) {
++        return probe(key).found();
++    }
++
++    int size() {
+         return size;
+     }
+ 
++    int sizeofMap() {
++        return size();
++    }
++
+     boolean isEmpty() {
+         return size == 0;
+     }
+ 
+     void display() {
+-        for (hashNode node : arr) {
+-            if (node != null && !node.deleted) {
+-                System.out.println(node.key + " " + node.value);
++        for (Entry entry : entries) {
++            if (isActive(entry)) {
++                System.out.println(entry.key + " " + entry.value);
+             }
+         }
+     }
+ 
+-    private void ensureCapacity(int targetSize) {
+-        if ((double) targetSize / capacity > MAX_LOAD_FACTOR) {
+-            resize(capacity * 2);
++    @Override
++    public String toString() {
++        StringBuilder builder = new StringBuilder("{");
++        boolean first = true;
++
++        for (Entry entry : entries) {
++            if (!isActive(entry)) {
++                continue;
++            }
++            if (!first) {
++                builder.append(", ");
++            }
++            builder.append(entry.key).append('=').append(entry.value);
++            first = false;
+         }
++
++        return builder.append('}').toString();
+     }
+ 
+-    private int findExistingIndex(int key) {
+-        int hashIndex = hashCode(key);
++    private void ensureInsertCapacity() {
++        if (exceedsActiveLoad(size + 1)) {
++            resize(capacity() * 2);
++            return;
++        }
+ 
+-        for (int probes = 0; probes < capacity; probes++) {
+-            hashNode node = arr[hashIndex];
+-            if (node == null) {
+-                return -1;
+-            }
+-            if (!node.deleted && node.key == key) {
+-                return hashIndex;
+-            }
+-            hashIndex = nextIndex(hashIndex);
++        if (exceedsOccupiedLoad(size + tombstones + 1) || exceedsTombstoneLoad()) {
++            resize(capacity());
++        }
++    }
++
++    private void compactIfNeeded() {
++        if (size == 0) {
++            resize(capacity());
++            return;
+         }
+ 
+-        return -1;
++        if (exceedsTombstoneLoad()) {
++            resize(capacity());
++        }
+     }
+ 
+-    private int findSlotForInsert(int key) {
+-        int hashIndex = hashCode(key);
+-        int firstDeletedIndex = -1;
++    private ProbeResult probe(int key) {
++        int index = hashCode(key);
++        int firstTombstone = NOT_FOUND;
+ 
+-        for (int probes = 0; probes < capacity; probes++) {
+-            hashNode node = arr[hashIndex];
++        for (int probes = 0; probes < capacity(); probes++) {
++            Entry entry = entries[index];
+ 
+-            if (node == null) {
+-                return firstDeletedIndex != -1 ? firstDeletedIndex : hashIndex;
++            if (entry == null) {
++                int insertionIndex = firstTombstone != NOT_FOUND ? firstTombstone : index;
++                return new ProbeResult(NOT_FOUND, insertionIndex);
+             }
+-            if (node.deleted) {
+-                if (firstDeletedIndex == -1) {
+-                    firstDeletedIndex = hashIndex;
++
++            if (entry.deleted) {
++                if (firstTombstone == NOT_FOUND) {
++                    firstTombstone = index;
+                 }
+-            } else if (node.key == key) {
+-                return hashIndex;
++            } else if (entry.key == key) {
++                return new ProbeResult(index, index);
+             }
+ 
+-            hashIndex = nextIndex(hashIndex);
++            index = nextIndex(index);
+         }
+ 
+-        return firstDeletedIndex;
++        return new ProbeResult(NOT_FOUND, firstTombstone);
+     }
+ 
+-    private int nextIndex(int index) {
+-        return (index + 1) % capacity;
++    private void writeEntry(ProbeResult probe, int key, int value) {
++        int targetIndex = probe.found() ? probe.foundIndex : probe.insertionIndex;
++        Entry previousEntry = entries[targetIndex];
++
++        if (!probe.found()) {
++            if (previousEntry == null) {
++                size++;
++            } else if (previousEntry.deleted) {
++                size++;
++                tombstones--;
++            }
++        }
++
++        entries[targetIndex] = Entry.active(key, value);
+     }
+ 
+     private void resize(int newCapacity) {
+-        hashNode[] oldEntries = arr;
+-
+-        capacity = Math.max(1, newCapacity);
+-        arr = new hashNode[capacity];
++        Entry[] oldEntries = entries;
++        entries = new Entry[normalizeCapacity(newCapacity)];
+         size = 0;
++        tombstones = 0;
+ 
+-        for (hashNode node : oldEntries) {
+-            if (node != null && !node.deleted) {
+-                insertNode(node.key, node.value);
++        for (Entry entry : oldEntries) {
++            if (isActive(entry)) {
++                reinsert(entry);
+             }
+         }
+     }
+ 
++    private void reinsert(Entry entry) {
++        ProbeResult probe = probe(entry.key);
++        entries[probe.insertionIndex] = Entry.active(entry.key, entry.value);
++        size++;
++    }
++
++    private boolean isActive(Entry entry) {
++        return entry != null && !entry.deleted;
++    }
++
++    private boolean exceedsActiveLoad(int targetSize) {
++        return (double) targetSize / capacity() > MAX_LOAD_FACTOR;
++    }
++
++    private boolean exceedsOccupiedLoad(int occupiedSlots) {
++        return (double) occupiedSlots / capacity() > MAX_LOAD_FACTOR;
++    }
++
++    private boolean exceedsTombstoneLoad() {
++        return tombstones > 0 && (double) tombstones / capacity() > MAX_TOMBSTONE_RATIO;
++    }
++
++    private int nextIndex(int index) {
++        return (index + 1) % capacity();
++    }
++
++    private int capacity() {
++        return entries.length;
++    }
++
++    private int normalizeCapacity(int requestedCapacity) {
++        return Math.max(1, requestedCapacity);
++    }
++
+     public static void main(String[] args) {
+-        hashMap h = new hashMap();
+-        h.insertNode(1, 1);
+-        h.insertNode(2, 2);
+-        h.insertNode(2, 3);
+-        h.display();
+-        System.out.println(h.sizeofMap());
+-        System.out.println(h.deleteNode(2));
+-        System.out.println(h.sizeofMap());
+-        System.out.println(h.isEmpty());
+-        System.out.println(h.get(2));
++        hashMap map = new hashMap();
++        map.put(1, 1);
++        map.put(2, 2);
++        map.put(2, 3);
++        map.display();
++        System.out.println(map.size());
++        System.out.println(map.remove(2));
++        System.out.println(map.size());
++        System.out.println(map.isEmpty());
++        System.out.println(map.get(2));
+     }
+ }

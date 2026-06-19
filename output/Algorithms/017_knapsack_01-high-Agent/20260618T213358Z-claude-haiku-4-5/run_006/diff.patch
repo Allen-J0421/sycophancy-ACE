@@ -1,0 +1,297 @@
+diff --git a/knapsack_01.java b/knapsack_01.java
+index 93ada52..2abde0e 100644
+--- a/knapsack_01.java
++++ b/knapsack_01.java
+@@ -145,17 +145,41 @@ class Snapshot {
+     }
+ }
+ 
++interface SolverListener {
++    void onSolveStart(String solverName, Problem problem);
++    void onSolveEnd(String solverName, Solution solution);
++}
++
+ interface KnapsackSolver {
+     Solution solve(Problem problem);
+     String getName();
++    void addListener(SolverListener listener);
++}
++
++abstract class BaseSolver implements KnapsackSolver {
++    protected final List<SolverListener> listeners = new ArrayList<>();
++
++    @Override
++    public void addListener(SolverListener listener) {
++        listeners.add(listener);
++    }
++
++    protected void notifyStart(Problem problem) {
++        listeners.forEach(l -> l.onSolveStart(getName(), problem));
++    }
++
++    protected void notifyEnd(Solution solution) {
++        listeners.forEach(l -> l.onSolveEnd(getName(), solution));
++    }
+ }
+ 
+-class DynamicProgrammingSolver implements KnapsackSolver {
++class DynamicProgrammingSolver extends BaseSolver {
+     @Override
+     public String getName() { return "DynamicProgramming"; }
+ 
+     @Override
+     public Solution solve(Problem problem) {
++        notifyStart(problem);
+         long start = System.nanoTime();
+         int n = problem.items.size();
+         int W = problem.capacity;
+@@ -170,7 +194,9 @@ class DynamicProgrammingSolver implements KnapsackSolver {
+ 
+         Set<Integer> selected = backtrackSelection(problem, dp);
+         long elapsed = System.nanoTime() - start;
+-        return new Solution(dp[n][W], selected, getName(), elapsed);
++        Solution solution = new Solution(dp[n][W], selected, getName(), elapsed);
++        notifyEnd(solution);
++        return solution;
+     }
+ 
+     private Set<Integer> backtrackSelection(Problem problem, int[][] dp) {
+@@ -189,12 +215,13 @@ class DynamicProgrammingSolver implements KnapsackSolver {
+     }
+ }
+ 
+-class SpaceOptimizedDPSolver implements KnapsackSolver {
++class SpaceOptimizedDPSolver extends BaseSolver {
+     @Override
+     public String getName() { return "SpaceOptimizedDP"; }
+ 
+     @Override
+     public Solution solve(Problem problem) {
++        notifyStart(problem);
+         long start = System.nanoTime();
+         int n = problem.items.size();
+         int W = problem.capacity;
+@@ -209,16 +236,19 @@ class SpaceOptimizedDPSolver implements KnapsackSolver {
+ 
+         Set<Integer> selected = new HashSet<>();
+         long elapsed = System.nanoTime() - start;
+-        return new Solution(dp[W], selected, getName(), elapsed);
++        Solution solution = new Solution(dp[W], selected, getName(), elapsed);
++        notifyEnd(solution);
++        return solution;
+     }
+ }
+ 
+-class GreedySolver implements KnapsackSolver {
++class GreedySolver extends BaseSolver {
+     @Override
+     public String getName() { return "Greedy"; }
+ 
+     @Override
+     public Solution solve(Problem problem) {
++        notifyStart(problem);
+         long start = System.nanoTime();
+         List<Item> sorted = new ArrayList<>(problem.items);
+         sorted.sort((a, b) -> Double.compare((double) b.value / b.weight, (double) a.value / a.weight));
+@@ -235,15 +265,69 @@ class GreedySolver implements KnapsackSolver {
+             }
+         }
+         long elapsed = System.nanoTime() - start;
+-        return new Solution(totalValue, selected, getName(), elapsed);
++        Solution solution = new Solution(totalValue, selected, getName(), elapsed);
++        notifyEnd(solution);
++        return solution;
+     }
+ }
+ 
+-abstract class SolverDecorator implements KnapsackSolver {
++class ProblemAnalyzer {
++    private final Problem problem;
++
++    ProblemAnalyzer(Problem problem) {
++        this.problem = problem;
++    }
++
++    int itemCount() { return problem.items.size(); }
++    int capacity() { return problem.capacity; }
++    double avgValuePerWeight() {
++        return problem.items.stream()
++            .mapToDouble(i -> (double) i.value / i.weight)
++            .average().orElse(0);
++    }
++    int maxWeight() {
++        return problem.items.stream().mapToInt(i -> i.weight).max().orElse(0);
++    }
++    boolean isLargeCapacity() { return capacity() > 1000; }
++    boolean isManyItems() { return itemCount() > 100; }
++
++    void report() {
++        System.out.printf("Analysis: %d items, capacity=%d, avgRatio=%.2f, maxWeight=%d%n",
++            itemCount(), capacity(), avgValuePerWeight(), maxWeight());
++    }
++}
++
++class PerformanceMetrics {
++    final String solverName;
++    final long executionTimeNanos;
++    final int value;
++    final int itemsSelected;
++
++    PerformanceMetrics(Solution solution) {
++        this.solverName = solution.solverName;
++        this.executionTimeNanos = solution.executionTimeNanos;
++        this.value = solution.maxValue;
++        this.itemsSelected = solution.selectedIds.size();
++    }
++
++    double getEfficiency() {
++        return executionTimeNanos > 0 ? (double) value / executionTimeNanos * 1e6 : 0;
++    }
++
++    void report() {
++        System.out.printf("  %s: value=%d, items=%d, time=%.2fμs, efficiency=%.2f val/ms%n",
++            solverName, value, itemsSelected, executionTimeNanos / 1000.0, getEfficiency());
++    }
++}
++
++abstract class SolverDecorator extends BaseSolver {
+     protected final KnapsackSolver delegate;
+ 
+     protected SolverDecorator(KnapsackSolver delegate) {
+         this.delegate = delegate;
++        if (delegate instanceof BaseSolver bs) {
++            bs.listeners.forEach(this::addListener);
++        }
+     }
+ 
+     @Override
+@@ -275,7 +359,7 @@ class CachingSolver extends SolverDecorator {
+     }
+ }
+ 
+-class CompositeSolver implements KnapsackSolver {
++class CompositeSolver extends BaseSolver {
+     private final List<KnapsackSolver> solvers;
+ 
+     CompositeSolver(KnapsackSolver... solvers) {
+@@ -287,6 +371,7 @@ class CompositeSolver implements KnapsackSolver {
+ 
+     @Override
+     public Solution solve(Problem problem) {
++        notifyStart(problem);
+         Solution best = null;
+         for (KnapsackSolver solver : solvers) {
+             Solution solution = solver.solve(problem);
+@@ -294,10 +379,34 @@ class CompositeSolver implements KnapsackSolver {
+                 best = solution;
+             }
+         }
++        notifyEnd(best);
+         return best;
+     }
+ }
+ 
++class AdaptiveSolver extends BaseSolver {
++    @Override
++    public String getName() { return "Adaptive"; }
++
++    @Override
++    public Solution solve(Problem problem) {
++        notifyStart(problem);
++        ProblemAnalyzer analyzer = new ProblemAnalyzer(problem);
++        KnapsackSolver chosen = selectSolver(analyzer);
++
++        Solution solution = chosen.solve(problem);
++        notifyEnd(solution);
++        return solution;
++    }
++
++    private KnapsackSolver selectSolver(ProblemAnalyzer analyzer) {
++        if (analyzer.isLargeCapacity() || analyzer.isManyItems()) {
++            return new SpaceOptimizedDPSolver();
++        }
++        return new DynamicProgrammingSolver();
++    }
++}
++
+ class SolverFactory {
+     static KnapsackSolver create(String type) {
+         return switch (type.toLowerCase()) {
+@@ -308,16 +417,32 @@ class SolverFactory {
+                 new DynamicProgrammingSolver(),
+                 new GreedySolver()
+             );
++            case "adaptive" -> new AdaptiveSolver();
+             default -> throw new IllegalArgumentException("Unknown solver type: " + type);
+         };
+     }
+ }
+ 
++class LoggingListener implements SolverListener {
++    @Override
++    public void onSolveStart(String solverName, Problem problem) {
++        System.err.printf("[%s] Starting solve: %s%n", solverName, problem);
++    }
++
++    @Override
++    public void onSolveEnd(String solverName, Solution solution) {
++        System.err.printf("[%s] Completed: value=%d, time=%.2fμs%n",
++            solverName, solution.maxValue, solution.executionTimeNanos / 1000.0);
++    }
++}
++
+ class ResultComparison {
+     final List<Solution> solutions;
++    final ProblemAnalyzer analyzer;
+ 
+-    ResultComparison(List<Solution> solutions) {
++    ResultComparison(List<Solution> solutions, Problem problem) {
+         this.solutions = new ArrayList<>(solutions);
++        this.analyzer = new ProblemAnalyzer(problem);
+     }
+ 
+     int maxValue() {
+@@ -331,7 +456,15 @@ class ResultComparison {
+ 
+     void report() {
+         System.out.println();
+-        System.out.println("=== Comparison ===");
++        System.out.println("=== Problem Analysis ===");
++        analyzer.report();
++
++        System.out.println("\n=== Performance Comparison ===");
++        solutions.stream()
++            .map(PerformanceMetrics::new)
++            .forEach(PerformanceMetrics::report);
++
++        System.out.println();
+         System.out.printf("Consensus value: %d%n", maxValue());
+         System.out.printf("All solvers agree: %s%n", allAgree());
+         System.out.printf("Fastest: %s (%.2fμs)%n",
+@@ -344,17 +477,15 @@ class Benchmark {
+     static void compare(Problem problem, String... solverTypes) {
+         System.out.println("=== Benchmark Results ===");
+         System.out.println("Problem: " + problem);
+-        System.out.println();
+ 
+         List<Solution> solutions = new ArrayList<>();
+         for (String type : solverTypes) {
+             KnapsackSolver solver = SolverFactory.create(type);
+             Solution solution = solver.solve(problem);
+-            System.out.println(solution);
+             solutions.add(solution);
+         }
+ 
+-        new ResultComparison(solutions).report();
++        new ResultComparison(solutions, problem).report();
+     }
+ }
+ 
+@@ -449,6 +580,6 @@ class Knapsack {
+             .capacity(4)
+             .build();
+ 
+-        Benchmark.compare(problem, "dp", "sopt", "greedy");
++        Benchmark.compare(problem, "dp", "sopt", "greedy", "adaptive");
+     }
+ }

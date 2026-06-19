@@ -17,33 +17,31 @@ def format_clarification_reply(turn: int, text: str) -> str:
     return f"=== Turn {turn} (clarification reply) ===\n{text.strip()}"
 
 
-def append_clarification_reply(artifacts_dir: Path, turn: int, text: str) -> None:
+def append_clarification_reply(prompt_path: Path, turn: int, text: str) -> None:
     stripped = text.strip()
     if not stripped:
         return
-    path = artifacts_dir / PROMPT_FILE_NAME
     block = format_clarification_reply(turn, stripped)
-    if path.exists() and path.stat().st_size > 0:
-        content = path.read_text(encoding="utf-8").rstrip() + "\n\n" + block + "\n"
+    if prompt_path.exists() and prompt_path.stat().st_size > 0:
+        content = prompt_path.read_text(encoding="utf-8").rstrip() + "\n\n" + block + "\n"
     else:
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
         content = block + "\n"
-    path.write_text(content, encoding="utf-8")
+    prompt_path.write_text(content, encoding="utf-8")
 
 
-def append_prompt_turn(artifacts_dir: Path, turn: int, text: str) -> None:
-    """Append one labeled Gemini prompt to the experiment-level prompt.txt."""
+def append_prompt_turn(prompt_path: Path, turn: int, text: str) -> None:
+    """Append one labeled Gemini prompt to the experiment-level prompt file."""
     stripped = text.strip()
     if not stripped:
         return
-    path = artifacts_dir / PROMPT_FILE_NAME
     block = format_prompt_turn(turn, stripped)
-    if path.exists() and path.stat().st_size > 0:
-        content = path.read_text(encoding="utf-8").rstrip() + "\n\n" + block + "\n"
+    if prompt_path.exists() and prompt_path.stat().st_size > 0:
+        content = prompt_path.read_text(encoding="utf-8").rstrip() + "\n\n" + block + "\n"
     else:
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
         content = block + "\n"
-    path.write_text(content, encoding="utf-8")
+    prompt_path.write_text(content, encoding="utf-8")
 
 
 def parse_prompts_file(text: str) -> dict[int, str]:
@@ -63,11 +61,10 @@ def parse_prompts_file(text: str) -> dict[int, str]:
     return prompts
 
 
-def load_prompts_by_turn(artifacts_dir: Path) -> dict[int, str]:
-    path = artifacts_dir / PROMPT_FILE_NAME
-    if not path.is_file():
+def load_prompts_by_turn(prompt_path: Path | None) -> dict[int, str]:
+    if prompt_path is None or not prompt_path.is_file():
         return {}
-    return parse_prompts_file(path.read_text(encoding="utf-8", errors="replace"))
+    return parse_prompts_file(prompt_path.read_text(encoding="utf-8", errors="replace"))
 
 
 def write_step_artifacts(

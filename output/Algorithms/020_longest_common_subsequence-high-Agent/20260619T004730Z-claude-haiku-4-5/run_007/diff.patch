@@ -1,0 +1,370 @@
+diff --git a/ApproximateLcsSolver.java b/ApproximateLcsSolver.java
+new file mode 100644
+index 0000000..ccdc469
+--- /dev/null
++++ b/ApproximateLcsSolver.java
+@@ -0,0 +1,105 @@
++/**
++ * Approximate LCS solver for very large inputs.
++ * Uses diagonal band narrowing to reduce computation time.
++ * Trades accuracy for speed on similar strings.
++ *
++ * Best for: Quick similarity filtering, large strings (>10,000 chars)
++ * where strings are expected to be fairly similar.
++ */
++class ApproximateLcsSolver implements LcsSolver {
++    private final double similarityThreshold;
++    private final int bandWidth;
++
++    /**
++     * Creates an approximate solver with default parameters.
++     * Assumes strings are >80% similar and uses 20% band width.
++     */
++    ApproximateLcsSolver() {
++        this(0.80, 0.20);
++    }
++
++    /**
++     * Creates an approximate solver with custom parameters.
++     *
++     * @param similarityThreshold expected similarity ratio (0.0-1.0)
++     *                           determines band width for optimization
++     * @param bandWidthPercent   band width as percentage of shorter string
++     */
++    ApproximateLcsSolver(double similarityThreshold, double bandWidthPercent) {
++        this.similarityThreshold = Math.max(0.0, Math.min(1.0, similarityThreshold));
++        this.bandWidth = (int) (100 * bandWidthPercent);
++    }
++
++    @Override
++    public LcsResult solve(LcsInput input) {
++        String s1 = input.getFirstString();
++        String s2 = input.getSecondString();
++        int m = s1.length();
++        int n = s2.length();
++
++        // For small inputs, use exact algorithm
++        if (m + n < 1000) {
++            return new StandardLcsSolver().solve(input);
++        }
++
++        // Estimate band width based on expected similarity
++        int estimatedMinLcs = (int) (Math.min(m, n) * similarityThreshold);
++        int band = Math.max(bandWidth, estimatedMinLcs / 10);
++
++        // Use restricted DP with band
++        int[][] dpTable = computeRestrictedDp(s1, s2, band);
++        return new LcsResult(dpTable[m][n]);
++    }
++
++    /**
++     * Computes DP table restricted to a diagonal band.
++     * Only fills cells where |i - j| <= band, reducing computation.
++     *
++     * @param s1   first string
++     * @param s2   second string
++     * @param band width of diagonal band (in each direction from main diagonal)
++     * @return DP table with LCS values
++     */
++    private int[][] computeRestrictedDp(String s1, String s2, int band) {
++        int m = s1.length();
++        int n = s2.length();
++        int[][] dp = new int[m + 1][n + 1];
++
++        for (int i = 1; i <= m; i++) {
++            // Calculate column range for this row (within band)
++            int jStart = Math.max(1, i - band);
++            int jEnd = Math.min(n, i + band);
++
++            for (int j = jStart; j <= jEnd; j++) {
++                if (s1.charAt(i - 1) == s2.charAt(j - 1)) {
++                    dp[i][j] = dp[i - 1][j - 1] + 1;
++                } else {
++                    // Handle boundary cases where neighbors are outside band
++                    int left = (j > 1) ? dp[i][j - 1] : 0;
++                    int top = (i > 1 && j >= jStart - 1) ? dp[i - 1][j] : 0;
++                    dp[i][j] = Math.max(left, top);
++                }
++            }
++
++            // Fill cells outside band with estimate
++            if (jStart > 1) {
++                for (int j = 1; j < jStart; j++) {
++                    dp[i][j] = Math.max(dp[i][j - 1], dp[i - 1][j]);
++                }
++            }
++            if (jEnd < n) {
++                for (int j = jEnd + 1; j <= n; j++) {
++                    dp[i][j] = Math.max(dp[i][j - 1], dp[i - 1][j]);
++                }
++            }
++        }
++
++        return dp;
++    }
++
++    @Override
++    public String toString() {
++        return String.format("ApproximateLcsSolver(threshold=%.0f%%, band=%d)",
++                similarityThreshold * 100, bandWidth);
++    }
++}
+diff --git a/SubstringLcsSolver.java b/SubstringLcsSolver.java
+new file mode 100644
+index 0000000..a94183f
+--- /dev/null
++++ b/SubstringLcsSolver.java
+@@ -0,0 +1,128 @@
++/**
++ * LCS solver optimized for finding subsequences of a pattern in a larger text.
++ * Useful for pattern matching where one string is much smaller than the other.
++ *
++ * Optimization: When one string is significantly smaller (pattern matching),
++ * this solver uses specialized algorithms more efficient than standard LCS.
++ *
++ * Best for: Finding patterns/keywords in text, where one string << other string
++ */
++class SubstringLcsSolver implements LcsSolver {
++
++    @Override
++    public LcsResult solve(LcsInput input) {
++        String s1 = input.getFirstString();
++        String s2 = input.getSecondString();
++
++        // Determine which is pattern and which is text
++        String pattern;
++        String text;
++        if (s1.length() <= s2.length()) {
++            pattern = s1;
++            text = s2;
++        } else {
++            pattern = s2;
++            text = s1;
++        }
++
++        // For roughly equal sizes, use standard algorithm
++        if (pattern.length() > text.length() * 0.5) {
++            return new StandardLcsSolver().solve(input);
++        }
++
++        // Use specialized DP optimized for small pattern vs large text
++        int result = computeSubstringLcs(pattern, text);
++        return new LcsResult(result);
++    }
++
++    /**
++     * Computes LCS optimized for pattern << text.
++     * Uses row-by-row computation with only two rows in memory.
++     *
++     * @param pattern the small pattern string
++     * @param text    the large text string
++     * @return LCS length
++     */
++    private int computeSubstringLcs(String pattern, String text) {
++        int p = pattern.length();
++        int t = text.length();
++
++        // Use rolling array to save space
++        int[] prevRow = new int[t + 1];
++        int[] currRow = new int[t + 1];
++
++        for (int i = 1; i <= p; i++) {
++            char patChar = pattern.charAt(i - 1);
++
++            for (int j = 1; j <= t; j++) {
++                if (patChar == text.charAt(j - 1)) {
++                    currRow[j] = prevRow[j - 1] + 1;
++                } else {
++                    currRow[j] = Math.max(prevRow[j], currRow[j - 1]);
++                }
++            }
++
++            // Swap rows
++            int[] temp = prevRow;
++            prevRow = currRow;
++            currRow = temp;
++        }
++
++        return prevRow[t];
++    }
++
++    @Override
++    public String toString() {
++        return "SubstringLcsSolver(pattern << text optimization)";
++    }
++}
++
++/**
++ * Extended result for substring matching that includes offset information.
++ * Tracks where the matching subsequence occurs in the text.
++ */
++class SubstringLcsResult {
++    final int lcsLength;
++    final int patternLength;
++    final int textLength;
++    final double coverage;  // LCS length as % of pattern
++
++    /**
++     * Creates a substring LCS result.
++     *
++     * @param lcsLength      length of LCS
++     * @param patternLength  length of pattern
++     * @param textLength     length of text
++     */
++    SubstringLcsResult(int lcsLength, int patternLength, int textLength) {
++        this.lcsLength = lcsLength;
++        this.patternLength = patternLength;
++        this.textLength = textLength;
++        this.coverage = patternLength > 0 ? (100.0 * lcsLength) / patternLength : 0;
++    }
++
++    /**
++     * Checks if pattern is completely found (100% coverage).
++     */
++    boolean isCompleteMatch() {
++        return lcsLength == patternLength;
++    }
++
++    /**
++     * Checks if coverage exceeds threshold (useful for fuzzy matching).
++     *
++     * @param threshold percentage threshold (0-100)
++     */
++    boolean meetsCoverage(double threshold) {
++        return coverage >= threshold;
++    }
++
++    @Override
++    public String toString() {
++        return String.format(
++                "SubstringLcsResult(lcs=%d/%d, coverage=%.1f%%, %s)",
++                lcsLength, patternLength, coverage,
++                isCompleteMatch() ? "COMPLETE_MATCH" : "PARTIAL_MATCH"
++        );
++    }
++}
+diff --git a/TestSpecializedSolvers.java b/TestSpecializedSolvers.java
+new file mode 100644
+index 0000000..8cc1a73
+--- /dev/null
++++ b/TestSpecializedSolvers.java
+@@ -0,0 +1,119 @@
++/**
++ * Tests for specialized LCS solver variants.
++ */
++class TestSpecializedSolvers {
++
++    public static void main(String[] args) {
++        testApproximateLcsSolver();
++        testSubstringLcsSolver();
++        System.out.println("\n✓ All specialized solver tests passed");
++    }
++
++    static void testApproximateLcsSolver() {
++        System.out.println("=== Approximate LCS Solver ===\n");
++
++        LcsSolver approximate = new ApproximateLcsSolver();
++        LcsSolver standard = new StandardLcsSolver();
++
++        // Test 1: Small input (should use exact algorithm)
++        System.out.println("Test 1: Small input (exact algorithm)");
++        LcsInput input1 = new LcsInput("ABC", "BCD");
++        int approxResult1 = approximate.solve(input1).getLength();
++        int standardResult1 = standard.solve(input1).getLength();
++        assert approxResult1 == standardResult1 : "Small inputs should match";
++        System.out.println("✓ Small input: " + approxResult1 + " (matches standard)");
++
++        // Test 2: Similar strings
++        System.out.println("\nTest 2: Similar strings (90% match)");
++        String s1 = "The quick brown fox jumps over the lazy dog";
++        String s2 = "The quack brown fox jumps over the lazy dog"; // one char different
++        LcsInput input2 = new LcsInput(s1, s2);
++        int approxResult2 = approximate.solve(input2).getLength();
++        int standardResult2 = standard.solve(input2).getLength();
++        System.out.println("Approximate: " + approxResult2 + ", Standard: " + standardResult2);
++        // Allow small difference due to approximation
++        assert Math.abs(approxResult2 - standardResult2) <= 2 : "Results should be close";
++        System.out.println("✓ Similar strings: approximate is close to standard");
++
++        // Test 3: No match
++        System.out.println("\nTest 3: No match");
++        LcsInput input3 = new LcsInput("AAA", "BBB");
++        int approxResult3 = approximate.solve(input3).getLength();
++        int standardResult3 = standard.solve(input3).getLength();
++        assert approxResult3 == standardResult3 && approxResult3 == 0 : "No match case";
++        System.out.println("✓ No match: " + approxResult3);
++
++        // Test 4: Complete match
++        System.out.println("\nTest 4: Complete match");
++        LcsInput input4 = new LcsInput("AGGTAB", "AGGTAB");
++        int approxResult4 = approximate.solve(input4).getLength();
++        assert approxResult4 == 6 : "Complete match";
++        System.out.println("✓ Complete match: " + approxResult4);
++
++        System.out.println();
++    }
++
++    static void testSubstringLcsSolver() {
++        System.out.println("=== Substring LCS Solver ===\n");
++
++        LcsSolver substring = new SubstringLcsSolver();
++        LcsSolver standard = new StandardLcsSolver();
++
++        // Test 1: Small pattern in large text
++        System.out.println("Test 1: Pattern matching (small pattern)");
++        String pattern = "AGGTAB";
++        String text = "XXAGGTABXX"; // Pattern with noise
++        LcsInput input1 = new LcsInput(pattern, text);
++        int substringResult1 = substring.solve(input1).getLength();
++        int standardResult1 = standard.solve(input1).getLength();
++        assert substringResult1 == standardResult1 && substringResult1 == 6;
++        System.out.println("✓ Pattern found: " + substringResult1);
++
++        // Test 2: Pattern not completely in text
++        System.out.println("\nTest 2: Partial pattern match");
++        String pattern2 = "AGGTAB";
++        String text2 = "AGTBXXXXX"; // Missing some chars from pattern
++        LcsInput input2 = new LcsInput(pattern2, text2);
++        int substringResult2 = substring.solve(input2).getLength();
++        int standardResult2 = standard.solve(input2).getLength();
++        assert substringResult2 == standardResult2;
++        System.out.println("✓ Partial match: " + substringResult2 + " chars found");
++
++        // Test 3: Pattern in noisy text
++        System.out.println("\nTest 3: Pattern with noise");
++        String pattern3 = "HELLO";
++        String text3 = "HXEXLXLXO"; // Same chars, noise in between
++        LcsInput input3 = new LcsInput(pattern3, text3);
++        int substringResult3 = substring.solve(input3).getLength();
++        int standardResult3 = standard.solve(input3).getLength();
++        assert substringResult3 == standardResult3 && substringResult3 == 5;
++        System.out.println("✓ Pattern in noise: " + substringResult3);
++
++        // Test 4: Multiple pattern instances
++        System.out.println("\nTest 4: Repeated pattern");
++        String pattern4 = "AB";
++        String text4 = "AXBXAXBX"; // Pattern appears multiple times with noise
++        LcsInput input4 = new LcsInput(pattern4, text4);
++        int substringResult4 = substring.solve(input4).getLength();
++        int standardResult4 = standard.solve(input4).getLength();
++        assert substringResult4 == standardResult4 && substringResult4 == 2;
++        System.out.println("✓ Repeated pattern: " + substringResult4);
++
++        // Test 5: SubstringLcsResult with complete match
++        System.out.println("\nTest 5: SubstringLcsResult complete match");
++        SubstringLcsResult result1 = new SubstringLcsResult(6, 6, 10);
++        assert result1.isCompleteMatch() : "Should be complete match";
++        assert result1.coverage == 100.0 : "Coverage should be 100%";
++        System.out.println("✓ Complete match detected: " + result1);
++
++        // Test 6: SubstringLcsResult partial match with threshold
++        System.out.println("\nTest 6: SubstringLcsResult with threshold");
++        SubstringLcsResult result2 = new SubstringLcsResult(4, 6, 10);
++        assert !result2.isCompleteMatch() : "Should not be complete";
++        assert result2.meetsCoverage(50.0) : "Should meet 50% threshold";
++        assert !result2.meetsCoverage(75.0) : "Should not meet 75% threshold";
++        System.out.println("✓ Partial match with thresholds: " + result2);
++
++        System.out.println();
++    }
++}

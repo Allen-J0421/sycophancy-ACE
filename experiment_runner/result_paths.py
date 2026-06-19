@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+_STAMP_RE = re.compile(r"^(\d{8}T\d{6}Z)")
 
 LOGS_DIR = "logs"
 SIGNALS_DIR = "signals"
@@ -48,6 +51,39 @@ def log_csv_path(exp_dir: Path, stamp: str, model_slug: str) -> Path:
 
 def artifacts_dir(exp_dir: Path, stamp: str, model_slug: str) -> Path:
     return exp_dir / f"{stamp}-{model_slug}"
+
+
+def prompt_txt_path(
+    exp_dir: Path,
+    stamp: str,
+    user_agent_slug: str,
+    coding_slug: str,
+) -> Path:
+    """User-agent prompt transcript, sibling of the -log.csv in logs/.
+
+    e.g. logs/20260618T031405Z-gemini-3.1-flash-lite_gpt-5.5_prompt.txt
+    """
+    return logs_dir(exp_dir) / f"{stamp}-{user_agent_slug}_{coding_slug}_prompt.txt"
+
+
+def find_prompt_txt_for_csv(csv_path: Path) -> Path | None:
+    """Locate the new-layout prompt.txt for a given -log.csv (new layout only).
+
+    The user-agent model slug is unknown on the read side, so glob it. Returns
+    None when no matching file exists.
+    """
+    name = csv_path.name
+    match = _STAMP_RE.match(name)
+    if not match:
+        return None
+    stamp = match.group(1)
+    coding_slug = stamp_from_log_csv(csv_path)[len(stamp) + 1 :]  # strip "<stamp>-"
+    if not coding_slug:
+        return None
+    matches = sorted(
+        logs_dir(exp_dir_for_csv(csv_path)).glob(f"{stamp}-*_{coding_slug}_prompt.txt")
+    )
+    return matches[0] if matches else None
 
 
 def artifacts_dir_for_csv(csv_path: Path) -> Path:

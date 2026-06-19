@@ -18,7 +18,8 @@ from experiment_runner.iteration import run_iteration
 from experiment_runner.models import ExperimentConfig, IterationResult, PrompterTurnInput, agent_run_ok
 from experiment_runner.prompter import extract_final_agent_message
 from experiment_runner.prompt_source import PromptSource
-from experiment_runner.util import eprint
+from experiment_runner.result_paths import prompt_txt_path, stamp_from_log_csv
+from experiment_runner.util import eprint, sanitize_slug
 
 
 class ExperimentRunner:
@@ -101,6 +102,17 @@ class ExperimentRunner:
             prev_sha = result.commit_sha
             yield result
 
+    def _prompt_txt_path(self):
+        """Logs-folder path for the user-agent prompt transcript (prompter mode only).
+
+        e.g. logs/<stamp>-<gemini-slug>_<coding-slug>_prompt.txt, sibling of the -log.csv.
+        """
+        coding_slug = sanitize_slug(self.config.effective_model)
+        ua_slug = sanitize_slug(self.config.prompter_config.model)
+        exp_dir = self.config.results_csv.parent.parent  # logs/<csv> -> <exp>
+        stamp = stamp_from_log_csv(self.config.results_csv)[: -(len(coding_slug) + 1)]
+        return prompt_txt_path(exp_dir, stamp, ua_slug, coding_slug)
+
     def write_log(self) -> int:
         """Returns the number of iterations where the coding agent did not complete successfully."""
         use_prompter = self.config.prompter and self.config.prompter_config is not None
@@ -113,6 +125,7 @@ class ExperimentRunner:
             self.prompt_source.prepare(codebase_snapshot=snapshot)
         agent_failures = 0
         jsonl_name = agent_jsonl_filename(self.config.agent)
+        prompt_path = self._prompt_txt_path() if use_prompter else None
 
         with self.config.results_csv.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
@@ -125,15 +138,15 @@ class ExperimentRunner:
                         branch=self.config.branch,
                     )
                 )
-                if use_prompter and result.prompt_text:
+                if prompt_path is not None and result.prompt_text:
                     append_prompt_turn(
-                        self.config.artifacts_dir,
+                        prompt_path,
                         result.number,
                         result.prompt_text,
                     )
                     if result.clarification_prompt_text:
                         append_clarification_reply(
-                            self.config.artifacts_dir,
+                            prompt_path,
                             result.number,
                             result.clarification_prompt_text,
                         )

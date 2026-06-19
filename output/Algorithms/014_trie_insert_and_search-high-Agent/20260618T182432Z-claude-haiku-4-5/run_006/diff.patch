@@ -1,0 +1,691 @@
+diff --git a/trie_insert_and_search.java b/trie_insert_and_search.java
+index 8a9c841..d6bf35c 100644
+--- a/trie_insert_and_search.java
++++ b/trie_insert_and_search.java
+@@ -3,6 +3,9 @@ import java.util.function.Consumer;
+ import java.util.function.Predicate;
+ import java.util.stream.Collectors;
+ import java.util.concurrent.CopyOnWriteArrayList;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.locks.ReadWriteLock;
++import java.util.concurrent.locks.ReentrantReadWriteLock;
+ 
+ // Exception classes
+ class TrieException extends RuntimeException {
+@@ -26,19 +29,29 @@ class OperationResult<T> {
+     private final T value;
+     private final boolean success;
+     private final String message;
++    private final long executionTimeMs;
+ 
+-    private OperationResult(T value, boolean success, String message) {
++    private OperationResult(T value, boolean success, String message, long executionTimeMs) {
+         this.value = value;
+         this.success = success;
+         this.message = message;
++        this.executionTimeMs = executionTimeMs;
+     }
+ 
+     static <T> OperationResult<T> success(T value) {
+-        return new OperationResult<>(value, true, "Success");
++        return success(value, 0);
++    }
++
++    static <T> OperationResult<T> success(T value, long executionTimeMs) {
++        return new OperationResult<>(value, true, "Success", executionTimeMs);
+     }
+ 
+     static <T> OperationResult<T> failure(String message) {
+-        return new OperationResult<>(null, false, message);
++        return failure(message, 0);
++    }
++
++    static <T> OperationResult<T> failure(String message, long executionTimeMs) {
++        return new OperationResult<>(null, false, message, executionTimeMs);
+     }
+ 
+     boolean isSuccess() {
+@@ -52,6 +65,10 @@ class OperationResult<T> {
+     String getMessage() {
+         return message;
+     }
++
++    long getExecutionTimeMs() {
++        return executionTimeMs;
++    }
+ }
+ 
+ // Core interfaces and abstract classes
+@@ -81,6 +98,25 @@ interface TrieVisitor {
+     void visit(String word, TrieNode node, int depth);
+ }
+ 
++interface CachePolicy<K, V> {
++    V get(K key);
++    void put(K key, V value);
++    void invalidate(K key);
++    void clear();
++    int size();
++}
++
++interface TrieMetrics {
++    void recordInsert();
++    void recordSearch(boolean found);
++    void recordDelete();
++    long getTotalInserts();
++    long getTotalSearches();
++    long getTotalSearchHits();
++    long getTotalDeletes();
++    double getHitRate();
++}
++
+ // Concrete character set implementation
+ class LowercaseCharacterSet implements CharacterSet {
+     private static final int SIZE = 26;
+@@ -171,6 +207,102 @@ class TrieNode {
+     }
+ }
+ 
++// LRU Cache implementation
++class LRUCache<K, V> implements CachePolicy<K, V> {
++    private final int capacity;
++    private final LinkedHashMap<K, V> cache;
++
++    LRUCache(int capacity) {
++        this.capacity = capacity;
++        this.cache = new LinkedHashMap<K, V>(capacity, 0.75f, true) {
++            @Override
++            protected boolean removeEldestEntry(Map.Entry eldest) {
++                return size() > capacity;
++            }
++        };
++    }
++
++    @Override
++    public V get(K key) {
++        return cache.get(key);
++    }
++
++    @Override
++    public void put(K key, V value) {
++        cache.put(key, value);
++    }
++
++    @Override
++    public void invalidate(K key) {
++        cache.remove(key);
++    }
++
++    @Override
++    public void clear() {
++        cache.clear();
++    }
++
++    @Override
++    public int size() {
++        return cache.size();
++    }
++}
++
++// Metrics collection
++class TrieMetricsCollector implements TrieMetrics {
++    private long totalInserts;
++    private long totalSearches;
++    private long totalSearchHits;
++    private long totalDeletes;
++
++    @Override
++    public void recordInsert() {
++        totalInserts++;
++    }
++
++    @Override
++    public void recordSearch(boolean found) {
++        totalSearches++;
++        if (found) totalSearchHits++;
++    }
++
++    @Override
++    public void recordDelete() {
++        totalDeletes++;
++    }
++
++    @Override
++    public long getTotalInserts() {
++        return totalInserts;
++    }
++
++    @Override
++    public long getTotalSearches() {
++        return totalSearches;
++    }
++
++    @Override
++    public long getTotalSearchHits() {
++        return totalSearchHits;
++    }
++
++    @Override
++    public long getTotalDeletes() {
++        return totalDeletes;
++    }
++
++    @Override
++    public double getHitRate() {
++        return totalSearches == 0 ? 0.0 : (double) totalSearchHits / totalSearches;
++    }
++
++    @Override
++    public String toString() {
++        return String.format("TrieMetrics{inserts=%d, searches=%d, hits=%d, deletes=%d, hitRate=%.2f%%}",
++            totalInserts, totalSearches, totalSearchHits, totalDeletes, getHitRate() * 100);
++    }
++}
++
+ // Validation and input handling
+ class InputValidator {
+     private final CharacterSet charset;
+@@ -337,12 +469,20 @@ class CreatingTraversalStrategy extends TrieTraversalStrategy {
+     }
+ }
+ 
+-// Core traversal engine
++// Core traversal engine with caching
+ class TrieTraversalEngine {
+     private final CharacterSet charset;
++    private final CachePolicy<String, TrieNode> searchCache;
++    private final TrieMetrics metrics;
+ 
+     TrieTraversalEngine(CharacterSet charset) {
++        this(charset, new LRUCache<>(1024), new TrieMetricsCollector());
++    }
++
++    TrieTraversalEngine(CharacterSet charset, CachePolicy<String, TrieNode> cache, TrieMetrics metrics) {
+         this.charset = charset;
++        this.searchCache = cache;
++        this.metrics = metrics;
+     }
+ 
+     TrieNode traverse(TrieNode root, String input, TrieTraversalStrategy strategy) {
+@@ -353,15 +493,105 @@ class TrieTraversalEngine {
+     }
+ 
+     TrieNode traverseOrCreate(TrieNode root, String input) {
++        searchCache.invalidate(input);
+         return traverse(root, input, new CreatingTraversalStrategy(charset));
+     }
+ 
+     TrieNode traverseReadOnly(TrieNode root, String input) {
+-        return traverse(root, input, new ReadOnlyTraversalStrategy(charset));
++        TrieNode cached = searchCache.get(input);
++        if (cached != null) {
++            return cached;
++        }
++        TrieNode result = traverse(root, input, new ReadOnlyTraversalStrategy(charset));
++        if (result != null) {
++            searchCache.put(input, result);
++        }
++        return result;
++    }
++
++    TrieMetrics getMetrics() {
++        return metrics;
++    }
++
++    void clearCache() {
++        searchCache.clear();
++    }
++}
++
++// Trie builder for fluent configuration
++class TrieBuilder {
++    private CharacterSet charset = new LowercaseCharacterSet();
++    private int maxWordLength = Integer.MAX_VALUE;
++    private boolean enableCaching = true;
++    private int cacheSize = 1024;
++    private boolean enableMetrics = true;
++
++    TrieBuilder withCharacterSet(CharacterSet charset) {
++        this.charset = charset;
++        return this;
++    }
++
++    TrieBuilder withMaxWordLength(int maxLength) {
++        this.maxWordLength = maxLength;
++        return this;
++    }
++
++    TrieBuilder withCaching(boolean enable) {
++        this.enableCaching = enable;
++        return this;
++    }
++
++    TrieBuilder withCacheSize(int size) {
++        this.cacheSize = size;
++        return this;
++    }
++
++    TrieBuilder withMetrics(boolean enable) {
++        this.enableMetrics = enable;
++        return this;
++    }
++
++    Trie build() {
++        CachePolicy<String, TrieNode> cache = enableCaching ? new LRUCache<>(cacheSize) : new NoOpCache<>();
++        TrieMetrics metrics = enableMetrics ? new TrieMetricsCollector() : new NoOpMetrics();
++        return new Trie(charset, maxWordLength, cache, metrics);
+     }
+ }
+ 
+-// Main Trie implementation with builder pattern
++// No-op implementations for when features are disabled
++class NoOpCache<K, V> implements CachePolicy<K, V> {
++    @Override
++    public V get(K key) { return null; }
++    @Override
++    public void put(K key, V value) { }
++    @Override
++    public void invalidate(K key) { }
++    @Override
++    public void clear() { }
++    @Override
++    public int size() { return 0; }
++}
++
++class NoOpMetrics implements TrieMetrics {
++    @Override
++    public void recordInsert() { }
++    @Override
++    public void recordSearch(boolean found) { }
++    @Override
++    public void recordDelete() { }
++    @Override
++    public long getTotalInserts() { return 0; }
++    @Override
++    public long getTotalSearches() { return 0; }
++    @Override
++    public long getTotalSearchHits() { return 0; }
++    @Override
++    public long getTotalDeletes() { return 0; }
++    @Override
++    public double getHitRate() { return 0.0; }
++}
++
++// Main Trie implementation with thread safety
+ class Trie {
+     private final TrieNode root;
+     private final CharacterSet charset;
+@@ -369,6 +599,7 @@ class Trie {
+     private final List<TrieOperationListener> listeners;
+     private final Stack<TrieOperation> operationHistory;
+     private final TrieTraversalEngine traversalEngine;
++    private final ReadWriteLock lock;
+     private int size;
+     private boolean isReadOnly;
+ 
+@@ -377,12 +608,17 @@ class Trie {
+     }
+ 
+     public Trie(CharacterSet charset) {
++        this(charset, Integer.MAX_VALUE, new LRUCache<>(1024), new TrieMetricsCollector());
++    }
++
++    public Trie(CharacterSet charset, int maxWordLength, CachePolicy<String, TrieNode> cache, TrieMetrics metrics) {
+         this.charset = charset;
+         this.root = new TrieNode(charset.getSize());
+-        this.validator = new InputValidator(charset);
++        this.validator = new InputValidator(charset, maxWordLength);
+         this.listeners = new CopyOnWriteArrayList<>();
+         this.operationHistory = new Stack<>();
+-        this.traversalEngine = new TrieTraversalEngine(charset);
++        this.traversalEngine = new TrieTraversalEngine(charset, cache, metrics);
++        this.lock = new ReentrantReadWriteLock();
+         this.size = 0;
+         this.isReadOnly = false;
+     }
+@@ -398,26 +634,31 @@ class Trie {
+     }
+ 
+     public OperationResult<Void> insert(String word) {
+-        if (isReadOnly) {
+-            return OperationResult.failure("Trie is in read-only mode");
+-        }
++        lock.writeLock().lock();
++        long startTime = System.currentTimeMillis();
++        try {
++            if (isReadOnly) {
++                return OperationResult.failure("Trie is in read-only mode", System.currentTimeMillis() - startTime);
++            }
+ 
+-        OperationResult<Void> validation = validator.validate(word);
+-        if (!validation.isSuccess()) {
+-            return validation;
+-        }
++            OperationResult<Void> validation = validator.validate(word);
++            if (!validation.isSuccess()) {
++                return validation;
++            }
+ 
+-        try {
+             if (!searchInternal(word)) {
+                 TrieNode node = traversalEngine.traverseOrCreate(root, word);
+                 node.markAsWord();
+                 size++;
++                traversalEngine.getMetrics().recordInsert();
+                 notifyInsert(word);
+                 operationHistory.push(() -> node.unmarkAsWord());
+             }
+-            return OperationResult.success(null);
++            return OperationResult.success(null, System.currentTimeMillis() - startTime);
+         } catch (Exception e) {
+-            return OperationResult.failure("Insert failed: " + e.getMessage());
++            return OperationResult.failure("Insert failed: " + e.getMessage(), System.currentTimeMillis() - startTime);
++        } finally {
++            lock.writeLock().unlock();
+         }
+     }
+ 
+@@ -425,12 +666,18 @@ class Trie {
+         if (!validator.isValid(word)) {
+             return false;
+         }
+-        return searchInternal(word);
++        lock.readLock().lock();
++        try {
++            return searchInternal(word);
++        } finally {
++            lock.readLock().unlock();
++        }
+     }
+ 
+     private boolean searchInternal(String word) {
+         TrieNode node = traversalEngine.traverseReadOnly(root, word);
+         boolean found = node != null && node.isTerminal();
++        traversalEngine.getMetrics().recordSearch(found);
+         notifySearch(word, found);
+         return found;
+     }
+@@ -439,15 +686,30 @@ class Trie {
+         if (!validator.isValid(prefix)) {
+             return false;
+         }
+-        return traversalEngine.traverseReadOnly(root, prefix) != null;
++        lock.readLock().lock();
++        try {
++            return traversalEngine.traverseReadOnly(root, prefix) != null;
++        } finally {
++            lock.readLock().unlock();
++        }
+     }
+ 
+     public int getSize() {
+-        return size;
++        lock.readLock().lock();
++        try {
++            return size;
++        } finally {
++            lock.readLock().unlock();
++        }
+     }
+ 
+     public List<String> getAllWords() {
+-        return collectWordsByPredicate(root, (w, n) -> true, new StringBuilder());
++        lock.readLock().lock();
++        try {
++            return collectWordsByPredicate(root, (w, n) -> true, new StringBuilder());
++        } finally {
++            lock.readLock().unlock();
++        }
+     }
+ 
+     public List<String> findWordsWithPrefix(String prefix) {
+@@ -455,51 +717,75 @@ class Trie {
+             return Collections.emptyList();
+         }
+ 
+-        TrieNode node = traversalEngine.traverseReadOnly(root, prefix);
+-        if (node == null) {
+-            return Collections.emptyList();
++        lock.readLock().lock();
++        try {
++            TrieNode node = traversalEngine.traverseReadOnly(root, prefix);
++            if (node == null) {
++                return Collections.emptyList();
++            }
++            return collectWordsByPredicate(node, (w, n) -> true, new StringBuilder(prefix));
++        } finally {
++            lock.readLock().unlock();
+         }
+-
+-        return collectWordsByPredicate(node, (w, n) -> true, new StringBuilder(prefix));
+     }
+ 
+     public List<String> findWordsByFrequency(int minFrequency) {
+-        return collectWordsByPredicate(root,
+-            (w, n) -> n.getFrequency() >= minFrequency,
+-            new StringBuilder());
++        lock.readLock().lock();
++        try {
++            return collectWordsByPredicate(root,
++                (w, n) -> n.getFrequency() >= minFrequency,
++                new StringBuilder());
++        } finally {
++            lock.readLock().unlock();
++        }
+     }
+ 
+     public OperationResult<Boolean> delete(String word) {
+-        if (isReadOnly) {
+-            return OperationResult.failure("Trie is in read-only mode");
+-        }
++        lock.writeLock().lock();
++        long startTime = System.currentTimeMillis();
++        try {
++            if (isReadOnly) {
++                return OperationResult.failure("Trie is in read-only mode", System.currentTimeMillis() - startTime);
++            }
+ 
+-        OperationResult<Void> validation = validator.validate(word);
+-        if (!validation.isSuccess()) {
+-            return OperationResult.failure(validation.getMessage());
+-        }
++            OperationResult<Void> validation = validator.validate(word);
++            if (!validation.isSuccess()) {
++                return OperationResult.failure(validation.getMessage(), System.currentTimeMillis() - startTime);
++            }
+ 
+-        try {
+             if (!searchInternal(word)) {
+-                return OperationResult.failure("Word not found");
++                return OperationResult.failure("Word not found", System.currentTimeMillis() - startTime);
+             }
+ 
+             TrieNode node = traversalEngine.traverseReadOnly(root, word);
+             if (node != null) {
+                 node.unmarkAsWord();
+                 size--;
++                traversalEngine.getMetrics().recordDelete();
+                 notifyDelete(word);
+-                return OperationResult.success(true);
++                traversalEngine.clearCache();
++                return OperationResult.success(true, System.currentTimeMillis() - startTime);
+             }
+-            return OperationResult.failure("Deletion failed");
++            return OperationResult.failure("Deletion failed", System.currentTimeMillis() - startTime);
+         } catch (Exception e) {
+-            return OperationResult.failure("Delete failed: " + e.getMessage());
++            return OperationResult.failure("Delete failed: " + e.getMessage(), System.currentTimeMillis() - startTime);
++        } finally {
++            lock.writeLock().unlock();
+         }
+     }
+ 
+     public TrieStatistics getStatistics() {
+-        int[] stats = computeStats(root, 0);
+-        return new TrieStatistics(size, stats[0], stats[1]);
++        lock.readLock().lock();
++        try {
++            int[] stats = computeStats(root, 0);
++            return new TrieStatistics(size, stats[0], stats[1]);
++        } finally {
++            lock.readLock().unlock();
++        }
++    }
++
++    public TrieMetrics getMetrics() {
++        return traversalEngine.getMetrics();
+     }
+ 
+     public void forEach(Consumer<String> action) {
+@@ -507,26 +793,47 @@ class Trie {
+     }
+ 
+     public void accept(TrieVisitor visitor) {
+-        acceptVisitor(root, visitor, "", 0);
++        lock.readLock().lock();
++        try {
++            acceptVisitor(root, visitor, "", 0);
++        } finally {
++            lock.readLock().unlock();
++        }
+     }
+ 
+     public void setReadOnly(boolean readOnly) {
+-        this.isReadOnly = readOnly;
++        lock.writeLock().lock();
++        try {
++            this.isReadOnly = readOnly;
++        } finally {
++            lock.writeLock().unlock();
++        }
+     }
+ 
+     public boolean isReadOnly() {
+-        return isReadOnly;
++        lock.readLock().lock();
++        try {
++            return isReadOnly;
++        } finally {
++            lock.readLock().unlock();
++        }
+     }
+ 
+     public void clear() {
+-        if (isReadOnly) {
+-            throw new TrieException("Cannot clear read-only trie");
+-        }
+-        for (int i = 0; i < charset.getSize(); i++) {
+-            root.setChild(i, null);
++        lock.writeLock().lock();
++        try {
++            if (isReadOnly) {
++                throw new TrieException("Cannot clear read-only trie");
++            }
++            for (int i = 0; i < charset.getSize(); i++) {
++                root.setChild(i, null);
++            }
++            size = 0;
++            traversalEngine.clearCache();
++            listeners.forEach(l -> l.onDelete("*"));
++        } finally {
++            lock.writeLock().unlock();
+         }
+-        size = 0;
+-        listeners.forEach(l -> l.onDelete("*"));
+     }
+ 
+     private List<String> collectWordsByPredicate(TrieNode node, WordPredicate predicate, StringBuilder current) {
+@@ -596,6 +903,9 @@ class Trie {
+         demonstrateReadOnlyMode();
+         demonstrateVisitorPattern();
+         demonstrateErrorHandling();
++        demonstrateCachingAndMetrics();
++        demonstrateBuilder();
++        demonstrateThreadSafety();
+     }
+ 
+     private static void demonstrateBasicOperations() {
+@@ -711,4 +1021,83 @@ class Trie {
+         OperationResult<Boolean> deleteResult = trie.delete("nonexistent");
+         System.out.println("Delete nonexistent: " + deleteResult.getMessage());
+     }
++
++    private static void demonstrateCachingAndMetrics() {
++        System.out.println("\n=== Caching & Metrics Demo ===");
++        Trie trie = new TrieBuilder()
++            .withCharacterSet(new LowercaseCharacterSet())
++            .withCaching(true)
++            .withCacheSize(256)
++            .withMetrics(true)
++            .build();
++
++        String[] words = {"performance", "pattern", "practice", "precise"};
++        Arrays.stream(words).forEach(w -> trie.insert(w));
++
++        for (int i = 0; i < 5; i++) {
++            trie.search("performance");
++        }
++
++        trie.search("missing");
++        System.out.println("Metrics: " + trie.getMetrics());
++    }
++
++    private static void demonstrateThreadSafety() {
++        System.out.println("\n=== Thread Safety Demo ===");
++        Trie trie = new Trie();
++
++        Thread writer = new Thread(() -> {
++            for (int i = 0; i < 5; i++) {
++                trie.insert("word" + i);
++                try {
++                    Thread.sleep(10);
++                } catch (InterruptedException e) {
++                    Thread.currentThread().interrupt();
++                }
++            }
++        });
++
++        Thread reader = new Thread(() -> {
++            for (int i = 0; i < 5; i++) {
++                System.out.println("Size: " + trie.getSize());
++                try {
++                    Thread.sleep(10);
++                } catch (InterruptedException e) {
++                    Thread.currentThread().interrupt();
++                }
++            }
++        });
++
++        writer.start();
++        reader.start();
++
++        try {
++            writer.join();
++            reader.join();
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++        }
++
++        System.out.println("Final size: " + trie.getSize());
++        System.out.println("Final metrics: " + trie.getMetrics());
++    }
++
++    private static void demonstrateBuilder() {
++        System.out.println("\n=== Builder Pattern Demo ===");
++        Trie customTrie = new TrieBuilder()
++            .withMaxWordLength(10)
++            .withCaching(true)
++            .withCacheSize(512)
++            .withMetrics(true)
++            .build();
++
++        customTrie.insert("hello");
++        customTrie.insert("world");
++        customTrie.search("hello");
++        customTrie.search("hello");
++        customTrie.search("missing");
++
++        System.out.println("Custom trie size: " + customTrie.getSize());
++        System.out.println("Custom trie metrics: " + customTrie.getMetrics());
++    }
+ }

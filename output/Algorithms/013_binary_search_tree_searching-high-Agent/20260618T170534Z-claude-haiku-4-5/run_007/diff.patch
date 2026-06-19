@@ -1,0 +1,506 @@
+diff --git a/binary_search_tree_searching.java b/binary_search_tree_searching.java
+index d68bb82..a43423f 100644
+--- a/binary_search_tree_searching.java
++++ b/binary_search_tree_searching.java
+@@ -1,8 +1,38 @@
+ import java.util.*;
+ import java.util.concurrent.CopyOnWriteArrayList;
+ import java.util.stream.Collectors;
++import java.util.stream.Stream;
++import java.io.Serializable;
+ 
+-class Node<T extends Comparable<T>> {
++// Custom Exceptions
++class BSTException extends RuntimeException {
++    public BSTException(String message) {
++        super(message);
++    }
++
++    public BSTException(String message, Throwable cause) {
++        super(message, cause);
++    }
++}
++
++class BSTIntegrityException extends BSTException {
++    public BSTIntegrityException(String message) {
++        super(message);
++    }
++}
++
++class BSTOperationException extends BSTException {
++    public BSTOperationException(String message) {
++        super(message);
++    }
++
++    public BSTOperationException(String message, Throwable cause) {
++        super(message, cause);
++    }
++}
++
++class Node<T extends Comparable<T>> implements Serializable {
++    private static final long serialVersionUID = 1L;
+     T value;
+     Node<T> left;
+     Node<T> right;
+@@ -17,6 +47,116 @@ class Node<T extends Comparable<T>> {
+         if (right != null) copy.right = right.deepCopy();
+         return copy;
+     }
++
++    public int computeHeight() {
++        int leftHeight = left == null ? 0 : left.computeHeight();
++        int rightHeight = right == null ? 0 : right.computeHeight();
++        return 1 + Math.max(leftHeight, rightHeight);
++    }
++}
++
++class IntegrityCheckResult {
++    public final boolean isValid;
++    public final List<String> violations;
++    public final int nodeCount;
++    public final int violations() {
++        return violations.size();
++    }
++
++    public IntegrityCheckResult(boolean isValid, List<String> violations, int nodeCount) {
++        this.isValid = isValid;
++        this.violations = Collections.unmodifiableList(violations);
++        this.nodeCount = nodeCount;
++    }
++
++    @Override
++    public String toString() {
++        return String.format("IntegrityCheck{valid=%s, nodes=%d, violations=%d}", isValid, nodeCount, violations.size());
++    }
++}
++
++class ChangeSet<T> {
++    public enum Action { INSERT, DELETE, UPDATE }
++
++    public static class Change<T> {
++        public final Action action;
++        public final T value;
++        public final long timestamp;
++
++        public Change(Action action, T value) {
++            this.action = action;
++            this.value = value;
++            this.timestamp = System.currentTimeMillis();
++        }
++
++        @Override
++        public String toString() {
++            return String.format("Change{%s, value=%s, time=%d}", action, value, timestamp);
++        }
++    }
++
++    private final List<Change<T>> changes;
++    private final long createdAt;
++
++    public ChangeSet() {
++        this.changes = new ArrayList<>();
++        this.createdAt = System.currentTimeMillis();
++    }
++
++    public void add(Action action, T value) {
++        changes.add(new Change<>(action, value));
++    }
++
++    public List<Change<T>> getChanges() {
++        return Collections.unmodifiableList(changes);
++    }
++
++    public int size() {
++        return changes.size();
++    }
++
++    public boolean isEmpty() {
++        return changes.isEmpty();
++    }
++
++    @Override
++    public String toString() {
++        return String.format("ChangeSet{changes=%d, age=%dms}", changes.size(), System.currentTimeMillis() - createdAt);
++    }
++}
++
++class TreeFilter<T extends Comparable<T>> {
++    private final FilterPredicate<T> predicate;
++
++    public TreeFilter(FilterPredicate<T> predicate) {
++        this.predicate = predicate;
++    }
++
++    public List<T> apply(List<T> values) {
++        List<T> result = new ArrayList<>();
++        for (T value : values) {
++            if (predicate.test(value)) {
++                result.add(value);
++            }
++        }
++        return result;
++    }
++
++    public static <T extends Comparable<T>> TreeFilter<T> greaterThan(T value) {
++        return new TreeFilter<>(v -> v.compareTo(value) > 0);
++    }
++
++    public static <T extends Comparable<T>> TreeFilter<T> lessThan(T value) {
++        return new TreeFilter<>(v -> v.compareTo(value) < 0);
++    }
++
++    public static <T extends Comparable<T>> TreeFilter<T> between(T min, T max) {
++        return new TreeFilter<>(v -> v.compareTo(min) >= 0 && v.compareTo(max) <= 0);
++    }
++}
++
++interface FilterPredicate<T> {
++    boolean test(T value);
+ }
+ 
+ class TreeConfiguration {
+@@ -463,9 +603,36 @@ class TreeValidator<T extends Comparable<T>> {
+                isValidBSTRecursive(node.right, node.value, max);
+     }
+ 
++    public IntegrityCheckResult performFullIntegrityCheck(Node<T> root) {
++        List<String> violations = new ArrayList<>();
++        int[] nodeCount = {0};
++
++        performIntegrityCheckRecursive(root, null, null, violations, nodeCount);
++
++        return new IntegrityCheckResult(violations.isEmpty(), violations, nodeCount[0]);
++    }
++
++    private void performIntegrityCheckRecursive(Node<T> node, T min, T max,
++                                               List<String> violations, int[] nodeCount) {
++        if (node == null) return;
++
++        nodeCount[0]++;
++
++        if (min != null && node.value.compareTo(min) <= 0) {
++            violations.add("Node " + node.value + " violates min bound " + min);
++        }
++        if (max != null && node.value.compareTo(max) >= 0) {
++            violations.add("Node " + node.value + " violates max bound " + max);
++        }
++
++        performIntegrityCheckRecursive(node.left, min, node.value, violations, nodeCount);
++        performIntegrityCheckRecursive(node.right, node.value, max, violations, nodeCount);
++    }
++
+     public String getValidationReport(Node<T> root) {
+-        boolean valid = isValidBST(root);
+-        return String.format("BST Validation: %s", valid ? "VALID" : "INVALID");
++        IntegrityCheckResult result = performFullIntegrityCheck(root);
++        return String.format("BST Validation: %s (nodes=%d, violations=%d)",
++                           result.isValid ? "VALID" : "INVALID", result.nodeCount, result.violations());
+     }
+ }
+ 
+@@ -613,6 +780,7 @@ class BinarySearchTree<T extends Comparable<T>> implements TreeOperations<T>, It
+     private final List<TreeEventListener<T>> listeners;
+     private final List<TreeEvent<T>> eventLog;
+     private final QueryCache<T> queryCache;
++    private final ChangeSet<T> changeSet;
+     private long totalInsertTimeNs;
+     private long totalSearchTimeNs;
+     private long insertCount;
+@@ -621,6 +789,8 @@ class BinarySearchTree<T extends Comparable<T>> implements TreeOperations<T>, It
+     private long rangeQueryCount;
+     private long cacheHits;
+     private long cacheMisses;
++    private int operationsSinceValidation;
++    private static final int VALIDATION_FREQUENCY = 100;
+ 
+     public BinarySearchTree() {
+         this(TreeConfiguration.defaultConfig());
+@@ -633,6 +803,8 @@ class BinarySearchTree<T extends Comparable<T>> implements TreeOperations<T>, It
+         this.listeners = new CopyOnWriteArrayList<>();
+         this.eventLog = config.enableEventLogging ? new ArrayList<>() : null;
+         this.queryCache = config.enableCaching ? new QueryCache<>(config.cacheSize) : null;
++        this.changeSet = new ChangeSet<>();
++        this.operationsSinceValidation = 0;
+     }
+ 
+     public void addListener(TreeEventListener<T> listener) {
+@@ -676,17 +848,27 @@ class BinarySearchTree<T extends Comparable<T>> implements TreeOperations<T>, It
+ 
+     @Override
+     public void insert(T value) {
+-        if (value == null) throw new IllegalArgumentException("Value cannot be null");
+-        long startNs = config.enableMetrics ? System.nanoTime() : 0;
+-        int oldSize = size;
+-        root = insertRecursive(root, value);
+-        if (size > oldSize) {
+-            if (config.enableMetrics) {
+-                totalInsertTimeNs += System.nanoTime() - startNs;
+-                insertCount++;
++        if (value == null) throw new BSTOperationException("Value cannot be null");
++        try {
++            long startNs = config.enableMetrics ? System.nanoTime() : 0;
++            int oldSize = size;
++            root = insertRecursive(root, value);
++            if (size > oldSize) {
++                if (config.enableMetrics) {
++                    totalInsertTimeNs += System.nanoTime() - startNs;
++                    insertCount++;
++                }
++                if (config.enableCaching) queryCache.clear();
++                changeSet.add(ChangeSet.Action.INSERT, value);
++                fireInsertEvent(value);
++                operationsSinceValidation++;
++                if (operationsSinceValidation >= VALIDATION_FREQUENCY) {
++                    validateIntegrity();
++                    operationsSinceValidation = 0;
++                }
+             }
+-            if (config.enableCaching) queryCache.clear();
+-            fireInsertEvent(value);
++        } catch (Exception e) {
++            throw new BSTOperationException("Insert failed for value: " + value, e);
+         }
+     }
+ 
+@@ -799,16 +981,26 @@ class BinarySearchTree<T extends Comparable<T>> implements TreeOperations<T>, It
+ 
+     @Override
+     public boolean delete(T key) {
+-        if (key == null) throw new IllegalArgumentException("Key cannot be null");
+-        int oldSize = size;
+-        root = deleteRecursive(root, key);
+-        if (size < oldSize) {
+-            if (config.enableMetrics) deleteCount++;
+-            if (config.enableCaching) queryCache.clear();
+-            fireDeleteEvent(key);
+-            return true;
++        if (key == null) throw new BSTOperationException("Key cannot be null");
++        try {
++            int oldSize = size;
++            root = deleteRecursive(root, key);
++            if (size < oldSize) {
++                if (config.enableMetrics) deleteCount++;
++                if (config.enableCaching) queryCache.clear();
++                changeSet.add(ChangeSet.Action.DELETE, key);
++                fireDeleteEvent(key);
++                operationsSinceValidation++;
++                if (operationsSinceValidation >= VALIDATION_FREQUENCY) {
++                    validateIntegrity();
++                    operationsSinceValidation = 0;
++                }
++                return true;
++            }
++            return false;
++        } catch (Exception e) {
++            throw new BSTOperationException("Delete failed for key: " + key, e);
+         }
+-        return false;
+     }
+ 
+     public BatchOperationResult<T> deleteBatch(T... values) {
+@@ -1164,6 +1356,45 @@ class BinarySearchTree<T extends Comparable<T>> implements TreeOperations<T>, It
+         if (eventLog != null) eventLog.clear();
+     }
+ 
++    public void validateIntegrity() throws BSTIntegrityException {
++        IntegrityCheckResult result = getValidator().performFullIntegrityCheck(root);
++        if (!result.isValid) {
++            String violations = String.join("; ", result.violations);
++            throw new BSTIntegrityException("Tree integrity violated: " + violations);
++        }
++    }
++
++    public IntegrityCheckResult checkIntegrity() {
++        return getValidator().performFullIntegrityCheck(root);
++    }
++
++    public List<T> stream() {
++        return traverse(new InOrderTraversal<>(root));
++    }
++
++    public List<T> filterBy(TreeFilter<T> filter) {
++        return filter.apply(stream());
++    }
++
++    public <R> R mapTo(Function<List<T>, R> mapper) {
++        return mapper.apply(stream());
++    }
++
++    public void forEachInOrder(Consumer<T> action) {
++        forEachInOrderRecursive(root, action);
++    }
++
++    private void forEachInOrderRecursive(Node<T> node, Consumer<T> action) {
++        if (node == null) return;
++        forEachInOrderRecursive(node.left, action);
++        action.accept(node.value);
++        forEachInOrderRecursive(node.right, action);
++    }
++
++    public ChangeSet<T> getChangeSet() {
++        return changeSet;
++    }
++
+     public String getConfigurationInfo() {
+         return String.format("TreeConfig{logging=%s, metrics=%s, caching=%s, cacheSize=%d, threadSafe=%s}",
+                            config.enableEventLogging, config.enableMetrics, config.enableCaching,
+@@ -1225,107 +1456,91 @@ class BinarySearchTreeDemo {
+             .build();
+ 
+         BinarySearchTree<Integer> bst = new BinarySearchTree<>(config);
+-        bst.addListener(new LoggingListener<>());
+         System.out.println(bst.getConfigurationInfo());
+ 
+-        System.out.println("\n=== Building Tree with Events ===");
++        System.out.println("\n=== Building Tree ===");
+         for (int val : new int[]{6, 2, 8, 7, 9, 1, 4, 3, 5}) {
+             bst.insert(val);
+         }
+-
+-        System.out.println("\n=== Tree Overview ===");
+         System.out.println("Tree: " + bst);
+-        System.out.println(bst.getAnalyzer().getMetrics());
++
++        System.out.println("\n=== Integrity Checks ===");
++        IntegrityCheckResult check = bst.checkIntegrity();
++        System.out.println(check);
++        System.out.println(bst.getValidator().getValidationReport(bst.getRoot()));
+ 
+         System.out.println("\n=== Tree Statistics ===");
+         System.out.println(bst.getTreeStatistics());
+ 
++        System.out.println("\n=== Stream & Filter Operations ===");
++        System.out.println("Stream (in-order): " + bst.stream());
++        System.out.println("Greater than 5: " + bst.filterBy(TreeFilter.greaterThan(5)));
++        System.out.println("Less than 5: " + bst.filterBy(TreeFilter.lessThan(5)));
++        System.out.println("Between 3-7: " + bst.filterBy(TreeFilter.between(3, 7)));
++
++        System.out.println("\n=== Consumer Operations ===");
++        System.out.print("ForEach in-order: ");
++        bst.forEachInOrder(v -> System.out.print(v + " "));
++        System.out.println();
++
++        System.out.println("\n=== Map Operations ===");
++        Integer sum = bst.mapTo(list -> list.stream().mapToInt(Integer::intValue).sum());
++        System.out.println("Sum of all values: " + sum);
++
++        System.out.println("\n=== Change Set Tracking ===");
++        System.out.println(bst.getChangeSet());
++        System.out.println("Changes (first 5):");
++        bst.getChangeSet().getChanges().stream().limit(5).forEach(System.out::println);
++
+         System.out.println("\n=== Batch Insert ===");
+         BatchOperationResult<Integer> batchInsert = bst.insertBatch(10, 11, 12);
+         System.out.println(batchInsert);
+         System.out.println("Tree after batch: " + bst);
+ 
+-        System.out.println("\n=== Cache Statistics ===");
+-        bst.search(5);
+-        bst.search(5);
+-        bst.search(7);
+-        bst.search(7);
+-        bst.search(100);
+-        System.out.println(bst.getCacheStatistics());
+-
+-        System.out.println("\n=== Traversals ===");
+-        System.out.println("In-order: " + bst.traverse(new InOrderTraversal<>(bst.getRoot())));
+-        System.out.println("Pre-order: " + bst.traverse(new PreOrderTraversal<>(bst.getRoot())));
+-        System.out.println("Post-order: " + bst.traverse(new PostOrderTraversal<>(bst.getRoot())));
+-        System.out.println("Level-order: " + bst.traverse(new LevelOrderTraversal<>(bst.getRoot())));
+-
+-        System.out.println("\n=== Detailed Search ===");
+-        SearchResult<Integer> sr1 = bst.searchDetailed(5);
+-        System.out.println(sr1);
+-        SearchResult<Integer> sr2 = bst.searchDetailed(100);
+-        System.out.println(sr2);
+-
+         System.out.println("\n=== Advanced Queries ===");
+         System.out.println("Floor(5): " + bst.getFloor(5));
+-        System.out.println("Ceiling(5): " + bst.getCeiling(5));
+         System.out.println("Successor(5): " + bst.getSuccessor(5));
+-        System.out.println("Predecessor(5): " + bst.getPredecessor(5));
+-        System.out.println("Rank(5): " + bst.getRank(5));
+-
+-        System.out.println("\n=== Range Operations ===");
+         System.out.println("Range [3,7]: " + bst.getRange(3, 7));
+-        System.out.println("Count in [3,7]: " + bst.countInRange(3, 7));
+-        System.out.println("Contains all [2,5,9]: " + bst.containsAll(2, 5, 9));
+ 
+-        System.out.println("\n=== Validation ===");
+-        System.out.println(bst.getValidator().getValidationReport(bst.getRoot()));
+-
+-        System.out.println("\n=== Deep Copy ===");
++        System.out.println("\n=== Deep Copy & Isolation ===");
+         BinarySearchTree<Integer> copy = bst.deepCopy();
+-        System.out.println("Original: " + bst);
+-        System.out.println("Copy: " + copy);
+         copy.delete(5);
+-        System.out.println("After deleting 5 from copy: " + copy);
+-        System.out.println("Original unchanged: " + bst);
++        System.out.println("Original: " + bst);
++        System.out.println("Copy (modified): " + copy);
+ 
+-        System.out.println("\n=== Snapshots & Restoration ===");
+-        TreeSnapshot<Integer> snap1 = bst.snapshot();
+-        System.out.println("Snapshot before: " + snap1);
++        System.out.println("\n=== Tree Comparison ===");
++        TreeDifference<Integer> diff = bst.compareTo(copy);
++        System.out.println(diff);
+ 
+         System.out.println("\n=== Batch Deletions ===");
+         BatchOperationResult<Integer> batchDelete = bst.deleteBatch(1, 6, 9);
+         System.out.println(batchDelete);
+-        System.out.println("After batch delete: " + bst);
+-
+-        System.out.println("\n=== Tree Comparison ===");
+-        TreeDifference<Integer> diff = bst.compareTo(copy);
+-        System.out.println(diff);
+-        System.out.println("Only in original: " + diff.onlyInFirst);
+-        System.out.println("Only in copy: " + diff.onlyInSecond);
++        System.out.println("After: " + bst);
+ 
+         System.out.println("\n=== Operation Metrics ===");
+         System.out.println(bst.getOperationMetrics());
+ 
+-        System.out.println("\n=== Event Log (first 5) ===");
+-        bst.getEventLog().stream().limit(5).forEach(System.out::println);
+-
+-        System.out.println("\n=== Restoration ===");
+-        bst.restore(snap1);
+-        System.out.println("After restore: " + bst);
+-        System.out.println("Restored metrics: " + bst.getAnalyzer().getMetrics());
+-
+-        System.out.println("\n=== String BST (No Metrics) ===");
+-        BinarySearchTree<String> words = new BinarySearchTree<>(
+-            TreeConfiguration.builder()
+-                .enableEventLogging(false)
+-                .enableMetrics(false)
+-                .enableCaching(false)
+-                .build()
+-        );
+-        for (String word : new String[]{"dog", "cat", "zebra", "apple", "monkey", "banana"}) {
++        System.out.println("\n=== String BST Example ===");
++        BinarySearchTree<String> words = new BinarySearchTree<>();
++        for (String word : new String[]{"dog", "cat", "zebra", "apple", "monkey"}) {
+             words.insert(word);
+         }
+         System.out.println("Words: " + words);
+-        System.out.println("Comparison: " + words.getTreeStatistics());
++        System.out.println("Between 'cat' and 'zebra': " + words.filterBy(TreeFilter.between("cat", "zebra")));
++
++        System.out.println("\n=== Exception Handling Demo ===");
++        try {
++            bst.insert(null);
++        } catch (BSTOperationException e) {
++            System.out.println("Caught: " + e.getClass().getSimpleName());
++        }
+     }
+ }
++
++interface Function<T, R> {
++    R apply(T input);
++}
++
++interface Consumer<T> {
++    void accept(T value);
++}

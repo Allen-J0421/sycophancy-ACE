@@ -1,0 +1,491 @@
+diff --git a/CachingStrategy.java b/CachingStrategy.java
+new file mode 100644
+index 0000000..f5a5ea5
+--- /dev/null
++++ b/CachingStrategy.java
+@@ -0,0 +1,47 @@
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++
++/**
++ * Decorator strategy that caches computation results based on input hash.
++ */
++public class CachingStrategy extends StrategyDecorator {
++    private final Map<Integer, List<Long>> cache = new HashMap<>();
++
++    public CachingStrategy(ComputationStrategy delegate) {
++        super(delegate);
++    }
++
++    @Override
++    public List<Long> compute(int[] arr) {
++        int hash = hashArray(arr);
++        if (cache.containsKey(hash)) {
++            return cache.get(hash);
++        }
++
++        List<Long> result = delegate.compute(arr);
++        cache.put(hash, result);
++        return result;
++    }
++
++    private int hashArray(int[] arr) {
++        int hash = 1;
++        for (int value : arr) {
++            hash = 31 * hash + value;
++        }
++        return hash;
++    }
++
++    public void clearCache() {
++        cache.clear();
++    }
++
++    public int getCacheSize() {
++        return cache.size();
++    }
++
++    @Override
++    public String getName() {
++        return "Cached " + delegate.getName();
++    }
++}
+diff --git a/CompositeListener.java b/CompositeListener.java
+index dfc60b4..b45da72 100644
+--- a/CompositeListener.java
++++ b/CompositeListener.java
+@@ -61,4 +61,13 @@ public class CompositeListener implements ComputationListener {
+             }
+         }
+     }
++
++    /**
++     * Checks if this composite has any listeners.
++     *
++     * @return true if listeners exist, false otherwise
++     */
++    public boolean hasListeners() {
++        return !listeners.isEmpty();
++    }
+ }
+diff --git a/LambdaListener.java b/LambdaListener.java
+new file mode 100644
+index 0000000..651a5b2
+--- /dev/null
++++ b/LambdaListener.java
+@@ -0,0 +1,64 @@
++import java.util.function.Consumer;
++
++/**
++ * Listener that accepts lambda expressions for event handling.
++ */
++public class LambdaListener extends AbstractListener {
++    private final Consumer<Integer> onStart;
++    private final Consumer<PrefixSum.PrefixSumResult> onComplete;
++    private final Consumer<Exception> onError;
++
++    public LambdaListener(Consumer<Integer> onStart,
++                         Consumer<PrefixSum.PrefixSumResult> onComplete,
++                         Consumer<Exception> onError) {
++        this.onStart = onStart;
++        this.onComplete = onComplete;
++        this.onError = onError;
++    }
++
++    @Override
++    protected void handleComputationStart(int arraySize) {
++        if (onStart != null) {
++            onStart.accept(arraySize);
++        }
++    }
++
++    @Override
++    protected void handleComputationComplete(PrefixSum.PrefixSumResult result) {
++        if (onComplete != null) {
++            onComplete.accept(result);
++        }
++    }
++
++    @Override
++    protected void handleComputationError(Exception exception) {
++        if (onError != null) {
++            onError.accept(exception);
++        }
++    }
++
++    public static class Builder {
++        private Consumer<Integer> onStart;
++        private Consumer<PrefixSum.PrefixSumResult> onComplete;
++        private Consumer<Exception> onError;
++
++        public Builder onStart(Consumer<Integer> handler) {
++            this.onStart = handler;
++            return this;
++        }
++
++        public Builder onComplete(Consumer<PrefixSum.PrefixSumResult> handler) {
++            this.onComplete = handler;
++            return this;
++        }
++
++        public Builder onError(Consumer<Exception> handler) {
++            this.onError = handler;
++            return this;
++        }
++
++        public LambdaListener build() {
++            return new LambdaListener(onStart, onComplete, onError);
++        }
++    }
++}
+diff --git a/PrefixSumBuilder.java b/PrefixSumBuilder.java
+new file mode 100644
+index 0000000..8bd7a8e
+--- /dev/null
++++ b/PrefixSumBuilder.java
+@@ -0,0 +1,79 @@
++/**
++ * Fluent builder for creating configured PrefixSum instances.
++ */
++public class PrefixSumBuilder {
++    private PrefixSumConfig config;
++    private ComputationStrategy strategy = new IterativeStrategy();
++    private final CompositeListener listeners = new CompositeListener();
++
++    public PrefixSumBuilder() {
++        this.config = PrefixSumConfig.defaults();
++    }
++
++    public PrefixSumBuilder withCaching() {
++        this.config = PrefixSumConfig.builder()
++            .withCache()
++            .build();
++        return this;
++    }
++
++    public PrefixSumBuilder withCacheClear() {
++        this.config = PrefixSumConfig.builder()
++            .withCache()
++            .withCacheClear()
++            .build();
++        return this;
++    }
++
++    public PrefixSumBuilder withMetrics() {
++        this.config = PrefixSumConfig.builder()
++            .withMetrics()
++            .build();
++        return this;
++    }
++
++    public PrefixSumBuilder withAllFeatures() {
++        this.config = PrefixSumConfig.builder()
++            .withCache()
++            .withCacheClear()
++            .withMetrics()
++            .build();
++        return this;
++    }
++
++    public PrefixSumBuilder withStrategy(ComputationStrategy strategy) {
++        this.strategy = strategy;
++        return this;
++    }
++
++    public PrefixSumBuilder withLogging() {
++        listeners.add(new LoggingListener());
++        return this;
++    }
++
++    public PrefixSumBuilder withTiming() {
++        listeners.add(new TimingListener());
++        return this;
++    }
++
++    public PrefixSumBuilder withListener(ComputationListener listener) {
++        listeners.add(listener);
++        return this;
++    }
++
++    public PrefixSumBuilder withLambdaListener(LambdaListener listener) {
++        listeners.add(listener);
++        return this;
++    }
++
++    public PrefixSum build() {
++        PrefixSum calculator = new PrefixSum(config, strategy);
++        if (!listeners.hasListeners()) {
++            // Only add the composite if it has listeners
++            calculator.addListener(listeners);
++        } else {
++            calculator.addListener(listeners);
++        }
++        return calculator;
++    }
++}
+diff --git a/PrefixSumDemo.java b/PrefixSumDemo.java
+index 329d740..2954f32 100644
+--- a/PrefixSumDemo.java
++++ b/PrefixSumDemo.java
+@@ -12,52 +12,71 @@ public class PrefixSumDemo {
+         PrefixSum.PrefixSumResult result = PrefixSum.computePrefixSum(SAMPLE_ARRAY);
+         System.out.println("Result: " + result);
+ 
+-        System.out.println("\n=== Factory Pattern Demo (Simple) ===");
+-        PrefixSum calculator1 = PrefixSumFactory.createSimple();
++        System.out.println("\n=== Fluent Builder Demo (Simple) ===");
++        PrefixSum calculator1 = new PrefixSumBuilder()
++            .withLogging()
++            .build();
+         PrefixSum.PrefixSumResult result1 = calculator1.compute(SAMPLE_ARRAY);
+-        System.out.println("Strategy: " + calculator1.getStrategyName());
+         System.out.println("Result: " + result1.getValues());
+ 
+-        System.out.println("\n=== Factory Pattern Demo (Cached) ===");
+-        PrefixSum calculator2 = PrefixSumFactory.createCached();
+-        PrefixSum.PrefixSumResult result2 = calculator2.compute(SAMPLE_ARRAY);
+-        System.out.println("Cached result: " + calculator2.getCachedResult());
++        System.out.println("\n=== Fluent Builder Demo (Cached + Metrics) ===");
++        PrefixSum calculator2 = new PrefixSumBuilder()
++            .withCacheClear()
++            .withMetrics()
++            .withLogging()
++            .withTiming()
++            .build();
++        PrefixSum.PrefixSumResult result2a = calculator2.compute(SAMPLE_ARRAY);
++        PrefixSum.PrefixSumResult result2b = calculator2.compute(ANOTHER_ARRAY);
++        System.out.println("Metrics: " + calculator2.getMetrics());
+ 
+-        System.out.println("\n=== Factory Pattern Demo (Monitored) ===");
+-        PrefixSum calculator3 = PrefixSumFactory.createMonitored();
++        System.out.println("\n=== Lambda Listener Demo ===");
++        PrefixSum calculator3 = new PrefixSumBuilder()
++            .withLambdaListener(new LambdaListener.Builder()
++                .onStart(size -> System.out.println("[LAMBDA] Computing for " + size + " elements"))
++                .onComplete(result3 -> System.out.println("[LAMBDA] Sum = " + result3.getTotalSum()))
++                .build())
++            .build();
+         PrefixSum.PrefixSumResult result3 = calculator3.compute(SAMPLE_ARRAY);
+-        System.out.println("Metrics: " + calculator3.getMetrics());
+ 
+-        System.out.println("\n=== Template Method + Listener Demo ===");
+-        PrefixSum calculator4 = PrefixSumFactory.createSimple();
+-        calculator4.addListener(new LoggingListener());
+-        calculator4.addListener(new TimingListener());
+-        PrefixSum.PrefixSumResult result4 = calculator4.compute(SAMPLE_ARRAY);
+-        System.out.println("Result values: " + result4.getValues());
++        System.out.println("\n=== Decorator Strategy Demo (Caching) ===");
++        CachingStrategy cachingStrategy = new CachingStrategy(new IterativeStrategy());
++        PrefixSum calculator4 = new PrefixSum(PrefixSumConfig.defaults(), cachingStrategy);
++        System.out.println("Strategy: " + calculator4.getStrategyName());
++        PrefixSum.PrefixSumResult result4a = calculator4.compute(SAMPLE_ARRAY);
++        System.out.println("First call - Cache size: " + cachingStrategy.getCacheSize());
++        PrefixSum.PrefixSumResult result4b = calculator4.compute(SAMPLE_ARRAY);
++        System.out.println("Second call (cached) - Cache size: " + cachingStrategy.getCacheSize());
++        System.out.println("Results equal: " + result4a.getValues().equals(result4b.getValues()));
+ 
+-        System.out.println("\n=== Composite Listener Demo ===");
+-        PrefixSum calculator5 = new PrefixSum();
+-        CompositeListener composite = new CompositeListener()
+-            .add(new LoggingListener())
+-            .add(new TimingListener());
+-        calculator5.addListener(composite);
++        System.out.println("\n=== Decorator Strategy Demo (Validation) ===");
++        ValidationStrategy validatingStrategy = new ValidationStrategy(new IterativeStrategy());
++        PrefixSum calculator5 = new PrefixSum(PrefixSumConfig.defaults(), validatingStrategy);
++        System.out.println("Strategy: " + calculator5.getStrategyName());
+         PrefixSum.PrefixSumResult result5 = calculator5.compute(SAMPLE_ARRAY);
+         System.out.println("Result: " + result5.getValues());
+ 
+-        System.out.println("\n=== Factory Pattern Demo (Full Featured) ===");
+-        PrefixSum calculator6 = PrefixSumFactory.createFull();
+-        PrefixSum.PrefixSumResult result6a = calculator6.compute(SAMPLE_ARRAY);
+-        System.out.println("First computation cached: " + calculator6.getCachedResult());
+-        PrefixSum.PrefixSumResult result6b = calculator6.compute(ANOTHER_ARRAY);
+-        System.out.println("Second computation cached: " + calculator6.getCachedResult());
+-        System.out.println("Overall metrics: " + calculator6.getMetrics());
++        System.out.println("\n=== Decorator Chain Demo (Validation + Caching) ===");
++        ComputationStrategy chain = new CachingStrategy(new ValidationStrategy(new IterativeStrategy()));
++        PrefixSum calculator6 = new PrefixSum(
++            PrefixSumConfig.builder().withMetrics().build(),
++            chain
++        );
++        calculator6.addListener(new LoggingListener());
++        System.out.println("Strategy: " + calculator6.getStrategyName());
++        PrefixSum.PrefixSumResult result6 = calculator6.compute(SAMPLE_ARRAY);
++        System.out.println("Result: " + result6.getValues());
+ 
+-        System.out.println("\n=== Factory with Strategy Demo ===");
+-        PrefixSum calculator7 = PrefixSumFactory.createWithStrategy(new IterativeStrategy());
++        System.out.println("\n=== Complex Builder Demo ===");
++        PrefixSum calculator7 = new PrefixSumBuilder()
++            .withAllFeatures()
++            .withStrategy(new CachingStrategy(new IterativeStrategy()))
++            .withLogging()
++            .withTiming()
++            .build();
+         PrefixSum.PrefixSumResult result7 = calculator7.compute(LARGE_ARRAY);
+         System.out.println("Large array: size=" + result7.getInputSize() +
+-                ", sum=" + result7.getTotalSum() +
+-                ", avg=" + String.format("%.2f", result7.getAverage()));
++                ", sum=" + result7.getTotalSum());
+     }
+ 
+     private static int[] createLargeArray(int size) {
+diff --git a/PrefixSumTest.java b/PrefixSumTest.java
+index ce67a3d..f67700f 100644
+--- a/PrefixSumTest.java
++++ b/PrefixSumTest.java
+@@ -14,6 +14,12 @@ public class PrefixSumTest {
+         testAbstractListener();
+         testCompositeListener();
+         testFactoryPattern();
++        testFluentBuilder();
++        testLambdaListener();
++        testStrategyDecorator();
++        testCachingStrategy();
++        testValidationStrategy();
++        testDecoratorChain();
+         testInputValidator();
+         testCacheClear();
+         testStatistics();
+@@ -113,6 +119,79 @@ public class PrefixSumTest {
+         assert full.getMetrics().getComputationCount() > 0 : "Full calculator should track metrics";
+     }
+ 
++    private static void testFluentBuilder() {
++        System.out.println("Testing fluent builder...");
++        PrefixSum calculator = new PrefixSumBuilder()
++            .withCaching()
++            .withMetrics()
++            .withLogging()
++            .build();
++        assert calculator != null : "Builder should create a calculator";
++        PrefixSum.PrefixSumResult result = calculator.compute(new int[]{1, 2, 3});
++        assert result.getTotalSum() == 6L : "Builder computation failed";
++        assert calculator.getMetrics().getComputationCount() > 0 : "Metrics should be tracked";
++    }
++
++    private static void testLambdaListener() {
++        System.out.println("Testing lambda listener...");
++        TestContainer container = new TestContainer();
++        LambdaListener listener = new LambdaListener.Builder()
++            .onStart(size -> container.startSize = size)
++            .onComplete(result -> container.completeCalled = true)
++            .onError(e -> container.errorCalled = true)
++            .build();
++        PrefixSum calculator = new PrefixSum();
++        calculator.addListener(listener);
++        calculator.compute(new int[]{1, 2, 3});
++        assert container.startSize == 3 : "Lambda onStart not called correctly";
++        assert container.completeCalled : "Lambda onComplete not called";
++        assert !container.errorCalled : "Lambda onError should not be called";
++    }
++
++    private static void testStrategyDecorator() {
++        System.out.println("Testing strategy decorator...");
++        ComputationStrategy base = new IterativeStrategy();
++        ComputationStrategy decorated = new CachingStrategy(base);
++        String name = decorated.getName();
++        assert name.contains("Cached") : "Decorator name should reflect decoration";
++    }
++
++    private static void testCachingStrategy() {
++        System.out.println("Testing caching strategy...");
++        CachingStrategy strategy = new CachingStrategy(new IterativeStrategy());
++        int[] arr1 = {1, 2, 3};
++        List<Long> result1 = strategy.compute(arr1);
++        assert strategy.getCacheSize() == 1 : "Cache should have one entry";
++
++        List<Long> result2 = strategy.compute(arr1);
++        assert strategy.getCacheSize() == 1 : "Cache should still have one entry";
++        assert result1.equals(result2) : "Cached results should be equal";
++
++        strategy.clearCache();
++        assert strategy.getCacheSize() == 0 : "Cache should be cleared";
++    }
++
++    private static void testValidationStrategy() {
++        System.out.println("Testing validation strategy...");
++        ValidationStrategy strategy = new ValidationStrategy(new IterativeStrategy());
++        PrefixSum.PrefixSumResult result = new PrefixSum(
++            PrefixSumConfig.defaults(),
++            strategy
++        ).compute(new int[]{1, 2, 3});
++        assert result.getValues().equals(List.of(1L, 3L, 6L)) : "Validation strategy computation failed";
++    }
++
++    private static void testDecoratorChain() {
++        System.out.println("Testing decorator chain...");
++        ComputationStrategy chain = new CachingStrategy(
++            new ValidationStrategy(new IterativeStrategy())
++        );
++        PrefixSum calculator = new PrefixSum(PrefixSumConfig.defaults(), chain);
++        PrefixSum.PrefixSumResult result1 = calculator.compute(new int[]{1, 2, 3});
++        PrefixSum.PrefixSumResult result2 = calculator.compute(new int[]{1, 2, 3});
++        assert result1.getValues().equals(result2.getValues()) : "Chain results should match";
++    }
++
+     private static void testInputValidator() {
+         System.out.println("Testing input validator...");
+         assert InputValidator.isValid(new int[]{1, 2, 3}) : "Valid array check failed";
+@@ -237,4 +316,10 @@ public class PrefixSumTest {
+             // No op
+         }
+     }
++
++    static class TestContainer {
++        int startSize = 0;
++        boolean completeCalled = false;
++        boolean errorCalled = false;
++    }
+ }
+diff --git a/StrategyDecorator.java b/StrategyDecorator.java
+new file mode 100644
+index 0000000..03bfadc
+--- /dev/null
++++ b/StrategyDecorator.java
+@@ -0,0 +1,15 @@
++/**
++ * Base decorator for wrapping computation strategies with additional behavior.
++ */
++public abstract class StrategyDecorator implements ComputationStrategy {
++    protected final ComputationStrategy delegate;
++
++    public StrategyDecorator(ComputationStrategy delegate) {
++        this.delegate = delegate;
++    }
++
++    @Override
++    public String getName() {
++        return delegate.getName() + " (decorated)";
++    }
++}
+diff --git a/ValidationStrategy.java b/ValidationStrategy.java
+new file mode 100644
+index 0000000..74e5a44
+--- /dev/null
++++ b/ValidationStrategy.java
+@@ -0,0 +1,21 @@
++import java.util.List;
++
++/**
++ * Decorator strategy that validates input before delegating to wrapped strategy.
++ */
++public class ValidationStrategy extends StrategyDecorator {
++    public ValidationStrategy(ComputationStrategy delegate) {
++        super(delegate);
++    }
++
++    @Override
++    public List<Long> compute(int[] arr) {
++        InputValidator.validate(arr);
++        return delegate.compute(arr);
++    }
++
++    @Override
++    public String getName() {
++        return "Validating " + delegate.getName();
++    }
++}

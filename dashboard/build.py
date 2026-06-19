@@ -21,6 +21,7 @@ from experiment_runner.artifacts import load_prompts_by_turn  # noqa: E402
 from experiment_runner.result_paths import (  # noqa: E402
     artifacts_dir_for_csv,
     exp_dir_has_logs,
+    find_prompt_txt_for_csv,
     iter_log_csvs,
     logs_dir,
     refdiff_jsonl_path,
@@ -178,15 +179,6 @@ def load_prompter_artifacts(
                 "prompter_transcript": "",
                 "prompter_jsonl": "",
             }
-        prompt_path = run_dir / "prompt.txt"
-        if prompt_path.is_file():
-            file_prompt = prompt_path.read_text(encoding="utf-8", errors="replace").strip()
-            if file_prompt:
-                return {
-                    "prompter_prompt": file_prompt,
-                    "prompter_transcript": "",
-                    "prompter_jsonl": "",
-                }
         return None
 
     raw = path.read_text(encoding="utf-8", errors="replace")
@@ -210,13 +202,6 @@ def load_prompter_artifacts(
                 if text:
                     prompt_out = text
 
-    if not prompt_out:
-        prompt_path = run_dir / "prompt.txt"
-        if prompt_path.is_file():
-            file_prompt = prompt_path.read_text(encoding="utf-8", errors="replace").strip()
-            if file_prompt:
-                prompt_out = file_prompt
-
     return {
         "prompter_prompt": prompt_out,
         "prompter_transcript": build_prompter_transcript(events),
@@ -226,7 +211,7 @@ def load_prompter_artifacts(
 
 def load_steps_from_csv(csv_path: Path) -> list[dict]:
     artifacts_dir = artifacts_dir_for_csv(csv_path)
-    prompts_by_turn = load_prompts_by_turn(artifacts_dir)
+    prompts_by_turn = load_prompts_by_turn(find_prompt_txt_for_csv(csv_path))
     refdiff_by_run = load_refdiff_for_csv(csv_path)
     signals_data = load_signals_for_csv(csv_path)
     signal_by_run: dict[int, dict] = {}

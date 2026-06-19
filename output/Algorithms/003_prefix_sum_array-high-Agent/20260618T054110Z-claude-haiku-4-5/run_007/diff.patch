@@ -1,0 +1,467 @@
+diff --git a/ComputationMetrics.java b/ComputationMetrics.java
+new file mode 100644
+index 0000000..cfa0453
+--- /dev/null
++++ b/ComputationMetrics.java
+@@ -0,0 +1,40 @@
++/**
++ * Performance metrics for a prefix sum computation.
++ */
++public class ComputationMetrics {
++    private final long computationTimeMs;
++    private final int computationCount;
++    private final long memoryUsedBytes;
++
++    public ComputationMetrics(long computationTimeMs, int computationCount, long memoryUsedBytes) {
++        this.computationTimeMs = computationTimeMs;
++        this.computationCount = computationCount;
++        this.memoryUsedBytes = memoryUsedBytes;
++    }
++
++    public long getComputationTimeMs() {
++        return computationTimeMs;
++    }
++
++    public int getComputationCount() {
++        return computationCount;
++    }
++
++    public long getMemoryUsedBytes() {
++        return memoryUsedBytes;
++    }
++
++    public double getAverageTimePerComputationMs() {
++        return computationCount > 0 ? (double) computationTimeMs / computationCount : 0.0;
++    }
++
++    @Override
++    public String toString() {
++        return "ComputationMetrics{" +
++                "computationTimeMs=" + computationTimeMs +
++                ", computationCount=" + computationCount +
++                ", memoryUsedBytes=" + memoryUsedBytes +
++                ", averageTimeMs=" + String.format("%.3f", getAverageTimePerComputationMs()) +
++                '}';
++    }
++}
+diff --git a/PrefixSum.java b/PrefixSum.java
+index e188fa6..e824b72 100644
+--- a/PrefixSum.java
++++ b/PrefixSum.java
+@@ -4,58 +4,36 @@ import java.util.List;
+ import java.util.Objects;
+ 
+ /**
+- * Computes prefix sum arrays efficiently with caching and statistics.
++ * Computes prefix sum arrays efficiently with caching, metrics, and statistics.
+  * The prefix sum at index i is the sum of all elements from index 0 to i.
+  */
+ public class PrefixSum {
+ 
+     private final List<Long> cache;
+-    private final boolean cacheEnabled;
+-    private final boolean clearCacheOnCompute;
++    private final PrefixSumConfig config;
+     private int computationCount;
++    private long totalComputationTime;
++    private long peakMemoryUsed;
+ 
+     /**
+-     * Creates a PrefixSum instance with configuration.
+-     *
+-     * @param cacheEnabled whether to cache computation results
+-     * @param clearCacheOnCompute whether to clear cache before each computation
++     * Creates a PrefixSum instance with default configuration.
+      */
+-    private PrefixSum(boolean cacheEnabled, boolean clearCacheOnCompute) {
+-        this.cacheEnabled = cacheEnabled;
+-        this.clearCacheOnCompute = clearCacheOnCompute;
+-        this.cache = cacheEnabled ? new ArrayList<>() : null;
+-        this.computationCount = 0;
++    public PrefixSum() {
++        this(PrefixSumConfig.defaults());
+     }
+ 
+     /**
+-     * Returns a builder for creating configured PrefixSum instances.
++     * Creates a PrefixSum instance with custom configuration.
+      *
+-     * @return a new Builder instance
+-     */
+-    public static Builder builder() {
+-        return new Builder();
+-    }
+-
+-    /**
+-     * Builder class for fluent PrefixSum configuration.
++     * @param config the configuration object
+      */
+-    public static class Builder {
+-        private boolean cacheEnabled = false;
+-        private boolean clearCacheOnCompute = false;
+-
+-        public Builder withCache() {
+-            this.cacheEnabled = true;
+-            return this;
+-        }
+-
+-        public Builder withCacheClear() {
+-            this.clearCacheOnCompute = true;
+-            return this;
+-        }
+-
+-        public PrefixSum build() {
+-            return new PrefixSum(cacheEnabled, clearCacheOnCompute);
+-        }
++    public PrefixSum(PrefixSumConfig config) {
++        Objects.requireNonNull(config, "Configuration cannot be null");
++        this.config = config;
++        this.cache = config.isCacheEnabled() ? new ArrayList<>() : null;
++        this.computationCount = 0;
++        this.totalComputationTime = 0;
++        this.peakMemoryUsed = 0;
+     }
+ 
+     /**
+@@ -71,7 +49,11 @@ public class PrefixSum {
+             throw new IllegalArgumentException("Input array cannot be empty");
+         }
+ 
+-        if (cacheEnabled && clearCacheOnCompute) {
++        long startTime = config.isTrackMetricsEnabled() ? System.nanoTime() : 0;
++        Runtime runtime = config.isTrackMetricsEnabled() ? Runtime.getRuntime() : null;
++        long memBefore = config.isTrackMetricsEnabled() ? runtime.totalMemory() - runtime.freeMemory() : 0;
++
++        if (config.isCacheEnabled() && config.shouldClearCacheOnCompute()) {
+             cache.clear();
+         }
+ 
+@@ -83,13 +65,20 @@ public class PrefixSum {
+             result.add(sum);
+         }
+ 
+-        if (cacheEnabled) {
++        if (config.isCacheEnabled()) {
+             cache.clear();
+             cache.addAll(result);
+         }
+ 
++        long memAfter = config.isTrackMetricsEnabled() ? runtime.totalMemory() - runtime.freeMemory() : 0;
++        long computationTime = config.isTrackMetricsEnabled() ? (System.nanoTime() - startTime) / 1_000_000 : 0;
++        long memUsed = config.isTrackMetricsEnabled() ? Math.abs(memAfter - memBefore) : 0;
++
+         computationCount++;
+-        return new PrefixSumResult(result, arr.length, sum);
++        totalComputationTime += computationTime;
++        peakMemoryUsed = Math.max(peakMemoryUsed, memUsed);
++
++        return new PrefixSumResult(result, arr.length, sum, computationTime, memUsed);
+     }
+ 
+     /**
+@@ -98,16 +87,18 @@ public class PrefixSum {
+      * @return an unmodifiable cached result, or an empty list if caching is disabled
+      */
+     public List<Long> getCachedResult() {
+-        return cacheEnabled && cache != null ? Collections.unmodifiableList(new ArrayList<>(cache)) : Collections.emptyList();
++        return config.isCacheEnabled() && cache != null ?
++            Collections.unmodifiableList(new ArrayList<>(cache)) :
++            Collections.emptyList();
+     }
+ 
+     /**
+-     * Gets the number of computations performed.
++     * Gets computation metrics.
+      *
+-     * @return the computation count
++     * @return metrics for this calculator's computations
+      */
+-    public int getComputationCount() {
+-        return computationCount;
++    public ComputationMetrics getMetrics() {
++        return new ComputationMetrics(totalComputationTime, computationCount, peakMemoryUsed);
+     }
+ 
+     /**
+@@ -117,7 +108,7 @@ public class PrefixSum {
+      * @return the result of the prefix sum computation
+      */
+     public static PrefixSumResult computePrefixSum(int[] arr) {
+-        return new PrefixSum(false, false).compute(arr);
++        return new PrefixSum(PrefixSumConfig.defaults()).compute(arr);
+     }
+ 
+     /**
+@@ -127,11 +118,16 @@ public class PrefixSum {
+         private final List<Long> values;
+         private final int inputSize;
+         private final long totalSum;
++        private final long computationTimeMs;
++        private final long memoryUsedBytes;
+ 
+-        private PrefixSumResult(List<Long> values, int inputSize, long totalSum) {
++        private PrefixSumResult(List<Long> values, int inputSize, long totalSum,
++                               long computationTimeMs, long memoryUsedBytes) {
+             this.values = Collections.unmodifiableList(new ArrayList<>(values));
+             this.inputSize = inputSize;
+             this.totalSum = totalSum;
++            this.computationTimeMs = computationTimeMs;
++            this.memoryUsedBytes = memoryUsedBytes;
+         }
+ 
+         public List<Long> getValues() {
+@@ -150,12 +146,22 @@ public class PrefixSum {
+             return inputSize > 0 ? (double) totalSum / inputSize : 0.0;
+         }
+ 
++        public long getComputationTimeMs() {
++            return computationTimeMs;
++        }
++
++        public long getMemoryUsedBytes() {
++            return memoryUsedBytes;
++        }
++
+         @Override
+         public String toString() {
+             return "PrefixSumResult{" +
+                     "values=" + values +
+                     ", totalSum=" + totalSum +
+                     ", average=" + String.format("%.2f", getAverage()) +
++                    ", timeMs=" + computationTimeMs +
++                    ", memoryBytes=" + memoryUsedBytes +
+                     '}';
+         }
+     }
+diff --git a/PrefixSumConfig.java b/PrefixSumConfig.java
+new file mode 100644
+index 0000000..b93e27e
+--- /dev/null
++++ b/PrefixSumConfig.java
+@@ -0,0 +1,62 @@
++/**
++ * Configuration object for PrefixSum behavior.
++ */
++public class PrefixSumConfig {
++    private final boolean cacheEnabled;
++    private final boolean clearCacheOnCompute;
++    private final boolean trackMetrics;
++
++    private PrefixSumConfig(boolean cacheEnabled, boolean clearCacheOnCompute, boolean trackMetrics) {
++        this.cacheEnabled = cacheEnabled;
++        this.clearCacheOnCompute = clearCacheOnCompute;
++        this.trackMetrics = trackMetrics;
++    }
++
++    public boolean isCacheEnabled() {
++        return cacheEnabled;
++    }
++
++    public boolean shouldClearCacheOnCompute() {
++        return clearCacheOnCompute;
++    }
++
++    public boolean isTrackMetricsEnabled() {
++        return trackMetrics;
++    }
++
++    public static Builder builder() {
++        return new Builder();
++    }
++
++    /**
++     * Builder for fluent configuration.
++     */
++    public static class Builder {
++        private boolean cacheEnabled = false;
++        private boolean clearCacheOnCompute = false;
++        private boolean trackMetrics = false;
++
++        public Builder withCache() {
++            this.cacheEnabled = true;
++            return this;
++        }
++
++        public Builder withCacheClear() {
++            this.clearCacheOnCompute = true;
++            return this;
++        }
++
++        public Builder withMetrics() {
++            this.trackMetrics = true;
++            return this;
++        }
++
++        public PrefixSumConfig build() {
++            return new PrefixSumConfig(cacheEnabled, clearCacheOnCompute, trackMetrics);
++        }
++    }
++
++    public static PrefixSumConfig defaults() {
++        return new PrefixSumConfig(false, false, false);
++    }
++}
+diff --git a/PrefixSumDemo.java b/PrefixSumDemo.java
+index deb0848..4476e93 100644
+--- a/PrefixSumDemo.java
++++ b/PrefixSumDemo.java
+@@ -5,33 +5,55 @@ public class PrefixSumDemo {
+ 
+     private static final int[] SAMPLE_ARRAY = {10, 20, 10, 5, 15};
+     private static final int[] ANOTHER_ARRAY = {5, 5, 5, 5};
++    private static final int[] LARGE_ARRAY = createLargeArray(1000);
+ 
+     public static void main(String[] args) {
+         System.out.println("=== Static Method Demo ===");
+         PrefixSum.PrefixSumResult result = PrefixSum.computePrefixSum(SAMPLE_ARRAY);
+         System.out.println("Result: " + result);
+ 
+-        System.out.println("\n=== Builder Pattern Demo (No Cache) ===");
+-        PrefixSum calculator1 = PrefixSum.builder().build();
++        System.out.println("\n=== Config-based Demo (No Cache, No Metrics) ===");
++        PrefixSum calculator1 = new PrefixSum(PrefixSumConfig.defaults());
+         PrefixSum.PrefixSumResult result1 = calculator1.compute(SAMPLE_ARRAY);
+         System.out.println("Computed result: " + result1);
+-        System.out.println("Cached result: " + calculator1.getCachedResult());
+-        System.out.println("Computation count: " + calculator1.getComputationCount());
++        System.out.println("Metrics: " + calculator1.getMetrics());
+ 
+-        System.out.println("\n=== Builder Pattern Demo (With Cache) ===");
+-        PrefixSum calculator2 = PrefixSum.builder().withCache().build();
++        System.out.println("\n=== Config-based Demo (With Cache) ===");
++        PrefixSumConfig config2 = PrefixSumConfig.builder().withCache().build();
++        PrefixSum calculator2 = new PrefixSum(config2);
+         PrefixSum.PrefixSumResult result2 = calculator2.compute(SAMPLE_ARRAY);
+         System.out.println("Computed result: " + result2);
+         System.out.println("Cached result: " + calculator2.getCachedResult());
+-        System.out.println("Computation count: " + calculator2.getComputationCount());
++        System.out.println("Metrics: " + calculator2.getMetrics());
+ 
+-        System.out.println("\n=== Builder Pattern Demo (With Cache Clear) ===");
+-        PrefixSum calculator3 = PrefixSum.builder().withCache().withCacheClear().build();
++        System.out.println("\n=== Config-based Demo (With Cache Clear + Metrics) ===");
++        PrefixSumConfig config3 = PrefixSumConfig.builder()
++            .withCache()
++            .withCacheClear()
++            .withMetrics()
++            .build();
++        PrefixSum calculator3 = new PrefixSum(config3);
+         PrefixSum.PrefixSumResult result3a = calculator3.compute(SAMPLE_ARRAY);
+         System.out.println("First computation: " + result3a);
+         PrefixSum.PrefixSumResult result3b = calculator3.compute(ANOTHER_ARRAY);
+         System.out.println("Second computation (cache cleared): " + result3b);
+         System.out.println("Cached result (only latest): " + calculator3.getCachedResult());
+-        System.out.println("Computation count: " + calculator3.getComputationCount());
++
++        System.out.println("\n=== Performance Demo (Large Array with Metrics) ===");
++        PrefixSumConfig config4 = PrefixSumConfig.builder().withMetrics().build();
++        PrefixSum calculator4 = new PrefixSum(config4);
++        PrefixSum.PrefixSumResult result4 = calculator4.compute(LARGE_ARRAY);
++        System.out.println("Large array result: size=" + result4.getInputSize() +
++                ", totalSum=" + result4.getTotalSum() +
++                ", average=" + String.format("%.2f", result4.getAverage()));
++        System.out.println("Performance metrics: " + calculator4.getMetrics());
++    }
++
++    private static int[] createLargeArray(int size) {
++        int[] arr = new int[size];
++        for (int i = 0; i < size; i++) {
++            arr[i] = i % 100 + 1;
++        }
++        return arr;
+     }
+ }
+diff --git a/PrefixSumTest.java b/PrefixSumTest.java
+index c2b4317..2990d42 100644
+--- a/PrefixSumTest.java
++++ b/PrefixSumTest.java
+@@ -1,4 +1,3 @@
+-import java.util.Collections;
+ import java.util.List;
+ 
+ /**
+@@ -8,7 +7,8 @@ public class PrefixSumTest {
+ 
+     public static void main(String[] args) {
+         testBasicComputation();
+-        testCaching();
++        testConfigBasedCaching();
++        testConfigBasedMetrics();
+         testCacheClear();
+         testStatistics();
+         testResultImmutability();
+@@ -24,18 +24,33 @@ public class PrefixSumTest {
+         assert result.getTotalSum() == 10L : "Total sum mismatch";
+     }
+ 
+-    private static void testCaching() {
+-        System.out.println("Testing caching functionality...");
+-        PrefixSum calculator = PrefixSum.builder().withCache().build();
++    private static void testConfigBasedCaching() {
++        System.out.println("Testing config-based caching...");
++        PrefixSumConfig config = PrefixSumConfig.builder().withCache().build();
++        PrefixSum calculator = new PrefixSum(config);
+         int[] arr = {10, 20, 30};
+         PrefixSum.PrefixSumResult result = calculator.compute(arr);
+         List<Long> cached = calculator.getCachedResult();
+         assert cached.equals(result.getValues()) : "Caching failed";
+     }
+ 
++    private static void testConfigBasedMetrics() {
++        System.out.println("Testing config-based metrics...");
++        PrefixSumConfig config = PrefixSumConfig.builder().withMetrics().build();
++        PrefixSum calculator = new PrefixSum(config);
++        calculator.compute(new int[]{1, 2, 3});
++        ComputationMetrics metrics = calculator.getMetrics();
++        assert metrics.getComputationCount() == 1 : "Metrics computation count mismatch";
++        assert metrics.getComputationTimeMs() >= 0 : "Computation time should be non-negative";
++    }
++
+     private static void testCacheClear() {
+         System.out.println("Testing cache clear on compute...");
+-        PrefixSum calculator = PrefixSum.builder().withCache().withCacheClear().build();
++        PrefixSumConfig config = PrefixSumConfig.builder()
++            .withCache()
++            .withCacheClear()
++            .build();
++        PrefixSum calculator = new PrefixSum(config);
+         calculator.compute(new int[]{1, 2, 3});
+         List<Long> firstCache = calculator.getCachedResult();
+         calculator.compute(new int[]{5, 5});
+@@ -45,11 +60,11 @@ public class PrefixSumTest {
+ 
+     private static void testStatistics() {
+         System.out.println("Testing statistics...");
+-        PrefixSum calculator = PrefixSum.builder().build();
++        PrefixSum calculator = new PrefixSum();
+         calculator.compute(new int[]{10, 20, 30});
+-        assert calculator.getComputationCount() == 1 : "Computation count mismatch";
++        assert calculator.getMetrics().getComputationCount() == 1 : "Computation count mismatch";
+         calculator.compute(new int[]{5, 5, 5});
+-        assert calculator.getComputationCount() == 2 : "Computation count not incremented";
++        assert calculator.getMetrics().getComputationCount() == 2 : "Computation count not incremented";
+ 
+         PrefixSum.PrefixSumResult result = PrefixSum.computePrefixSum(new int[]{2, 4, 6});
+         assert result.getTotalSum() == 12L : "Total sum incorrect";
+@@ -71,7 +86,7 @@ public class PrefixSumTest {
+ 
+     private static void testEdgeCases() {
+         System.out.println("Testing edge cases...");
+-        PrefixSum calculator = PrefixSum.builder().build();
++        PrefixSum calculator = new PrefixSum();
+ 
+         try {
+             calculator.compute(null);
+@@ -90,5 +105,12 @@ public class PrefixSumTest {
+         PrefixSum.PrefixSumResult singleElement = calculator.compute(new int[]{42});
+         assert singleElement.getValues().equals(List.of(42L)) : "Single element failed";
+         assert singleElement.getTotalSum() == 42L : "Single element sum mismatch";
++
++        try {
++            new PrefixSum(null);
++            assert false : "Should throw NullPointerException for null config";
++        } catch (NullPointerException e) {
++            // Expected
++        }
+     }
+ }

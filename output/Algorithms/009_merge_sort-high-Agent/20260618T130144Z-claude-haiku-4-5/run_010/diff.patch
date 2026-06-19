@@ -1,0 +1,494 @@
+diff --git a/FullStackDemo.java b/FullStackDemo.java
+new file mode 100644
+index 0000000..3f5e9b6
+--- /dev/null
++++ b/FullStackDemo.java
+@@ -0,0 +1,107 @@
++import sorting.core.*;
++import sorting.analysis.Profiler;
++import sorting.reactive.SortStream;
++import sorting.spi.SortProvider;
++import sorting.testing.PropertyTestGenerator;
++
++public class FullStackDemo {
++    public static void main(String[] args) throws SortException, SortConfigurationException {
++        demonstrateAnnotations();
++        demonstrateProfiling();
++        demonstrateReactiveStreams();
++        demonstrateOptimizationProfiles();
++    }
++
++    private static void demonstrateAnnotations() throws SortConfigurationException {
++        System.out.println("=== ANNOTATION-DRIVEN CONFIGURATION ===\n");
++
++        @Sortable(
++                value = "UserData",
++                algorithm = "parallel-merge-sort",
++                enableMetrics = true,
++                enableValidation = true,
++                enableCaching = true,
++                cacheSize = 50,
++                insertionThreshold = 15
++        )
++        class UserData implements Comparable<UserData> {
++            @Override
++            public int compareTo(UserData o) {
++                return 0;
++            }
++        }
++
++        SortConfig<UserData> config = SortableProcessor.processSortable(UserData.class);
++        System.out.println("Processed @Sortable annotation:");
++        System.out.println("  Insertion Threshold: " + config.insertionThreshold());
++        System.out.println("  Track Metrics: " + config.trackMetrics());
++        System.out.println("  Validate Input: " + config.validateInput());
++        System.out.println("  Thread Pool Size: " + config.threadPoolSize());
++        System.out.println();
++    }
++
++    private static void demonstrateProfiling() throws SortException, SortConfigurationException {
++        System.out.println("=== PERFORMANCE PROFILING ===\n");
++
++        Profiler profiler = new Profiler("MergeSortProfiling");
++
++        Integer[] data = PropertyTestGenerator.TestDataGenerator.randomIntegers(5000);
++
++        SortConfig<Integer> config = OptimizationProfile.BALANCED.apply(SortConfig.<Integer>builder());
++        ParallelMergeSort<Integer> sorter = new ParallelMergeSort<>(config);
++
++        profiler.start("sort");
++        long start = System.nanoTime();
++        sorter.sort(data);
++        long duration = System.nanoTime() - start;
++        profiler.recordValue("sort", duration);
++        sorter.shutdown();
++
++        System.out.println(profiler.report());
++    }
++
++    private static void demonstrateReactiveStreams() {
++        System.out.println("=== REACTIVE STREAMS ===\n");
++
++        SortStream.ReactiveSort<Integer> reactiveSort = new SortStream.ReactiveSort<>(
++                100,
++                Integer::compareTo);
++
++        reactiveSort.subscribeTo(sortedBatch -> {
++            System.out.println("Processed batch of " + sortedBatch.length + " elements");
++        });
++
++        Integer[] batch1 = {5, 3, 8, 1, 9};
++        Integer[] batch2 = {7, 2, 6, 4};
++
++        reactiveSort.processBatch(batch1);
++        reactiveSort.processBatch(batch2);
++
++        try {
++            Thread.sleep(100);
++        } catch (InterruptedException e) {
++            e.printStackTrace();
++        }
++
++        reactiveSort.close();
++        System.out.println();
++    }
++
++    private static void demonstrateOptimizationProfiles() throws SortConfigurationException {
++        System.out.println("=== OPTIMIZATION PROFILES ===\n");
++
++        Integer[] testData = PropertyTestGenerator.TestDataGenerator.randomIntegers(1000);
++
++        for (OptimizationProfile profile : OptimizationProfile.values()) {
++            System.out.println("Profile: " + profile.name());
++            System.out.println("Description: " + profile.getDescription());
++
++            SortConfig<Integer> config = profile.apply(SortConfig.<Integer>builder());
++            System.out.println("  Insertion Threshold: " + config.insertionThreshold());
++            System.out.println("  Track Metrics: " + config.trackMetrics());
++            System.out.println("  Validate Input: " + config.validateInput());
++            System.out.println("  Thread Pool Size: " + config.threadPoolSize());
++            System.out.println();
++        }
++    }
++}
+diff --git a/sorting/analysis/Profiler.java b/sorting/analysis/Profiler.java
+new file mode 100644
+index 0000000..9b4117c
+--- /dev/null
++++ b/sorting/analysis/Profiler.java
+@@ -0,0 +1,83 @@
++package sorting.analysis;
++
++import java.util.LinkedHashMap;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.atomic.AtomicLong;
++
++public class Profiler {
++    private final Map<String, ProfilingData> data;
++    private final String name;
++
++    public Profiler(String name) {
++        this.name = name;
++        this.data = new ConcurrentHashMap<>();
++    }
++
++    public void start(String operation) {
++        data.putIfAbsent(operation, new ProfilingData());
++    }
++
++    public void end(String operation) {
++        ProfilingData profile = data.get(operation);
++        if (profile != null) {
++            profile.recordOperation();
++        }
++    }
++
++    public void recordValue(String operation, long value) {
++        ProfilingData profile = data.computeIfAbsent(operation, k -> new ProfilingData());
++        profile.recordValue(value);
++    }
++
++    public ProfilingData getData(String operation) {
++        return data.get(operation);
++    }
++
++    public String report() {
++        StringBuilder sb = new StringBuilder("Profile Report: " + name + "\n");
++
++        for (Map.Entry<String, ProfilingData> entry : data.entrySet()) {
++            sb.append(String.format("  %s: calls=%d, total=%d ns, avg=%.2f ns\n",
++                    entry.getKey(),
++                    entry.getValue().callCount(),
++                    entry.getValue().totalValue(),
++                    entry.getValue().average()));
++        }
++
++        return sb.toString();
++    }
++
++    public static class ProfilingData {
++        private final AtomicLong callCount = new AtomicLong(0);
++        private final AtomicLong totalValue = new AtomicLong(0);
++
++        public void recordOperation() {
++            callCount.incrementAndGet();
++        }
++
++        public void recordValue(long value) {
++            callCount.incrementAndGet();
++            totalValue.addAndGet(value);
++        }
++
++        public long callCount() {
++            return callCount.get();
++        }
++
++        public long totalValue() {
++            return totalValue.get();
++        }
++
++        public double average() {
++            long count = callCount.get();
++            return count == 0 ? 0 : (double) totalValue.get() / count;
++        }
++
++        @Override
++        public String toString() {
++            return String.format("calls=%d, total=%d ns, avg=%.2f ns",
++                    callCount(), totalValue(), average());
++        }
++    }
++}
+diff --git a/sorting/core/OptimizationProfile.java b/sorting/core/OptimizationProfile.java
+new file mode 100644
+index 0000000..292d360
+--- /dev/null
++++ b/sorting/core/OptimizationProfile.java
+@@ -0,0 +1,71 @@
++package sorting.core;
++
++public enum OptimizationProfile {
++    SPEED("Speed optimized") {
++        @Override
++        public <T extends Comparable<T>> SortConfig<T> apply(SortConfig.Builder<T> builder) throws SortConfigurationException {
++            return builder
++                    .comparator((a, b) -> ((Comparable) a).compareTo(b))
++                    .insertionThreshold(50)
++                    .trackMetrics(false)
++                    .validateInput(false)
++                    .threadPoolSize(Runtime.getRuntime().availableProcessors())
++                    .build();
++        }
++    },
++
++    BALANCED("Balanced performance") {
++        @Override
++        public <T extends Comparable<T>> SortConfig<T> apply(SortConfig.Builder<T> builder) throws SortConfigurationException {
++            return builder
++                    .comparator((a, b) -> ((Comparable) a).compareTo(b))
++                    .insertionThreshold(20)
++                    .trackMetrics(true)
++                    .validateInput(true)
++                    .threadPoolSize(Math.max(1, Runtime.getRuntime().availableProcessors() / 2))
++                    .build();
++        }
++    },
++
++    SAFETY("Safety optimized") {
++        @Override
++        public <T extends Comparable<T>> SortConfig<T> apply(SortConfig.Builder<T> builder) throws SortConfigurationException {
++            return builder
++                    .comparator((a, b) -> ((Comparable) a).compareTo(b))
++                    .insertionThreshold(10)
++                    .trackMetrics(true)
++                    .validateInput(true)
++                    .threadPoolSize(1)
++                    .build();
++        }
++    },
++
++    MEMORY("Memory optimized") {
++        @Override
++        public <T extends Comparable<T>> SortConfig<T> apply(SortConfig.Builder<T> builder) throws SortConfigurationException {
++            return builder
++                    .comparator((a, b) -> ((Comparable) a).compareTo(b))
++                    .insertionThreshold(5)
++                    .trackMetrics(false)
++                    .validateInput(false)
++                    .threadPoolSize(1)
++                    .build();
++        }
++    };
++
++    private final String description;
++
++    OptimizationProfile(String description) {
++        this.description = description;
++    }
++
++    public abstract <T extends Comparable<T>> SortConfig<T> apply(SortConfig.Builder<T> builder) throws SortConfigurationException;
++
++    public String getDescription() {
++        return description;
++    }
++
++    public static <T extends Comparable<T>> SortConfig<T> recommended() throws SortConfigurationException {
++        return BALANCED.apply(SortConfig.<T>builder());
++    }
++}
+diff --git a/sorting/core/Sortable.java b/sorting/core/Sortable.java
+new file mode 100644
+index 0000000..a71a2ea
+--- /dev/null
++++ b/sorting/core/Sortable.java
+@@ -0,0 +1,24 @@
++package sorting.core;
++
++import java.lang.annotation.ElementType;
++import java.lang.annotation.Retention;
++import java.lang.annotation.RetentionPolicy;
++import java.lang.annotation.Target;
++
++@Target(ElementType.TYPE)
++@Retention(RetentionPolicy.RUNTIME)
++public @interface Sortable {
++    String value() default "default";
++
++    String algorithm() default "parallel-merge-sort";
++
++    boolean enableMetrics() default true;
++
++    boolean enableValidation() default true;
++
++    boolean enableCaching() default false;
++
++    int cacheSize() default 100;
++
++    int insertionThreshold() default 10;
++}
+diff --git a/sorting/core/SortableProcessor.java b/sorting/core/SortableProcessor.java
+new file mode 100644
+index 0000000..cb710c0
+--- /dev/null
++++ b/sorting/core/SortableProcessor.java
+@@ -0,0 +1,54 @@
++package sorting.core;
++
++import java.lang.reflect.AnnotatedElement;
++import java.util.Optional;
++
++public class SortableProcessor {
++    public static <T extends Comparable<T>> SortConfig<T> processSortable(Class<T> clazz) throws SortConfigurationException {
++        if (!clazz.isAnnotationPresent(Sortable.class)) {
++            throw new SortConfigurationException("Class " + clazz.getName() + " is not annotated with @Sortable");
++        }
++
++        Sortable annotation = clazz.getAnnotation(Sortable.class);
++
++        if (annotation.value().isEmpty()) {
++            throw new SortConfigurationException("Sortable annotation must have a value");
++        }
++
++        return extractConfig(annotation);
++    }
++
++    public static <T extends Comparable<T>> SortConfig<T> processSortable(Sortable annotation) throws SortConfigurationException {
++        return extractConfig(annotation);
++    }
++
++    @SuppressWarnings("unchecked")
++    private static <T extends Comparable<T>> SortConfig<T> extractConfig(Sortable annotation) throws SortConfigurationException {
++        try {
++            SortConfig.Builder<T> builder = (SortConfig.Builder<T>) SortConfig.builder();
++            return builder
++                    .comparator((Comparable::compareTo))
++                    .insertionThreshold(annotation.insertionThreshold())
++                    .trackMetrics(annotation.enableMetrics())
++                    .validateInput(annotation.enableValidation())
++                    .threadPoolSize(Math.max(1, Runtime.getRuntime().availableProcessors() / 2))
++                    .build();
++        } catch (SortConfigurationException e) {
++            throw e;
++        } catch (Exception e) {
++            throw new SortConfigurationException("Failed to process @Sortable annotation", e);
++        }
++    }
++
++    public static String getAlgorithmName(Sortable annotation) {
++        return annotation.algorithm();
++    }
++
++    public static boolean shouldEnableCaching(Sortable annotation) {
++        return annotation.enableCaching();
++    }
++
++    public static int getCacheSize(Sortable annotation) {
++        return annotation.cacheSize();
++    }
++}
+diff --git a/sorting/reactive/SortStream.java b/sorting/reactive/SortStream.java
+new file mode 100644
+index 0000000..d4e7025
+--- /dev/null
++++ b/sorting/reactive/SortStream.java
+@@ -0,0 +1,83 @@
++package sorting.reactive;
++
++import java.util.Comparator;
++import java.util.concurrent.Flow;
++import java.util.concurrent.SubmissionPublisher;
++import java.util.function.Consumer;
++
++public class SortStream<T extends Comparable<T>> {
++    private final int batchSize;
++    private final SubmissionPublisher<T[]> publisher;
++
++    public SortStream(int batchSize) {
++        this.batchSize = batchSize;
++        this.publisher = new SubmissionPublisher<>();
++    }
++
++    public void subscribe(Consumer<T[]> consumer) {
++        publisher.subscribe(new Flow.Subscriber<T[]>() {
++            private Flow.Subscription subscription;
++
++            @Override
++            public void onSubscribe(Flow.Subscription sub) {
++                this.subscription = sub;
++                subscription.request(1);
++            }
++
++            @Override
++            public void onNext(T[] item) {
++                consumer.accept(item);
++                subscription.request(1);
++            }
++
++            @Override
++            public void onError(Throwable throwable) {
++                System.err.println("Stream error: " + throwable.getMessage());
++            }
++
++            @Override
++            public void onComplete() {
++                System.out.println("Stream complete");
++            }
++        });
++    }
++
++    public void publishBatch(T[] batch) {
++        publisher.submit(batch);
++    }
++
++    public void close() {
++        publisher.close();
++    }
++
++    public static class ReactiveSort<T extends Comparable<T>> {
++        private final SortStream<T> stream;
++        private final Comparator<T> comparator;
++
++        public ReactiveSort(int batchSize, Comparator<T> comparator) {
++            this.stream = new SortStream<>(batchSize);
++            this.comparator = comparator;
++        }
++
++        public void subscribeTo(Consumer<T[]> processor) {
++            stream.subscribe(array -> {
++                sortBatch(array);
++                processor.accept(array);
++            });
++        }
++
++        public void processBatch(T[] batch) {
++            stream.publishBatch(batch);
++        }
++
++        public void close() {
++            stream.close();
++        }
++
++        private void sortBatch(T[] array) {
++            if (array.length > 1) {
++                java.util.Arrays.sort(array, comparator);
++            }
++        }
++    }
++}
+diff --git a/sorting/spi/SortProvider.java b/sorting/spi/SortProvider.java
+new file mode 100644
+index 0000000..b066808
+--- /dev/null
++++ b/sorting/spi/SortProvider.java
+@@ -0,0 +1,30 @@
++package sorting.spi;
++
++import sorting.core.SortConfig;
++import sorting.core.SortException;
++import java.util.Comparator;
++import java.util.ServiceLoader;
++
++public interface SortProvider<T extends Comparable<T>> {
++    String name();
++
++    void sort(T[] array, Comparator<T> comparator) throws SortException;
++
++    int priority();
++
++    static <T extends Comparable<T>> SortProvider<T> loadFastest() {
++        return ServiceLoader.load(SortProvider.class).stream()
++                .map(ServiceLoader.Provider::get)
++                .max((a, b) -> Integer.compare(a.priority(), b.priority()))
++                .map(provider -> (SortProvider<T>) provider)
++                .orElseThrow(() -> new IllegalStateException("No sort providers available"));
++    }
++
++    static <T extends Comparable<T>> java.util.List<SortProvider<T>> loadAll() {
++        return ServiceLoader.load(SortProvider.class).stream()
++                .map(ServiceLoader.Provider::get)
++                .map(provider -> (SortProvider<T>) provider)
++                .sorted((a, b) -> Integer.compare(b.priority(), a.priority()))
++                .toList();
++    }
++}

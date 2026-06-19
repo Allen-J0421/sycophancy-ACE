@@ -1,0 +1,287 @@
+diff --git a/matrix_chain_multiplication.java b/matrix_chain_multiplication.java
+index 15ea411..9057986 100644
+--- a/matrix_chain_multiplication.java
++++ b/matrix_chain_multiplication.java
+@@ -7,6 +7,98 @@ public class MatrixChainMultiplication {
+         return new SolverBuilder();
+     }
+ 
++    /**
++     * Validated, immutable representation of matrix dimensions.
++     */
++    public static class MatrixDimensions {
++        private static final int MIN_MATRICES = 2;
++        private final int[] values;
++
++        public MatrixDimensions(int[] dimensions) {
++            if (dimensions == null || dimensions.length < MIN_MATRICES) {
++                throw new IllegalArgumentException("At least 2 matrices required");
++            }
++            this.values = dimensions.clone();
++        }
++
++        public int size() {
++            return values.length;
++        }
++
++        public int get(int index) {
++            return values[index];
++        }
++
++        int[] toArray() {
++            return values.clone();
++        }
++    }
++
++    /**
++     * Encapsulates the DP tables and query operations.
++     */
++    static class DPTable {
++        private final int[][] cost;
++        private final int[][] splits;
++        private final int size;
++
++        DPTable(int size) {
++            this.size = size;
++            this.cost = new int[size][size];
++            this.splits = new int[size][size];
++        }
++
++        void setCost(int i, int j, int value) {
++            cost[i][j] = value;
++        }
++
++        int getCost(int i, int j) {
++            return cost[i][j];
++        }
++
++        void recordSplit(int i, int j, int splitPoint) {
++            splits[i][j] = splitPoint;
++        }
++
++        int getSplit(int i, int j) {
++            return splits[i][j];
++        }
++
++        int getMinimumCost() {
++            return cost[0][size - 1];
++        }
++
++        int[][] getSplits() {
++            return splits;
++        }
++    }
++
++    /**
++     * Captures computation performance metrics.
++     */
++    public static class PerformanceMetrics {
++        private final long computationTimeMs;
++        private final int matricesProcessed;
++
++        public PerformanceMetrics(long computationTimeMs, int matricesProcessed) {
++            this.computationTimeMs = computationTimeMs;
++            this.matricesProcessed = matricesProcessed;
++        }
++
++        public long getComputationTimeMs() {
++            return computationTimeMs;
++        }
++
++        public int getMatricesProcessed() {
++            return matricesProcessed;
++        }
++
++        @Override
++        public String toString() {
++            return String.format("computed in %dms (%d matrices)", computationTimeMs, matricesProcessed);
++        }
++    }
++
+     /**
+      * Algorithm abstraction for solving matrix chain multiplication.
+      */
+@@ -14,15 +106,43 @@ public class MatrixChainMultiplication {
+         Solution solve();
+     }
+ 
++    /**
++     * Configuration for solver behavior.
++     */
++    public static class SolverConfig {
++        private final MatrixDimensions dimensions;
++        private final boolean cachingEnabled;
++        private final String algorithm;
++
++        public SolverConfig(MatrixDimensions dimensions, boolean cachingEnabled, String algorithm) {
++            this.dimensions = dimensions;
++            this.cachingEnabled = cachingEnabled;
++            this.algorithm = algorithm;
++        }
++
++        public MatrixDimensions getDimensions() {
++            return dimensions;
++        }
++
++        public boolean isCachingEnabled() {
++            return cachingEnabled;
++        }
++
++        public String getAlgorithm() {
++            return algorithm;
++        }
++    }
++
+     /**
+      * Fluent builder for configuring and creating solvers.
+      */
+     public static class SolverBuilder {
+-        private int[] dimensions;
++        private MatrixDimensions dimensions;
+         private boolean cachingEnabled = false;
++        private String algorithm = "DP";
+ 
+         public SolverBuilder withDimensions(int[] dimensions) {
+-            this.dimensions = dimensions;
++            this.dimensions = new MatrixDimensions(dimensions);
+             return this;
+         }
+ 
+@@ -32,7 +152,8 @@ public class MatrixChainMultiplication {
+         }
+ 
+         public Solver build() {
+-            Solver solver = new DynamicProgrammingSolver(dimensions);
++            SolverConfig config = new SolverConfig(dimensions, cachingEnabled, algorithm);
++            Solver solver = new BottomUpDynamicProgrammingSolver(config);
+             return cachingEnabled ? new CachingSolver(solver) : solver;
+         }
+ 
+@@ -47,14 +168,14 @@ public class MatrixChainMultiplication {
+     public static class Solution {
+         private final int minimumCost;
+         private final int[][] splitPoints;
+-        private final long computationTimeMs;
++        private final PerformanceMetrics metrics;
+         private final int matrixCount;
+         private final ParenthesizationBuilder parenthesizer;
+ 
+-        Solution(int minimumCost, int[][] splitPoints, long computationTimeMs, int matrixCount) {
++        Solution(int minimumCost, int[][] splitPoints, PerformanceMetrics metrics, int matrixCount) {
+             this.minimumCost = minimumCost;
+             this.splitPoints = splitPoints;
+-            this.computationTimeMs = computationTimeMs;
++            this.metrics = metrics;
+             this.matrixCount = matrixCount;
+             this.parenthesizer = new ParenthesizationBuilder(splitPoints, matrixCount);
+         }
+@@ -63,8 +184,8 @@ public class MatrixChainMultiplication {
+             return minimumCost;
+         }
+ 
+-        public long getComputationTimeMs() {
+-            return computationTimeMs;
++        public PerformanceMetrics getMetrics() {
++            return metrics;
+         }
+ 
+         public String getOptimalParenthesization() {
+@@ -77,8 +198,8 @@ public class MatrixChainMultiplication {
+ 
+         @Override
+         public String toString() {
+-            return String.format("Minimum multiplications: %d (computed in %dms), Optimal order: %s",
+-                    minimumCost, computationTimeMs, getOptimalParenthesization());
++            return String.format("Minimum multiplications: %d (%s), Optimal order: %s",
++                    minimumCost, metrics, getOptimalParenthesization());
+         }
+     }
+ 
+@@ -140,18 +261,13 @@ public class MatrixChainMultiplication {
+      * Time Complexity: O(n³) where n is the number of matrices
+      * Space Complexity: O(n²) for the DP tables
+      */
+-    static class DynamicProgrammingSolver implements Solver {
+-        private static final int MIN_MATRICES = 2;
+-        private final int[] dimensions;
+-        private final int numMatrices;
+-        private final int[][] costTable;
+-        private final int[][] splitTable;
++    static class BottomUpDynamicProgrammingSolver implements Solver {
++        private final SolverConfig config;
++        private final DPTable table;
+ 
+-        DynamicProgrammingSolver(int[] dimensions) {
+-            this.dimensions = validateAndStore(dimensions);
+-            this.numMatrices = dimensions.length;
+-            this.costTable = new int[numMatrices][numMatrices];
+-            this.splitTable = new int[numMatrices][numMatrices];
++        BottomUpDynamicProgrammingSolver(SolverConfig config) {
++            this.config = config;
++            this.table = new DPTable(config.getDimensions().size());
+         }
+ 
+         @Override
+@@ -160,39 +276,41 @@ public class MatrixChainMultiplication {
+             computeOptimalCosts();
+             long endTime = System.currentTimeMillis();
+ 
+-            return new Solution(costTable[0][numMatrices - 1], splitTable,
+-                    endTime - startTime, numMatrices);
+-        }
++            PerformanceMetrics metrics = new PerformanceMetrics(
++                    endTime - startTime,
++                    config.getDimensions().size()
++            );
+ 
+-        private int[] validateAndStore(int[] dimensions) {
+-            if (dimensions == null || dimensions.length < MIN_MATRICES) {
+-                throw new IllegalArgumentException("At least 2 matrices required");
+-            }
+-            return dimensions;
++            return new Solution(
++                    table.getMinimumCost(),
++                    table.getSplits(),
++                    metrics,
++                    config.getDimensions().size()
++            );
+         }
+ 
+         private void computeOptimalCosts() {
+-            for (int chainLength = 2; chainLength < numMatrices; chainLength++) {
+-                for (int start = 0; start < numMatrices - chainLength; start++) {
++            int n = config.getDimensions().size();
++            int[] dims = config.getDimensions().toArray();
++
++            for (int chainLength = 2; chainLength < n; chainLength++) {
++                for (int start = 0; start < n - chainLength; start++) {
+                     int end = start + chainLength;
+-                    costTable[start][end] = Integer.MAX_VALUE;
++                    table.setCost(start, end, Integer.MAX_VALUE);
+ 
+                     for (int split = start + 1; split < end; split++) {
+-                        int cost = computeCostForSplit(start, split, end);
+-                        if (cost < costTable[start][end]) {
+-                            costTable[start][end] = cost;
+-                            splitTable[start][end] = split;
++                        int cost = table.getCost(start, split)
++                                 + table.getCost(split, end)
++                                 + dims[start] * dims[split] * dims[end];
++
++                        if (cost < table.getCost(start, end)) {
++                            table.setCost(start, end, cost);
++                            table.recordSplit(start, end, split);
+                         }
+                     }
+                 }
+             }
+         }
+-
+-        private int computeCostForSplit(int start, int split, int end) {
+-            return costTable[start][split]
+-                 + costTable[split][end]
+-                 + dimensions[start] * dimensions[split] * dimensions[end];
+-        }
+     }
+ 
+     public static void main(String[] args) {

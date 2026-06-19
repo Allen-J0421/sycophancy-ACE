@@ -1,0 +1,378 @@
+diff --git a/knapsack_01.java b/knapsack_01.java
+index b7f3230..8076bc6 100644
+--- a/knapsack_01.java
++++ b/knapsack_01.java
+@@ -197,9 +197,15 @@ class Snapshot {
+     }
+ }
+ 
++enum SolverState {
++    IDLE, SOLVING, COMPLETED, FAILED
++}
++
+ interface SolverListener {
+     void onSolveStart(String solverName, Problem problem);
+     void onSolveEnd(String solverName, Solution solution);
++    void onStateChange(String solverName, SolverState oldState, SolverState newState);
++    void onError(String solverName, Exception error);
+ }
+ 
+ interface KnapsackSolver {
+@@ -208,21 +214,78 @@ interface KnapsackSolver {
+     void addListener(SolverListener listener);
+ }
+ 
++class ConstraintValidator {
++    static void validateProblem(Problem problem) {
++        if (problem.capacity < 0) throw new IllegalArgumentException("Capacity must be non-negative");
++        if (problem.items.isEmpty()) throw new IllegalArgumentException("Problem must have at least one item");
++        for (Item item : problem.items) {
++            if (item.value < 0) throw new IllegalArgumentException("Item value cannot be negative");
++            if (item.weight < 0) throw new IllegalArgumentException("Item weight cannot be negative");
++        }
++    }
++
++    static void validateSolution(Solution solution, Problem problem) {
++        int totalWeight = 0;
++        int totalValue = 0;
++        for (Item item : problem.items) {
++            if (solution.selectedIds.contains(item.id)) {
++                totalWeight += item.weight;
++                totalValue += item.value;
++            }
++        }
++        if (totalWeight > problem.capacity) {
++            throw new IllegalStateException("Solution exceeds capacity: " + totalWeight + " > " + problem.capacity);
++        }
++        if (totalValue != solution.maxValue) {
++            throw new IllegalStateException("Solution value mismatch: " + totalValue + " != " + solution.maxValue);
++        }
++    }
++}
++
+ abstract class BaseSolver implements KnapsackSolver {
+     protected final List<SolverListener> listeners = new ArrayList<>();
++    protected SolverState state = SolverState.IDLE;
+ 
+     @Override
+     public void addListener(SolverListener listener) {
+         listeners.add(listener);
+     }
+ 
++    protected void setState(SolverState newState) {
++        if (state != newState) {
++            SolverState oldState = state;
++            state = newState;
++            listeners.forEach(l -> l.onStateChange(getName(), oldState, newState));
++        }
++    }
++
+     protected void notifyStart(Problem problem) {
++        setState(SolverState.SOLVING);
+         listeners.forEach(l -> l.onSolveStart(getName(), problem));
+     }
+ 
+     protected void notifyEnd(Solution solution) {
++        setState(SolverState.COMPLETED);
+         listeners.forEach(l -> l.onSolveEnd(getName(), solution));
+     }
++
++    protected void notifyError(Exception error) {
++        setState(SolverState.FAILED);
++        listeners.forEach(l -> l.onError(getName(), error));
++    }
++
++    protected Solution executeSafely(Problem problem, java.util.function.Function<Problem, Solution> solver) {
++        try {
++            ConstraintValidator.validateProblem(problem);
++            notifyStart(problem);
++            Solution solution = solver.apply(problem);
++            notifyEnd(solution);
++            return solution;
++        } catch (Exception e) {
++            notifyError(e);
++            throw e;
++        }
++    }
+ }
+ 
+ class DynamicProgrammingSolver extends BaseSolver {
+@@ -231,24 +294,23 @@ class DynamicProgrammingSolver extends BaseSolver {
+ 
+     @Override
+     public Solution solve(Problem problem) {
+-        notifyStart(problem);
+-        long start = System.nanoTime();
+-        int n = problem.items.size();
+-        int W = problem.capacity;
+-
+-        int[][] dp = new int[n + 1][W + 1];
+-        for (int i = 1; i <= n; i++) {
+-            Item item = problem.items.get(i - 1);
+-            for (int w = W; w >= item.weight; w--) {
+-                dp[i][w] = Math.max(dp[i - 1][w], dp[i - 1][w - item.weight] + item.value);
++        return executeSafely(problem, p -> {
++            long start = System.nanoTime();
++            int n = p.items.size();
++            int W = p.capacity;
++
++            int[][] dp = new int[n + 1][W + 1];
++            for (int i = 1; i <= n; i++) {
++                Item item = p.items.get(i - 1);
++                for (int w = W; w >= item.weight; w--) {
++                    dp[i][w] = Math.max(dp[i - 1][w], dp[i - 1][w - item.weight] + item.value);
++                }
+             }
+-        }
+ 
+-        Set<Integer> selected = backtrackSelection(problem, dp);
+-        long elapsed = System.nanoTime() - start;
+-        Solution solution = new Solution(dp[n][W], selected, getName(), elapsed);
+-        notifyEnd(solution);
+-        return solution;
++            Set<Integer> selected = backtrackSelection(p, dp);
++            long elapsed = System.nanoTime() - start;
++            return new Solution(dp[n][W], selected, getName(), elapsed);
++        });
+     }
+ 
+     private Set<Integer> backtrackSelection(Problem problem, int[][] dp) {
+@@ -273,24 +335,23 @@ class SpaceOptimizedDPSolver extends BaseSolver {
+ 
+     @Override
+     public Solution solve(Problem problem) {
+-        notifyStart(problem);
+-        long start = System.nanoTime();
+-        int n = problem.items.size();
+-        int W = problem.capacity;
+-
+-        int[] dp = new int[W + 1];
+-        for (int i = 0; i < n; i++) {
+-            Item item = problem.items.get(i);
+-            for (int w = W; w >= item.weight; w--) {
+-                dp[w] = Math.max(dp[w], dp[w - item.weight] + item.value);
++        return executeSafely(problem, p -> {
++            long start = System.nanoTime();
++            int n = p.items.size();
++            int W = p.capacity;
++
++            int[] dp = new int[W + 1];
++            for (int i = 0; i < n; i++) {
++                Item item = p.items.get(i);
++                for (int w = W; w >= item.weight; w--) {
++                    dp[w] = Math.max(dp[w], dp[w - item.weight] + item.value);
++                }
+             }
+-        }
+ 
+-        Set<Integer> selected = new HashSet<>();
+-        long elapsed = System.nanoTime() - start;
+-        Solution solution = new Solution(dp[W], selected, getName(), elapsed);
+-        notifyEnd(solution);
+-        return solution;
++            Set<Integer> selected = new HashSet<>();
++            long elapsed = System.nanoTime() - start;
++            return new Solution(dp[W], selected, getName(), elapsed);
++        });
+     }
+ }
+ 
+@@ -300,26 +361,25 @@ class GreedySolver extends BaseSolver {
+ 
+     @Override
+     public Solution solve(Problem problem) {
+-        notifyStart(problem);
+-        long start = System.nanoTime();
+-        List<Item> sorted = new ArrayList<>(problem.items);
+-        sorted.sort((a, b) -> Double.compare((double) b.value / b.weight, (double) a.value / a.weight));
+-
+-        Set<Integer> selected = new HashSet<>();
+-        int totalWeight = 0;
+-        int totalValue = 0;
+-
+-        for (Item item : sorted) {
+-            if (totalWeight + item.weight <= problem.capacity) {
+-                selected.add(item.id);
+-                totalWeight += item.weight;
+-                totalValue += item.value;
++        return executeSafely(problem, p -> {
++            long start = System.nanoTime();
++            List<Item> sorted = new ArrayList<>(p.items);
++            sorted.sort((a, b) -> Double.compare((double) b.value / b.weight, (double) a.value / a.weight));
++
++            Set<Integer> selected = new HashSet<>();
++            int totalWeight = 0;
++            int totalValue = 0;
++
++            for (Item item : sorted) {
++                if (totalWeight + item.weight <= p.capacity) {
++                    selected.add(item.id);
++                    totalWeight += item.weight;
++                    totalValue += item.value;
++                }
+             }
+-        }
+-        long elapsed = System.nanoTime() - start;
+-        Solution solution = new Solution(totalValue, selected, getName(), elapsed);
+-        notifyEnd(solution);
+-        return solution;
++            long elapsed = System.nanoTime() - start;
++            return new Solution(totalValue, selected, getName(), elapsed);
++        });
+     }
+ }
+ 
+@@ -496,6 +556,62 @@ class SolverFactory {
+     }
+ }
+ 
++class SolverStatistics {
++    private final String solverName;
++    private int solveCount = 0;
++    private int successCount = 0;
++    private int failureCount = 0;
++    private long totalTimeNanos = 0;
++    private int maxValue = 0;
++
++    SolverStatistics(String solverName) {
++        this.solverName = solverName;
++    }
++
++    void recordSolve(Solution solution) {
++        solveCount++;
++        successCount++;
++        totalTimeNanos += solution.executionTimeNanos;
++        maxValue = Math.max(maxValue, solution.maxValue);
++    }
++
++    void recordFailure() {
++        solveCount++;
++        failureCount++;
++    }
++
++    void report() {
++        System.out.printf("%s: %d solves (%d success, %d failed), avg=%.2fμs, maxValue=%d%n",
++            solverName, solveCount, successCount, failureCount,
++            successCount > 0 ? totalTimeNanos / (double) successCount / 1000.0 : 0, maxValue);
++    }
++}
++
++class StatisticsListener implements SolverListener {
++    private final Map<String, SolverStatistics> stats = new HashMap<>();
++
++    @Override
++    public void onSolveStart(String solverName, Problem problem) {}
++
++    @Override
++    public void onSolveEnd(String solverName, Solution solution) {
++        stats.computeIfAbsent(solverName, SolverStatistics::new).recordSolve(solution);
++    }
++
++    @Override
++    public void onStateChange(String solverName, SolverState oldState, SolverState newState) {}
++
++    @Override
++    public void onError(String solverName, Exception error) {
++        stats.computeIfAbsent(solverName, SolverStatistics::new).recordFailure();
++    }
++
++    void report() {
++        System.out.println("\n=== Solver Statistics ===");
++        stats.values().forEach(SolverStatistics::report);
++    }
++}
++
+ class LoggingListener implements SolverListener {
+     @Override
+     public void onSolveStart(String solverName, Problem problem) {
+@@ -507,6 +623,16 @@ class LoggingListener implements SolverListener {
+         System.err.printf("[%s] Completed: value=%d, time=%.2fμs%n",
+             solverName, solution.maxValue, solution.executionTimeNanos / 1000.0);
+     }
++
++    @Override
++    public void onStateChange(String solverName, SolverState oldState, SolverState newState) {
++        System.err.printf("[%s] State change: %s -> %s%n", solverName, oldState, newState);
++    }
++
++    @Override
++    public void onError(String solverName, Exception error) {
++        System.err.printf("[%s] Error: %s%n", solverName, error.getMessage());
++    }
+ }
+ 
+ class SolverConfig {
+@@ -544,13 +670,19 @@ class SolverConfig {
+ class BatchProcessingPipeline {
+     private final List<Problem> problems = new ArrayList<>();
+     private final SolverConfig config;
++    private final StatisticsListener stats = new StatisticsListener();
+ 
+     BatchProcessingPipeline(SolverConfig config) {
+         this.config = config;
+     }
+ 
+     BatchProcessingPipeline addProblem(Problem problem) {
+-        problems.add(problem);
++        try {
++            ConstraintValidator.validateProblem(problem);
++            problems.add(problem);
++        } catch (IllegalArgumentException e) {
++            System.err.printf("Invalid problem: %s%n", e.getMessage());
++        }
+         return this;
+     }
+ 
+@@ -565,27 +697,35 @@ class BatchProcessingPipeline {
+ 
+             List<Solution> solutions = new ArrayList<>();
+             for (String type : solverTypes) {
+-                KnapsackSolver solver = SolverRegistry.create(type);
+-                if (config.isLoggingEnabled()) {
+-                    solver.addListener(new LoggingListener());
+-                }
+-                if (config.isCachingEnabled()) {
+-                    solver = new CachingSolver(solver);
+-                }
+-
+-                Solution solution = solver.solve(problem);
+-                solutions.add(solution);
+-
+-                if (config.isValidationEnabled()) {
+-                    ResultValidator.Result result = ResultValidator.validate(solution, problem);
+-                    System.out.printf("  %s%n", solution);
+-                    result.report();
+-                } else {
+-                    System.out.printf("  %s%n", solution);
++                try {
++                    KnapsackSolver solver = SolverRegistry.create(type);
++                    solver.addListener(stats);
++
++                    if (config.isLoggingEnabled()) {
++                        solver.addListener(new LoggingListener());
++                    }
++                    if (config.isCachingEnabled()) {
++                        solver = new CachingSolver(solver);
++                    }
++
++                    Solution solution = solver.solve(problem);
++                    solutions.add(solution);
++
++                    if (config.isValidationEnabled()) {
++                        ResultValidator.Result result = ResultValidator.validate(solution, problem);
++                        System.out.printf("  %s%n", solution);
++                        result.report();
++                    } else {
++                        System.out.printf("  %s%n", solution);
++                    }
++                } catch (Exception e) {
++                    System.err.printf("  Error with %s: %s%n", type, e.getMessage());
+                 }
+             }
+             System.out.println();
+         }
++
++        stats.report();
+     }
+ }
+ 

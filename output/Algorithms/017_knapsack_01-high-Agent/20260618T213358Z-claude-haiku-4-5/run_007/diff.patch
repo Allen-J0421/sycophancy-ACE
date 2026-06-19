@@ -1,0 +1,252 @@
+diff --git a/knapsack_01.java b/knapsack_01.java
+index 2abde0e..b7f3230 100644
+--- a/knapsack_01.java
++++ b/knapsack_01.java
+@@ -116,18 +116,70 @@ class Solution {
+     final Set<Integer> selectedIds;
+     final String solverName;
+     final long executionTimeNanos;
++    final boolean isValid;
++    final int totalWeight;
+ 
+     Solution(int maxValue, Set<Integer> selectedIds, String solverName, long executionTimeNanos) {
+         this.maxValue = maxValue;
+         this.selectedIds = Collections.unmodifiableSet(new HashSet<>(selectedIds));
+         this.solverName = solverName;
+         this.executionTimeNanos = executionTimeNanos;
++        this.isValid = true;
++        this.totalWeight = 0;
++    }
++
++    Solution(int maxValue, Set<Integer> selectedIds, String solverName, long executionTimeNanos,
++             boolean isValid, int totalWeight) {
++        this.maxValue = maxValue;
++        this.selectedIds = Collections.unmodifiableSet(new HashSet<>(selectedIds));
++        this.solverName = solverName;
++        this.executionTimeNanos = executionTimeNanos;
++        this.isValid = isValid;
++        this.totalWeight = totalWeight;
+     }
+ 
+     @Override
+     public String toString() {
+-        return String.format("Solution(solver=%s, value=%d, selected=%s, time=%.2fμs)",
+-            solverName, maxValue, selectedIds, executionTimeNanos / 1000.0);
++        return String.format("Solution(solver=%s, value=%d, weight=%d, selected=%d, valid=%s, time=%.2fμs)",
++            solverName, maxValue, totalWeight, selectedIds.size(), isValid, executionTimeNanos / 1000.0);
++    }
++}
++
++class ResultValidator {
++    static Result validate(Solution solution, Problem problem) {
++        int totalWeight = 0;
++        int totalValue = 0;
++        for (Item item : problem.items) {
++            if (solution.selectedIds.contains(item.id)) {
++                totalWeight += item.weight;
++                totalValue += item.value;
++            }
++        }
++        boolean valid = totalWeight <= problem.capacity && totalValue == solution.maxValue;
++        return new Result(solution, valid, totalWeight, totalValue);
++    }
++
++    static class Result {
++        final Solution solution;
++        final boolean isValid;
++        final int actualWeight;
++        final int actualValue;
++
++        Result(Solution solution, boolean isValid, int actualWeight, int actualValue) {
++            this.solution = solution;
++            this.isValid = isValid;
++            this.actualWeight = actualWeight;
++            this.actualValue = actualValue;
++        }
++
++        boolean exceedsCapacity(Problem problem) {
++            return actualWeight > problem.capacity;
++        }
++
++        void report() {
++            System.out.printf("    Validation: %s (weight=%d, value=%d)%n",
++                isValid ? "✓ VALID" : "✗ INVALID", actualWeight, actualValue);
++        }
+     }
+ }
+ 
+@@ -407,19 +459,40 @@ class AdaptiveSolver extends BaseSolver {
+     }
+ }
+ 
++class SolverRegistry {
++    private static final Map<String, java.util.function.Supplier<KnapsackSolver>> REGISTRY = new HashMap<>();
++
++    static {
++        register("dp", DynamicProgrammingSolver::new);
++        register("dynamic", DynamicProgrammingSolver::new);
++        register("sopt", SpaceOptimizedDPSolver::new);
++        register("space-opt", SpaceOptimizedDPSolver::new);
++        register("greedy", GreedySolver::new);
++        register("composite", () -> new CompositeSolver(
++            new DynamicProgrammingSolver(),
++            new GreedySolver()
++        ));
++        register("adaptive", AdaptiveSolver::new);
++    }
++
++    static void register(String name, java.util.function.Supplier<KnapsackSolver> factory) {
++        REGISTRY.put(name.toLowerCase(), factory);
++    }
++
++    static KnapsackSolver create(String type) {
++        var factory = REGISTRY.get(type.toLowerCase());
++        if (factory == null) throw new IllegalArgumentException("Unknown solver type: " + type);
++        return factory.get();
++    }
++
++    static Set<String> availableSolvers() {
++        return REGISTRY.keySet();
++    }
++}
++
+ class SolverFactory {
+     static KnapsackSolver create(String type) {
+-        return switch (type.toLowerCase()) {
+-            case "dp", "dynamic" -> new DynamicProgrammingSolver();
+-            case "sopt", "space-opt" -> new SpaceOptimizedDPSolver();
+-            case "greedy" -> new GreedySolver();
+-            case "composite" -> new CompositeSolver(
+-                new DynamicProgrammingSolver(),
+-                new GreedySolver()
+-            );
+-            case "adaptive" -> new AdaptiveSolver();
+-            default -> throw new IllegalArgumentException("Unknown solver type: " + type);
+-        };
++        return SolverRegistry.create(type);
+     }
+ }
+ 
+@@ -436,6 +509,86 @@ class LoggingListener implements SolverListener {
+     }
+ }
+ 
++class SolverConfig {
++    private final Map<String, Object> config = new HashMap<>();
++    private boolean validateResults = true;
++    private boolean enableLogging = false;
++    private boolean enableCaching = false;
++
++    SolverConfig withValidation(boolean enabled) {
++        this.validateResults = enabled;
++        return this;
++    }
++
++    SolverConfig withLogging(boolean enabled) {
++        this.enableLogging = enabled;
++        return this;
++    }
++
++    SolverConfig withCaching(boolean enabled) {
++        this.enableCaching = enabled;
++        return this;
++    }
++
++    SolverConfig set(String key, Object value) {
++        config.put(key, value);
++        return this;
++    }
++
++    Object get(String key) { return config.get(key); }
++    boolean isValidationEnabled() { return validateResults; }
++    boolean isLoggingEnabled() { return enableLogging; }
++    boolean isCachingEnabled() { return enableCaching; }
++}
++
++class BatchProcessingPipeline {
++    private final List<Problem> problems = new ArrayList<>();
++    private final SolverConfig config;
++
++    BatchProcessingPipeline(SolverConfig config) {
++        this.config = config;
++    }
++
++    BatchProcessingPipeline addProblem(Problem problem) {
++        problems.add(problem);
++        return this;
++    }
++
++    void execute(String... solverTypes) {
++        System.out.println("=== Batch Processing Pipeline ===");
++        System.out.printf("Processing %d problems with %d solvers%n", problems.size(), solverTypes.length);
++        System.out.println();
++
++        for (int i = 0; i < problems.size(); i++) {
++            Problem problem = problems.get(i);
++            System.out.printf("Problem %d: %s%n", i + 1, problem);
++
++            List<Solution> solutions = new ArrayList<>();
++            for (String type : solverTypes) {
++                KnapsackSolver solver = SolverRegistry.create(type);
++                if (config.isLoggingEnabled()) {
++                    solver.addListener(new LoggingListener());
++                }
++                if (config.isCachingEnabled()) {
++                    solver = new CachingSolver(solver);
++                }
++
++                Solution solution = solver.solve(problem);
++                solutions.add(solution);
++
++                if (config.isValidationEnabled()) {
++                    ResultValidator.Result result = ResultValidator.validate(solution, problem);
++                    System.out.printf("  %s%n", solution);
++                    result.report();
++                } else {
++                    System.out.printf("  %s%n", solution);
++                }
++            }
++            System.out.println();
++        }
++    }
++}
++
+ class ResultComparison {
+     final List<Solution> solutions;
+     final ProblemAnalyzer analyzer;
+@@ -573,13 +726,33 @@ class Knapsack {
+         TestSuite.runAll();
+ 
+         System.out.println();
+-        Problem problem = Problem.builder()
++
++        Problem problem1 = Problem.builder()
+             .addItem(Item.builder().id(1).value(1).weight(4).build())
+             .addItem(Item.builder().id(2).value(2).weight(5).build())
+             .addItem(Item.builder().id(3).value(3).weight(1).build())
+             .capacity(4)
+             .build();
+ 
+-        Benchmark.compare(problem, "dp", "sopt", "greedy", "adaptive");
++        Problem problem2 = Problem.builder()
++            .addItem(Item.builder().id(1).value(60).weight(10).build())
++            .addItem(Item.builder().id(2).value(100).weight(20).build())
++            .addItem(Item.builder().id(3).value(120).weight(30).build())
++            .capacity(50)
++            .build();
++
++        SolverConfig config = new SolverConfig()
++            .withValidation(true)
++            .withLogging(false)
++            .withCaching(false);
++
++        BatchProcessingPipeline pipeline = new BatchProcessingPipeline(config)
++            .addProblem(problem1)
++            .addProblem(problem2);
++
++        pipeline.execute("dp", "greedy");
++
++        System.out.println("\n=== Traditional Benchmark ===");
++        Benchmark.compare(problem1, "dp", "sopt", "greedy", "adaptive");
+     }
+ }
