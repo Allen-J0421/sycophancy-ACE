@@ -1,0 +1,176 @@
+diff --git a/README.md b/README.md
+index af7663b..6c3c5aa 100644
+--- a/README.md
++++ b/README.md
+@@ -15,6 +15,7 @@ src/main/java/floydwarshall/
+               LongWeightSystem,
+               DoubleWeightSystem
+   graph/      WeightedGraph<W>, Edge<W>    — immutable graph domain model + builder
++              Graphs                       — build a graph from an adjacency matrix
+   matrix/     SquareMatrix<W>              — bounds-checked matrix; unset cell = unreachable
+   algorithm/  FloydWarshallSolver<W>       — the O(V^3) solver (no input mutation)
+               AllPairsShortestPaths<W>     — result: distances + path queries
+@@ -59,6 +60,18 @@ Swap `new IntWeightSystem()` for `new DoubleWeightSystem()` / `new LongWeightSys
+ (and the graph's type parameter) to solve over those weights. For a custom weight
+ type, implement `WeightSystem<W>` — `zero()`, `sum(a, b)`, and `compare(a, b)`.
+ 
++Prefer adjacency matrices? Build the graph with `Graphs` instead of the builder:
++
++```java
++int inf = 100_000_000;
++int[][] m = {{0, 4, inf}, {inf, 0, 1}, {2, inf, 0}};
++WeightedGraph<Integer> g = Graphs.fromIntMatrix(m, inf);   // cells == inf mean "no edge"
++
++// Generic form: a null cell means "no edge".
++Double[][] d = {{0.0, 1.5, null}, {null, 0.0, 2.25}, {null, null, 0.0}};
++WeightedGraph<Double> dg = Graphs.fromMatrix(d);
++```
++
+ ## Design notes
+ 
+ - **Generic weights.** The solver is parameterised over a weight type `W` via
+diff --git a/src/main/java/floydwarshall/graph/Graphs.java b/src/main/java/floydwarshall/graph/Graphs.java
+new file mode 100644
+index 0000000..46e3893
+--- /dev/null
++++ b/src/main/java/floydwarshall/graph/Graphs.java
+@@ -0,0 +1,81 @@
++package floydwarshall.graph;
++
++import java.util.Objects;
++
++/**
++ * Factory helpers for building {@link WeightedGraph} instances, for clients who
++ * have their edges in adjacency-matrix form rather than as a list of edges.
++ *
++ * <p>In all factories {@code matrix[i][j]} is interpreted as the weight of the
++ * directed edge {@code i -> j}, including the diagonal: a present cell is
++ * transcribed faithfully into an edge, so a meaningful (e.g. negative) self-loop
++ * is preserved. Cells that denote "no edge" are skipped — represented by
++ * {@code null} in the generic factory and by an explicit sentinel in the
++ * {@code int} convenience factory.
++ */
++public final class Graphs {
++
++    private Graphs() {
++    }
++
++    /**
++     * Builds a graph from a square {@code W[][]} adjacency matrix in which a
++     * {@code null} cell means "no edge".
++     *
++     * @throws IllegalArgumentException if the matrix is not square
++     */
++    public static <W> WeightedGraph<W> fromMatrix(W[][] matrix) {
++        Objects.requireNonNull(matrix, "matrix");
++        int n = matrix.length;
++        WeightedGraph.Builder<W> builder = WeightedGraph.builder(n);
++        for (int i = 0; i < n; i++) {
++            W[] row = requireSquareRow(matrix[i], i, n);
++            for (int j = 0; j < n; j++) {
++                if (row[j] != null) {
++                    builder.addEdge(i, j, row[j]);
++                }
++            }
++        }
++        return builder.build();
++    }
++
++    /**
++     * Builds an {@code Integer}-weighted graph from a square {@code int[][]}
++     * adjacency matrix in which cells equal to {@code noEdge} mean "no edge".
++     * This mirrors the classic infinity-sentinel matrix style.
++     *
++     * @throws IllegalArgumentException if the matrix is not square
++     */
++    public static WeightedGraph<Integer> fromIntMatrix(int[][] matrix, int noEdge) {
++        Objects.requireNonNull(matrix, "matrix");
++        int n = matrix.length;
++        WeightedGraph.Builder<Integer> builder = WeightedGraph.builder(n);
++        for (int i = 0; i < n; i++) {
++            int[] row = matrix[i];
++            Objects.requireNonNull(row, "matrix row " + i);
++            if (row.length != n) {
++                throw notSquare(i, row.length, n);
++            }
++            for (int j = 0; j < n; j++) {
++                if (row[j] != noEdge) {
++                    builder.addEdge(i, j, row[j]);
++                }
++            }
++        }
++        return builder.build();
++    }
++
++    private static <W> W[] requireSquareRow(W[] row, int index, int expected) {
++        Objects.requireNonNull(row, "matrix row " + index);
++        if (row.length != expected) {
++            throw notSquare(index, row.length, expected);
++        }
++        return row;
++    }
++
++    private static IllegalArgumentException notSquare(int row, int actual, int expected) {
++        return new IllegalArgumentException(
++                "matrix is not square: row " + row + " has length " + actual
++                        + ", expected " + expected);
++    }
++}
+diff --git a/src/test/java/floydwarshall/FloydWarshallTest.java b/src/test/java/floydwarshall/FloydWarshallTest.java
+index ed35777..a5888c0 100644
+--- a/src/test/java/floydwarshall/FloydWarshallTest.java
++++ b/src/test/java/floydwarshall/FloydWarshallTest.java
+@@ -4,6 +4,7 @@ import floydwarshall.algorithm.AllPairsShortestPaths;
+ import floydwarshall.algorithm.FloydWarshallSolver;
+ import floydwarshall.algorithm.VertexPath;
+ import floydwarshall.demo.ExampleGraphs;
++import floydwarshall.graph.Graphs;
+ import floydwarshall.graph.WeightedGraph;
+ import floydwarshall.weight.DoubleWeightSystem;
+ import floydwarshall.weight.IntWeightSystem;
+@@ -27,6 +28,8 @@ public final class FloydWarshallTest {
+         failures += run("negative cycle detection", () -> negativeCycle(a));
+         failures += run("double weights", () -> doubleWeights(a));
+         failures += run("long weights", () -> longWeights(a));
++        failures += run("int matrix adapter matches baseline", () -> intMatrixAdapter(a));
++        failures += run("generic matrix adapter", () -> genericMatrixAdapter(a));
+ 
+         System.out.println();
+         System.out.println(a.checks() + " checks executed.");
+@@ -110,6 +113,36 @@ public final class FloydWarshallTest {
+         a.assertEquals(List.of(0, 1, 2), r.path(0, 2).orElseThrow().vertices(), "0->2 path");
+     }
+ 
++    private static void intMatrixAdapter(TestAssertions a) {
++        int inf = 100_000_000;
++        int[][] matrix = {
++                {0, 4, inf, 5, inf},
++                {inf, 0, 1, inf, 6},
++                {2, inf, 0, 3, inf},
++                {inf, inf, 1, 0, 2},
++                {1, inf, inf, 4, 0},
++        };
++        WeightedGraph<Integer> fromMatrix = Graphs.fromIntMatrix(matrix, inf);
++        AllPairsShortestPaths<Integer> viaMatrix = intSolver().solve(fromMatrix);
++        AllPairsShortestPaths<Integer> viaBuilder = intSolver().solve(ExampleGraphs.classicFiveVertex());
++        // The matrix-built graph must yield exactly the same distances as the
++        // edge-list-built graph it represents.
++        a.assertEquals(viaBuilder.distanceMatrix(), viaMatrix.distanceMatrix(),
++                "matrix adapter and builder agree");
++    }
++
++    private static void genericMatrixAdapter(TestAssertions a) {
++        Double[][] matrix = {
++                {0.0, 1.5, null},
++                {null, 0.0, 2.25},
++                {null, null, 0.0},
++        };
++        WeightedGraph<Double> g = Graphs.fromMatrix(matrix);
++        AllPairsShortestPaths<Double> r = new FloydWarshallSolver<>(new DoubleWeightSystem()).solve(g);
++        a.assertEquals(Double.valueOf(3.75), r.distance(0, 2).orElseThrow(), "0->2 via 1");
++        a.assertTrue(r.distance(2, 0).isEmpty(), "2->0 unreachable (null cells)");
++    }
++
+     private static void longWeights(TestAssertions a) {
+         long big = 3_000_000_000L; // beyond int range
+         WeightedGraph<Long> g = WeightedGraph.<Long>builder(3)

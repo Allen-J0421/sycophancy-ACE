@@ -1,0 +1,303 @@
+diff --git a/KmpMatchIterator.java b/KmpMatchIterator.java
+new file mode 100644
+index 0000000..8186601
+--- /dev/null
++++ b/KmpMatchIterator.java
+@@ -0,0 +1,69 @@
++import java.util.NoSuchElementException;
++import java.util.PrimitiveIterator;
++
++/**
++ * One-shot iterator over zero-based KMP match indices for a specific text input.
++ */
++public final class KmpMatchIterator implements PrimitiveIterator.OfInt {
++    private final String pattern;
++    private final int[] longestPrefixSuffix;
++    private final CharSequence text;
++
++    private int textIndex;
++    private int patternIndex;
++    private int nextMatchIndex;
++    private boolean nextMatchReady;
++    private boolean exhausted;
++
++    KmpMatchIterator(String pattern, int[] longestPrefixSuffix, CharSequence text) {
++        this.pattern = pattern;
++        this.longestPrefixSuffix = longestPrefixSuffix;
++        this.text = text;
++        this.exhausted = pattern.length() > text.length();
++    }
++
++    @Override
++    public boolean hasNext() {
++        if (nextMatchReady) {
++            return true;
++        }
++
++        if (exhausted) {
++            return false;
++        }
++
++        while (textIndex < text.length()) {
++            if (text.charAt(textIndex) == pattern.charAt(patternIndex)) {
++                textIndex++;
++                patternIndex++;
++
++                if (patternIndex == pattern.length()) {
++                    nextMatchIndex = textIndex - patternIndex;
++                    patternIndex = longestPrefixSuffix[patternIndex - 1];
++                    nextMatchReady = true;
++                    return true;
++                }
++                continue;
++            }
++
++            if (patternIndex > 0) {
++                patternIndex = longestPrefixSuffix[patternIndex - 1];
++            } else {
++                textIndex++;
++            }
++        }
++
++        exhausted = true;
++        return false;
++    }
++
++    @Override
++    public int nextInt() {
++        if (!hasNext()) {
++            throw new NoSuchElementException("No remaining matches");
++        }
++
++        nextMatchReady = false;
++        return nextMatchIndex;
++    }
++}
+diff --git a/KmpPattern.java b/KmpPattern.java
+index 6aaffee..ed8d3c3 100644
+--- a/KmpPattern.java
++++ b/KmpPattern.java
+@@ -32,18 +32,20 @@ public final class KmpPattern {
+         return value;
+     }
+ 
+-    public KmpMatchResult analyzeIn(CharSequence text) {
++    public KmpMatchIterator matchIteratorIn(CharSequence text) {
+         validateText(text);
++        return new KmpMatchIterator(value, longestPrefixSuffix, text);
++    }
+ 
+-        if (value.length() > text.length()) {
++    public KmpMatchResult analyzeIn(CharSequence text) {
++        List<Integer> matches = new ArrayList<>();
++        KmpMatchIterator iterator = matchIteratorIn(text);
++        iterator.forEachRemaining((int matchIndex) -> matches.add(matchIndex));
++
++        if (matches.isEmpty()) {
+             return KmpMatchResult.noMatches();
+         }
+ 
+-        List<Integer> matches = new ArrayList<>();
+-        scanMatches(text, matchIndex -> {
+-            matches.add(matchIndex);
+-            return true;
+-        });
+         return KmpMatchResult.from(matches);
+     }
+ 
+@@ -52,51 +54,29 @@ public final class KmpPattern {
+     }
+ 
+     public OptionalInt findFirstIn(CharSequence text) {
+-        validateText(text);
+-
+-        if (value.length() > text.length()) {
+-            return OptionalInt.empty();
+-        }
+-
+-        int[] firstMatchIndex = { -1 };
+-        scanMatches(text, matchIndex -> {
+-            firstMatchIndex[0] = matchIndex;
+-            return false;
+-        });
+-        return firstMatchIndex[0] >= 0 ? OptionalInt.of(firstMatchIndex[0]) : OptionalInt.empty();
++        KmpMatchIterator iterator = matchIteratorIn(text);
++        return iterator.hasNext() ? OptionalInt.of(iterator.nextInt()) : OptionalInt.empty();
+     }
+ 
+     public int countMatchesIn(CharSequence text) {
+-        validateText(text);
++        int matchCount = 0;
++        KmpMatchIterator iterator = matchIteratorIn(text);
+ 
+-        if (value.length() > text.length()) {
+-            return 0;
++        while (iterator.hasNext()) {
++            iterator.nextInt();
++            matchCount++;
+         }
+ 
+-        int[] matchCount = { 0 };
+-        scanMatches(text, matchIndex -> {
+-            matchCount[0]++;
+-            return true;
+-        });
+-        return matchCount[0];
++        return matchCount;
+     }
+ 
+     public boolean occursIn(CharSequence text) {
+-        return findFirstIn(text).isPresent();
++        return matchIteratorIn(text).hasNext();
+     }
+ 
+     public void forEachMatchIn(CharSequence text, IntConsumer matchConsumer) {
+-        validateText(text);
+         Objects.requireNonNull(matchConsumer, "matchConsumer must not be null");
+-
+-        if (value.length() > text.length()) {
+-            return;
+-        }
+-
+-        scanMatches(text, matchIndex -> {
+-            matchConsumer.accept(matchIndex);
+-            return true;
+-        });
++        matchIteratorIn(text).forEachRemaining(matchConsumer);
+     }
+ 
+     static int[] buildLongestPrefixSuffixTable(String pattern) {
+@@ -125,37 +105,4 @@ public final class KmpPattern {
+     private void validateText(CharSequence text) {
+         Objects.requireNonNull(text, "text must not be null");
+     }
+-
+-    private void scanMatches(CharSequence text, MatchVisitor visitor) {
+-        int textIndex = 0;
+-        int patternIndex = 0;
+-
+-        while (textIndex < text.length()) {
+-            if (text.charAt(textIndex) == value.charAt(patternIndex)) {
+-                textIndex++;
+-                patternIndex++;
+-
+-                if (patternIndex == value.length()) {
+-                    int matchIndex = textIndex - patternIndex;
+-                    patternIndex = longestPrefixSuffix[patternIndex - 1];
+-
+-                    if (!visitor.visit(matchIndex)) {
+-                        return;
+-                    }
+-                }
+-                continue;
+-            }
+-
+-            if (patternIndex > 0) {
+-                patternIndex = longestPrefixSuffix[patternIndex - 1];
+-            } else {
+-                textIndex++;
+-            }
+-        }
+-    }
+-
+-    @FunctionalInterface
+-    private interface MatchVisitor {
+-        boolean visit(int matchIndex);
+-    }
+ }
+diff --git a/KmpSearch.java b/KmpSearch.java
+index caecfb2..203e4ac 100644
+--- a/KmpSearch.java
++++ b/KmpSearch.java
+@@ -25,6 +25,10 @@ public final class KmpSearch {
+         return compile(pattern).analyzeIn(text);
+     }
+ 
++    public static KmpMatchIterator matchIterator(CharSequence pattern, CharSequence text) {
++        return compile(pattern).matchIteratorIn(text);
++    }
++
+     public static OptionalInt findFirst(CharSequence pattern, CharSequence text) {
+         return compile(pattern).findFirstIn(text);
+     }
+diff --git a/KmpSearchDemo.java b/KmpSearchDemo.java
+index 80f6449..6f5d3a5 100644
+--- a/KmpSearchDemo.java
++++ b/KmpSearchDemo.java
+@@ -11,6 +11,7 @@ public final class KmpSearchDemo {
+ 
+         KmpPattern compiledPattern = KmpSearch.compile(pattern);
+         KmpMatchResult result = compiledPattern.analyzeIn(text);
++        KmpMatchIterator iterator = compiledPattern.matchIteratorIn(text);
+ 
+         System.out.println("Matches: " + result.matchIndices());
+         System.out.println("Count: " + result.count());
+@@ -18,8 +19,9 @@ public final class KmpSearchDemo {
+         System.out.println("Last: " + formatOptional(result.lastMatch()));
+         System.out.println("Contains: " + result.hasMatches());
+ 
+-        System.out.print("Streamed: ");
+-        for (int matchIndex : result.matchIndices()) {
++        System.out.print("Iterated: ");
++        while (iterator.hasNext()) {
++            int matchIndex = iterator.nextInt();
+             System.out.print(matchIndex + " ");
+         }
+         if (!result.hasMatches()) {
+diff --git a/KmpSearchSelfTest.java b/KmpSearchSelfTest.java
+index 7ec5801..57e956f 100644
+--- a/KmpSearchSelfTest.java
++++ b/KmpSearchSelfTest.java
+@@ -12,6 +12,7 @@ public final class KmpSearchSelfTest {
+         assertEquals(List.of(), KmpSearch.search("xyz", "aaaa"), "no matches");
+         assertEquals(List.of(), KmpSearch.search("longer-pattern", "short"), "pattern longer than text");
+         assertAnalysis(KmpSearch.analyze("aaba", "aabaacaadaabaaba"), List.of(0, 9, 12), "analysis through facade");
++        assertEquals(List.of(0, 2), collectMatches(KmpSearch.matchIterator("aba", "ababa")), "iterator through facade");
+         assertEquals(OptionalInt.of(2), KmpSearch.findFirst("aaba", "xxaabaacaadaabaaba"), "first match through facade");
+         assertEquals(3, KmpSearch.countMatches("aa", "aaaa"), "count matches through facade");
+         assertTrue(KmpSearch.contains("aba", "xxabaxx"), "contains through facade");
+@@ -21,6 +22,7 @@ public final class KmpSearchSelfTest {
+         KmpPattern compiledPattern = KmpPattern.compile("aba");
+         assertEquals("aba", compiledPattern.value(), "compiled pattern preserves source value");
+         assertAnalysis(compiledPattern.analyzeIn("ababa"), List.of(0, 2), "compiled pattern analysis");
++        assertEquals(List.of(0, 2), collectMatches(compiledPattern.matchIteratorIn("ababa")), "pattern iterator search");
+         assertEquals(List.of(0, 2), compiledPattern.findMatchesIn("ababa"), "compiled pattern search");
+         assertEquals(List.of(0, 2), compiledPattern.findMatchesIn(new StringBuilder("ababa")), "char sequence search");
+         assertEquals(OptionalInt.of(0), compiledPattern.findFirstIn("ababa"), "first match search");
+@@ -34,7 +36,9 @@ public final class KmpSearchSelfTest {
+         assertThrows(IllegalArgumentException.class, () -> KmpPattern.compile(""), "empty pattern rejected");
+         assertThrows(NullPointerException.class, () -> KmpPattern.compile(null), "null pattern rejected");
+         assertThrows(NullPointerException.class, () -> compiledPattern.findMatchesIn(null), "null text rejected");
++        assertThrows(NullPointerException.class, () -> compiledPattern.matchIteratorIn(null), "null iterator text rejected");
+         assertThrows(NullPointerException.class, () -> compiledPattern.forEachMatchIn("ababa", null), "null match consumer rejected");
++        assertThrows(java.util.NoSuchElementException.class, () -> exhaustedIterator(compiledPattern).nextInt(), "iterator rejects nextInt when exhausted");
+     }
+ 
+     private static void assertAnalysis(KmpMatchResult result, List<Integer> expectedMatches, String scenario) {
+@@ -61,10 +65,26 @@ public final class KmpSearchSelfTest {
+         return List.copyOf(matches);
+     }
+ 
++    private static List<Integer> collectMatches(KmpMatchIterator iterator) {
++        List<Integer> matches = new java.util.ArrayList<>();
++
++        while (iterator.hasNext()) {
++            matches.add(iterator.nextInt());
++        }
++
++        return List.copyOf(matches);
++    }
++
+     private static OptionalInt toOptional(Integer value) {
+         return value == null ? OptionalInt.empty() : OptionalInt.of(value);
+     }
+ 
++    private static KmpMatchIterator exhaustedIterator(KmpPattern pattern) {
++        KmpMatchIterator iterator = pattern.matchIteratorIn("xxxx");
++        assertFalse(iterator.hasNext(), "iterator should be exhausted");
++        return iterator;
++    }
++
+     private static void assertEquals(Object expected, Object actual, String scenario) {
+         if (!expected.equals(actual)) {
+             throw new AssertionError(scenario + ": expected " + expected + " but got " + actual);

@@ -1,0 +1,461 @@
+diff --git a/bipartite/Main.java b/bipartite/Main.java
+index 2bf689e..28b5958 100644
+--- a/bipartite/Main.java
++++ b/bipartite/Main.java
+@@ -37,6 +37,18 @@ public final class Main {
+         // Depth-first traversal over the same Graph interface.
+         List<Integer> dfsOrder = new DepthFirstSearch().traverse(triangle);
+         System.out.println("DFS preorder (unweighted undirected): " + dfsOrder);
++
++        // Topological sort of the directed acyclic graph above.
++        reportTopologicalSort(new TopologicalSort().sort(directed));
++    }
++
++    private static void reportTopologicalSort(TopologicalSortResult result) {
++        switch (result) {
++            case TopologicalSortResult.Sorted sorted ->
++                    System.out.println("Topological order (directed): " + sorted.order());
++            case TopologicalSortResult.Cyclic cyclic ->
++                    System.out.println("Topological sort failed; cycle witness: " + cyclic.cycle());
++        }
+     }
+ 
+     private static void report(String label, BipartiteResult result) {
+diff --git a/bipartite/TopologicalSort.java b/bipartite/TopologicalSort.java
+new file mode 100644
+index 0000000..fcb6804
+--- /dev/null
++++ b/bipartite/TopologicalSort.java
+@@ -0,0 +1,170 @@
++package bipartite;
++
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.Deque;
++import java.util.List;
++import java.util.PriorityQueue;
++
++/**
++ * Produces a topological ordering of a {@link DirectedGraph}: a sequence of all
++ * vertices in which every edge {@code u -> v} has {@code u} before {@code v}, so
++ * dependencies precede the vertices that depend on them. Such an order exists if
++ * and only if the graph is acyclic.
++ *
++ * <p>The ordering is computed with Kahn's algorithm — repeatedly emitting a
++ * vertex whose remaining in-degree is zero — which is iterative and BFS-flavoured
++ * like the search in {@link BipartiteChecker}. Ties are broken by ascending
++ * vertex id (via a min-heap), so the result is the unique lexicographically
++ * smallest topological order. If a cycle prevents a complete ordering, a directed
++ * cycle is reconstructed as a verifiable witness, mirroring the odd-cycle witness
++ * of {@link BipartiteChecker}. The sort runs in {@code O((V + E) log V)} time
++ * (the log factor coming from the heap) and {@code O(V + E)} space.
++ *
++ * <p>Topological order is a property of directed graphs, so this takes a
++ * {@link DirectedGraph}; it relies only on the {@link Graph} interface internally.
++ */
++public final class TopologicalSort {
++
++    private static final int UNVISITED = 0;
++    private static final int IN_PROGRESS = 1;
++    private static final int DONE = 2;
++
++    /**
++     * Topologically sorts the given graph.
++     *
++     * @param graph the directed graph to sort
++     * @return a {@link TopologicalSortResult.Sorted} with the ordering if the
++     *         graph is acyclic, otherwise a {@link TopologicalSortResult.Cyclic}
++     *         carrying a directed-cycle witness
++     * @throws NullPointerException if {@code graph} is null
++     */
++    public TopologicalSortResult sort(DirectedGraph graph) {
++        if (graph == null) {
++            throw new NullPointerException("graph must not be null");
++        }
++
++        int order = graph.order();
++        int[] inDegree = inDegrees(graph);
++
++        // Seed the queue with every source (in-degree zero); the min-heap makes
++        // ties resolve to the smallest vertex id for a deterministic result.
++        PriorityQueue<Integer> ready = new PriorityQueue<>();
++        for (int vertex = 0; vertex < order; vertex++) {
++            if (inDegree[vertex] == 0) {
++                ready.add(vertex);
++            }
++        }
++
++        List<Integer> sorted = new ArrayList<>(order);
++        while (!ready.isEmpty()) {
++            int u = ready.poll();
++            sorted.add(u);
++            for (int v : graph.neighbors(u)) {
++                if (--inDegree[v] == 0) {
++                    ready.add(v);
++                }
++            }
++        }
++
++        if (sorted.size() == order) {
++            return new TopologicalSortResult.Sorted(sorted);
++        }
++        // Vertices never reaching in-degree zero form the cyclic remainder.
++        return new TopologicalSortResult.Cyclic(findCycle(graph, inDegree));
++    }
++
++    private static int[] inDegrees(DirectedGraph graph) {
++        int[] inDegree = new int[graph.order()];
++        for (int u = 0; u < graph.order(); u++) {
++            for (int v : graph.neighbors(u)) {
++                inDegree[v]++;
++            }
++        }
++        return inDegree;
++    }
++
++    /**
++     * Finds a directed cycle within the vertices that Kahn's algorithm could not
++     * order — those still carrying a positive in-degree. Every such vertex has an
++     * incoming edge from another such vertex, so the induced subgraph is
++     * guaranteed to contain a cycle; a depth-first search over it locates a back
++     * edge to a vertex on the current path.
++     */
++    private static List<Integer> findCycle(DirectedGraph graph, int[] inDegree) {
++        int order = graph.order();
++        int[] state = new int[order];
++        // Vertices that were successfully ordered are not part of any cycle.
++        for (int vertex = 0; vertex < order; vertex++) {
++            if (inDegree[vertex] == 0) {
++                state[vertex] = DONE;
++            }
++        }
++
++        for (int start = 0; start < order; start++) {
++            if (state[start] == UNVISITED) {
++                List<Integer> cycle = depthFirstCycle(graph, start, state);
++                if (cycle != null) {
++                    return cycle;
++                }
++            }
++        }
++        throw new IllegalStateException("a cycle was expected but none was found");
++    }
++
++    /**
++     * Iterative depth-first search from {@code start} that returns the first
++     * directed cycle it encounters (an edge to a vertex still on the current
++     * path), or {@code null} if this component has none.
++     */
++    private static List<Integer> depthFirstCycle(DirectedGraph graph, int start, int[] state) {
++        Deque<int[]> stack = new ArrayDeque<>();   // frames of {vertex, nextNeighborIndex}
++        Deque<Integer> path = new ArrayDeque<>();  // vertices currently in progress, deepest first
++        state[start] = IN_PROGRESS;
++        stack.push(new int[] {start, 0});
++        path.push(start);
++
++        while (!stack.isEmpty()) {
++            int[] frame = stack.peek();
++            int u = frame[0];
++            List<Integer> neighbors = graph.neighbors(u);
++
++            if (frame[1] < neighbors.size()) {
++                int v = neighbors.get(frame[1]++);
++                if (state[v] == DONE) {
++                    continue;
++                }
++                if (state[v] == IN_PROGRESS) {
++                    return extractCycle(path, v);
++                }
++                state[v] = IN_PROGRESS;
++                stack.push(new int[] {v, 0});
++                path.push(v);
++            } else {
++                state[u] = DONE;
++                stack.pop();
++                path.pop();
++            }
++        }
++        return null;
++    }
++
++    /**
++     * Extracts the cycle closed by a back edge to {@code target}: the suffix of
++     * the current path from {@code target} down to the deepest vertex, returned
++     * in edge order so that consecutive entries (and the closing entry back to
++     * the first) are directed edges.
++     */
++    private static List<Integer> extractCycle(Deque<Integer> path, int target) {
++        List<Integer> cycle = new ArrayList<>();
++        for (int vertex : path) {  // deepest vertex first, down to the path root
++            cycle.add(vertex);
++            if (vertex == target) {
++                break;
++            }
++        }
++        Collections.reverse(cycle);
++        return cycle;
++    }
++}
+diff --git a/bipartite/TopologicalSortResult.java b/bipartite/TopologicalSortResult.java
+new file mode 100644
+index 0000000..52a8932
+--- /dev/null
++++ b/bipartite/TopologicalSortResult.java
+@@ -0,0 +1,64 @@
++package bipartite;
++
++import java.util.List;
++
++/**
++ * The outcome of a topological sort, modelled as a sealed type — mirroring
++ * {@link BipartiteResult} — so callers handle exactly the two possible cases and
++ * illegal states cannot be represented.
++ *
++ * <p>Either the graph is acyclic, in which case a {@linkplain Sorted valid
++ * topological order} is available, or it contains a {@linkplain Cyclic cycle}
++ * (which makes a topological order impossible), in which case a directed-cycle
++ * witness is available. Callers can branch with a switch:
++ *
++ * <pre>{@code
++ * switch (new TopologicalSort().sort(graph)) {
++ *     case TopologicalSortResult.Sorted s -> use(s.order());
++ *     case TopologicalSortResult.Cyclic c -> report(c.cycle());
++ * }
++ * }</pre>
++ */
++public sealed interface TopologicalSortResult
++        permits TopologicalSortResult.Sorted, TopologicalSortResult.Cyclic {
++
++    /** @return whether the graph is acyclic (and therefore sortable) */
++    boolean isAcyclic();
++
++    /**
++     * Result for an acyclic graph.
++     *
++     * @param order every vertex in a dependency-respecting order: for each edge
++     *              {@code u -> v}, {@code u} appears before {@code v}
++     */
++    record Sorted(List<Integer> order) implements TopologicalSortResult {
++
++        public Sorted {
++            order = List.copyOf(order);
++        }
++
++        @Override
++        public boolean isAcyclic() {
++            return true;
++        }
++    }
++
++    /**
++     * Result for a graph that contains a cycle, carrying a witness.
++     *
++     * @param cycle vertices forming a directed cycle (the closing edge runs from
++     *              the last vertex back to the first); its presence proves no
++     *              topological order exists
++     */
++    record Cyclic(List<Integer> cycle) implements TopologicalSortResult {
++
++        public Cyclic {
++            cycle = List.copyOf(cycle);
++        }
++
++        @Override
++        public boolean isAcyclic() {
++            return false;
++        }
++    }
++}
+diff --git a/bipartite/TopologicalSortTests.java b/bipartite/TopologicalSortTests.java
+new file mode 100644
+index 0000000..411088e
+--- /dev/null
++++ b/bipartite/TopologicalSortTests.java
+@@ -0,0 +1,162 @@
++package bipartite;
++
++import java.util.List;
++
++/**
++ * Lightweight, dependency-free test harness for {@link TopologicalSort},
++ * matching the style of {@link BipartiteCheckerTests} and
++ * {@link DepthFirstSearchTests}. Runnable with
++ * {@code java bipartite.TopologicalSortTests}; the process exits non-zero if any
++ * case fails.
++ */
++public final class TopologicalSortTests {
++
++    private static int failures = 0;
++    private static final TopologicalSort SORT = new TopologicalSort();
++
++    public static void main(String[] args) {
++        sortsDiamondIntoDependencyOrder();
++        respectsEdgeDirectionForEveryEdge();
++        breaksTiesByAscendingVertexId();
++        includesIsolatedVertices();
++        emptyGraphSortsToEmptyOrder();
++        detectsCycle();
++        cycleWitnessIsAValidDirectedCycle();
++        rejectsNullGraph();
++
++        if (failures == 0) {
++            System.out.println("All tests passed.");
++        } else {
++            System.out.println(failures + " test(s) failed.");
++            System.exit(1);
++        }
++    }
++
++    private static void sortsDiamondIntoDependencyOrder() {
++        // 0 -> {1, 2} -> 3; the lexicographically smallest order is 0,1,2,3.
++        DirectedGraph graph = DirectedGraph.of(4, new int[][] {{0, 1}, {0, 2}, {1, 3}, {2, 3}});
++        TopologicalSortResult result = SORT.sort(graph);
++        check("diamond sorts into the smallest dependency order",
++                result instanceof TopologicalSortResult.Sorted sorted
++                        && sorted.order().equals(List.of(0, 1, 2, 3)));
++    }
++
++    private static void respectsEdgeDirectionForEveryEdge() {
++        DirectedGraph graph = DirectedGraph.of(6, new int[][] {
++                {5, 2}, {5, 0}, {4, 0}, {4, 1}, {2, 3}, {3, 1}
++        });
++        TopologicalSortResult result = SORT.sort(graph);
++        check("every edge points forward in the produced order",
++                result instanceof TopologicalSortResult.Sorted sorted
++                        && isValidTopologicalOrder(graph, sorted.order()));
++    }
++
++    private static void breaksTiesByAscendingVertexId() {
++        // No edges: all vertices are sources, emitted smallest-first.
++        DirectedGraph graph = DirectedGraph.of(3, new int[][] {});
++        TopologicalSortResult result = SORT.sort(graph);
++        check("independent vertices are ordered by ascending id",
++                result instanceof TopologicalSortResult.Sorted sorted
++                        && sorted.order().equals(List.of(0, 1, 2)));
++    }
++
++    private static void includesIsolatedVertices() {
++        // Vertex 2 has no edges; it must still appear in the order.
++        DirectedGraph graph = DirectedGraph.of(3, new int[][] {{0, 1}});
++        TopologicalSortResult result = SORT.sort(graph);
++        check("isolated vertices are included",
++                result instanceof TopologicalSortResult.Sorted sorted
++                        && sorted.order().size() == 3
++                        && sorted.order().contains(2));
++    }
++
++    private static void emptyGraphSortsToEmptyOrder() {
++        DirectedGraph graph = DirectedGraph.of(0, new int[][] {});
++        TopologicalSortResult result = SORT.sort(graph);
++        check("empty graph sorts to an empty order",
++                result instanceof TopologicalSortResult.Sorted sorted && sorted.order().isEmpty());
++    }
++
++    private static void detectsCycle() {
++        DirectedGraph graph = DirectedGraph.of(3, new int[][] {{0, 1}, {1, 2}, {2, 0}});
++        check("a cyclic graph is reported as cyclic", !SORT.sort(graph).isAcyclic());
++    }
++
++    private static void cycleWitnessIsAValidDirectedCycle() {
++        // Vertex 0 feeds into the cycle 1 -> 2 -> 3 -> 1.
++        DirectedGraph graph = DirectedGraph.of(4, new int[][] {{0, 1}, {1, 2}, {2, 3}, {3, 1}});
++        TopologicalSortResult result = SORT.sort(graph);
++        check("cycle witness is a valid directed cycle",
++                result instanceof TopologicalSortResult.Cyclic cyclic
++                        && isValidDirectedCycle(graph, cyclic.cycle()));
++    }
++
++    private static void rejectsNullGraph() {
++        boolean threw;
++        try {
++            SORT.sort(null);
++            threw = false;
++        } catch (NullPointerException expected) {
++            threw = true;
++        }
++        check("rejects null graph", threw);
++    }
++
++    /**
++     * A valid order lists every vertex exactly once and places the source of
++     * each directed edge before its target.
++     */
++    private static boolean isValidTopologicalOrder(DirectedGraph graph, List<Integer> order) {
++        int n = graph.order();
++        if (order.size() != n) {
++            return false;
++        }
++        int[] position = new int[n];
++        boolean[] seen = new boolean[n];
++        for (int i = 0; i < order.size(); i++) {
++            int vertex = order.get(i);
++            if (seen[vertex]) {
++                return false;
++            }
++            seen[vertex] = true;
++            position[vertex] = i;
++        }
++        for (int u = 0; u < n; u++) {
++            for (int v : graph.neighbors(u)) {
++                if (position[u] >= position[v]) {
++                    return false;
++                }
++            }
++        }
++        return true;
++    }
++
++    /**
++     * A valid directed-cycle witness has length at least two and every
++     * consecutive pair — including the closing edge from the last vertex back to
++     * the first — is a directed edge in the graph.
++     */
++    private static boolean isValidDirectedCycle(DirectedGraph graph, List<Integer> cycle) {
++        int n = cycle.size();
++        if (n < 2) {
++            return false;
++        }
++        for (int i = 0; i < n; i++) {
++            int from = cycle.get(i);
++            int to = cycle.get((i + 1) % n);
++            if (!graph.neighbors(from).contains(to)) {
++                return false;
++            }
++        }
++        return true;
++    }
++
++    private static void check(String description, boolean condition) {
++        if (condition) {
++            System.out.println("PASS: " + description);
++        } else {
++            System.out.println("FAIL: " + description);
++            failures++;
++        }
++    }
++}
+diff --git a/bipartite/package-info.java b/bipartite/package-info.java
+index f25fdf2..7364d97 100644
+--- a/bipartite/package-info.java
++++ b/bipartite/package-info.java
+@@ -22,11 +22,15 @@
+  * run unchanged on every implementation. {@link bipartite.BipartiteChecker} runs
+  * a breadth-first 2-coloring and returns the sealed
+  * {@link bipartite.BipartiteResult} — either the two vertex partitions or an
+- * odd-cycle witness — while {@link bipartite.DepthFirstSearch} provides a
+- * standard depth-first traversal.
++ * odd-cycle witness — {@link bipartite.DepthFirstSearch} provides a standard
++ * depth-first traversal, and {@link bipartite.TopologicalSort} orders a
++ * {@link bipartite.DirectedGraph} so dependencies precede dependents, returning
++ * the sealed {@link bipartite.TopologicalSortResult} — either the order or a
++ * directed-cycle witness.
+  *
+  * <p>{@link bipartite.Main} provides a runnable demonstration, and
+- * {@link bipartite.BipartiteCheckerTests} and
+- * {@link bipartite.DepthFirstSearchTests} are dependency-free test harnesses.
++ * {@link bipartite.BipartiteCheckerTests},
++ * {@link bipartite.DepthFirstSearchTests}, and
++ * {@link bipartite.TopologicalSortTests} are dependency-free test harnesses.
+  */
+ package bipartite;

@@ -1,0 +1,159 @@
+diff --git a/DfsCycleDetector.java b/DfsCycleDetector.java
+index d8130af..51d4935 100644
+--- a/DfsCycleDetector.java
++++ b/DfsCycleDetector.java
+@@ -10,9 +10,12 @@ import java.util.Optional;
+  * "back edge" — an edge into a vertex still on the active DFS path — proves a
+  * cycle, and the active path itself yields the offending vertices.
+  *
+- * <p>Runs in O(V + E) time and O(V) extra space. Reconstructing the cycle path
+- * comes for free from the traversal, so this implementation uses the default
+- * {@link CycleDetector#hasCycle} rather than a separate cheaper check.
++ * <p>The traversal is <em>iterative</em>, driven by an explicit stack rather
++ * than recursion, so it handles arbitrarily deep graphs without risking a
++ * {@link StackOverflowError}. Runs in O(V + E) time and O(V) extra space.
++ *
++ * <p>Reconstructing the cycle path comes for free from the traversal, so this
++ * implementation uses the default {@link CycleDetector#hasCycle}.
+  */
+ final class DfsCycleDetector implements CycleDetector {
+ 
+@@ -25,16 +28,27 @@ final class DfsCycleDetector implements CycleDetector {
+         DONE
+     }
+ 
++    /** One entry of the explicit DFS stack: a vertex and how far its out-edges have been scanned. */
++    private static final class Frame {
++        final int vertex;
++        final List<Integer> neighbors;
++        int next;
++
++        Frame(int vertex, List<Integer> neighbors) {
++            this.vertex = vertex;
++            this.neighbors = neighbors;
++        }
++    }
++
+     @Override
+     public Optional<Cycle> findCycle(DirectedGraph graph) {
+         int vertexCount = graph.vertices();
+         Mark[] marks = new Mark[vertexCount];
+         Arrays.fill(marks, Mark.UNVISITED);
+-        Deque<Integer> path = new ArrayDeque<>();
+ 
+         for (int start = 0; start < vertexCount; start++) {
+             if (marks[start] == Mark.UNVISITED) {
+-                List<Integer> cycle = explore(graph, start, marks, path);
++                List<Integer> cycle = explore(graph, start, marks);
+                 if (cycle != null) {
+                     return Optional.of(new Cycle(cycle));
+                 }
+@@ -43,38 +57,41 @@ final class DfsCycleDetector implements CycleDetector {
+         return Optional.empty();
+     }
+ 
+-    /** Depth-first walk from {@code u}; returns a cycle if a back edge is found, else {@code null}. */
+-    private List<Integer> explore(DirectedGraph graph, int u, Mark[] marks, Deque<Integer> path) {
+-        marks[u] = Mark.ON_PATH;
+-        path.addLast(u);
++    /** Iterative depth-first walk rooted at {@code root}; returns a cycle if a back edge is found, else {@code null}. */
++    private List<Integer> explore(DirectedGraph graph, int root, Mark[] marks) {
++        Deque<Frame> stack = new ArrayDeque<>();
++        marks[root] = Mark.ON_PATH;
++        stack.addLast(new Frame(root, graph.neighbors(root)));
+ 
+-        for (int v : graph.neighbors(u)) {
+-            if (marks[v] == Mark.ON_PATH) {
+-                return cycleFrom(path, v);
+-            }
+-            if (marks[v] == Mark.UNVISITED) {
+-                List<Integer> cycle = explore(graph, v, marks, path);
+-                if (cycle != null) {
+-                    return cycle;
++        while (!stack.isEmpty()) {
++            Frame frame = stack.peekLast();
++            if (frame.next < frame.neighbors.size()) {
++                int v = frame.neighbors.get(frame.next++);
++                if (marks[v] == Mark.ON_PATH) {
++                    return cycleFrom(stack, v);
+                 }
++                if (marks[v] == Mark.UNVISITED) {
++                    marks[v] = Mark.ON_PATH;
++                    stack.addLast(new Frame(v, graph.neighbors(v)));
++                }
++            } else { // u's out-edges are exhausted: this is where recursion would return
++                marks[frame.vertex] = Mark.DONE;
++                stack.removeLast();
+             }
+         }
+-
+-        path.removeLast();
+-        marks[u] = Mark.DONE;
+         return null;
+     }
+ 
+-    /** Slices the current path from its first visit to {@code start}, closing the loop back to {@code start}. */
+-    private List<Integer> cycleFrom(Deque<Integer> path, int start) {
++    /** Slices the active path from its first visit to {@code start}, closing the loop back to {@code start}. */
++    private List<Integer> cycleFrom(Deque<Frame> stack, int start) {
+         List<Integer> cycle = new ArrayList<>();
+         boolean collecting = false;
+-        for (int vertex : path) { // ArrayDeque iterates head -> tail, i.e. root -> current
+-            if (vertex == start) {
++        for (Frame frame : stack) { // ArrayDeque iterates head -> tail, i.e. root -> current
++            if (frame.vertex == start) {
+                 collecting = true;
+             }
+             if (collecting) {
+-                cycle.add(vertex);
++                cycle.add(frame.vertex);
+             }
+         }
+         cycle.add(start);
+diff --git a/README.md b/README.md
+index 1b353c8..b80d64d 100644
+--- a/README.md
++++ b/README.md
+@@ -22,7 +22,7 @@ and reports the vertices that form it.
+ 
+ | Algorithm | Strategy | Notes |
+ |-----------|----------|-------|
+-| `DFS`  | depth-first search, back-edge detection | reconstructs the cycle path directly from the traversal |
++| `DFS`  | depth-first search, back-edge detection | iterative (explicit stack), so no recursion-depth limit; reconstructs the cycle path directly from the traversal |
+ | `KAHN` | Kahn's topological elimination          | decides *existence* cheaply; reconstructs a cycle from the residual core |
+ 
+ Both satisfy the same contract and agree on every result.
+diff --git a/test/CycleDetectorTest.java b/test/CycleDetectorTest.java
+index d1acfde..6bf569c 100644
+--- a/test/CycleDetectorTest.java
++++ b/test/CycleDetectorTest.java
+@@ -123,6 +123,29 @@ class CycleDetectorTest {
+         }
+     }
+ 
++    @ParameterizedTest(name = "{0}")
++    @EnumSource(CycleDetectionAlgorithm.class)
++    @DisplayName("handles a deep graph without stack overflow")
++    void deepGraphNoStackOverflow(CycleDetectionAlgorithm algorithm) {
++        int n = 200_000;
++        CycleDetector detector = CycleDetector.create(algorithm);
++
++        // A long acyclic chain 0 -> 1 -> ... -> n-1 (depth that would blow a recursive stack).
++        int[][] chain = new int[n - 1][];
++        for (int i = 0; i < n - 1; i++) {
++            chain[i] = new int[] {i, i + 1};
++        }
++        assertFalse(detector.hasCycle(DirectedGraph.from(n, chain)));
++
++        // The same chain closed into one big cycle by adding (n-1) -> 0.
++        int[][] loop = new int[n][];
++        System.arraycopy(chain, 0, loop, 0, n - 1);
++        loop[n - 1] = new int[] {n - 1, 0};
++        DirectedGraph cyclic = DirectedGraph.from(n, loop);
++        assertTrue(detector.hasCycle(cyclic));
++        assertIsCycleOf(detector.findCycle(cyclic).orElseThrow(), cyclic);
++    }
++
+     @Test
+     @DisplayName("factory returns the requested implementation")
+     void factorySelectsImplementation() {

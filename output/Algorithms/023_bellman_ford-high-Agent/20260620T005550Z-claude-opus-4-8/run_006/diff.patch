@@ -1,0 +1,157 @@
+diff --git a/BellmanFordDemo.java b/BellmanFordDemo.java
+index 6c46f71..e2295ed 100644
+--- a/BellmanFordDemo.java
++++ b/BellmanFordDemo.java
+@@ -23,9 +23,9 @@ final class BellmanFordDemo {
+                 System.out.println();
+ 
+                 int target = 3;
++                Path path = distances.pathTo(target);
+                 System.out.println("Shortest path " + distances.source() + " -> " + target
+-                    + ": " + distances.pathTo(target)
+-                    + " (distance " + distances.distanceTo(target) + ")");
++                    + ": " + path.vertices() + " (weight " + path.totalWeight() + ")");
+             }
+         }
+     }
+diff --git a/BellmanFordTest.java b/BellmanFordTest.java
+index 0b9ef89..a8aab2a 100644
+--- a/BellmanFordTest.java
++++ b/BellmanFordTest.java
+@@ -43,26 +43,34 @@ final class BellmanFordTest {
+             {1, 3, 2}, {4, 3, -1}, {2, 4, 1}, {1, 2, 1}, {0, 1, 5}
+         });
+         Distances distances = succeed(BellmanFord.shortestPaths(graph, 0));
++        Path path = distances.pathTo(3);
+ 
+         check("path 0->3 follows the optimal route",
+-            distances.pathTo(3).equals(List.of(0, 1, 2, 4, 3)));
+-        check("reconstructed path ends at the target", lastOf(distances.pathTo(3)) == 3);
+-        check("path source matches result source", distances.pathTo(3).get(0) == 0);
++            path.vertices().equals(List.of(0, 1, 2, 4, 3)));
++        check("path total weight matches the distance",
++            path.totalWeight() == distances.distanceTo(3));
++        check("path total weight is 6", path.totalWeight() == 6);
++        check("path edge count is 4", path.edgeCount() == 4);
++        check("path is not empty", !path.isEmpty());
+     }
+ 
+     private static void pathToSourceIsTheSourceAlone() {
+         WeightedGraph graph = WeightedGraph.of(2, WeightedEdge.of(0, 1, 1));
+         Distances distances = succeed(BellmanFord.shortestPaths(graph, 0));
++        Path path = distances.pathTo(0);
+ 
+-        check("path to the source is just the source",
+-            distances.pathTo(0).equals(List.of(0)));
++        check("path to the source is just the source", path.vertices().equals(List.of(0)));
++        check("path to the source has zero weight", path.totalWeight() == 0);
++        check("path to the source has no edges", path.edgeCount() == 0);
+     }
+ 
+     private static void unreachableVertexHasNoPath() {
+         WeightedGraph graph = WeightedGraph.of(3, WeightedEdge.of(0, 1, 4));
+         Distances distances = succeed(BellmanFord.shortestPaths(graph, 0));
++        Path path = distances.pathTo(2);
+ 
+-        check("unreachable vertex has empty path", distances.pathTo(2).isEmpty());
++        check("unreachable vertex has no path", path.isEmpty());
++        check("unreachable path equals Path.none()", path.equals(Path.none()));
+     }
+ 
+     private static void unreachableVerticesAreReported() {
+@@ -134,10 +142,6 @@ final class BellmanFordTest {
+         throw new AssertionError(result);
+     }
+ 
+-    private static int lastOf(List<Integer> path) {
+-        return path.get(path.size() - 1);
+-    }
+-
+     private static void check(String name, boolean condition) {
+         if (condition) {
+             passed++;
+diff --git a/Distances.java b/Distances.java
+index 9c29728..3b4fad6 100644
+--- a/Distances.java
++++ b/Distances.java
+@@ -48,22 +48,23 @@ final class Distances implements ShortestPathResult {
+     /**
+      * Reconstructs the shortest path from the source to {@code target}.
+      *
+-     * <p>The path is returned as the sequence of vertices from the source through
+-     * to {@code target} inclusive. The path to the source itself is the single
+-     * element {@code [source]}.
++     * <p>The returned {@link Path} lists the vertices from the source through to
++     * {@code target} inclusive, paired with the path's total weight. The path to
++     * the source itself is the single vertex {@code [source]} with weight {@code 0}.
+      *
+-     * @return the vertex sequence, or an empty list if {@code target} is unreachable
++     * @return the path, or {@link Path#none()} if {@code target} is unreachable
+      */
+-    List<Integer> pathTo(int target) {
++    Path pathTo(int target) {
+         if (!isReachable(target)) {
+-            return List.of();
++            return Path.none();
+         }
+         // Walk predecessors back to the source, building the path front-to-back.
+-        ArrayDeque<Integer> path = new ArrayDeque<>();
++        ArrayDeque<Integer> vertices = new ArrayDeque<>();
+         for (int v = target; v != NO_PREDECESSOR; v = predecessors[v]) {
+-            path.addFirst(v);
++            vertices.addFirst(v);
+         }
+-        return List.copyOf(path);
++        // The total weight of the shortest path to a vertex is exactly its distance.
++        return Path.of(List.copyOf(vertices), distances[target]);
+     }
+ 
+     /** A defensive copy of all distances; index {@code i} is the distance to vertex {@code i}. */
+diff --git a/Path.java b/Path.java
+new file mode 100644
+index 0000000..695bc93
+--- /dev/null
++++ b/Path.java
+@@ -0,0 +1,42 @@
++import java.util.List;
++
++/**
++ * An immutable shortest path: the sequence of vertices from a source to a target,
++ * together with the total weight of traversing it.
++ *
++ * <p>When no route exists between two vertices, {@link #none()} is used: it has an
++ * empty vertex sequence, reported by {@link #isEmpty()}.
++ */
++record Path(List<Integer> vertices, int totalWeight) {
++
++    private static final Path NONE = new Path(List.of(), 0);
++
++    /** Defensive, immutable copy so the path cannot be mutated after construction. */
++    Path {
++        vertices = List.copyOf(vertices);
++    }
++
++    static Path of(List<Integer> vertices, int totalWeight) {
++        return new Path(vertices, totalWeight);
++    }
++
++    /** The absence of a path, e.g. to an unreachable vertex. */
++    static Path none() {
++        return NONE;
++    }
++
++    /** Whether this represents "no path" (an empty vertex sequence). */
++    boolean isEmpty() {
++        return vertices.isEmpty();
++    }
++
++    /** The number of edges traversed; {@code 0} for an empty path or a single vertex. */
++    int edgeCount() {
++        return Math.max(0, vertices.size() - 1);
++    }
++
++    @Override
++    public String toString() {
++        return isEmpty() ? "Path[none]" : "Path" + vertices + " (weight " + totalWeight + ")";
++    }
++}

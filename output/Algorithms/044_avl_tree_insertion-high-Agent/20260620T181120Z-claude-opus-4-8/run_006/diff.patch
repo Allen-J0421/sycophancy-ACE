@@ -1,0 +1,565 @@
+diff --git a/avl_tree_insertion.java b/avl_tree_insertion.java
+index 4936a32..162936c 100644
+--- a/avl_tree_insertion.java
++++ b/avl_tree_insertion.java
+@@ -9,6 +9,7 @@ import java.util.List;
+ import java.util.NoSuchElementException;
+ import java.util.Objects;
+ import java.util.Optional;
++import java.util.Random;
+ import java.util.SortedSet;
+ import java.util.TreeSet;
+ 
+@@ -21,22 +22,33 @@ import java.util.TreeSet;
+  * ({@link Comparable}) or by a {@link Comparator} supplied at construction, and
+  * iteration yields them in ascending order.
+  *
++ * <p>Each node stores only its <em>balance factor</em> &mdash; the signed height
++ * difference {@code height(left) - height(right)}, which is always one of
++ * {@code -1, 0, +1} &mdash; in a single {@code byte}, rather than a full integer
++ * height. Balance factors are maintained incrementally as the tree is mutated;
++ * no node height is ever recomputed during {@code add}/{@code remove}, so the
++ * compact representation costs nothing in time. Heights are derived on demand
++ * only by the {@link #height()} query and by {@link #validate()}.
++ *
+  * <p>As a {@code SortedSet}, duplicate elements are not stored and {@code null}
+  * elements are rejected. The {@link #subSet}, {@link #headSet} and
+  * {@link #tailSet} methods return live, range-restricted views backed by this
+- * set: changes made through a view are written through to the backing tree and
+- * vice-versa. Iterators are fail-fast and support {@link Iterator#remove()}.
++ * set. Iterators are fail-fast and support {@link Iterator#remove()}.
+  *
+  * @param <T> the type of elements held in the tree
+  */
+ class AVLTree<T> extends AbstractSet<T> implements SortedSet<T> {
+ 
+-    /** A tree node; its structure is mutated only by the enclosing tree. */
++    /**
++     * A tree node. {@code bf} is the balance factor {@code h(left) - h(right)},
++     * kept within {@code [-1, +1]} by rebalancing. Structure and balance factor
++     * are mutated only by the enclosing tree.
++     */
+     private static final class Node<T> {
+         T value;
+         Node<T> left;
+         Node<T> right;
+-        int height = 1;
++        byte bf;
+ 
+         Node(T value) {
+             this.value = value;
+@@ -48,6 +60,14 @@ class AVLTree<T> extends AbstractSet<T> implements SortedSet<T> {
+     private int size;
+     private int modCount;
+ 
++    /*
++     * Out-parameters for the recursive insert/delete helpers, signalling whether
++     * the height of the subtree just returned changed. Single-threaded use only.
++     */
++    private boolean taller;            // set by insert(): subtree grew by one
++    private boolean shorter;           // set by delete(): subtree shrank by one
++    private boolean rebalanceShortened; // set by rebalance: rotation reduced height
++
+     /** Creates a tree that orders elements by their natural ordering. */
+     AVLTree() {
+         this.comparator = null;
+@@ -96,7 +116,7 @@ class AVLTree<T> extends AbstractSet<T> implements SortedSet<T> {
+     public boolean remove(Object o) {
+         Objects.requireNonNull(o, "value");
+         int sizeBefore = size;
+-        root = remove(root, (T) o);
++        root = delete(root, (T) o);
+         boolean changed = size != sizeBefore;
+         if (changed) {
+             modCount++;
+@@ -265,9 +285,19 @@ class AVLTree<T> extends AbstractSet<T> implements SortedSet<T> {
+         return Optional.ofNullable(best);
+     }
+ 
+-    /** Returns the height of the tree (0 for an empty tree). */
++    /**
++     * Returns the height of the tree (0 for an empty tree), computed on the fly
++     * in O(log n) by descending the taller side at each node, as told by the
++     * stored balance factor.
++     */
+     int height() {
+-        return height(root);
++        int h = 0;
++        Node<T> node = root;
++        while (node != null) {
++            h++;
++            node = node.bf >= 0 ? node.left : node.right;
++        }
++        return h;
+     }
+ 
+     /** Returns the elements in ascending (sorted) order. */
+@@ -285,119 +315,242 @@ class AVLTree<T> extends AbstractSet<T> implements SortedSet<T> {
+     }
+ 
+     /**
+-     * Verifies that every AVL invariant holds: binary-search ordering, cached
+-     * node heights, the balance factor at every node, and {@link #size}. Intended
+-     * for tests and debugging.
++     * Verifies that every AVL invariant holds: binary-search ordering, that each
++     * stored balance factor equals the true {@code height(left) - height(right)},
++     * that every balance factor is within {@code [-1, +1]}, and {@link #size}.
++     * Heights are recomputed from scratch here (O(n)); intended for tests and
++     * debugging.
+      *
+      * @throws IllegalStateException if any invariant is violated
+      */
+     void validate() {
+-        int counted = validate(root, null, null);
+-        if (counted != size) {
++        validateCount = 0;
++        validateHeight(root, null, null);
++        if (validateCount != size) {
+             throw new IllegalStateException(
+-                    "size mismatch: tracked " + size + " but counted " + counted);
++                    "size mismatch: tracked " + size + " but counted " + validateCount);
+         }
+     }
+ 
++    private int validateCount;
++
+     // ---------------------------------------------------------------------
+-    // Insertion, deletion and balancing
++    // Insertion (incremental balance-factor maintenance)
+     // ---------------------------------------------------------------------
+ 
+     private Node<T> insert(Node<T> node, T value) {
+         if (node == null) {
+             size++;
++            taller = true;
+             return new Node<>(value);
+         }
+ 
+         int cmp = compare(value, node.value);
++        if (cmp == 0) {
++            taller = false;
++            return node; // duplicate: no change
++        }
++
+         if (cmp < 0) {
+             node.left = insert(node.left, value);
+-        } else if (cmp > 0) {
+-            node.right = insert(node.right, value);
++            if (taller) {
++                // Left subtree grew: bf = h(left) - h(right) increases by one.
++                node.bf++;
++                if (node.bf == 0) {
++                    taller = false;        // filled a right-leaning gap; height unchanged
++                } else if (node.bf == 1) {
++                    taller = true;         // now leans left; height grew
++                } else {                   // node.bf == 2: rebalance
++                    node = rebalanceLeftHeavy(node);
++                    taller = false;        // insertion rotations restore the old height
++                }
++            }
+         } else {
+-            return node; // duplicate: no change
++            node.right = insert(node.right, value);
++            if (taller) {
++                node.bf--;
++                if (node.bf == 0) {
++                    taller = false;
++                } else if (node.bf == -1) {
++                    taller = true;
++                } else {                   // node.bf == -2: rebalance
++                    node = rebalanceRightHeavy(node);
++                    taller = false;
++                }
++            }
+         }
+-
+-        updateHeight(node);
+-        return rebalance(node);
++        return node;
+     }
+ 
+-    private Node<T> remove(Node<T> node, T value) {
++    // ---------------------------------------------------------------------
++    // Deletion (incremental balance-factor maintenance)
++    // ---------------------------------------------------------------------
++
++    private Node<T> delete(Node<T> node, T value) {
+         if (node == null) {
+-            return null;
++            shorter = false;
++            return null; // not found
+         }
+ 
+         int cmp = compare(value, node.value);
+         if (cmp < 0) {
+-            node.left = remove(node.left, value);
++            node.left = delete(node.left, value);
++            if (shorter) {
++                node = fixAfterLeftShrink(node);
++            }
+         } else if (cmp > 0) {
+-            node.right = remove(node.right, value);
++            node.right = delete(node.right, value);
++            if (shorter) {
++                node = fixAfterRightShrink(node);
++            }
+         } else if (node.left == null || node.right == null) {
+-            // Zero or one child: splice the node out.
++            // Zero or one child: splice the node out; the subtree shrinks.
+             size--;
+-            node = (node.left != null) ? node.left : node.right;
++            shorter = true;
++            return (node.left != null) ? node.left : node.right;
+         } else {
+-            // Two children: replace with in-order successor, then delete it.
++            // Two children: copy the in-order successor up, then delete it from
++            // the right subtree (which shrinks if its height drops).
+             Node<T> successor = minNode(node.right);
+             node.value = successor.value;
+-            node.right = remove(node.right, successor.value);
++            node.right = delete(node.right, successor.value);
++            if (shorter) {
++                node = fixAfterRightShrink(node);
++            }
+         }
++        return node;
++    }
+ 
+-        if (node == null) {
+-            return null;
++    /** A left child shrank: drop bf by one and rebalance if it underflows. */
++    private Node<T> fixAfterLeftShrink(Node<T> node) {
++        node.bf--;
++        if (node.bf == 0) {
++            shorter = true;            // was left-leaning; now balanced and shorter
++        } else if (node.bf == -1) {
++            shorter = false;           // now leans right but height unchanged
++        } else {                       // node.bf == -2: right-heavy violation
++            node = rebalanceRightHeavy(node);
++            shorter = rebalanceShortened;
+         }
+-        updateHeight(node);
+-        return rebalance(node);
++        return node;
+     }
+ 
+-    private static <T> Node<T> minNode(Node<T> node) {
+-        while (node.left != null) {
+-            node = node.left;
++    /** A right child shrank: raise bf by one and rebalance if it overflows. */
++    private Node<T> fixAfterRightShrink(Node<T> node) {
++        node.bf++;
++        if (node.bf == 0) {
++            shorter = true;
++        } else if (node.bf == 1) {
++            shorter = false;
++        } else {                       // node.bf == 2: left-heavy violation
++            node = rebalanceLeftHeavy(node);
++            shorter = rebalanceShortened;
+         }
+         return node;
+     }
+ 
+-    /** Restores the AVL invariant at {@code node} with at most two rotations. */
+-    private Node<T> rebalance(Node<T> node) {
+-        int balance = balanceFactor(node);
++    // ---------------------------------------------------------------------
++    // Rebalancing: rotations plus direct balance-factor recomputation
++    // ---------------------------------------------------------------------
+ 
+-        // Left-heavy
+-        if (balance > 1) {
+-            if (balanceFactor(node.left) < 0) {
+-                node.left = rotateLeft(node.left); // Left-Right case
++    /**
++     * Repairs a node whose balance factor has reached +2 (left-heavy). The new
++     * balance factors are derived from the children's, never from heights. Sets
++     * {@link #rebalanceShortened} to whether the subtree's height dropped by one.
++     */
++    private Node<T> rebalanceLeftHeavy(Node<T> node) {
++        Node<T> left = node.left;
++        if (left.bf >= 0) {
++            // Left-Left. left.bf == +1 on insert; left.bf may be 0 on delete.
++            boolean leftBalanced = left.bf == 0;
++            rebalanceShortened = !leftBalanced;
++            node = rotateRight(node);
++            if (leftBalanced) {
++                node.bf = -1;          // new root (old left)
++                node.right.bf = 1;     // old node
++            } else {
++                node.bf = 0;
++                node.right.bf = 0;
+             }
+-            return rotateRight(node); // Left-Left case
++        } else {
++            // Left-Right: rotate the left child left, then this node right.
++            int pivotBf = node.left.right.bf;
++            node.left = rotateLeft(node.left);
++            node = rotateRight(node);
++            applyDoubleRotationBalance(node, pivotBf);
++            rebalanceShortened = true; // a double rotation always lowers the height
+         }
++        return node;
++    }
+ 
+-        // Right-heavy
+-        if (balance < -1) {
+-            if (balanceFactor(node.right) > 0) {
+-                node.right = rotateRight(node.right); // Right-Left case
++    /** Mirror image of {@link #rebalanceLeftHeavy} for a balance factor of -2. */
++    private Node<T> rebalanceRightHeavy(Node<T> node) {
++        Node<T> right = node.right;
++        if (right.bf <= 0) {
++            // Right-Right.
++            boolean rightBalanced = right.bf == 0;
++            rebalanceShortened = !rightBalanced;
++            node = rotateLeft(node);
++            if (rightBalanced) {
++                node.bf = 1;
++                node.left.bf = -1;
++            } else {
++                node.bf = 0;
++                node.left.bf = 0;
+             }
+-            return rotateLeft(node); // Right-Right case
++        } else {
++            // Right-Left.
++            int pivotBf = node.right.left.bf;
++            node.right = rotateRight(node.right);
++            node = rotateLeft(node);
++            applyDoubleRotationBalance(node, pivotBf);
++            rebalanceShortened = true;
+         }
++        return node;
++    }
+ 
+-        return node; // already balanced
++    /**
++     * After a double rotation, {@code root} is the former grandchild pivot and
++     * its two children are the other two rotated nodes. Their balance factors
++     * depend only on the pivot's balance factor before the rotation.
++     */
++    private void applyDoubleRotationBalance(Node<T> root, int pivotBf) {
++        if (pivotBf > 0) {
++            root.left.bf = 0;
++            root.right.bf = -1;
++        } else if (pivotBf < 0) {
++            root.left.bf = 1;
++            root.right.bf = 0;
++        } else {
++            root.left.bf = 0;
++            root.right.bf = 0;
++        }
++        root.bf = 0;
+     }
+ 
++    /** Pure structural right rotation; balance factors are fixed up by callers. */
+     private Node<T> rotateRight(Node<T> y) {
+         Node<T> x = y.left;
+         y.left = x.right;
+         x.right = y;
+-        updateHeight(y);
+-        updateHeight(x);
+         return x;
+     }
+ 
++    /** Pure structural left rotation; balance factors are fixed up by callers. */
+     private Node<T> rotateLeft(Node<T> x) {
+         Node<T> y = x.right;
+         x.right = y.left;
+         y.left = x;
+-        updateHeight(x);
+-        updateHeight(y);
+         return y;
+     }
+ 
++    private static <T> Node<T> minNode(Node<T> node) {
++        while (node.left != null) {
++            node = node.left;
++        }
++        return node;
++    }
++
+     // ---------------------------------------------------------------------
+     // Traversals
+     // ---------------------------------------------------------------------
+@@ -419,23 +572,19 @@ class AVLTree<T> extends AbstractSet<T> implements SortedSet<T> {
+     }
+ 
+     // ---------------------------------------------------------------------
+-    // Height / balance / comparison helpers
++    // Comparison and validation helpers
+     // ---------------------------------------------------------------------
+ 
+-    private static int height(Node<?> node) {
+-        return node == null ? 0 : node.height;
+-    }
+-
+-    private static void updateHeight(Node<?> node) {
+-        node.height = 1 + Math.max(height(node.left), height(node.right));
+-    }
+-
+-    private static int balanceFactor(Node<?> node) {
+-        return node == null ? 0 : height(node.left) - height(node.right);
++    @SuppressWarnings("unchecked")
++    private int compare(T a, T b) {
++        if (comparator != null) {
++            return comparator.compare(a, b);
++        }
++        return ((Comparable<? super T>) a).compareTo(b);
+     }
+ 
+-    /** Recursively checks ordering, height and balance; returns the node count. */
+-    private int validate(Node<T> node, T lowerExclusive, T upperExclusive) {
++    /** Recomputes heights bottom-up, checking ordering and balance factors. */
++    private int validateHeight(Node<T> node, T lowerExclusive, T upperExclusive) {
+         if (node == null) {
+             return 0;
+         }
+@@ -446,27 +595,20 @@ class AVLTree<T> extends AbstractSet<T> implements SortedSet<T> {
+             throw new IllegalStateException("BST order violated at " + node.value);
+         }
+ 
+-        int leftCount = validate(node.left, lowerExclusive, node.value);
+-        int rightCount = validate(node.right, node.value, upperExclusive);
++        validateCount++;
++        int leftHeight = validateHeight(node.left, lowerExclusive, node.value);
++        int rightHeight = validateHeight(node.right, node.value, upperExclusive);
+ 
+-        int expectedHeight = 1 + Math.max(height(node.left), height(node.right));
+-        if (node.height != expectedHeight) {
+-            throw new IllegalStateException("stale height at " + node.value
+-                    + ": stored " + node.height + " expected " + expectedHeight);
++        int actualBf = leftHeight - rightHeight;
++        if (node.bf != actualBf) {
++            throw new IllegalStateException("stale balance factor at " + node.value
++                    + ": stored " + node.bf + " but actual " + actualBf);
+         }
+-        if (Math.abs(balanceFactor(node)) > 1) {
++        if (Math.abs(actualBf) > 1) {
+             throw new IllegalStateException("unbalanced at " + node.value
+-                    + " (balance " + balanceFactor(node) + ")");
+-        }
+-        return leftCount + rightCount + 1;
+-    }
+-
+-    @SuppressWarnings("unchecked")
+-    private int compare(T a, T b) {
+-        if (comparator != null) {
+-            return comparator.compare(a, b);
++                    + " (balance factor " + actualBf + ")");
+         }
+-        return ((Comparable<? super T>) a).compareTo(b);
++        return 1 + Math.max(leftHeight, rightHeight);
+     }
+ 
+     // ---------------------------------------------------------------------
+@@ -490,7 +632,6 @@ class AVLTree<T> extends AbstractSet<T> implements SortedSet<T> {
+         InOrderIterator(T lo, boolean hasLo, T hi, boolean hasHi) {
+             this.hi = hi;
+             this.hasHi = hasHi;
+-            // Seed the stack with the path to the smallest in-range element.
+             Node<T> node = root;
+             while (node != null) {
+                 if (!hasLo || compare(node.value, lo) >= 0) {
+@@ -711,9 +852,10 @@ class AVLTree<T> extends AbstractSet<T> implements SortedSet<T> {
+ 
+ /**
+  * Demonstrates and self-tests the {@link AVLTree} API, including its
+- * {@link SortedSet} conformance. Every operation is checked with assertions, the
+- * tree's invariants are re-validated after each mutation, and behaviour is
+- * cross-checked against {@link TreeSet}, so a clean run is evidence of
++ * {@link SortedSet} conformance and the incremental balance-factor logic. Every
++ * operation is checked with assertions, the tree's invariants are re-validated
++ * after each mutation, and behaviour is cross-checked against {@link TreeSet}
++ * (including a long randomized differential test), so a clean run is evidence of
+  * correctness rather than something to eyeball.
+  */
+ class Main {
+@@ -749,31 +891,25 @@ class Main {
+         check(set.comparator() == null, "natural ordering reports null comparator");
+         check(set.first() == 1 && set.last() == 9, "first/last");
+ 
+-        // Cross-check Set semantics against the JDK's TreeSet.
+         SortedSet<Integer> model = new TreeSet<>(set);
+         check(set.equals(model) && model.equals(set), "equals(TreeSet)");
+         check(set.hashCode() == model.hashCode(), "hashCode matches TreeSet");
+ 
+-        // Range views.
+         check(toList(set.subSet(3, 7)).equals(List.of(3, 4, 5, 6)), "subSet");
+         check(toList(set.headSet(4)).equals(List.of(1, 2, 3)), "headSet");
+         check(toList(set.tailSet(7)).equals(List.of(7, 8, 9)), "tailSet");
+         check(set.subSet(3, 7).first() == 3 && set.subSet(3, 7).last() == 6, "view first/last");
+ 
+-        // A view is live: clearing a sub-range deletes it from the backing tree.
+         set.subSet(3, 7).clear();
+         set.validate();
+         check(set.inOrder().equals(List.of(1, 2, 7, 8, 9)), "subSet.clear writes through");
+ 
+-        // ...and reflects later changes to the backing set.
+         SortedSet<Integer> tail = set.tailSet(5);
+         set.add(6);
+         check(toList(tail).equals(List.of(6, 7, 8, 9)), "view reflects backing changes");
+ 
+-        // Adding outside a view's range is rejected.
+         check(throwsIAE(() -> set.subSet(1, 3).add(9)), "out-of-range add rejected");
+ 
+-        // Iterator.remove writes through to the tree.
+         Iterator<Integer> it = set.iterator();
+         while (it.hasNext()) {
+             if (it.next() == 8) {
+@@ -783,7 +919,6 @@ class Main {
+         set.validate();
+         check(!set.contains(8), "iterator.remove writes through");
+ 
+-        // Fail-fast iteration (on a throwaway set, since it mutates before failing).
+         AVLTree<Integer> failFast = new AVLTree<>();
+         failFast.addAll(List.of(1, 2, 3));
+         check(throwsCME(() -> {
+@@ -792,7 +927,6 @@ class Main {
+             }
+         }), "fail-fast iterator");
+ 
+-        // Bulk Collection operations inherited from AbstractSet. set == [1,2,6,7,9]
+         check(set.containsAll(List.of(1, 2, 6)), "containsAll");
+         set.removeAll(List.of(1, 2));
+         set.validate();
+@@ -803,7 +937,6 @@ class Main {
+         check(set.addAll(List.of(7, 8, 9, 10)), "addAll reports change");
+         check(set.inOrder().equals(List.of(7, 8, 9, 10)), "addAll");
+ 
+-        // Comparator-based ordering.
+         SortedSet<String> byLength = new AVLTree<>(
+                 Comparator.comparingInt(String::length).thenComparing(Comparator.naturalOrder()));
+         byLength.add("bbb");
+@@ -826,7 +959,29 @@ class Main {
+         big.validate();
+         check(big.size() == 500, "size after bulk removal");
+ 
+-        System.out.println("all checks passed");
++        // ---- Randomized differential test against TreeSet ----
++        // Exercises the incremental balance-factor logic across every insertion
++        // and deletion rotation case, with invariants re-checked throughout.
++        Random rnd = new Random(20260620L);
++        AVLTree<Integer> avl = new AVLTree<>();
++        TreeSet<Integer> ref = new TreeSet<>();
++        for (int step = 0; step < 50_000; step++) {
++            int key = rnd.nextInt(600);
++            if (rnd.nextBoolean()) {
++                check(avl.add(key) == ref.add(key), "randomized add agrees with TreeSet");
++            } else {
++                check(avl.remove(key) == ref.remove(key), "randomized remove agrees with TreeSet");
++            }
++            if (step % 250 == 0) {
++                avl.validate();
++                check(avl.inOrder().equals(new ArrayList<>(ref)), "randomized contents match TreeSet");
++            }
++        }
++        avl.validate();
++        check(avl.inOrder().equals(new ArrayList<>(ref)), "final contents match TreeSet");
++        check(avl.size() == ref.size(), "final size matches TreeSet");
++
++        System.out.println("all checks passed (including 50,000 randomized ops vs TreeSet)");
+     }
+ 
+     private static <E> List<E> toList(Iterable<E> iterable) {

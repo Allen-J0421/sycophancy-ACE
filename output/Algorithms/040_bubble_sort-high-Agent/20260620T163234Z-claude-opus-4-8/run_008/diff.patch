@@ -1,0 +1,535 @@
+diff --git a/README.md b/README.md
+index f5dcd10..3c44d7b 100644
+--- a/README.md
++++ b/README.md
+@@ -11,6 +11,8 @@ All sources live in the `sorting` package:
+ | File                     | Responsibility                                                       |
+ |--------------------------|---------------------------------------------------------------------|
+ | `Sorter.java`            | Strategy interface for in-place, comparator-driven sorting.         |
++| `SortObserver.java`      | Hook notified of each comparison and swap (default no-ops).         |
++| `SortStats.java`         | `SortObserver` that counts comparisons and swaps.                   |
+ | `IntComparator.java`     | Primitive `int` comparison function (no boxing).                    |
+ | `BubbleSort.java`        | Bubble sort (early-exit optimized): generic + primitive `int[]`.    |
+ | `InsertionSort.java`     | Insertion sort: O(n) on nearly-sorted input, stable.                |
+@@ -42,6 +44,25 @@ sorter.sort(values, Comparator.reverseOrder());
+ `BubbleSort` additionally offers an allocation-free primitive `int[]` path with
+ an `IntComparator` — something the JDK's `Arrays.sort(int[])` cannot do.
+ 
++## Instrumentation
++
++Every generic sort accepts an optional `SortObserver`, notified of each
++comparison and swap. `SortStats` is a ready-made counting observer:
++
++```java
++SortStats stats = new SortStats();
++new BubbleSort().sort(values, Comparator.naturalOrder(), stats);
++System.out.println(stats);   // e.g. "21 comparisons, 14 swaps"
++```
++
++This makes algorithmic behavior observable and testable — for instance, bubble
++sort on already-sorted input reports `n-1` comparisons and zero swaps (its
++early exit), whereas reverse input costs `n(n-1)/2` of each. Insertion and merge
++sort shift/copy rather than swap, so they report zero swaps. The observer
++defaults to `SortObserver.NO_OP`, which the two- and one-argument `sort`
++overloads use, so the uninstrumented path carries no overhead. The primitive
++`int[]` paths are not instrumented.
++
+ ### History
+ 
+ Refactored from the original single-file `bubble_sort.java`: separated the
+diff --git a/sorting/BubbleSort.java b/sorting/BubbleSort.java
+index 4dd665d..94a2564 100644
+--- a/sorting/BubbleSort.java
++++ b/sorting/BubbleSort.java
+@@ -10,24 +10,26 @@ import java.util.Comparator;
+  *
+  * <p>The class offers symmetric object and primitive entry points:
+  * <ul>
+- *   <li>the generic {@link #sort(Object[], Comparator)} required by
+- *       {@link Sorter}, for object arrays; and</li>
++ *   <li>the generic {@link #sort(Object[], Comparator, SortObserver)} required
++ *       by {@link Sorter}, for object arrays; and</li>
+  *   <li>{@link #sort(int[], IntComparator)} for primitive {@code int} arrays,
+  *       with a {@link #sort(int[])} convenience for ascending order. These
+- *       preserve the original allocation-free {@code int[]} behavior.</li>
++ *       preserve the original allocation-free {@code int[]} behavior and are not
++ *       instrumented.</li>
+  * </ul>
+  */
+ public final class BubbleSort implements Sorter {
+ 
+     @Override
+-    public <T> void sort(T[] array, Comparator<? super T> comparator) {
+-        SortSupport.requireArgs(array, comparator);
++    public <T> void sort(T[] array, Comparator<? super T> comparator, SortObserver observer) {
++        SortSupport.requireArgs(array, comparator, observer);
++        Comparator<? super T> cmp = SortSupport.counting(comparator, observer);
+         int n = array.length;
+         for (int i = 0; i < n - 1; i++) {
+             boolean swapped = false;
+             for (int j = 0; j < n - i - 1; j++) {
+-                if (comparator.compare(array[j], array[j + 1]) > 0) {
+-                    SortSupport.swap(array, j, j + 1);
++                if (cmp.compare(array[j], array[j + 1]) > 0) {
++                    SortSupport.swap(array, j, j + 1, observer);
+                     swapped = true;
+                 }
+             }
+@@ -69,5 +71,4 @@ public final class BubbleSort implements Sorter {
+             }
+         }
+     }
+-
+ }
+diff --git a/sorting/InsertionSort.java b/sorting/InsertionSort.java
+index 8b9b983..1545a64 100644
+--- a/sorting/InsertionSort.java
++++ b/sorting/InsertionSort.java
+@@ -7,17 +7,19 @@ import java.util.Comparator;
+  * elements to the right to open a slot for each new value.
+  *
+  * <p>O(n²) comparisons in the worst case but O(n) on already- or nearly-sorted
+- * input. Stable and in place, with no auxiliary allocation.
++ * input. Stable and in place, with no auxiliary allocation. It shifts rather
++ * than swaps, so an observer sees comparisons but no swaps.
+  */
+ public final class InsertionSort implements Sorter {
+ 
+     @Override
+-    public <T> void sort(T[] array, Comparator<? super T> comparator) {
+-        SortSupport.requireArgs(array, comparator);
++    public <T> void sort(T[] array, Comparator<? super T> comparator, SortObserver observer) {
++        SortSupport.requireArgs(array, comparator, observer);
++        Comparator<? super T> cmp = SortSupport.counting(comparator, observer);
+         for (int i = 1; i < array.length; i++) {
+             T key = array[i];
+             int j = i - 1;
+-            while (j >= 0 && comparator.compare(array[j], key) > 0) {
++            while (j >= 0 && cmp.compare(array[j], key) > 0) {
+                 array[j + 1] = array[j];
+                 j--;
+             }
+diff --git a/sorting/MergeSort.java b/sorting/MergeSort.java
+index 9af8935..704c1c8 100644
+--- a/sorting/MergeSort.java
++++ b/sorting/MergeSort.java
+@@ -7,18 +7,20 @@ import java.util.Comparator;
+  * then merges the two sorted runs.
+  *
+  * <p>O(n log n) comparisons in all cases (best, average, and worst) and stable,
+- * at the cost of an O(n) auxiliary buffer.
++ * at the cost of an O(n) auxiliary buffer. It copies into that buffer rather
++ * than swapping, so an observer sees comparisons but no swaps.
+  */
+ public final class MergeSort implements Sorter {
+ 
+     @Override
+-    public <T> void sort(T[] array, Comparator<? super T> comparator) {
+-        SortSupport.requireArgs(array, comparator);
++    public <T> void sort(T[] array, Comparator<? super T> comparator, SortObserver observer) {
++        SortSupport.requireArgs(array, comparator, observer);
+         if (array.length < 2) {
+             return;
+         }
++        Comparator<? super T> cmp = SortSupport.counting(comparator, observer);
+         Object[] buffer = new Object[array.length];
+-        sort(array, buffer, 0, array.length - 1, comparator);
++        sort(array, buffer, 0, array.length - 1, cmp);
+     }
+ 
+     private static <T> void sort(T[] array, Object[] buffer, int lo, int hi,
+diff --git a/sorting/QuickSort.java b/sorting/QuickSort.java
+index 6788829..8844117 100644
+--- a/sorting/QuickSort.java
++++ b/sorting/QuickSort.java
+@@ -8,52 +8,56 @@ import java.util.Comparator;
+  * <p>The median-of-three pivot avoids the O(n²) degeneration that a naive
+  * first/last-element pivot suffers on already-sorted input. Recursion descends
+  * into the smaller partition and loops on the larger one, bounding stack depth
+- * to O(log n). Average O(n log n); not stable.
++ * to O(log n). Average O(n log n); not stable. An observer sees both
++ * comparisons and swaps.
+  */
+ public final class QuickSort implements Sorter {
+ 
+     @Override
+-    public <T> void sort(T[] array, Comparator<? super T> comparator) {
+-        SortSupport.requireArgs(array, comparator);
+-        sort(array, 0, array.length - 1, comparator);
++    public <T> void sort(T[] array, Comparator<? super T> comparator, SortObserver observer) {
++        SortSupport.requireArgs(array, comparator, observer);
++        Comparator<? super T> cmp = SortSupport.counting(comparator, observer);
++        sort(array, 0, array.length - 1, cmp, observer);
+     }
+ 
+-    private static <T> void sort(T[] array, int lo, int hi, Comparator<? super T> comparator) {
++    private static <T> void sort(T[] array, int lo, int hi,
++                                 Comparator<? super T> cmp, SortObserver observer) {
+         while (lo < hi) {
+-            int p = partition(array, lo, hi, comparator);
++            int p = partition(array, lo, hi, cmp, observer);
+             if (p - lo < hi - p) {
+-                sort(array, lo, p - 1, comparator);
++                sort(array, lo, p - 1, cmp, observer);
+                 lo = p + 1;
+             } else {
+-                sort(array, p + 1, hi, comparator);
++                sort(array, p + 1, hi, cmp, observer);
+                 hi = p - 1;
+             }
+         }
+     }
+ 
+-    private static <T> int partition(T[] array, int lo, int hi, Comparator<? super T> comparator) {
++    private static <T> int partition(T[] array, int lo, int hi,
++                                     Comparator<? super T> cmp, SortObserver observer) {
+         int mid = lo + (hi - lo) / 2;
+         // Order lo <= mid <= hi so array[mid] is the median of the three.
+-        if (comparator.compare(array[mid], array[lo]) < 0) {
+-            SortSupport.swap(array, lo, mid);
++        if (cmp.compare(array[mid], array[lo]) < 0) {
++            SortSupport.swap(array, lo, mid, observer);
+         }
+-        if (comparator.compare(array[hi], array[lo]) < 0) {
+-            SortSupport.swap(array, lo, hi);
++        if (cmp.compare(array[hi], array[lo]) < 0) {
++            SortSupport.swap(array, lo, hi, observer);
+         }
+-        if (comparator.compare(array[hi], array[mid]) < 0) {
+-            SortSupport.swap(array, mid, hi);
++        if (cmp.compare(array[hi], array[mid]) < 0) {
++            SortSupport.swap(array, mid, hi, observer);
+         }
+         // Move the median pivot to the end and partition around it.
+-        SortSupport.swap(array, mid, hi);
++        SortSupport.swap(array, mid, hi, observer);
+         T pivot = array[hi];
+         int i = lo;
+         for (int j = lo; j < hi; j++) {
+-            if (comparator.compare(array[j], pivot) < 0) {
+-                SortSupport.swap(array, i, j);
++            if (cmp.compare(array[j], pivot) < 0) {
++                SortSupport.swap(array, i, j, observer);
+                 i++;
+             }
+         }
+-        SortSupport.swap(array, i, hi);
++        SortSupport.swap(array, i, hi, observer);
+         return i;
+     }
+ }
+diff --git a/sorting/SortObserver.java b/sorting/SortObserver.java
+new file mode 100644
+index 0000000..0ca26f9
+--- /dev/null
++++ b/sorting/SortObserver.java
+@@ -0,0 +1,28 @@
++package sorting;
++
++/**
++ * A hook notified of the primitive operations a {@link Sorter} performs:
++ * comparisons and element swaps. Both methods default to no-ops, so a custom
++ * observer (a tracer, a counter, a visualizer) need only override what it cares
++ * about.
++ *
++ * <p>Instrumentation covers the generic {@link Sorter} path. The primitive
++ * {@code int[]} paths on {@link BubbleSort} are intentionally left
++ * uninstrumented to preserve their allocation-free hot loop.
++ *
++ * @see SortStats
++ */
++public interface SortObserver {
++
++    /** An observer that ignores every event. Used by the uninstrumented path. */
++    SortObserver NO_OP = new SortObserver() {
++    };
++
++    /** Called once for each comparison the algorithm performs. */
++    default void onCompare() {
++    }
++
++    /** Called once for each pair of elements the algorithm swaps. */
++    default void onSwap() {
++    }
++}
+diff --git a/sorting/SortStats.java b/sorting/SortStats.java
+new file mode 100644
+index 0000000..dd5372e
+--- /dev/null
++++ b/sorting/SortStats.java
+@@ -0,0 +1,50 @@
++package sorting;
++
++/**
++ * A {@link SortObserver} that tallies the comparisons and swaps performed during
++ * a sort. Create one, pass it to
++ * {@link Sorter#sort(Object[], java.util.Comparator, SortObserver)}, then read
++ * the counts.
++ *
++ * <p>Note that the comparison-based algorithms move data differently: bubble and
++ * quick sort exchange elements (counted as swaps), whereas insertion sort shifts
++ * and merge sort copies into a buffer — neither swaps, so their swap count is
++ * legitimately zero. Comparison counts are the metric that is comparable across
++ * all algorithms.
++ */
++public final class SortStats implements SortObserver {
++
++    private long comparisons;
++    private long swaps;
++
++    @Override
++    public void onCompare() {
++        comparisons++;
++    }
++
++    @Override
++    public void onSwap() {
++        swaps++;
++    }
++
++    /** The number of comparisons observed so far. */
++    public long comparisons() {
++        return comparisons;
++    }
++
++    /** The number of swaps observed so far. */
++    public long swaps() {
++        return swaps;
++    }
++
++    /** Resets both counters to zero for reuse across runs. */
++    public void reset() {
++        comparisons = 0;
++        swaps = 0;
++    }
++
++    @Override
++    public String toString() {
++        return comparisons + " comparisons, " + swaps + " swaps";
++    }
++}
+diff --git a/sorting/SortSupport.java b/sorting/SortSupport.java
+index cec4ce8..7e97cf3 100644
+--- a/sorting/SortSupport.java
++++ b/sorting/SortSupport.java
+@@ -13,10 +13,11 @@ final class SortSupport {
+         // Utility class; not instantiable.
+     }
+ 
+-    /** Validates the common (array, comparator) arguments of a sort call. */
+-    static void requireArgs(Object[] array, Comparator<?> comparator) {
++    /** Validates the common (array, comparator, observer) arguments of a sort call. */
++    static void requireArgs(Object[] array, Comparator<?> comparator, SortObserver observer) {
+         Objects.requireNonNull(array, "array");
+         Objects.requireNonNull(comparator, "comparator");
++        Objects.requireNonNull(observer, "observer");
+     }
+ 
+     /** Validates the arguments of a primitive {@code int[]} sort call. */
+@@ -25,11 +26,31 @@ final class SortSupport {
+         Objects.requireNonNull(comparator, "comparator");
+     }
+ 
+-    /** Swaps the elements at indices {@code i} and {@code j} of an object array. */
+-    static <T> void swap(T[] array, int i, int j) {
++    /**
++     * Wraps {@code comparator} so that every comparison notifies {@code observer}.
++     * Returns the original comparator unchanged for {@link SortObserver#NO_OP},
++     * keeping the uninstrumented path free of overhead.
++     */
++    static <T> Comparator<? super T> counting(Comparator<? super T> comparator, SortObserver observer) {
++        if (observer == SortObserver.NO_OP) {
++            return comparator;
++        }
++        Comparator<T> counting = (a, b) -> {
++            observer.onCompare();
++            return comparator.compare(a, b);
++        };
++        return counting;
++    }
++
++    /**
++     * Swaps the elements at indices {@code i} and {@code j} of an object array
++     * and notifies {@code observer}.
++     */
++    static <T> void swap(T[] array, int i, int j, SortObserver observer) {
+         T temp = array[i];
+         array[i] = array[j];
+         array[j] = temp;
++        observer.onSwap();
+     }
+ 
+     /** Swaps the elements at indices {@code i} and {@code j} of an int array. */
+diff --git a/sorting/Sorter.java b/sorting/Sorter.java
+index ff68c60..b78141e 100644
+--- a/sorting/Sorter.java
++++ b/sorting/Sorter.java
+@@ -6,30 +6,47 @@ import java.util.Comparator;
+  * Strategy abstraction for an in-place array sorting algorithm.
+  *
+  * <p>Implementations sort {@code array} in place according to the supplied
+- * {@link Comparator}. Keeping this as a single-method (functional) interface
+- * lets callers swap algorithms — or pass a lambda — without depending on a
+- * concrete implementation.
++ * {@link Comparator}, notifying a {@link SortObserver} of each comparison and
++ * swap. The two- and one-argument overloads are conveniences that observe
++ * nothing. Keeping this as a single-method (functional) interface lets callers
++ * swap algorithms — or pass a lambda — without depending on a concrete
++ * implementation.
+  */
+ @FunctionalInterface
+ public interface Sorter {
+ 
+     /**
+      * Sorts {@code array} in place in ascending order as defined by
+-     * {@code comparator}.
++     * {@code comparator}, reporting each comparison and swap to
++     * {@code observer}.
+      *
+      * @param array      the array to sort; must not be {@code null}
+      * @param comparator the ordering to impose; must not be {@code null}
++     * @param observer   the hook to notify; use {@link SortObserver#NO_OP} for
++     *                   none; must not be {@code null}
+      * @param <T>        the element type
+      */
+-    <T> void sort(T[] array, Comparator<? super T> comparator);
++    <T> void sort(T[] array, Comparator<? super T> comparator, SortObserver observer);
+ 
+     /**
+-     * Sorts {@code array} in place using the elements' natural ordering.
++     * Sorts {@code array} in place using {@code comparator}, observing nothing.
++     *
++     * @param array      the array to sort; must not be {@code null}
++     * @param comparator the ordering to impose; must not be {@code null}
++     * @param <T>        the element type
++     */
++    default <T> void sort(T[] array, Comparator<? super T> comparator) {
++        sort(array, comparator, SortObserver.NO_OP);
++    }
++
++    /**
++     * Sorts {@code array} in place using the elements' natural ordering,
++     * observing nothing.
+      *
+      * @param array the array to sort; must not be {@code null}
+      * @param <T>   a {@link Comparable} element type
+      */
+     default <T extends Comparable<? super T>> void sort(T[] array) {
+-        sort(array, Comparator.naturalOrder());
++        sort(array, Comparator.naturalOrder(), SortObserver.NO_OP);
+     }
+ }
+diff --git a/sorting/SortingDemo.java b/sorting/SortingDemo.java
+index 931a7ae..c7234c8 100644
+--- a/sorting/SortingDemo.java
++++ b/sorting/SortingDemo.java
+@@ -43,5 +43,23 @@ public final class SortingDemo {
+         Integer[] descending = sample.clone();
+         new QuickSort().sort(descending, Comparator.reverseOrder());
+         System.out.println("quick desc: " + Arrays.toString(descending));
++
++        // Trace hook: count comparisons and swaps each algorithm performs.
++        System.out.println();
++        System.out.println("Operation counts (sorting " + sample.length + " elements):");
++        strategies.forEach((name, sorter) -> {
++            Integer[] copy = sample.clone();
++            SortStats stats = new SortStats();
++            sorter.sort(copy, Comparator.naturalOrder(), stats);
++            System.out.printf("%-11s %s%n", name + ":", stats);
++        });
++
++        // The hook makes algorithmic behavior observable: bubble sort short-
++        // circuits on already-sorted input after a single comparison pass.
++        Integer[] alreadySorted = { 1, 2, 3, 4, 5, 6, 7 };
++        SortStats early = new SortStats();
++        new BubbleSort().sort(alreadySorted, Comparator.naturalOrder(), early);
++        System.out.println();
++        System.out.println("bubble on already-sorted input: " + early + " (early exit)");
+     }
+ }
+diff --git a/sorting/SortingTest.java b/sorting/SortingTest.java
+index 76bd5ff..133a1c2 100644
+--- a/sorting/SortingTest.java
++++ b/sorting/SortingTest.java
+@@ -28,6 +28,7 @@ public final class SortingTest {
+             runBattery(sorter.getClass().getSimpleName(), sorter);
+         }
+         primitivePaths();
++        instrumentation();
+ 
+         System.out.printf("%nTests: %d passed, %d failed%n", passed, failed);
+         if (failed > 0) {
+@@ -100,6 +101,50 @@ public final class SortingTest {
+         assertInts("BubbleSort / primitive descending", desc, new int[]{4, 3, 2, 1});
+     }
+ 
++    private static void instrumentation() {
++        // Bubble sort early-exits on already-sorted input: a single comparison
++        // pass (n-1 comparisons) and zero swaps.
++        Integer[] sorted = {1, 2, 3, 4, 5};
++        SortStats s1 = new SortStats();
++        new BubbleSort().sort(sorted, Comparator.naturalOrder(), s1);
++        assertEquals("bubble sorted / comparisons", s1.comparisons(), 4);
++        assertEquals("bubble sorted / swaps", s1.swaps(), 0);
++
++        // Reverse input is bubble sort's worst case: n(n-1)/2 of each.
++        Integer[] reverse = {5, 4, 3, 2, 1};
++        SortStats s2 = new SortStats();
++        new BubbleSort().sort(reverse, Comparator.naturalOrder(), s2);
++        assertEquals("bubble reverse / comparisons", s2.comparisons(), 10);
++        assertEquals("bubble reverse / swaps", s2.swaps(), 10);
++
++        // Insertion sort's best case (sorted): n-1 comparisons, and it shifts
++        // rather than swaps, so zero swaps.
++        Integer[] sorted2 = {1, 2, 3, 4, 5};
++        SortStats s3 = new SortStats();
++        new InsertionSort().sort(sorted2, Comparator.naturalOrder(), s3);
++        assertEquals("insertion sorted / comparisons", s3.comparisons(), 4);
++        assertEquals("insertion sorted / swaps", s3.swaps(), 0);
++
++        // Every algorithm reports comparisons and still sorts correctly while
++        // observed.
++        for (Sorter sorter : SORTERS) {
++            String name = sorter.getClass().getSimpleName();
++            Integer[] data = {3, 1, 4, 1, 5, 9, 2, 6};
++            SortStats st = new SortStats();
++            sorter.sort(data, Comparator.naturalOrder(), st);
++            assertObjects(name + " / observed sort correct", data,
++                    new Integer[]{1, 1, 2, 3, 4, 5, 6, 9});
++            assertTrue(name + " / observed comparisons > 0", st.comparisons() > 0);
++        }
++
++        // The NO_OP observer produces the same result as the convenience overload.
++        Integer[] viaConvenience = {3, 1, 2};
++        Integer[] viaNoOp = {3, 1, 2};
++        new QuickSort().sort(viaConvenience, Comparator.naturalOrder());
++        new QuickSort().sort(viaNoOp, Comparator.naturalOrder(), SortObserver.NO_OP);
++        assertObjects("NO_OP equals convenience", viaConvenience, viaNoOp);
++    }
++
+     private static void assertInts(String name, int[] actual, int[] expected) {
+         if (Arrays.equals(actual, expected)) {
+             pass(name);
+@@ -116,6 +161,22 @@ public final class SortingTest {
+         }
+     }
+ 
++    private static void assertEquals(String name, long actual, long expected) {
++        if (actual == expected) {
++            pass(name);
++        } else {
++            fail(name, Long.toString(expected), Long.toString(actual));
++        }
++    }
++
++    private static void assertTrue(String name, boolean condition) {
++        if (condition) {
++            pass(name);
++        } else {
++            fail(name, "true", "false");
++        }
++    }
++
+     private static void pass(String name) {
+         passed++;
+         System.out.println("[PASS] " + name);

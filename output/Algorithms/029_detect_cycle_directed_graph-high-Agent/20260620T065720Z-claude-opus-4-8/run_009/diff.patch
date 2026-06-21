@@ -1,0 +1,395 @@
+diff --git a/DetectCycleDemo.java b/DetectCycleDemo.java
+index ba6f72e..d742f17 100644
+--- a/DetectCycleDemo.java
++++ b/DetectCycleDemo.java
+@@ -29,5 +29,15 @@ final class DetectCycleDemo {
+             CycleDetector detector = CycleDetector.create(algorithm).withLogging(logger);
+             detector.findCycle(graph);
+         }
++
++        // Visitor-based traversal: custom operations over the same graph,
++        // computed without any change to DirectedGraph.
++        OutDegreeDistributionVisitor degrees = new OutDegreeDistributionVisitor();
++        GraphTraversal.visitAll(graph, degrees);
++        System.out.println("out-degree distribution: " + degrees.distribution());
++
++        ReachableVerticesVisitor reachable = new ReachableVerticesVisitor();
++        GraphTraversal.traverseFrom(graph, 0, reachable);
++        System.out.println("reachable from 0: " + reachable.reachable());
+     }
+ }
+diff --git a/GraphTraversal.java b/GraphTraversal.java
+new file mode 100644
+index 0000000..efba576
+--- /dev/null
++++ b/GraphTraversal.java
+@@ -0,0 +1,61 @@
++import java.util.ArrayDeque;
++import java.util.Deque;
++
++/**
++ * Traversal engine that walks a {@link DirectedGraph} and dispatches its
++ * vertices and edges to a {@link GraphVisitor}. It reads only the graph's public
++ * API, so new operations are written as visitors here — the {@code DirectedGraph}
++ * class itself never changes.
++ */
++final class GraphTraversal {
++
++    private GraphTraversal() {
++    }
++
++    /**
++     * Visits every vertex (in ascending order) and every edge of {@code graph}
++     * exactly once. Suitable for whole-graph operations such as degree statistics.
++     */
++    static void visitAll(DirectedGraph graph, GraphVisitor visitor) {
++        int vertexCount = graph.vertices();
++        for (int u = 0; u < vertexCount; u++) {
++            visitor.visitVertex(u);
++            for (int v : graph.neighbors(u)) {
++                visitor.visitEdge(u, v);
++            }
++        }
++    }
++
++    /**
++     * Breadth-first traversal of every vertex reachable from {@code source}
++     * (including {@code source} itself). Each reachable vertex triggers
++     * {@link GraphVisitor#visitVertex} once; every scanned edge triggers
++     * {@link GraphVisitor#visitEdge}.
++     *
++     * @throws IndexOutOfBoundsException if {@code source} is not a valid vertex
++     */
++    static void traverseFrom(DirectedGraph graph, int source, GraphVisitor visitor) {
++        int vertexCount = graph.vertices();
++        if (source < 0 || source >= vertexCount) {
++            throw new IndexOutOfBoundsException(
++                    "source " + source + " out of range [0, " + vertexCount + ")");
++        }
++
++        boolean[] seen = new boolean[vertexCount];
++        Deque<Integer> queue = new ArrayDeque<>();
++        seen[source] = true;
++        queue.add(source);
++
++        while (!queue.isEmpty()) {
++            int u = queue.poll();
++            visitor.visitVertex(u);
++            for (int v : graph.neighbors(u)) {
++                visitor.visitEdge(u, v);
++                if (!seen[v]) {
++                    seen[v] = true;
++                    queue.add(v);
++                }
++            }
++        }
++    }
++}
+diff --git a/GraphVisitor.java b/GraphVisitor.java
+new file mode 100644
+index 0000000..7302b44
+--- /dev/null
++++ b/GraphVisitor.java
+@@ -0,0 +1,21 @@
++/**
++ * A visitor over the elements of a {@link DirectedGraph}, invoked by
++ * {@link GraphTraversal}. Implement this to define a custom graph operation —
++ * out-degree statistics, reachability, edge counting, and so on — <em>without
++ * modifying {@code DirectedGraph}</em>.
++ *
++ * <p>Both hooks default to no-ops, so a visitor overrides only the events it
++ * cares about (e.g. a reachability visitor needs only {@link #visitVertex}).
++ * A visitor typically accumulates state during traversal and exposes the result
++ * through its own method afterwards.
++ */
++interface GraphVisitor {
++
++    /** Called once for each vertex the traversal reaches. */
++    default void visitVertex(int vertex) {
++    }
++
++    /** Called once for each edge {@code from -> to} the traversal scans. */
++    default void visitEdge(int from, int to) {
++    }
++}
+diff --git a/OutDegreeDistributionVisitor.java b/OutDegreeDistributionVisitor.java
+new file mode 100644
+index 0000000..400d812
+--- /dev/null
++++ b/OutDegreeDistributionVisitor.java
+@@ -0,0 +1,38 @@
++import java.util.HashMap;
++import java.util.Map;
++import java.util.TreeMap;
++
++/**
++ * A {@link GraphVisitor} that computes the out-degree distribution of a graph:
++ * how many vertices have each out-degree. Run it with
++ * {@link GraphTraversal#visitAll}, then read {@link #distribution()}.
++ *
++ * <p>Vertices with out-degree zero are included, so the counts always sum to the
++ * graph's vertex count.
++ */
++final class OutDegreeDistributionVisitor implements GraphVisitor {
++
++    private final Map<Integer, Integer> outDegreeByVertex = new HashMap<>();
++
++    @Override
++    public void visitVertex(int vertex) {
++        outDegreeByVertex.putIfAbsent(vertex, 0);
++    }
++
++    @Override
++    public void visitEdge(int from, int to) {
++        outDegreeByVertex.merge(from, 1, Integer::sum);
++    }
++
++    /**
++     * Returns a map from out-degree to the number of vertices having that
++     * out-degree, ordered by ascending degree.
++     */
++    Map<Integer, Integer> distribution() {
++        Map<Integer, Integer> distribution = new TreeMap<>();
++        for (int outDegree : outDegreeByVertex.values()) {
++            distribution.merge(outDegree, 1, Integer::sum);
++        }
++        return distribution;
++    }
++}
+diff --git a/README.md b/README.md
+index ca4c35c..021400b 100644
+--- a/README.md
++++ b/README.md
+@@ -102,6 +102,35 @@ Run the bundled demo:
+ javac *.java && java DetectCycleDemo
+ ```
+ 
++## Custom graph operations (visitor pattern)
++
++Define new operations over a graph — degree statistics, reachability, edge
++counting — *without modifying `DirectedGraph`*. A `GraphTraversal` engine walks
++the graph and dispatches to a `GraphVisitor`; each new operation is a new visitor.
++
++```java
++// out-degree distribution: how many vertices have each out-degree
++OutDegreeDistributionVisitor degrees = new OutDegreeDistributionVisitor();
++GraphTraversal.visitAll(graph, degrees);
++degrees.distribution();                       // e.g. {0=1, 1=2, 2=1}
++
++// vertices reachable from a source (BFS), source included
++ReachableVerticesVisitor reachable = new ReachableVerticesVisitor();
++GraphTraversal.traverseFrom(graph, 0, reachable);
++reachable.reachable();                        // e.g. [0, 1, 2, 3]
++
++// your own operation — just implement the hooks you need
++GraphVisitor edgeCounter = new GraphVisitor() {
++    int count;
++    public void visitEdge(int from, int to) { count++; }
++};
++GraphTraversal.visitAll(graph, edgeCounter);
++```
++
++`GraphVisitor` has no-op default hooks (`visitVertex`, `visitEdge`), so a visitor
++overrides only what it cares about. `GraphTraversal` offers `visitAll` (every
++vertex and edge) and `traverseFrom` (BFS from a source).
++
+ ## Tests
+ 
+ ```sh
+diff --git a/ReachableVerticesVisitor.java b/ReachableVerticesVisitor.java
+new file mode 100644
+index 0000000..a10ec7a
+--- /dev/null
++++ b/ReachableVerticesVisitor.java
+@@ -0,0 +1,24 @@
++import java.util.Collections;
++import java.util.LinkedHashSet;
++import java.util.Set;
++
++/**
++ * A {@link GraphVisitor} that collects the set of vertices visited during a
++ * traversal. Paired with {@link GraphTraversal#traverseFrom}, it yields the
++ * vertices reachable from a source (the source included); paired with
++ * {@link GraphTraversal#visitAll}, it yields every vertex.
++ */
++final class ReachableVerticesVisitor implements GraphVisitor {
++
++    private final Set<Integer> visited = new LinkedHashSet<>();
++
++    @Override
++    public void visitVertex(int vertex) {
++        visited.add(vertex);
++    }
++
++    /** Returns the visited vertices, in the order they were first reached. */
++    Set<Integer> reachable() {
++        return Collections.unmodifiableSet(visited);
++    }
++}
+diff --git a/test/GraphTraversalTest.java b/test/GraphTraversalTest.java
+new file mode 100644
+index 0000000..d144638
+--- /dev/null
++++ b/test/GraphTraversalTest.java
+@@ -0,0 +1,161 @@
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Nested;
++import org.junit.jupiter.api.Test;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++/**
++ * JUnit 5 test suite for the visitor-based traversal: {@link GraphTraversal},
++ * {@link GraphVisitor}, and the example visitors.
++ *
++ * <p>Compile and run with {@code ./run-tests.sh} (no build tool required).
++ */
++@DisplayName("Graph traversal (visitor pattern)")
++class GraphTraversalTest {
++
++    /** Records the order of visited vertices and edges for assertions. */
++    private static final class RecordingVisitor implements GraphVisitor {
++        final List<Integer> vertices = new ArrayList<>();
++        final List<String> edges = new ArrayList<>();
++
++        @Override
++        public void visitVertex(int vertex) {
++            vertices.add(vertex);
++        }
++
++        @Override
++        public void visitEdge(int from, int to) {
++            edges.add(from + "->" + to);
++        }
++    }
++
++    /** 0 -> 1 -> 2 -> 0 (cycle) and 2 -> 3; vertex 3 is a sink. */
++    private static DirectedGraph sample() {
++        return DirectedGraph.builder(4)
++                .addEdge(0, 1)
++                .addEdge(1, 2)
++                .addEdge(2, 0)
++                .addEdge(2, 3)
++                .build();
++    }
++
++    @Nested
++    @DisplayName("GraphTraversal")
++    class TraversalTests {
++
++        @Test
++        @DisplayName("visitAll visits every vertex and edge once, in order")
++        void visitAllCoversGraph() {
++            RecordingVisitor visitor = new RecordingVisitor();
++            GraphTraversal.visitAll(sample(), visitor);
++
++            assertEquals(List.of(0, 1, 2, 3), visitor.vertices);
++            assertEquals(List.of("0->1", "1->2", "2->0", "2->3"), visitor.edges);
++        }
++
++        @Test
++        @DisplayName("visitAll on an empty graph visits nothing")
++        void visitAllEmpty() {
++            RecordingVisitor visitor = new RecordingVisitor();
++            GraphTraversal.visitAll(DirectedGraph.builder(0).build(), visitor);
++            assertTrue(visitor.vertices.isEmpty());
++            assertTrue(visitor.edges.isEmpty());
++        }
++
++        @Test
++        @DisplayName("traverseFrom visits each reachable vertex exactly once")
++        void traverseFromVisitsReachableOnce() {
++            RecordingVisitor visitor = new RecordingVisitor();
++            GraphTraversal.traverseFrom(sample(), 0, visitor);
++
++            // all four are reachable from 0; each appears once despite the cycle
++            assertEquals(4, visitor.vertices.size());
++            assertEquals(Set.of(0, 1, 2, 3), Set.copyOf(visitor.vertices));
++            assertEquals(0, visitor.vertices.get(0), "source is visited first");
++        }
++
++        @Test
++        @DisplayName("traverseFrom rejects an out-of-range source")
++        void traverseFromRejectsBadSource() {
++            assertThrows(IndexOutOfBoundsException.class,
++                    () -> GraphTraversal.traverseFrom(sample(), 9, new RecordingVisitor()));
++        }
++    }
++
++    @Nested
++    @DisplayName("OutDegreeDistributionVisitor")
++    class OutDegreeTests {
++
++        @Test
++        @DisplayName("counts how many vertices have each out-degree, including zero")
++        void distribution() {
++            // out-degrees: 0->1, 1->1, 2->2, 3->0
++            OutDegreeDistributionVisitor visitor = new OutDegreeDistributionVisitor();
++            GraphTraversal.visitAll(sample(), visitor);
++
++            assertEquals(Map.of(0, 1, 1, 2, 2, 1), visitor.distribution());
++        }
++
++        @Test
++        @DisplayName("counts sum to the vertex count")
++        void countsSumToVertices() {
++            OutDegreeDistributionVisitor visitor = new OutDegreeDistributionVisitor();
++            DirectedGraph graph = DirectedGraph.builder(5).addEdge(0, 1).build();
++            GraphTraversal.visitAll(graph, visitor);
++
++            int total = visitor.distribution().values().stream().mapToInt(Integer::intValue).sum();
++            assertEquals(5, total);
++        }
++    }
++
++    @Nested
++    @DisplayName("ReachableVerticesVisitor")
++    class ReachableTests {
++
++        @Test
++        @DisplayName("includes the source and excludes unreachable vertices")
++        void reachableSet() {
++            DirectedGraph graph = DirectedGraph.builder(5)
++                    .addEdge(0, 1)
++                    .addEdge(1, 2)
++                    .build(); // 3 and 4 are isolated
++
++            ReachableVerticesVisitor visitor = new ReachableVerticesVisitor();
++            GraphTraversal.traverseFrom(graph, 0, visitor);
++
++            assertEquals(Set.of(0, 1, 2), visitor.reachable());
++            assertFalse(visitor.reachable().contains(3));
++        }
++
++        @Test
++        @DisplayName("a sink vertex reaches only itself")
++        void sinkReachesItself() {
++            ReachableVerticesVisitor visitor = new ReachableVerticesVisitor();
++            GraphTraversal.traverseFrom(sample(), 3, visitor);
++            assertEquals(Set.of(3), visitor.reachable());
++        }
++    }
++
++    @Test
++    @DisplayName("a custom visitor adds an operation without touching DirectedGraph")
++    void customVisitorExtensibility() {
++        // An ad-hoc operation: count the edges. No change to DirectedGraph needed.
++        int[] edgeCount = {0};
++        GraphVisitor edgeCounter = new GraphVisitor() {
++            @Override
++            public void visitEdge(int from, int to) {
++                edgeCount[0]++;
++            }
++        };
++        GraphTraversal.visitAll(sample(), edgeCounter);
++        assertEquals(4, edgeCount[0]);
++    }
++}

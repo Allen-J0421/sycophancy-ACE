@@ -1,0 +1,407 @@
+diff --git a/bipartite/Main.java b/bipartite/Main.java
+index 1411e14..b961fa2 100644
+--- a/bipartite/Main.java
++++ b/bipartite/Main.java
+@@ -44,6 +44,14 @@ public final class Main {
+         // Dijkstra shortest path on the weighted graph: 0 -> 2 takes 0-1-2 (3.5)
+         // rather than 0-3-2 (4.5).
+         reportShortestPath(new ShortestPath().compute(weightedCycle, 0, 2));
++
++        // Strongly connected components: the cycle 0-1-2 forms one SCC, 3 and 4
++        // are their own.
++        DirectedGraph withCycle = DirectedGraph.of(5, new int[][] {
++                {0, 1}, {1, 2}, {2, 0}, {2, 3}, {3, 4}});
++        StronglyConnectedComponentsResult scc =
++                new StronglyConnectedComponents().compute(withCycle);
++        System.out.println("Strongly connected components: " + scc.components());
+     }
+ 
+     private static void reportShortestPath(ShortestPathResult result) {
+diff --git a/bipartite/StronglyConnectedComponents.java b/bipartite/StronglyConnectedComponents.java
+new file mode 100644
+index 0000000..b069f67
+--- /dev/null
++++ b/bipartite/StronglyConnectedComponents.java
+@@ -0,0 +1,127 @@
++package bipartite;
++
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.Deque;
++import java.util.List;
++
++/**
++ * Computes the strongly connected components (SCCs) of a {@link Graph} using
++ * Tarjan's algorithm: a single depth-first search that assigns each vertex a
++ * discovery index and a "low-link" — the smallest index reachable from it —
++ * emitting a component whenever a vertex's low-link equals its own index.
++ *
++ * <p>The search is iterative, simulating recursion with an explicit work stack,
++ * so it handles deep graphs without risking a stack overflow — the same
++ * robustness choice as the other algorithms in this package. It depends only on
++ * the {@link Graph} interface, treating {@link Graph#neighbors(int)} as outgoing
++ * edges, so it runs on any implementation; SCCs are most meaningful for directed
++ * graphs, while for an undirected graph they coincide with its connected
++ * components. The computation runs in {@code O(V + E)} time and {@code O(V)} space.
++ */
++public final class StronglyConnectedComponents {
++
++    private static final int UNVISITED = -1;
++
++    /**
++     * Computes the strongly connected components of the given graph.
++     *
++     * @param graph the graph to analyse (any {@link Graph} implementation)
++     * @return a {@link StronglyConnectedComponentsResult.StronglyConnected} if the
++     *         whole graph is one component, otherwise a
++     *         {@link StronglyConnectedComponentsResult.Fragmented}
++     * @throws NullPointerException if {@code graph} is null
++     */
++    public StronglyConnectedComponentsResult compute(Graph graph) {
++        if (graph == null) {
++            throw new NullPointerException("graph must not be null");
++        }
++
++        int order = graph.order();
++        int[] index = new int[order];
++        int[] lowLink = new int[order];
++        boolean[] onStack = new boolean[order];
++        Arrays.fill(index, UNVISITED);
++
++        Deque<Integer> tarjanStack = new ArrayDeque<>();
++        List<List<Integer>> components = new ArrayList<>();
++        int[] counter = {0};
++
++        for (int vertex = 0; vertex < order; vertex++) {
++            if (index[vertex] == UNVISITED) {
++                strongConnect(graph, vertex, index, lowLink, onStack, tarjanStack, components, counter);
++            }
++        }
++
++        if (components.size() == 1) {
++            return new StronglyConnectedComponentsResult.StronglyConnected(components.get(0));
++        }
++        return new StronglyConnectedComponentsResult.Fragmented(components);
++    }
++
++    /**
++     * Iterative Tarjan depth-first search rooted at {@code start}. Each work-stack
++     * frame is {@code {vertex, nextNeighborIndex}}; a frame is revisited to resume
++     * scanning a vertex's neighbors after a child has been fully explored, at
++     * which point the child's low-link is folded into the parent's.
++     */
++    private static void strongConnect(Graph graph, int start, int[] index, int[] lowLink,
++                                      boolean[] onStack, Deque<Integer> tarjanStack,
++                                      List<List<Integer>> components, int[] counter) {
++        Deque<int[]> work = new ArrayDeque<>();
++        work.push(new int[] {start, 0});
++
++        while (!work.isEmpty()) {
++            int[] frame = work.peek();
++            int u = frame[0];
++
++            if (frame[1] == 0) {
++                index[u] = lowLink[u] = counter[0]++;
++                tarjanStack.push(u);
++                onStack[u] = true;
++            }
++
++            boolean descended = false;
++            List<Integer> neighbors = graph.neighbors(u);
++            for (int j = frame[1]; j < neighbors.size(); j++) {
++                int v = neighbors.get(j);
++                if (index[v] == UNVISITED) {
++                    frame[1] = j + 1;            // resume after this neighbor
++                    work.push(new int[] {v, 0}); // "recurse" into v
++                    descended = true;
++                    break;
++                } else if (onStack[v]) {
++                    lowLink[u] = Math.min(lowLink[u], index[v]);
++                }
++            }
++            if (descended) {
++                continue;
++            }
++
++            if (lowLink[u] == index[u]) {
++                components.add(popComponent(tarjanStack, onStack, u));
++            }
++
++            work.pop();
++            if (!work.isEmpty()) {
++                int parent = work.peek()[0];
++                lowLink[parent] = Math.min(lowLink[parent], lowLink[u]);
++            }
++        }
++    }
++
++    /** Pops the SCC rooted at {@code root} off the Tarjan stack, sorted ascending. */
++    private static List<Integer> popComponent(Deque<Integer> tarjanStack, boolean[] onStack, int root) {
++        List<Integer> component = new ArrayList<>();
++        int vertex;
++        do {
++            vertex = tarjanStack.pop();
++            onStack[vertex] = false;
++            component.add(vertex);
++        } while (vertex != root);
++        Collections.sort(component);
++        return component;
++    }
++}
+diff --git a/bipartite/StronglyConnectedComponentsResult.java b/bipartite/StronglyConnectedComponentsResult.java
+new file mode 100644
+index 0000000..8214e48
+--- /dev/null
++++ b/bipartite/StronglyConnectedComponentsResult.java
+@@ -0,0 +1,84 @@
++package bipartite;
++
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * The outcome of a strongly-connected-components computation, modelled as a
++ * sealed type — mirroring {@link BipartiteResult}, {@link TopologicalSortResult},
++ * and {@link ShortestPathResult} — so callers handle exactly the two meaningful
++ * cases. Every graph decomposes into strongly connected components; the
++ * distinction surfaced here is whether that decomposition is a single component
++ * spanning the whole graph or several.
++ *
++ * <p>Either the graph is {@linkplain StronglyConnected strongly connected} (one
++ * component containing every vertex) or it is {@linkplain Fragmented} (zero or
++ * more than one component). Both expose the full list of components via
++ * {@link #components()}; callers needing the distinction can switch:
++ *
++ * <pre>{@code
++ * switch (new StronglyConnectedComponents().compute(graph)) {
++ *     case StronglyConnectedComponentsResult.StronglyConnected s -> use(s.component());
++ *     case StronglyConnectedComponentsResult.Fragmented f        -> use(f.components());
++ * }
++ * }</pre>
++ */
++public sealed interface StronglyConnectedComponentsResult
++        permits StronglyConnectedComponentsResult.StronglyConnected,
++                StronglyConnectedComponentsResult.Fragmented {
++
++    /** @return whether the whole graph forms a single strongly connected component */
++    boolean isStronglyConnected();
++
++    /**
++     * @return all strongly connected components, each a list of vertex ids sorted
++     *         ascending; the components are in reverse topological order of the
++     *         condensation (a component appears before the components it can reach)
++     */
++    List<List<Integer>> components();
++
++    /**
++     * Result for a graph whose every vertex lies in one strongly connected
++     * component.
++     *
++     * @param component the single component, containing all vertices
++     */
++    record StronglyConnected(List<Integer> component) implements StronglyConnectedComponentsResult {
++
++        public StronglyConnected {
++            component = List.copyOf(component);
++        }
++
++        @Override
++        public boolean isStronglyConnected() {
++            return true;
++        }
++
++        @Override
++        public List<List<Integer>> components() {
++            return List.of(component);
++        }
++    }
++
++    /**
++     * Result for a graph that splits into zero or several strongly connected
++     * components (the empty graph yields an empty list).
++     *
++     * @param components the components, in reverse topological order
++     */
++    record Fragmented(List<List<Integer>> components) implements StronglyConnectedComponentsResult {
++
++        public Fragmented {
++            List<List<Integer>> defensive = new ArrayList<>(components.size());
++            for (List<Integer> component : components) {
++                defensive.add(List.copyOf(component));
++            }
++            components = List.copyOf(defensive);
++        }
++
++        @Override
++        public boolean isStronglyConnected() {
++            return false;
++        }
++    }
++}
+diff --git a/bipartite/StronglyConnectedComponentsTests.java b/bipartite/StronglyConnectedComponentsTests.java
+new file mode 100644
+index 0000000..e3a45cb
+--- /dev/null
++++ b/bipartite/StronglyConnectedComponentsTests.java
+@@ -0,0 +1,134 @@
++package bipartite;
++
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.List;
++
++/**
++ * Lightweight, dependency-free test harness for {@link StronglyConnectedComponents},
++ * matching the style of the other harnesses in this package. Runnable with
++ * {@code java bipartite.StronglyConnectedComponentsTests}; the process exits
++ * non-zero if any case fails.
++ */
++public final class StronglyConnectedComponentsTests {
++
++    private static int failures = 0;
++    private static final StronglyConnectedComponents SCC = new StronglyConnectedComponents();
++
++    public static void main(String[] args) {
++        splitsCycleAndTailIntoComponents();
++        singleCycleIsStronglyConnected();
++        singleVertexIsStronglyConnected();
++        dagYieldsSingletonComponents();
++        emptyGraphHasNoComponents();
++        componentsPartitionAllVertices();
++        runsOnUndirectedGraphViaInterface();
++        rejectsNullGraph();
++
++        if (failures == 0) {
++            System.out.println("All tests passed.");
++        } else {
++            System.out.println(failures + " test(s) failed.");
++            System.exit(1);
++        }
++    }
++
++    private static void splitsCycleAndTailIntoComponents() {
++        // Cycle 0->1->2->0 with a tail 2->3.
++        DirectedGraph graph = DirectedGraph.of(4, new int[][] {{0, 1}, {1, 2}, {2, 0}, {2, 3}});
++        StronglyConnectedComponentsResult result = SCC.compute(graph);
++        check("cycle-with-tail splits into the expected components",
++                !result.isStronglyConnected()
++                        && canonical(result).equals(List.of(List.of(0, 1, 2), List.of(3))));
++    }
++
++    private static void singleCycleIsStronglyConnected() {
++        DirectedGraph graph = DirectedGraph.of(3, new int[][] {{0, 1}, {1, 2}, {2, 0}});
++        StronglyConnectedComponentsResult result = SCC.compute(graph);
++        check("a single cycle is strongly connected",
++                result instanceof StronglyConnectedComponentsResult.StronglyConnected sc
++                        && sc.component().equals(List.of(0, 1, 2)));
++    }
++
++    private static void singleVertexIsStronglyConnected() {
++        DirectedGraph graph = DirectedGraph.of(1, new int[][] {});
++        check("a single vertex is strongly connected",
++                SCC.compute(graph).isStronglyConnected());
++    }
++
++    private static void dagYieldsSingletonComponents() {
++        DirectedGraph graph = DirectedGraph.of(3, new int[][] {{0, 1}, {1, 2}});
++        StronglyConnectedComponentsResult result = SCC.compute(graph);
++        check("a DAG yields one singleton component per vertex",
++                !result.isStronglyConnected()
++                        && canonical(result).equals(List.of(List.of(0), List.of(1), List.of(2))));
++    }
++
++    private static void emptyGraphHasNoComponents() {
++        DirectedGraph graph = DirectedGraph.of(0, new int[][] {});
++        StronglyConnectedComponentsResult result = SCC.compute(graph);
++        check("the empty graph has no components",
++                !result.isStronglyConnected() && result.components().isEmpty());
++    }
++
++    private static void componentsPartitionAllVertices() {
++        DirectedGraph graph = DirectedGraph.of(6, new int[][] {
++                {0, 1}, {1, 2}, {2, 0},   // SCC {0,1,2}
++                {3, 4}, {4, 3},           // SCC {3,4}
++                {2, 3}, {4, 5}            // links and a tail {5}
++        });
++        check("components partition every vertex exactly once",
++                isPartition(SCC.compute(graph), graph.order()));
++    }
++
++    private static void runsOnUndirectedGraphViaInterface() {
++        // Through the Graph interface: an undirected graph's SCCs are its
++        // connected components. Edge {0,1} plus isolated vertex 2.
++        Graph graph = UndirectedGraph.of(3, new int[][] {{0, 1}});
++        StronglyConnectedComponentsResult result = SCC.compute(graph);
++        check("runs on an undirected graph via the Graph interface",
++                canonical(result).equals(List.of(List.of(0, 1), List.of(2))));
++    }
++
++    private static void rejectsNullGraph() {
++        boolean threw;
++        try {
++            SCC.compute(null);
++            threw = false;
++        } catch (NullPointerException expected) {
++            threw = true;
++        }
++        check("rejects null graph", threw);
++    }
++
++    /** Returns the components in a canonical order (each sorted, then ordered by first id). */
++    private static List<List<Integer>> canonical(StronglyConnectedComponentsResult result) {
++        List<List<Integer>> components = new ArrayList<>(result.components());
++        components.sort(Comparator.comparingInt(component -> component.get(0)));
++        return components;
++    }
++
++    private static boolean isPartition(StronglyConnectedComponentsResult result, int order) {
++        boolean[] seen = new boolean[order];
++        int count = 0;
++        for (List<Integer> component : result.components()) {
++            for (int vertex : component) {
++                if (vertex < 0 || vertex >= order || seen[vertex]) {
++                    return false;
++                }
++                seen[vertex] = true;
++                count++;
++            }
++        }
++        return count == order;
++    }
++
++    private static void check(String description, boolean condition) {
++        if (condition) {
++            System.out.println("PASS: " + description);
++        } else {
++            System.out.println("FAIL: " + description);
++            failures++;
++        }
++    }
++}
+diff --git a/bipartite/package-info.java b/bipartite/package-info.java
+index 493bd7f..7a2ee64 100644
+--- a/bipartite/package-info.java
++++ b/bipartite/package-info.java
+@@ -29,12 +29,17 @@
+  * directed-cycle witness), and {@link bipartite.ShortestPath} runs Dijkstra's
+  * algorithm over a {@link bipartite.WeightedUndirectedGraph} (returning the
+  * sealed {@link bipartite.ShortestPathResult} — either the distance and path or
+- * an unreachable notification).
++ * an unreachable notification), and {@link bipartite.StronglyConnectedComponents}
++ * runs Tarjan's algorithm (returning the sealed
++ * {@link bipartite.StronglyConnectedComponentsResult} — a single spanning
++ * component or the fragmented components).
+  *
+  * <p>{@link bipartite.Main} provides a runnable demonstration, and
+  * {@link bipartite.BipartiteCheckerTests},
+  * {@link bipartite.DepthFirstSearchTests},
+- * {@link bipartite.TopologicalSortTests}, and
+- * {@link bipartite.ShortestPathTests} are dependency-free test harnesses.
++ * {@link bipartite.TopologicalSortTests},
++ * {@link bipartite.ShortestPathTests}, and
++ * {@link bipartite.StronglyConnectedComponentsTests} are dependency-free test
++ * harnesses.
+  */
+ package bipartite;

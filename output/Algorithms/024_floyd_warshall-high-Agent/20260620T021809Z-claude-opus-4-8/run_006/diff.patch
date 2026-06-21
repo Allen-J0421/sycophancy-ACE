@@ -1,0 +1,1072 @@
+diff --git a/README.md b/README.md
+index cd9f820..af7663b 100644
+--- a/README.md
++++ b/README.md
+@@ -2,19 +2,24 @@
+ 
+ A small, well-factored Java implementation of the Floyd-Warshall algorithm for
+ computing shortest paths between every pair of vertices in a directed, weighted
+-graph. Supports negative edge weights, detects negative cycles, and can
+-reconstruct the actual shortest path between any two vertices.
++graph. Weights are **generic**: any type with a `WeightSystem` (Integer, Long,
++Double, or your own) is supported. Handles negative weights, detects negative
++cycles, and can reconstruct the actual shortest path between any two vertices.
+ 
+ ## Layout
+ 
+ ```
+ src/main/java/floydwarshall/
+-  graph/      WeightedGraph, Edge          — immutable graph domain model + builder
+-  matrix/     IntSquareMatrix              — bounds-checked, copy-safe square matrix
+-  algorithm/  FloydWarshallSolver          — the O(V^3) solver (no input mutation)
+-              AllPairsShortestPaths        — result: distances + path queries
+-              NextHopTable, VertexPath     — successor table + reconstructed paths
+-  format/     DistanceMatrixFormatter      — aligned text rendering of the matrix
++  weight/     WeightSystem                 — the (sum, compare, zero) ops over a weight type W
++              IntWeightSystem,             — ready-made systems for the common numeric types
++              LongWeightSystem,
++              DoubleWeightSystem
++  graph/      WeightedGraph<W>, Edge<W>    — immutable graph domain model + builder
++  matrix/     SquareMatrix<W>              — bounds-checked matrix; unset cell = unreachable
++  algorithm/  FloydWarshallSolver<W>       — the O(V^3) solver (no input mutation)
++              AllPairsShortestPaths<W>     — result: distances + path queries
++              NextHopTable, VertexPath<W>  — successor table + reconstructed paths
++  format/     DistanceMatrixFormatter<W>   — aligned text rendering of the matrix
+   demo/       FloydWarshallDemo            — runnable entry point
+               ExampleGraphs                — reusable sample graphs
+ src/test/java/floydwarshall/
+@@ -36,26 +41,33 @@ java -cp out floydwarshall.FloydWarshallTest        # run the tests
+ ## Example
+ 
+ ```java
+-WeightedGraph graph = WeightedGraph.builder(3)
++WeightedGraph<Integer> graph = WeightedGraph.<Integer>builder(3)
+         .addEdge(0, 1, 4)
+         .addEdge(1, 2, 1)
+         .addEdge(2, 0, 2)
+         .build();
+ 
+-AllPairsShortestPaths result = new FloydWarshallSolver().solve(graph);
++AllPairsShortestPaths<Integer> result =
++        new FloydWarshallSolver<>(new IntWeightSystem()).solve(graph);
+ 
+-result.distance(0, 2);   // OptionalInt[5]
+-result.path(0, 2);       // Optional[0 -> 1 -> 2 (cost 5)]
+-result.hasNegativeCycle();
++result.distance(0, 2);          // Optional[5]
++result.path(0, 2);              // Optional[0 -> 1 -> 2 (cost 5)]
++result.hasNegativeCycle();      // false
+ ```
+ 
++Swap `new IntWeightSystem()` for `new DoubleWeightSystem()` / `new LongWeightSystem()`
++(and the graph's type parameter) to solve over those weights. For a custom weight
++type, implement `WeightSystem<W>` — `zero()`, `sum(a, b)`, and `compare(a, b)`.
++
+ ## Design notes
+ 
+-- **Separation of concerns.** Graph representation, the solver, the result/query
+-  API, and formatting are independent units, each independently testable.
+-- **No magic numbers leak out.** The unreachable sentinel lives in one place
+-  (`AllPairsShortestPaths.INFINITY`); callers see `OptionalInt`/`Optional`.
+-- **No input mutation.** Both `solve(WeightedGraph)` and `solve(int[][])` copy
+-  their inputs, unlike the original in-place implementation.
++- **Generic weights.** The solver is parameterised over a weight type `W` via
++  `WeightSystem<W>` (a min-plus-style structure). No code is tied to `int`.
++- **No sentinels.** "Unreachable" is the *absence* of a value (`SquareMatrix`
++  unset cell), surfaced as an empty `Optional` — there is no infinity constant.
++- **Separation of concerns.** Weight arithmetic, graph representation, the
++  solver, the result/query API, and formatting are independent, testable units.
++- **No input mutation.** `solve(WeightedGraph)` copies into fresh state, unlike
++  the original in-place implementation.
+ - **Correctness extras.** Negative-cycle detection and path reconstruction via a
+   successor (`NextHopTable`) matrix, neither of which the original supported.
+diff --git a/src/main/java/floydwarshall/algorithm/AllPairsShortestPaths.java b/src/main/java/floydwarshall/algorithm/AllPairsShortestPaths.java
+index afbca58..f34356f 100644
+--- a/src/main/java/floydwarshall/algorithm/AllPairsShortestPaths.java
++++ b/src/main/java/floydwarshall/algorithm/AllPairsShortestPaths.java
+@@ -1,35 +1,28 @@
+ package floydwarshall.algorithm;
+ 
+-import floydwarshall.matrix.IntSquareMatrix;
++import floydwarshall.matrix.SquareMatrix;
+ 
+ import java.util.ArrayList;
+ import java.util.List;
+ import java.util.Optional;
+-import java.util.OptionalInt;
+ 
+ /**
+  * Immutable result of running {@link FloydWarshallSolver} over a graph: the
+  * matrix of shortest-path distances between every ordered pair of vertices,
+  * plus enough information to reconstruct an actual shortest path.
+  *
+- * <p>Unreachable pairs are represented internally by the {@link #INFINITY}
+- * sentinel but surfaced to callers as empty {@link OptionalInt}/{@link Optional}
+- * results, so client code never has to compare against a magic number.
++ * <p>Unreachable pairs are surfaced as empty {@link Optional} results, so client
++ * code never has to compare against a sentinel.
++ *
++ * @param <W> the weight type
+  */
+-public final class AllPairsShortestPaths {
+-
+-    /**
+-     * Sentinel distance for "no path". Chosen large enough to dominate any real
+-     * path yet small enough that {@code INFINITY + INFINITY} cannot overflow an
+-     * {@code int}, which lets the relaxation step add two distances safely.
+-     */
+-    public static final int INFINITY = (int) 1e8;
++public final class AllPairsShortestPaths<W> {
+ 
+-    private final IntSquareMatrix distances;
++    private final SquareMatrix<W> distances;
+     private final NextHopTable nextHops;
+     private final boolean hasNegativeCycle;
+ 
+-    AllPairsShortestPaths(IntSquareMatrix distances, NextHopTable nextHops, boolean hasNegativeCycle) {
++    AllPairsShortestPaths(SquareMatrix<W> distances, NextHopTable nextHops, boolean hasNegativeCycle) {
+         this.distances = distances;
+         this.nextHops = nextHops;
+         this.hasNegativeCycle = hasNegativeCycle;
+@@ -48,13 +41,12 @@ public final class AllPairsShortestPaths {
+      * @return the shortest-path distance from {@code from} to {@code to}, or an
+      *         empty result if {@code to} is unreachable from {@code from}.
+      */
+-    public OptionalInt distance(int from, int to) {
+-        int d = distances.get(from, to);
+-        return d >= INFINITY ? OptionalInt.empty() : OptionalInt.of(d);
++    public Optional<W> distance(int from, int to) {
++        return distances.get(from, to);
+     }
+ 
+     /** @return a defensive copy of the full distance matrix. */
+-    public IntSquareMatrix distanceMatrix() {
++    public SquareMatrix<W> distanceMatrix() {
+         return distances.copy();
+     }
+ 
+@@ -65,7 +57,7 @@ public final class AllPairsShortestPaths {
+      * @throws IllegalStateException if the path traverses a negative cycle, in
+      *         which case no finite shortest path is well defined
+      */
+-    public Optional<VertexPath> path(int from, int to) {
++    public Optional<VertexPath<W>> path(int from, int to) {
+         if (!nextHops.hasPath(from, to)) {
+             return Optional.empty();
+         }
+@@ -81,6 +73,6 @@ public final class AllPairsShortestPaths {
+             }
+             vertices.add(current);
+         }
+-        return Optional.of(new VertexPath(vertices, distances.get(from, to)));
++        return Optional.of(new VertexPath<>(vertices, distances.getOrNull(from, to)));
+     }
+ }
+diff --git a/src/main/java/floydwarshall/algorithm/FloydWarshallSolver.java b/src/main/java/floydwarshall/algorithm/FloydWarshallSolver.java
+index 15453b5..232dcda 100644
+--- a/src/main/java/floydwarshall/algorithm/FloydWarshallSolver.java
++++ b/src/main/java/floydwarshall/algorithm/FloydWarshallSolver.java
+@@ -2,34 +2,44 @@ package floydwarshall.algorithm;
+ 
+ import floydwarshall.graph.Edge;
+ import floydwarshall.graph.WeightedGraph;
+-import floydwarshall.matrix.IntSquareMatrix;
++import floydwarshall.matrix.SquareMatrix;
++import floydwarshall.weight.WeightSystem;
++
++import java.util.Objects;
+ 
+ /**
+- * Computes all-pairs shortest paths using the Floyd-Warshall algorithm.
++ * Computes all-pairs shortest paths using the Floyd-Warshall algorithm over an
++ * arbitrary weight type {@code W}, as defined by a {@link WeightSystem}.
+  *
+  * <p>The algorithm runs in {@code O(V^3)} time and {@code O(V^2)} space and
+- * supports negative edge weights. Negative-weight cycles are detected rather
+- * than silently producing meaningless distances. Neither the input
+- * {@link WeightedGraph} nor any supplied matrix is mutated; results are returned
+- * in a fresh {@link AllPairsShortestPaths}.
++ * supports negative weights. Negative-weight cycles are detected rather than
++ * silently producing meaningless distances. The input {@link WeightedGraph} is
++ * never mutated; results are returned in a fresh {@link AllPairsShortestPaths}.
++ *
++ * @param <W> the weight type
+  */
+-public final class FloydWarshallSolver {
++public final class FloydWarshallSolver<W> {
+ 
+-    private static final int INF = AllPairsShortestPaths.INFINITY;
++    private final WeightSystem<W> weights;
++
++    public FloydWarshallSolver(WeightSystem<W> weights) {
++        this.weights = Objects.requireNonNull(weights, "weights");
++    }
+ 
+     /** Solves all-pairs shortest paths for the given graph. */
+-    public AllPairsShortestPaths solve(WeightedGraph graph) {
++    public AllPairsShortestPaths<W> solve(WeightedGraph<W> graph) {
+         int n = graph.vertexCount();
+-        IntSquareMatrix dist = IntSquareMatrix.filled(n, INF);
++        SquareMatrix<W> dist = SquareMatrix.empty(n);
+         NextHopTable next = new NextHopTable(n);
+ 
+         for (int v = 0; v < n; v++) {
+-            dist.set(v, v, 0);
++            dist.set(v, v, weights.zero());
+             next.set(v, v, v);
+         }
+         // Keep the cheapest weight when parallel edges share an ordered pair.
+-        for (Edge e : graph.edges()) {
+-            if (e.weight() < dist.get(e.from(), e.to())) {
++        for (Edge<W> e : graph.edges()) {
++            W current = dist.getOrNull(e.from(), e.to());
++            if (current == null || weights.compare(e.weight(), current) < 0) {
+                 dist.set(e.from(), e.to(), e.weight());
+                 next.set(e.from(), e.to(), e.to());
+             }
+@@ -37,53 +47,38 @@ public final class FloydWarshallSolver {
+         return run(dist, next);
+     }
+ 
+-    /**
+-     * Solves all-pairs shortest paths for a pre-built distance matrix where
+-     * {@code matrix[i][j]} is the direct cost from {@code i} to {@code j} and
+-     * {@link AllPairsShortestPaths#INFINITY} marks the absence of an edge. The
+-     * input array is copied and left unmodified.
+-     */
+-    public AllPairsShortestPaths solve(int[][] matrix) {
+-        IntSquareMatrix dist = IntSquareMatrix.copyOf(matrix);
+-        int n = dist.size();
+-        NextHopTable next = new NextHopTable(n);
+-        for (int i = 0; i < n; i++) {
+-            for (int j = 0; j < n; j++) {
+-                if (i == j || dist.get(i, j) < INF) {
+-                    next.set(i, j, j);
+-                }
+-            }
+-        }
+-        return run(dist, next);
+-    }
+-
+-    private AllPairsShortestPaths run(IntSquareMatrix dist, NextHopTable next) {
++    private AllPairsShortestPaths<W> run(SquareMatrix<W> dist, NextHopTable next) {
+         int n = dist.size();
+         for (int k = 0; k < n; k++) {
+             for (int i = 0; i < n; i++) {
+-                // Nothing to relay through k if i cannot reach k.
+-                if (dist.get(i, k) >= INF) {
+-                    continue;
++                W distIK = dist.getOrNull(i, k);
++                if (distIK == null) {
++                    continue; // i cannot reach k, so k relays nothing for row i
+                 }
+                 for (int j = 0; j < n; j++) {
+-                    if (dist.get(k, j) >= INF) {
++                    W distKJ = dist.getOrNull(k, j);
++                    if (distKJ == null) {
+                         continue;
+                     }
+-                    int candidate = dist.get(i, k) + dist.get(k, j);
+-                    if (candidate < dist.get(i, j)) {
++                    W candidate = weights.sum(distIK, distKJ);
++                    W existing = dist.getOrNull(i, j);
++                    if (existing == null || weights.compare(candidate, existing) < 0) {
+                         dist.set(i, j, candidate);
+                         next.set(i, j, next.get(i, k));
+                     }
+                 }
+             }
+         }
+-        boolean negativeCycle = false;
+-        for (int i = 0; i < n; i++) {
+-            if (dist.get(i, i) < 0) {
+-                negativeCycle = true;
+-                break;
++        return new AllPairsShortestPaths<>(dist, next, hasNegativeCycle(dist));
++    }
++
++    private boolean hasNegativeCycle(SquareMatrix<W> dist) {
++        for (int i = 0; i < dist.size(); i++) {
++            W self = dist.getOrNull(i, i);
++            if (self != null && weights.compare(self, weights.zero()) < 0) {
++                return true;
+             }
+         }
+-        return new AllPairsShortestPaths(dist, next, negativeCycle);
++        return false;
+     }
+ }
+diff --git a/src/main/java/floydwarshall/algorithm/VertexPath.java b/src/main/java/floydwarshall/algorithm/VertexPath.java
+index e765445..d4900cb 100644
+--- a/src/main/java/floydwarshall/algorithm/VertexPath.java
++++ b/src/main/java/floydwarshall/algorithm/VertexPath.java
+@@ -7,10 +7,11 @@ import java.util.stream.Collectors;
+  * An ordered, immutable sequence of vertices forming a shortest path, together
+  * with the total cost of traversing it.
+  *
+- * @param vertices the vertices visited, in order from source to destination
+- * @param totalCost the sum of the edge weights along the path
++ * @param <W>       the weight type
++ * @param vertices  the vertices visited, in order from source to destination
++ * @param totalCost the combined weight along the path
+  */
+-public record VertexPath(List<Integer> vertices, int totalCost) {
++public record VertexPath<W>(List<Integer> vertices, W totalCost) {
+ 
+     public VertexPath {
+         vertices = List.copyOf(vertices);
+diff --git a/src/main/java/floydwarshall/demo/ExampleGraphs.java b/src/main/java/floydwarshall/demo/ExampleGraphs.java
+index 5c1c1c6..c10eea2 100644
+--- a/src/main/java/floydwarshall/demo/ExampleGraphs.java
++++ b/src/main/java/floydwarshall/demo/ExampleGraphs.java
+@@ -21,8 +21,8 @@ public final class ExampleGraphs {
+      *   4->0:1  4->3:4
+      * </pre>
+      */
+-    public static WeightedGraph classicFiveVertex() {
+-        return WeightedGraph.builder(5)
++    public static WeightedGraph<Integer> classicFiveVertex() {
++        return WeightedGraph.<Integer>builder(5)
+                 .addEdge(0, 1, 4)
+                 .addEdge(0, 3, 5)
+                 .addEdge(1, 2, 1)
+diff --git a/src/main/java/floydwarshall/demo/FloydWarshallDemo.java b/src/main/java/floydwarshall/demo/FloydWarshallDemo.java
+index f49050d..e07e0dc 100644
+--- a/src/main/java/floydwarshall/demo/FloydWarshallDemo.java
++++ b/src/main/java/floydwarshall/demo/FloydWarshallDemo.java
+@@ -4,20 +4,22 @@ import floydwarshall.algorithm.AllPairsShortestPaths;
+ import floydwarshall.algorithm.FloydWarshallSolver;
+ import floydwarshall.format.DistanceMatrixFormatter;
+ import floydwarshall.graph.WeightedGraph;
++import floydwarshall.weight.IntWeightSystem;
+ 
+ /**
+  * Command-line entry point demonstrating the Floyd-Warshall library: it solves
+- * the canonical example graph, prints the shortest-distance matrix, and
+- * reconstructs a sample shortest path.
++ * the canonical example graph with integer weights, prints the
++ * shortest-distance matrix, and reconstructs a sample shortest path.
+  */
+ public final class FloydWarshallDemo {
+ 
+     public static void main(String[] args) {
+-        WeightedGraph graph = ExampleGraphs.classicFiveVertex();
++        WeightedGraph<Integer> graph = ExampleGraphs.classicFiveVertex();
+ 
+-        AllPairsShortestPaths result = new FloydWarshallSolver().solve(graph);
++        AllPairsShortestPaths<Integer> result =
++                new FloydWarshallSolver<>(new IntWeightSystem()).solve(graph);
+ 
+-        System.out.print(new DistanceMatrixFormatter().format(result));
++        System.out.print(new DistanceMatrixFormatter<Integer>().format(result));
+ 
+         result.path(1, 0).ifPresent(path ->
+                 System.out.println(System.lineSeparator() + "Shortest path 1 -> 0: " + path));
+diff --git a/src/main/java/floydwarshall/format/DistanceMatrixFormatter.java b/src/main/java/floydwarshall/format/DistanceMatrixFormatter.java
+index 9e8f7a8..ff241bf 100644
+--- a/src/main/java/floydwarshall/format/DistanceMatrixFormatter.java
++++ b/src/main/java/floydwarshall/format/DistanceMatrixFormatter.java
+@@ -2,34 +2,42 @@ package floydwarshall.format;
+ 
+ import floydwarshall.algorithm.AllPairsShortestPaths;
+ 
+-import java.util.OptionalInt;
++import java.util.function.Function;
+ 
+ /**
+- * Renders a {@link AllPairsShortestPaths} distance matrix as human-readable
++ * Renders an {@link AllPairsShortestPaths} distance matrix as human-readable
+  * text. Unreachable pairs are shown with a configurable token (default
+- * {@code "INF"}) and columns are aligned for readability.
++ * {@code "INF"}), each weight is rendered with a configurable function (default
++ * {@link String#valueOf}), and columns are right-aligned for readability.
++ *
++ * @param <W> the weight type
+  */
+-public final class DistanceMatrixFormatter {
++public final class DistanceMatrixFormatter<W> {
+ 
+     private final String unreachableToken;
++    private final Function<W, String> renderer;
+ 
+     public DistanceMatrixFormatter() {
+-        this("INF");
++        this("INF", String::valueOf);
+     }
+ 
+     public DistanceMatrixFormatter(String unreachableToken) {
++        this(unreachableToken, String::valueOf);
++    }
++
++    public DistanceMatrixFormatter(String unreachableToken, Function<W, String> renderer) {
+         this.unreachableToken = unreachableToken;
++        this.renderer = renderer;
+     }
+ 
+     /** Formats the distance matrix with right-aligned, evenly spaced columns. */
+-    public String format(AllPairsShortestPaths result) {
++    public String format(AllPairsShortestPaths<W> result) {
+         int n = result.vertexCount();
+         String[][] cells = new String[n][n];
+         int width = 0;
+         for (int i = 0; i < n; i++) {
+             for (int j = 0; j < n; j++) {
+-                OptionalInt d = result.distance(i, j);
+-                String text = d.isPresent() ? Integer.toString(d.getAsInt()) : unreachableToken;
++                String text = result.distance(i, j).map(renderer).orElse(unreachableToken);
+                 cells[i][j] = text;
+                 width = Math.max(width, text.length());
+             }
+diff --git a/src/main/java/floydwarshall/graph/Edge.java b/src/main/java/floydwarshall/graph/Edge.java
+index 1b2ba93..eed8be5 100644
+--- a/src/main/java/floydwarshall/graph/Edge.java
++++ b/src/main/java/floydwarshall/graph/Edge.java
+@@ -1,17 +1,21 @@
+ package floydwarshall.graph;
+ 
++import java.util.Objects;
++
+ /**
+- * An immutable directed, weighted edge between two vertices.
++ * An immutable directed edge between two vertices, weighted by a value of type
++ * {@code W}.
+  *
+  * <p>Vertices are identified by their zero-based index within a
+- * {@link WeightedGraph}. The {@code weight} may be negative; Floyd-Warshall
+- * supports negative edge weights (and can detect negative cycles).
++ * {@link WeightedGraph}. Weights may be negative; Floyd-Warshall supports
++ * negative edge weights (and can detect negative cycles).
+  *
++ * @param <W>    the weight type
+  * @param from   the source vertex index
+  * @param to     the destination vertex index
+- * @param weight the cost of traversing the edge
++ * @param weight the cost of traversing the edge (non-null)
+  */
+-public record Edge(int from, int to, int weight) {
++public record Edge<W>(int from, int to, W weight) {
+ 
+     public Edge {
+         if (from < 0) {
+@@ -20,5 +24,6 @@ public record Edge(int from, int to, int weight) {
+         if (to < 0) {
+             throw new IllegalArgumentException("to must be non-negative, got " + to);
+         }
++        Objects.requireNonNull(weight, "weight");
+     }
+ }
+diff --git a/src/main/java/floydwarshall/graph/WeightedGraph.java b/src/main/java/floydwarshall/graph/WeightedGraph.java
+index 239fc57..3e3a76b 100644
+--- a/src/main/java/floydwarshall/graph/WeightedGraph.java
++++ b/src/main/java/floydwarshall/graph/WeightedGraph.java
+@@ -1,25 +1,25 @@
+ package floydwarshall.graph;
+ 
+ import java.util.ArrayList;
+-import java.util.Collections;
+ import java.util.List;
+-import java.util.OptionalInt;
+ 
+ /**
+- * An immutable directed graph with integer edge weights over a fixed set of
+- * vertices {@code 0 .. vertexCount()-1}.
++ * An immutable directed graph whose edges carry weights of type {@code W}, over
++ * a fixed set of vertices {@code 0 .. vertexCount()-1}.
+  *
+  * <p>Instances are created through the {@link Builder}, which guarantees that
+- * every edge references valid vertices. Parallel edges are permitted; when
+- * exporting to a distance matrix the cheapest weight between any ordered pair
+- * is retained.
++ * every edge references valid vertices. Parallel edges are permitted; the solver
++ * keeps the cheapest weight between any ordered pair according to its
++ * {@link floydwarshall.weight.WeightSystem}.
++ *
++ * @param <W> the edge-weight type
+  */
+-public final class WeightedGraph {
++public final class WeightedGraph<W> {
+ 
+     private final int vertexCount;
+-    private final List<Edge> edges;
++    private final List<Edge<W>> edges;
+ 
+-    private WeightedGraph(int vertexCount, List<Edge> edges) {
++    private WeightedGraph(int vertexCount, List<Edge<W>> edges) {
+         this.vertexCount = vertexCount;
+         this.edges = List.copyOf(edges);
+     }
+@@ -30,28 +30,10 @@ public final class WeightedGraph {
+     }
+ 
+     /** @return an unmodifiable view of every edge in the graph. */
+-    public List<Edge> edges() {
++    public List<Edge<W>> edges() {
+         return edges;
+     }
+ 
+-    /**
+-     * Returns the weight of the cheapest direct edge from {@code from} to
+-     * {@code to}, or an empty result if no such edge exists. A self-loop is
+-     * only reported if it was explicitly added.
+-     */
+-    public OptionalInt directWeight(int from, int to) {
+-        requireVertexInRange(from, vertexCount);
+-        requireVertexInRange(to, vertexCount);
+-        OptionalInt best = OptionalInt.empty();
+-        for (Edge e : edges) {
+-            if (e.from() == from && e.to() == to) {
+-                best = best.isEmpty() ? OptionalInt.of(e.weight())
+-                                      : OptionalInt.of(Math.min(best.getAsInt(), e.weight()));
+-            }
+-        }
+-        return best;
+-    }
+-
+     /** Shared bounds check used by both the graph and its builder. */
+     private static void requireVertexInRange(int v, int vertexCount) {
+         if (v < 0 || v >= vertexCount) {
+@@ -61,14 +43,14 @@ public final class WeightedGraph {
+     }
+ 
+     /** Creates a builder for a graph with the given number of vertices. */
+-    public static Builder builder(int vertexCount) {
+-        return new Builder(vertexCount);
++    public static <W> Builder<W> builder(int vertexCount) {
++        return new Builder<>(vertexCount);
+     }
+ 
+     /** Fluent builder that validates edges as they are added. */
+-    public static final class Builder {
++    public static final class Builder<W> {
+         private final int vertexCount;
+-        private final List<Edge> edges = new ArrayList<>();
++        private final List<Edge<W>> edges = new ArrayList<>();
+ 
+         private Builder(int vertexCount) {
+             if (vertexCount < 0) {
+@@ -79,15 +61,15 @@ public final class WeightedGraph {
+         }
+ 
+         /** Adds a directed edge, validating that both endpoints exist. */
+-        public Builder addEdge(int from, int to, int weight) {
++        public Builder<W> addEdge(int from, int to, W weight) {
+             requireVertexInRange(from, vertexCount);
+             requireVertexInRange(to, vertexCount);
+-            edges.add(new Edge(from, to, weight));
++            edges.add(new Edge<>(from, to, weight));
+             return this;
+         }
+ 
+-        public WeightedGraph build() {
+-            return new WeightedGraph(vertexCount, Collections.unmodifiableList(edges));
++        public WeightedGraph<W> build() {
++            return new WeightedGraph<>(vertexCount, edges);
+         }
+     }
+ }
+diff --git a/src/main/java/floydwarshall/matrix/IntSquareMatrix.java b/src/main/java/floydwarshall/matrix/IntSquareMatrix.java
+deleted file mode 100644
+index 16275f9..0000000
+--- a/src/main/java/floydwarshall/matrix/IntSquareMatrix.java
++++ /dev/null
+@@ -1,100 +0,0 @@
+-package floydwarshall.matrix;
+-
+-import java.util.Arrays;
+-
+-/**
+- * A mutable square matrix of {@code int} values with bounds-checked access.
+- *
+- * <p>This is a thin, defensive wrapper around a {@code int[][]} that guarantees
+- * the square invariant and copies data on construction and export, so callers
+- * cannot accidentally alias internal state. It carries no algorithm-specific
+- * semantics; sentinels such as "infinity" are the concern of the caller.
+- */
+-public final class IntSquareMatrix {
+-
+-    private final int size;
+-    private final int[][] cells;
+-
+-    private IntSquareMatrix(int size, int[][] cells) {
+-        this.size = size;
+-        this.cells = cells;
+-    }
+-
+-    /** Creates a {@code size x size} matrix with every cell set to {@code fill}. */
+-    public static IntSquareMatrix filled(int size, int fill) {
+-        if (size < 0) {
+-            throw new IllegalArgumentException("size must be non-negative, got " + size);
+-        }
+-        int[][] cells = new int[size][size];
+-        for (int[] row : cells) {
+-            Arrays.fill(row, fill);
+-        }
+-        return new IntSquareMatrix(size, cells);
+-    }
+-
+-    /**
+-     * Creates a matrix from a defensive copy of {@code source}, which must be
+-     * square (every row the same length as the number of rows).
+-     */
+-    public static IntSquareMatrix copyOf(int[][] source) {
+-        int size = source.length;
+-        int[][] cells = new int[size][];
+-        for (int i = 0; i < size; i++) {
+-            if (source[i].length != size) {
+-                throw new IllegalArgumentException(
+-                        "matrix is not square: row " + i + " has length "
+-                                + source[i].length + ", expected " + size);
+-            }
+-            cells[i] = source[i].clone();
+-        }
+-        return new IntSquareMatrix(size, cells);
+-    }
+-
+-    public int size() {
+-        return size;
+-    }
+-
+-    public int get(int row, int col) {
+-        checkIndex(row, col);
+-        return cells[row][col];
+-    }
+-
+-    public void set(int row, int col, int value) {
+-        checkIndex(row, col);
+-        cells[row][col] = value;
+-    }
+-
+-    /** @return an independent {@link IntSquareMatrix} with identical contents. */
+-    public IntSquareMatrix copy() {
+-        return copyOf(cells);
+-    }
+-
+-    /** @return a defensive {@code int[][]} copy of this matrix. */
+-    public int[][] toArray() {
+-        int[][] out = new int[size][];
+-        for (int i = 0; i < size; i++) {
+-            out[i] = cells[i].clone();
+-        }
+-        return out;
+-    }
+-
+-    private void checkIndex(int row, int col) {
+-        if (row < 0 || row >= size || col < 0 || col >= size) {
+-            throw new IndexOutOfBoundsException(
+-                    "(" + row + ", " + col + ") out of bounds for size " + size);
+-        }
+-    }
+-
+-    @Override
+-    public boolean equals(Object o) {
+-        if (this == o) {
+-            return true;
+-        }
+-        return o instanceof IntSquareMatrix other && Arrays.deepEquals(cells, other.cells);
+-    }
+-
+-    @Override
+-    public int hashCode() {
+-        return Arrays.deepHashCode(cells);
+-    }
+-}
+diff --git a/src/main/java/floydwarshall/matrix/SquareMatrix.java b/src/main/java/floydwarshall/matrix/SquareMatrix.java
+new file mode 100644
+index 0000000..0b4ca5c
+--- /dev/null
++++ b/src/main/java/floydwarshall/matrix/SquareMatrix.java
+@@ -0,0 +1,83 @@
++package floydwarshall.matrix;
++
++import java.util.Arrays;
++import java.util.Optional;
++
++/**
++ * A mutable {@code size x size} matrix of weights of type {@code W} with
++ * bounds-checked access. An unset cell represents "no value" (for shortest
++ * paths: unreachable) and is surfaced as an empty {@link Optional} rather than
++ * any sentinel, so no magic value can leak to callers.
++ *
++ * @param <W> the element type
++ */
++public final class SquareMatrix<W> {
++
++    private final int size;
++    private final Object[][] cells;
++
++    private SquareMatrix(int size) {
++        this.size = size;
++        this.cells = new Object[size][size];
++    }
++
++    /** Creates a {@code size x size} matrix with every cell unset. */
++    public static <W> SquareMatrix<W> empty(int size) {
++        if (size < 0) {
++            throw new IllegalArgumentException("size must be non-negative, got " + size);
++        }
++        return new SquareMatrix<>(size);
++    }
++
++    public int size() {
++        return size;
++    }
++
++    /** @return the value at {@code (row, col)}, or empty if unset. */
++    public Optional<W> get(int row, int col) {
++        return Optional.ofNullable(getOrNull(row, col));
++    }
++
++    /** @return the value at {@code (row, col)}, or {@code null} if unset. */
++    @SuppressWarnings("unchecked")
++    public W getOrNull(int row, int col) {
++        checkIndex(row, col);
++        return (W) cells[row][col];
++    }
++
++    public boolean isSet(int row, int col) {
++        checkIndex(row, col);
++        return cells[row][col] != null;
++    }
++
++    public void set(int row, int col, W value) {
++        checkIndex(row, col);
++        cells[row][col] = value;
++    }
++
++    /** @return an independent copy with identical contents. */
++    public SquareMatrix<W> copy() {
++        SquareMatrix<W> clone = new SquareMatrix<>(size);
++        for (int i = 0; i < size; i++) {
++            System.arraycopy(cells[i], 0, clone.cells[i], 0, size);
++        }
++        return clone;
++    }
++
++    private void checkIndex(int row, int col) {
++        if (row < 0 || row >= size || col < 0 || col >= size) {
++            throw new IndexOutOfBoundsException(
++                    "(" + row + ", " + col + ") out of bounds for size " + size);
++        }
++    }
++
++    @Override
++    public boolean equals(Object o) {
++        return o instanceof SquareMatrix<?> other && Arrays.deepEquals(cells, other.cells);
++    }
++
++    @Override
++    public int hashCode() {
++        return Arrays.deepHashCode(cells);
++    }
++}
+diff --git a/src/main/java/floydwarshall/weight/DoubleWeightSystem.java b/src/main/java/floydwarshall/weight/DoubleWeightSystem.java
+new file mode 100644
+index 0000000..d6686b3
+--- /dev/null
++++ b/src/main/java/floydwarshall/weight/DoubleWeightSystem.java
+@@ -0,0 +1,29 @@
++package floydwarshall.weight;
++
++/**
++ * {@link WeightSystem} for {@code double} weights, e.g. distances, costs, or
++ * probabilities expressed as additive log-weights.
++ *
++ * <p>Ordering uses {@link Double#compare}, so {@code NaN} weights are rejected to
++ * avoid producing an inconsistent ordering.
++ */
++public final class DoubleWeightSystem implements WeightSystem<Double> {
++
++    @Override
++    public Double zero() {
++        return 0.0;
++    }
++
++    @Override
++    public Double sum(Double a, Double b) {
++        return a + b;
++    }
++
++    @Override
++    public int compare(Double a, Double b) {
++        if (Double.isNaN(a) || Double.isNaN(b)) {
++            throw new IllegalArgumentException("NaN weights are not comparable");
++        }
++        return Double.compare(a, b);
++    }
++}
+diff --git a/src/main/java/floydwarshall/weight/IntWeightSystem.java b/src/main/java/floydwarshall/weight/IntWeightSystem.java
+new file mode 100644
+index 0000000..08f2bb1
+--- /dev/null
++++ b/src/main/java/floydwarshall/weight/IntWeightSystem.java
+@@ -0,0 +1,24 @@
++package floydwarshall.weight;
++
++/**
++ * {@link WeightSystem} for {@code int} weights, reproducing the behaviour of the
++ * original integer-only implementation. Supports negative weights and negative
++ * cycles.
++ */
++public final class IntWeightSystem implements WeightSystem<Integer> {
++
++    @Override
++    public Integer zero() {
++        return 0;
++    }
++
++    @Override
++    public Integer sum(Integer a, Integer b) {
++        return a + b;
++    }
++
++    @Override
++    public int compare(Integer a, Integer b) {
++        return Integer.compare(a, b);
++    }
++}
+diff --git a/src/main/java/floydwarshall/weight/LongWeightSystem.java b/src/main/java/floydwarshall/weight/LongWeightSystem.java
+new file mode 100644
+index 0000000..3064a27
+--- /dev/null
++++ b/src/main/java/floydwarshall/weight/LongWeightSystem.java
+@@ -0,0 +1,23 @@
++package floydwarshall.weight;
++
++/**
++ * {@link WeightSystem} for {@code long} weights, useful when path costs can
++ * exceed the range of {@code int}.
++ */
++public final class LongWeightSystem implements WeightSystem<Long> {
++
++    @Override
++    public Long zero() {
++        return 0L;
++    }
++
++    @Override
++    public Long sum(Long a, Long b) {
++        return a + b;
++    }
++
++    @Override
++    public int compare(Long a, Long b) {
++        return Long.compare(a, b);
++    }
++}
+diff --git a/src/main/java/floydwarshall/weight/WeightSystem.java b/src/main/java/floydwarshall/weight/WeightSystem.java
+new file mode 100644
+index 0000000..0cd6dd0
+--- /dev/null
++++ b/src/main/java/floydwarshall/weight/WeightSystem.java
+@@ -0,0 +1,34 @@
++package floydwarshall.weight;
++
++/**
++ * Defines the arithmetic Floyd-Warshall needs to operate over an arbitrary
++ * weight type {@code W}: how to combine two consecutive path segments, how to
++ * order path costs, and what the cost of a zero-length path is.
++ *
++ * <p>Together these form a min-plus-style structure. The algorithm never needs
++ * an explicit "infinity" value — unreachable pairs are modelled as the
++ * <em>absence</em> of a weight — so implementations only have to describe finite
++ * costs.
++ *
++ * <p>Implementations are expected to be stateless and thread-safe.
++ *
++ * @param <W> the weight type (e.g. {@code Integer}, {@code Long}, {@code Double})
++ */
++public interface WeightSystem<W> {
++
++    /**
++     * The cost of a path of length zero, i.e. the additive identity such that
++     * {@code sum(zero(), w).equals(w)}. Self-distances start from this value and
++     * negative cycles are detected by comparing a cycle's cost against it.
++     */
++    W zero();
++
++    /** Combines two consecutive path segments into a single cost. */
++    W sum(W a, W b);
++
++    /**
++     * Orders path costs the way {@link Comparable#compareTo} would: negative if
++     * {@code a} is cheaper than {@code b}, zero if equal, positive otherwise.
++     */
++    int compare(W a, W b);
++}
+diff --git a/src/test/java/floydwarshall/FloydWarshallTest.java b/src/test/java/floydwarshall/FloydWarshallTest.java
+index b77323f..ed35777 100644
+--- a/src/test/java/floydwarshall/FloydWarshallTest.java
++++ b/src/test/java/floydwarshall/FloydWarshallTest.java
+@@ -5,6 +5,9 @@ import floydwarshall.algorithm.FloydWarshallSolver;
+ import floydwarshall.algorithm.VertexPath;
+ import floydwarshall.demo.ExampleGraphs;
+ import floydwarshall.graph.WeightedGraph;
++import floydwarshall.weight.DoubleWeightSystem;
++import floydwarshall.weight.IntWeightSystem;
++import floydwarshall.weight.LongWeightSystem;
+ 
+ import java.util.List;
+ import java.util.Optional;
+@@ -15,17 +18,15 @@ import java.util.Optional;
+  */
+ public final class FloydWarshallTest {
+ 
+-    private static final int INF = AllPairsShortestPaths.INFINITY;
+-
+     public static void main(String[] args) {
+         TestAssertions a = new TestAssertions();
+         int failures = 0;
+-        failures += run("classic distances match baseline", () -> classicDistances(a), a);
+-        failures += run("path reconstruction", () -> pathReconstruction(a), a);
+-        failures += run("unreachable vertex", () -> unreachable(a), a);
+-        failures += run("negative cycle detection", () -> negativeCycle(a), a);
+-        failures += run("matrix input is not mutated", () -> inputNotMutated(a), a);
+-        failures += run("matrix and graph agree", () -> matrixMatchesGraph(a), a);
++        failures += run("classic distances match baseline", () -> classicDistances(a));
++        failures += run("path reconstruction", () -> pathReconstruction(a));
++        failures += run("unreachable vertex", () -> unreachable(a));
++        failures += run("negative cycle detection", () -> negativeCycle(a));
++        failures += run("double weights", () -> doubleWeights(a));
++        failures += run("long weights", () -> longWeights(a));
+ 
+         System.out.println();
+         System.out.println(a.checks() + " checks executed.");
+@@ -36,7 +37,7 @@ public final class FloydWarshallTest {
+         System.out.println("All tests passed.");
+     }
+ 
+-    private static int run(String name, Runnable test, TestAssertions a) {
++    private static int run(String name, Runnable test) {
+         try {
+             test.run();
+             System.out.println("[PASS] " + name);
+@@ -47,8 +48,12 @@ public final class FloydWarshallTest {
+         }
+     }
+ 
++    private static FloydWarshallSolver<Integer> intSolver() {
++        return new FloydWarshallSolver<>(new IntWeightSystem());
++    }
++
+     private static void classicDistances(TestAssertions a) {
+-        AllPairsShortestPaths r = new FloydWarshallSolver().solve(ExampleGraphs.classicFiveVertex());
++        AllPairsShortestPaths<Integer> r = intSolver().solve(ExampleGraphs.classicFiveVertex());
+         int[][] expected = {
+                 {0, 4, 5, 5, 7},
+                 {3, 0, 1, 4, 6},
+@@ -58,15 +63,15 @@ public final class FloydWarshallTest {
+         };
+         for (int i = 0; i < expected.length; i++) {
+             for (int j = 0; j < expected.length; j++) {
+-                a.assertEquals(expected[i][j], r.distance(i, j).orElse(INF),
++                a.assertEquals(expected[i][j], r.distance(i, j).orElseThrow(),
+                         "distance(" + i + "," + j + ")");
+             }
+         }
+     }
+ 
+     private static void pathReconstruction(TestAssertions a) {
+-        AllPairsShortestPaths r = new FloydWarshallSolver().solve(ExampleGraphs.classicFiveVertex());
+-        Optional<VertexPath> path = r.path(1, 0);
++        AllPairsShortestPaths<Integer> r = intSolver().solve(ExampleGraphs.classicFiveVertex());
++        Optional<VertexPath<Integer>> path = r.path(1, 0);
+         a.assertTrue(path.isPresent(), "path 1->0 should exist");
+         a.assertEquals(List.of(1, 2, 0), path.get().vertices(), "path 1->0 vertices");
+         a.assertEquals(3, path.get().totalCost(), "path 1->0 cost");
+@@ -74,57 +79,44 @@ public final class FloydWarshallTest {
+     }
+ 
+     private static void unreachable(TestAssertions a) {
+-        WeightedGraph g = WeightedGraph.builder(3).addEdge(0, 1, 1).build();
+-        AllPairsShortestPaths r = new FloydWarshallSolver().solve(g);
++        WeightedGraph<Integer> g = WeightedGraph.<Integer>builder(3).addEdge(0, 1, 1).build();
++        AllPairsShortestPaths<Integer> r = intSolver().solve(g);
+         a.assertTrue(r.distance(0, 2).isEmpty(), "vertex 2 unreachable");
+         a.assertTrue(r.path(0, 2).isEmpty(), "no path to vertex 2");
+         a.assertEquals(1, r.distance(0, 1).orElseThrow(), "0->1 reachable");
+     }
+ 
+     private static void negativeCycle(TestAssertions a) {
+-        WeightedGraph g = WeightedGraph.builder(2)
++        WeightedGraph<Integer> cyclic = WeightedGraph.<Integer>builder(2)
+                 .addEdge(0, 1, 1)
+                 .addEdge(1, 0, -2)
+                 .build();
+-        AllPairsShortestPaths r = new FloydWarshallSolver().solve(g);
+-        a.assertTrue(r.hasNegativeCycle(), "negative cycle should be detected");
++        a.assertTrue(intSolver().solve(cyclic).hasNegativeCycle(),
++                "negative cycle should be detected");
+ 
+-        WeightedGraph acyclic = WeightedGraph.builder(2).addEdge(0, 1, 5).build();
+-        a.assertTrue(!new FloydWarshallSolver().solve(acyclic).hasNegativeCycle(),
++        WeightedGraph<Integer> acyclic = WeightedGraph.<Integer>builder(2).addEdge(0, 1, 5).build();
++        a.assertTrue(!intSolver().solve(acyclic).hasNegativeCycle(),
+                 "no false-positive negative cycle");
+     }
+ 
+-    private static void inputNotMutated(TestAssertions a) {
+-        int[][] matrix = {
+-                {0, 4, INF},
+-                {INF, 0, 1},
+-                {2, INF, 0},
+-        };
+-        int[][] before = {
+-                {0, 4, INF},
+-                {INF, 0, 1},
+-                {2, INF, 0},
+-        };
+-        new FloydWarshallSolver().solve(matrix);
+-        for (int i = 0; i < before.length; i++) {
+-            for (int j = 0; j < before.length; j++) {
+-                a.assertEquals(before[i][j], matrix[i][j], "input cell (" + i + "," + j + ")");
+-            }
+-        }
++    private static void doubleWeights(TestAssertions a) {
++        WeightedGraph<Double> g = WeightedGraph.<Double>builder(3)
++                .addEdge(0, 1, 1.5)
++                .addEdge(1, 2, 2.25)
++                .addEdge(0, 2, 5.0)   // direct edge is more expensive than 0->1->2
++                .build();
++        AllPairsShortestPaths<Double> r = new FloydWarshallSolver<>(new DoubleWeightSystem()).solve(g);
++        a.assertEquals(Double.valueOf(3.75), r.distance(0, 2).orElseThrow(), "0->2 cheapest cost");
++        a.assertEquals(List.of(0, 1, 2), r.path(0, 2).orElseThrow().vertices(), "0->2 path");
+     }
+ 
+-    private static void matrixMatchesGraph(TestAssertions a) {
+-        FloydWarshallSolver solver = new FloydWarshallSolver();
+-        AllPairsShortestPaths fromGraph = solver.solve(ExampleGraphs.classicFiveVertex());
+-        int[][] matrix = {
+-                {0, 4, INF, 5, INF},
+-                {INF, 0, 1, INF, 6},
+-                {2, INF, 0, 3, INF},
+-                {INF, INF, 1, 0, 2},
+-                {1, INF, INF, 4, 0},
+-        };
+-        AllPairsShortestPaths fromMatrix = solver.solve(matrix);
+-        a.assertEquals(fromGraph.distanceMatrix(), fromMatrix.distanceMatrix(),
+-                "graph and matrix inputs yield identical distances");
++    private static void longWeights(TestAssertions a) {
++        long big = 3_000_000_000L; // beyond int range
++        WeightedGraph<Long> g = WeightedGraph.<Long>builder(3)
++                .addEdge(0, 1, big)
++                .addEdge(1, 2, big)
++                .build();
++        AllPairsShortestPaths<Long> r = new FloydWarshallSolver<>(new LongWeightSystem()).solve(g);
++        a.assertEquals(Long.valueOf(2 * big), r.distance(0, 2).orElseThrow(), "0->2 sums without overflow");
+     }
+ }
+diff --git a/src/test/java/floydwarshall/TestAssertions.java b/src/test/java/floydwarshall/TestAssertions.java
+index ee39907..5bc17c6 100644
+--- a/src/test/java/floydwarshall/TestAssertions.java
++++ b/src/test/java/floydwarshall/TestAssertions.java
+@@ -29,10 +29,6 @@ public final class TestAssertions {
+         }
+     }
+ 
+-    public void assertEquals(int expected, int actual, String message) {
+-        assertEquals(Integer.valueOf(expected), Integer.valueOf(actual), message);
+-    }
+-
+     public void fail(String message) {
+         checks++;
+         throw new AssertionError(message);

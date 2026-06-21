@@ -1,0 +1,195 @@
+diff --git a/prims_mst.java b/prims_mst.java
+index f6c3a12..c17a228 100644
+--- a/prims_mst.java
++++ b/prims_mst.java
+@@ -1,4 +1,5 @@
+ import java.util.ArrayList;
++import java.util.Comparator;
+ import java.util.List;
+ import java.util.PriorityQueue;
+ 
+@@ -6,19 +7,14 @@ import java.util.PriorityQueue;
+  * Computes a Minimum Spanning Tree (MST) of an undirected, weighted graph using
+  * Prim's algorithm.
+  *
+- * <p>The graph is supplied as a symmetric adjacency matrix where {@code graph[u][v]}
+- * is the weight of the edge between vertices {@code u} and {@code v}, and a weight of
+- * {@code 0} means there is no edge.
+- *
+- * <p>This implementation uses a binary heap (priority queue) to select the next
+- * cheapest crossing edge, giving a running time of {@code O(E log V)} rather than the
+- * {@code O(V^2)} of the naive linear-scan variant.
++ * <p>The algorithm operates on an adjacency-list {@link Graph}, so edge enumeration is
++ * proportional to the number of edges rather than to {@code V^2}. Combined with a binary
++ * heap to select the next cheapest crossing edge, the running time is {@code O(E log V)},
++ * which is efficient for sparse graphs. A convenience adapter,
++ * {@link Graph#fromAdjacencyMatrix(int[][])}, accepts the classic matrix form.
+  */
+ final class PrimsMst {
+ 
+-    /** Sentinel weight indicating "no edge" in the adjacency matrix. */
+-    private static final int NO_EDGE = 0;
+-
+     private PrimsMst() {
+         // Utility class: no instances.
+     }
+@@ -39,16 +35,92 @@ final class PrimsMst {
+     }
+ 
+     /**
+-     * Computes the minimum spanning tree of the graph described by {@code graph}.
++     * An undirected, weighted graph stored as adjacency lists. Edges are added in both
++     * directions; weights must be positive.
++     */
++    static final class Graph {
++
++        /** Sentinel weight indicating "no edge" in an adjacency matrix. */
++        private static final int NO_EDGE = 0;
++
++        /** A weighted link to a neighbouring vertex. */
++        private record Neighbor(int vertex, int weight) {}
++
++        private final List<List<Neighbor>> adjacency;
++
++        Graph(int vertexCount) {
++            if (vertexCount < 0) {
++                throw new IllegalArgumentException("Vertex count must not be negative: " + vertexCount);
++            }
++            adjacency = new ArrayList<>(vertexCount);
++            for (int i = 0; i < vertexCount; i++) {
++                adjacency.add(new ArrayList<>());
++            }
++        }
++
++        int vertexCount() {
++            return adjacency.size();
++        }
++
++        /** Adds an undirected edge between {@code u} and {@code v} with positive {@code weight}. */
++        void addEdge(int u, int v, int weight) {
++            checkVertex(u);
++            checkVertex(v);
++            if (weight <= 0) {
++                throw new IllegalArgumentException("Edge weight must be positive: " + weight);
++            }
++            adjacency.get(u).add(new Neighbor(v, weight));
++            adjacency.get(v).add(new Neighbor(u, weight));
++        }
++
++        private List<Neighbor> neighbors(int vertex) {
++            return adjacency.get(vertex);
++        }
++
++        private void checkVertex(int vertex) {
++            if (vertex < 0 || vertex >= adjacency.size()) {
++                throw new IndexOutOfBoundsException("Vertex out of range: " + vertex);
++            }
++        }
++
++        /**
++         * Builds a {@code Graph} from a square, symmetric adjacency matrix where
++         * {@code matrix[u][v] == 0} denotes the absence of an edge. Only the upper
++         * triangle is read, so the edge is added exactly once.
++         */
++        static Graph fromAdjacencyMatrix(int[][] matrix) {
++            if (matrix == null) {
++                throw new IllegalArgumentException("Adjacency matrix must not be null.");
++            }
++            for (int[] row : matrix) {
++                if (row == null || row.length != matrix.length) {
++                    throw new IllegalArgumentException("Adjacency matrix must be square.");
++                }
++            }
++            Graph graph = new Graph(matrix.length);
++            for (int u = 0; u < matrix.length; u++) {
++                for (int v = u + 1; v < matrix.length; v++) {
++                    if (matrix[u][v] != NO_EDGE) {
++                        graph.addEdge(u, v, matrix[u][v]);
++                    }
++                }
++            }
++            return graph;
++        }
++    }
++
++    /**
++     * Computes the minimum spanning tree of {@code graph}.
+      *
+-     * @param graph a square, symmetric adjacency matrix; {@code graph[u][v] == 0}
+-     *              denotes the absence of an edge
++     * @param graph an undirected, weighted graph
+      * @return the MST edges (in the order vertices are added) and their total weight
+-     * @throws IllegalArgumentException if the matrix is null, not square, or the graph
+-     *                                  is not connected
++     * @throws IllegalArgumentException if {@code graph} is null or not connected
+      */
+-    static MstResult compute(int[][] graph) {
+-        int vertexCount = validate(graph);
++    static MstResult compute(Graph graph) {
++        if (graph == null) {
++            throw new IllegalArgumentException("Graph must not be null.");
++        }
++        int vertexCount = graph.vertexCount();
+         if (vertexCount == 0) {
+             return new MstResult(List.of(), 0L);
+         }
+@@ -58,8 +130,8 @@ final class PrimsMst {
+         long totalWeight = 0L;
+ 
+         // Min-heap of candidate crossing edges, ordered by weight.
+-        PriorityQueue<Edge> frontier = new PriorityQueue<>((a, b) -> Integer.compare(a.weight(), b.weight()));
+-        addCrossingEdges(graph, inTree, 0, frontier);
++        PriorityQueue<Edge> frontier = new PriorityQueue<>(Comparator.comparingInt(Edge::weight));
++        expandFrom(graph, inTree, 0, frontier);
+ 
+         while (!frontier.isEmpty() && mstEdges.size() < vertexCount - 1) {
+             Edge cheapest = frontier.poll();
+@@ -68,7 +140,7 @@ final class PrimsMst {
+             }
+             mstEdges.add(cheapest);
+             totalWeight += cheapest.weight();
+-            addCrossingEdges(graph, inTree, cheapest.to(), frontier);
++            expandFrom(graph, inTree, cheapest.to(), frontier);
+         }
+ 
+         if (mstEdges.size() != vertexCount - 1) {
+@@ -81,27 +153,13 @@ final class PrimsMst {
+      * Marks {@code vertex} as part of the tree and pushes every edge leading from it to
+      * a vertex not yet in the tree onto the frontier.
+      */
+-    private static void addCrossingEdges(int[][] graph, boolean[] inTree, int vertex, PriorityQueue<Edge> frontier) {
++    private static void expandFrom(Graph graph, boolean[] inTree, int vertex, PriorityQueue<Edge> frontier) {
+         inTree[vertex] = true;
+-        for (int neighbor = 0; neighbor < graph.length; neighbor++) {
+-            int weight = graph[vertex][neighbor];
+-            if (weight != NO_EDGE && !inTree[neighbor]) {
+-                frontier.add(new Edge(vertex, neighbor, weight));
+-            }
+-        }
+-    }
+-
+-    /** Validates the adjacency matrix and returns the vertex count. */
+-    private static int validate(int[][] graph) {
+-        if (graph == null) {
+-            throw new IllegalArgumentException("Graph must not be null.");
+-        }
+-        for (int[] row : graph) {
+-            if (row == null || row.length != graph.length) {
+-                throw new IllegalArgumentException("Adjacency matrix must be square.");
++        for (Graph.Neighbor neighbor : graph.neighbors(vertex)) {
++            if (!inTree[neighbor.vertex()]) {
++                frontier.add(new Edge(vertex, neighbor.vertex(), neighbor.weight()));
+             }
+         }
+-        return graph.length;
+     }
+ 
+     /** Renders an MST result as a human-readable edge/weight table. */
+@@ -124,6 +182,6 @@ final class PrimsMst {
+             { 0, 5, 7, 9, 0 },
+         };
+ 
+-        System.out.println(format(compute(graph)));
++        System.out.println(format(compute(Graph.fromAdjacencyMatrix(graph))));
+     }
+ }

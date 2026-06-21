@@ -1,0 +1,233 @@
+diff --git a/BellmanFordDemo.java b/BellmanFordDemo.java
+index e2295ed..4b0d45c 100644
+--- a/BellmanFordDemo.java
++++ b/BellmanFordDemo.java
+@@ -13,8 +13,8 @@ final class BellmanFordDemo {
+         ShortestPathResult result = BellmanFord.shortestPaths(graph, 0);
+ 
+         switch (result) {
+-            case NegativeCycle ignored ->
+-                System.out.println("Graph contains a negative-weight cycle.");
++            case NegativeCycle cycle ->
++                System.out.println("Graph contains a negative-weight cycle: " + cycle.vertices());
+             case Distances distances -> {
+                 for (int v = 0; v < distances.vertexCount(); v++) {
+                     System.out.print(
+diff --git a/NegativeCycle.java b/NegativeCycle.java
+index 5b67358..6837c0c 100644
+--- a/NegativeCycle.java
++++ b/NegativeCycle.java
+@@ -1,13 +1,23 @@
++import java.util.List;
++
+ /**
+  * The result when a negative-weight cycle is reachable from the source.
+  *
+- * <p>In this case no shortest path is well defined, so the type deliberately
+- * carries no distances at all.
++ * <p>No shortest path is well defined in this case, so the type carries no
++ * distances. It does, however, report the {@linkplain #vertices() vertices of the
++ * offending cycle}, listed in traversal order: for consecutive entries
++ * {@code a, b} the edge {@code a -> b} exists, and the final vertex closes back to
++ * the first.
+  */
+-record NegativeCycle() implements ShortestPathResult {
++record NegativeCycle(List<Integer> vertices) implements ShortestPathResult {
++
++    /** Defensive, immutable copy so the reported cycle cannot be mutated. */
++    NegativeCycle {
++        vertices = List.copyOf(vertices);
++    }
+ 
+     @Override
+     public String toString() {
+-        return "NegativeCycle";
++        return "NegativeCycle" + vertices;
+     }
+ }
+diff --git a/bellman_ford.java b/bellman_ford.java
+index 2481398..a2a3119 100644
+--- a/bellman_ford.java
++++ b/bellman_ford.java
+@@ -1,4 +1,7 @@
++import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.Collections;
++import java.util.List;
+ 
+ /**
+  * Single-source shortest paths via the Bellman-Ford algorithm.
+@@ -12,6 +15,9 @@ import java.util.Arrays;
+  */
+ final class BellmanFord {
+ 
++    /** Sentinel for "no vertex", e.g. a pass that relaxed nothing. */
++    private static final int NO_VERTEX = -1;
++
+     private BellmanFord() {
+     }
+ 
+@@ -20,7 +26,8 @@ final class BellmanFord {
+      *
+      * <p>The classic algorithm: relax every edge {@code V - 1} times, then run one
+      * additional pass. If any edge can still be relaxed on that final pass, a
+-     * negative-weight cycle is reachable and no shortest path is well defined.
++     * negative-weight cycle is reachable; the cycle itself is then reconstructed
++     * from the predecessor chain.
+      */
+     static ShortestPathResult shortestPaths(WeightedGraph graph, int source) {
+         if (source < 0 || source >= graph.vertices()) {
+@@ -33,18 +40,21 @@ final class BellmanFord {
+         dist[source] = 0;
+ 
+         // predecessors[v] is the vertex preceding v on the best known path to v,
+-        // enabling path reconstruction; the source and unreachable vertices have none.
++        // enabling path (and negative-cycle) reconstruction; the source and
++        // unreachable vertices have none.
+         int[] predecessors = new int[graph.vertices()];
+         Arrays.fill(predecessors, Distances.NO_PREDECESSOR);
+ 
+         for (int pass = 0; pass < graph.vertices() - 1; pass++) {
+-            if (!relaxAll(graph, dist, predecessors)) {
++            if (relaxPass(graph, dist, predecessors) == NO_VERTEX) {
+                 break; // no edge improved this pass; further passes cannot either
+             }
+         }
+ 
+-        if (relaxAll(graph, dist, predecessors)) {
+-            return new NegativeCycle();
++        // One more pass: any vertex still improving lies on or downstream of a cycle.
++        int affected = relaxPass(graph, dist, predecessors);
++        if (affected != NO_VERTEX) {
++            return new NegativeCycle(extractCycle(affected, predecessors, graph.vertices()));
+         }
+         return new Distances(source, dist, predecessors);
+     }
+@@ -52,10 +62,10 @@ final class BellmanFord {
+     /**
+      * Relaxes every edge once, recording the predecessor for any improved vertex.
+      *
+-     * @return {@code true} if any distance was reduced
++     * @return the last vertex whose distance was reduced, or {@link #NO_VERTEX} if none
+      */
+-    private static boolean relaxAll(WeightedGraph graph, int[] dist, int[] predecessors) {
+-        boolean improved = false;
++    private static int relaxPass(WeightedGraph graph, int[] dist, int[] predecessors) {
++        int improved = NO_VERTEX;
+         for (WeightedEdge edge : graph.edges()) {
+             int from = dist[edge.from()];
+             if (from == Distances.UNREACHABLE) {
+@@ -65,9 +75,34 @@ final class BellmanFord {
+             if (candidate < dist[edge.to()]) {
+                 dist[edge.to()] = candidate;
+                 predecessors[edge.to()] = edge.from();
+-                improved = true;
++                improved = edge.to();
+             }
+         }
+         return improved;
+     }
++
++    /**
++     * Reconstructs a negative-weight cycle from the predecessor chain.
++     *
++     * @param affected a vertex relaxed on the detection pass (on or downstream of the cycle)
++     * @return the cycle vertices in traversal order: edge {@code v[i] -> v[i+1]} exists,
++     *     and the last vertex closes back to the first
++     */
++    private static List<Integer> extractCycle(int affected, int[] predecessors, int vertices) {
++        // Stepping back V times is guaranteed to land on a vertex of the cycle itself,
++        // even if `affected` only leads into the cycle rather than lying on it.
++        int onCycle = affected;
++        for (int i = 0; i < vertices; i++) {
++            onCycle = predecessors[onCycle];
++        }
++        // Walk predecessors once around the loop, then reverse into traversal order.
++        List<Integer> cycle = new ArrayList<>();
++        int v = onCycle;
++        do {
++            cycle.add(v);
++            v = predecessors[v];
++        } while (v != onCycle);
++        Collections.reverse(cycle);
++        return cycle;
++    }
+ }
+diff --git a/test/BellmanFordTest.java b/test/BellmanFordTest.java
+index 260590d..eea1f7d 100644
+--- a/test/BellmanFordTest.java
++++ b/test/BellmanFordTest.java
+@@ -2,6 +2,7 @@ import org.junit.jupiter.api.DisplayName;
+ import org.junit.jupiter.api.Nested;
+ import org.junit.jupiter.api.Test;
+ 
++import java.util.Comparator;
+ import java.util.List;
+ 
+ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+@@ -124,6 +125,38 @@ class BellmanFordTest {
+             assertInstanceOf(NegativeCycle.class, BellmanFord.shortestPaths(graph, 0));
+         }
+ 
++        @Test
++        @DisplayName("the reported cycle is a real closed walk with negative weight")
++        void reportedCycleIsValid() {
++            WeightedGraph graph = WeightedGraph.of(3,
++                WeightedEdge.of(0, 1, 1),
++                WeightedEdge.of(1, 2, -1),
++                WeightedEdge.of(2, 1, -1)); // 1 -> 2 -> 1 sums to -2
++            NegativeCycle result =
++                assertInstanceOf(NegativeCycle.class, BellmanFord.shortestPaths(graph, 0));
++
++            assertClosedNegativeWalk(graph, result.vertices());
++            // The only cycle here is {1, 2}.
++            assertEquals(List.of(1, 2), result.vertices().stream().sorted().toList());
++        }
++
++        @Test
++        @DisplayName("a cycle that the source only leads into is still reported")
++        void cycleReachedThroughALeadInIsReported() {
++            // 0 -> 1 enters a 1 -> 2 -> 3 -> 1 cycle summing to -1; vertex 0 is not on it.
++            WeightedGraph graph = WeightedGraph.of(4,
++                WeightedEdge.of(0, 1, 5),
++                WeightedEdge.of(1, 2, 1),
++                WeightedEdge.of(2, 3, 1),
++                WeightedEdge.of(3, 1, -3));
++            NegativeCycle result =
++                assertInstanceOf(NegativeCycle.class, BellmanFord.shortestPaths(graph, 0));
++
++            assertClosedNegativeWalk(graph, result.vertices());
++            assertFalse(result.vertices().contains(0), "lead-in vertex must not be on the cycle");
++            assertEquals(List.of(1, 2, 3), result.vertices().stream().sorted().toList());
++        }
++
+         @Test
+         @DisplayName("the result type distinguishes the two cases")
+         void resultTypeDistinguishesTheTwoCases() {
+@@ -135,6 +168,26 @@ class BellmanFordTest {
+             assertInstanceOf(Distances.class, BellmanFord.shortestPaths(healthy, 0));
+             assertInstanceOf(NegativeCycle.class, BellmanFord.shortestPaths(cyclic, 0));
+         }
++
++        /**
++         * Asserts that {@code cycle} lists vertices for which each consecutive pair
++         * (wrapping around) is a real edge, and that the edges sum to a negative weight.
++         */
++        private void assertClosedNegativeWalk(WeightedGraph graph, List<Integer> cycle) {
++            assertFalse(cycle.isEmpty(), "cycle must not be empty");
++            int total = 0;
++            for (int i = 0; i < cycle.size(); i++) {
++                int from = cycle.get(i);
++                int to = cycle.get((i + 1) % cycle.size());
++                int weight = graph.edges().stream()
++                    .filter(e -> e.from() == from && e.to() == to)
++                    .map(WeightedEdge::weight)
++                    .min(Comparator.naturalOrder())
++                    .orElseThrow(() -> new AssertionError("no edge " + from + " -> " + to));
++                total += weight;
++            }
++            assertTrue(total < 0, "cycle weight should be negative but was " + total);
++        }
+     }
+ 
+     @Nested

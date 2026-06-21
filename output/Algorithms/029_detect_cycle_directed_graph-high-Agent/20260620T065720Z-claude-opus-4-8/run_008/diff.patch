@@ -1,0 +1,361 @@
+diff --git a/DetectCycleDemo.java b/DetectCycleDemo.java
+index 3370a4f..ba6f72e 100644
+--- a/DetectCycleDemo.java
++++ b/DetectCycleDemo.java
+@@ -11,9 +11,12 @@
+ final class DetectCycleDemo {
+ 
+     public static void main(String[] args) {
+-        DirectedGraph graph = DirectedGraph.from(4, new int[][] {
+-            {0, 1}, {1, 2}, {2, 0}, {2, 3}
+-        });
++        DirectedGraph graph = DirectedGraph.builder(4)
++                .addEdge(0, 1)
++                .addEdge(1, 2)
++                .addEdge(2, 0)
++                .addEdge(2, 3)
++                .build();
+ 
+         CycleDetectionAlgorithm[] algorithms = args.length > 0
+                 ? new CycleDetectionAlgorithm[] {CycleDetectionAlgorithm.valueOf(args[0].toUpperCase())}
+diff --git a/DirectedGraph.java b/DirectedGraph.java
+index 99bfa7c..1af2434 100644
+--- a/DirectedGraph.java
++++ b/DirectedGraph.java
+@@ -12,6 +12,9 @@ import java.util.List;
+  * one-vertex cycle). Construction validates the vertex count and every edge
+  * endpoint, so algorithms operating on the graph never have to defend against
+  * malformed input.
++ *
++ * <p>Build a graph either in one shot with {@link #from(int, int[][])} or
++ * fluently with a {@link Builder} from {@link #builder(int)} / {@link #builder()}.
+  */
+ final class DirectedGraph {
+ 
+@@ -23,30 +26,34 @@ final class DirectedGraph {
+ 
+     /**
+      * Builds a graph with {@code vertexCount} vertices and the given directed
+-     * edges, each expressed as a {@code {from, to}} pair.
++     * edges, each expressed as a {@code {from, to}} pair. Equivalent to
++     * {@code builder(vertexCount).addEdges(edges).build()}.
+      *
+      * @throws IllegalArgumentException if {@code vertexCount} is negative or an
+      *                                  edge is not a two-element {@code {from, to}} pair
+      * @throws IndexOutOfBoundsException if an edge endpoint is not a valid vertex
+      */
+     static DirectedGraph from(int vertexCount, int[][] edges) {
+-        if (vertexCount < 0) {
+-            throw new IllegalArgumentException("vertexCount must be non-negative: " + vertexCount);
+-        }
+-        List<List<Integer>> adjacency = new ArrayList<>(vertexCount);
+-        for (int i = 0; i < vertexCount; i++) {
+-            adjacency.add(new ArrayList<>());
+-        }
+-        for (int[] edge : edges) {
+-            if (edge == null || edge.length != 2) {
+-                throw new IllegalArgumentException(
+-                        "each edge must be a {from, to} pair, got " + Arrays.toString(edge));
+-            }
+-            int from = checkVertex(edge[0], vertexCount);
+-            int to = checkVertex(edge[1], vertexCount);
+-            adjacency.get(from).add(to);
+-        }
+-        return new DirectedGraph(adjacency);
++        return builder(vertexCount).addEdges(edges).build();
++    }
++
++    /**
++     * Starts a fluent builder for a graph with a fixed {@code vertexCount}. Edge
++     * endpoints are validated against this count as they are added.
++     *
++     * @throws IllegalArgumentException if {@code vertexCount} is negative
++     */
++    static Builder builder(int vertexCount) {
++        return new Builder(vertexCount, true);
++    }
++
++    /**
++     * Starts a fluent builder whose vertex set grows to fit the edges added to
++     * it (the final count is one past the highest vertex referenced). Use
++     * {@link Builder#ensureVertices(int)} to reserve isolated trailing vertices.
++     */
++    static Builder builder() {
++        return new Builder(0, false);
+     }
+ 
+     /** Returns the number of vertices in the graph. */
+@@ -67,4 +74,134 @@ final class DirectedGraph {
+         }
+         return vertex;
+     }
++
++    /**
++     * Fluent builder for {@link DirectedGraph}. Chain {@link #addEdge} /
++     * {@link #addEdges} calls and finish with {@link #build()}:
++     *
++     * <pre>{@code
++     *   DirectedGraph g = DirectedGraph.builder(4)
++     *       .addEdge(0, 1)
++     *       .addEdge(1, 2)
++     *       .addEdge(2, 0)
++     *       .build();
++     * }</pre>
++     *
++     * <p>A builder is single-use: any mutator (or a second {@code build()}) after
++     * {@code build()} throws {@link IllegalStateException}.
++     */
++    static final class Builder {
++
++        private final boolean fixedSize;
++        private int vertexCount;
++        private List<List<Integer>> adjacency;
++        private boolean built;
++
++        private Builder(int vertexCount, boolean fixedSize) {
++            if (vertexCount < 0) {
++                throw new IllegalArgumentException("vertexCount must be non-negative: " + vertexCount);
++            }
++            this.fixedSize = fixedSize;
++            this.vertexCount = vertexCount;
++            this.adjacency = new ArrayList<>(vertexCount);
++            for (int i = 0; i < vertexCount; i++) {
++                adjacency.add(new ArrayList<>());
++            }
++        }
++
++        /**
++         * Adds a directed edge {@code from -> to}.
++         *
++         * <p>In a fixed-size builder both endpoints must be valid vertices; in a
++         * growing builder the vertex set expands to include them.
++         *
++         * @throws IndexOutOfBoundsException if an endpoint is negative, or is out
++         *                                   of range in a fixed-size builder
++         * @throws IllegalStateException if the builder has already been built
++         */
++        Builder addEdge(int from, int to) {
++            checkNotBuilt();
++            adjacency.get(resolve(from)).add(resolve(to));
++            return this;
++        }
++
++        /**
++         * Adds every edge in {@code edges}, each a {@code {from, to}} pair.
++         *
++         * @throws IllegalArgumentException if an edge is not a two-element pair
++         */
++        Builder addEdges(int[][] edges) {
++            checkNotBuilt();
++            for (int[] edge : edges) {
++                if (edge == null || edge.length != 2) {
++                    throw new IllegalArgumentException(
++                            "each edge must be a {from, to} pair, got " + Arrays.toString(edge));
++                }
++                addEdge(edge[0], edge[1]);
++            }
++            return this;
++        }
++
++        /**
++         * Ensures the built graph has at least {@code count} vertices, reserving
++         * isolated ones that no edge references. Never removes vertices.
++         *
++         * @throws IndexOutOfBoundsException if {@code count} exceeds a fixed-size
++         *                                   builder's vertex count
++         */
++        Builder ensureVertices(int count) {
++            checkNotBuilt();
++            if (count < 0) {
++                throw new IllegalArgumentException("count must be non-negative: " + count);
++            }
++            grow(count);
++            return this;
++        }
++
++        /**
++         * Builds the immutable graph and consumes this builder.
++         *
++         * @throws IllegalStateException if the builder has already been built
++         */
++        DirectedGraph build() {
++            checkNotBuilt();
++            built = true;
++            List<List<Integer>> result = adjacency;
++            adjacency = null; // hand ownership to the graph; no defensive copy needed
++            return new DirectedGraph(result);
++        }
++
++        /** Validates an endpoint, growing the vertex set in a growing builder. */
++        private int resolve(int vertex) {
++            if (vertex < 0) {
++                throw new IndexOutOfBoundsException(
++                        "vertex " + vertex + " out of range [0, " + vertexCount + ")");
++            }
++            if (vertex >= vertexCount) {
++                if (fixedSize) {
++                    throw new IndexOutOfBoundsException(
++                            "vertex " + vertex + " out of range [0, " + vertexCount + ")");
++                }
++                grow(vertex + 1);
++            }
++            return vertex;
++        }
++
++        private void grow(int newCount) {
++            if (fixedSize && newCount > vertexCount) {
++                throw new IndexOutOfBoundsException(
++                        "cannot grow a fixed-size builder to " + newCount + " vertices");
++            }
++            while (adjacency.size() < newCount) {
++                adjacency.add(new ArrayList<>());
++            }
++            vertexCount = Math.max(vertexCount, newCount);
++        }
++
++        private void checkNotBuilt() {
++            if (built) {
++                throw new IllegalStateException("builder already consumed by build()");
++            }
++        }
++    }
+ }
+diff --git a/README.md b/README.md
+index 4e2e0d0..ca4c35c 100644
+--- a/README.md
++++ b/README.md
+@@ -6,9 +6,28 @@ and reports the vertices that form it.
+ ## API
+ 
+ - **`DirectedGraph`** — an immutable adjacency-list graph over vertices
+-  `0 .. vertices()-1`. Build one with `DirectedGraph.from(vertexCount, edges)`,
+-  where `edges` is an array of `{from, to}` pairs. Construction validates the
+-  vertex count and every endpoint.
++  `0 .. vertices()-1`. Construction validates the vertex count and every endpoint.
++  Build one in any of three ways:
++
++  ```java
++  // 1. one-shot factory from an edge array
++  DirectedGraph.from(4, new int[][] {{0, 1}, {1, 2}, {2, 0}, {2, 3}});
++
++  // 2. fluent builder, fixed vertex count (endpoints validated against it)
++  DirectedGraph.builder(4)
++      .addEdge(0, 1).addEdge(1, 2).addEdge(2, 0).addEdge(2, 3)
++      .build();
++
++  // 3. fluent builder that grows to fit the edges (no need to pre-count)
++  DirectedGraph.builder()
++      .addEdges(new int[][] {{0, 1}, {1, 2}})
++      .addEdge(2, 0)
++      .ensureVertices(10)   // reserve isolated trailing vertices, if any
++      .build();
++  ```
++
++  The builder is single-use (`build()` consumes it) and `from(...)` is just a
++  shorthand for `builder(vertexCount).addEdges(edges).build()`.
+ - **`CycleDetector`** — the detection *interface* (`O(V + E)`):
+   - `boolean hasCycle(DirectedGraph)` — whether any cycle exists.
+   - `Optional<Cycle> findCycle(DirectedGraph)` — one cycle if present.
+diff --git a/test/DirectedGraphTest.java b/test/DirectedGraphTest.java
+index 18aa92b..60ee03f 100644
+--- a/test/DirectedGraphTest.java
++++ b/test/DirectedGraphTest.java
+@@ -1,4 +1,5 @@
+ import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Nested;
+ import org.junit.jupiter.api.Test;
+ 
+ import java.util.List;
+@@ -65,4 +66,92 @@ class DirectedGraphTest {
+         assertThrows(UnsupportedOperationException.class,
+                 () -> graph.neighbors(0).add(99));
+     }
++
++    @Nested
++    @DisplayName("Builder")
++    class BuilderTests {
++
++        @Test
++        @DisplayName("builds fluently, equivalent to from(...)")
++        void fluentEquivalentToFrom() {
++            DirectedGraph built = DirectedGraph.builder(4)
++                    .addEdge(0, 1)
++                    .addEdge(1, 2)
++                    .addEdge(2, 0)
++                    .addEdge(2, 3)
++                    .build();
++            assertEquals(4, built.vertices());
++            assertEquals(List.of(1), built.neighbors(0));
++            assertEquals(List.of(0, 3), built.neighbors(2));
++        }
++
++        @Test
++        @DisplayName("addEdges adds a batch of pairs")
++        void addEdgesBatch() {
++            DirectedGraph graph = DirectedGraph.builder(3)
++                    .addEdges(new int[][] {{0, 1}, {0, 2}, {1, 2}})
++                    .build();
++            assertEquals(List.of(1, 2), graph.neighbors(0));
++            assertEquals(List.of(2), graph.neighbors(1));
++        }
++
++        @Test
++        @DisplayName("a fixed-size builder rejects an out-of-range endpoint")
++        void fixedSizeRejectsOutOfRange() {
++            assertThrows(IndexOutOfBoundsException.class,
++                    () -> DirectedGraph.builder(2).addEdge(0, 5));
++        }
++
++        @Test
++        @DisplayName("a growing builder expands to fit referenced vertices")
++        void growingBuilderExpands() {
++            DirectedGraph graph = DirectedGraph.builder()
++                    .addEdge(0, 3)
++                    .addEdge(3, 7)
++                    .build();
++            assertEquals(8, graph.vertices());          // highest index 7 -> 8 vertices
++            assertEquals(List.of(3), graph.neighbors(0));
++            assertEquals(List.of(), graph.neighbors(7));
++        }
++
++        @Test
++        @DisplayName("ensureVertices reserves isolated trailing vertices")
++        void ensureVerticesReserves() {
++            DirectedGraph graph = DirectedGraph.builder()
++                    .addEdge(0, 1)
++                    .ensureVertices(5)
++                    .build();
++            assertEquals(5, graph.vertices());
++            assertEquals(List.of(), graph.neighbors(4));
++        }
++
++        @Test
++        @DisplayName("a growing builder still rejects a negative endpoint")
++        void growingBuilderRejectsNegative() {
++            assertThrows(IndexOutOfBoundsException.class,
++                    () -> DirectedGraph.builder().addEdge(0, -1));
++        }
++
++        @Test
++        @DisplayName("a fixed-size builder cannot be grown past its vertex count")
++        void ensureVerticesCannotExceedFixedSize() {
++            assertThrows(IndexOutOfBoundsException.class,
++                    () -> DirectedGraph.builder(2).ensureVertices(5));
++        }
++
++        @Test
++        @DisplayName("the builder is single-use")
++        void singleUse() {
++            DirectedGraph.Builder builder = DirectedGraph.builder(2).addEdge(0, 1);
++            builder.build();
++            assertThrows(IllegalStateException.class, () -> builder.addEdge(1, 0));
++            assertThrows(IllegalStateException.class, builder::build);
++        }
++
++        @Test
++        @DisplayName("rejects a negative vertex count")
++        void negativeVertexCount() {
++            assertThrows(IllegalArgumentException.class, () -> DirectedGraph.builder(-1));
++        }
++    }
+ }

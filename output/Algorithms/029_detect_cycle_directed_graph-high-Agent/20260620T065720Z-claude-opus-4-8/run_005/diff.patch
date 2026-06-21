@@ -1,0 +1,706 @@
+diff --git a/CycleDetectionAlgorithm.java b/CycleDetectionAlgorithm.java
+new file mode 100644
+index 0000000..cdf7e01
+--- /dev/null
++++ b/CycleDetectionAlgorithm.java
+@@ -0,0 +1,38 @@
++/**
++ * The cycle-detection algorithms a caller can choose from at runtime. Use
++ * {@link CycleDetector#create(CycleDetectionAlgorithm)} (or {@link #create()})
++ * to obtain a detector for a selected value, e.g. parsed from configuration or
++ * a command-line argument via {@link #valueOf(String)}.
++ */
++enum CycleDetectionAlgorithm {
++
++    /** Depth-first search with three-color back-edge detection. */
++    DFS("depth-first search with back-edge detection") {
++        @Override
++        CycleDetector create() {
++            return new DfsCycleDetector();
++        }
++    },
++
++    /** Kahn's algorithm: repeatedly removing in-degree-zero vertices. */
++    KAHN("Kahn topological elimination") {
++        @Override
++        CycleDetector create() {
++            return new KahnCycleDetector();
++        }
++    };
++
++    private final String description;
++
++    CycleDetectionAlgorithm(String description) {
++        this.description = description;
++    }
++
++    /** A short human-readable description of the algorithm. */
++    String description() {
++        return description;
++    }
++
++    /** Creates a fresh detector implementing this algorithm. */
++    abstract CycleDetector create();
++}
+diff --git a/DetectCycleDemo.java b/DetectCycleDemo.java
+index a8f1141..50a9b94 100644
+--- a/DetectCycleDemo.java
++++ b/DetectCycleDemo.java
+@@ -1,11 +1,11 @@
+-import java.util.Optional;
+-
+ /**
+- * Small runnable example of the cycle-detection library.
++ * Small runnable example showing runtime selection of the detection algorithm.
+  *
+- * <p>Compile and run from the project root:
++ * <p>Run from the project root, optionally naming an algorithm:
+  * <pre>{@code
+- *   javac *.java && java DetectCycleDemo
++ *   javac *.java
++ *   java DetectCycleDemo          # runs every available algorithm
++ *   java DetectCycleDemo KAHN     # runs only the named one
+  * }</pre>
+  */
+ final class DetectCycleDemo {
+@@ -15,9 +15,16 @@ final class DetectCycleDemo {
+             {0, 1}, {1, 2}, {2, 0}, {2, 3}
+         });
+ 
+-        Optional<Cycle> cycle = new CycleDetector().findCycle(graph);
+-        System.out.println(cycle
+-                .map(c -> "true (cycle: " + c + ")")
+-                .orElse("false"));
++        CycleDetectionAlgorithm[] algorithms = args.length > 0
++                ? new CycleDetectionAlgorithm[] {CycleDetectionAlgorithm.valueOf(args[0].toUpperCase())}
++                : CycleDetectionAlgorithm.values();
++
++        for (CycleDetectionAlgorithm algorithm : algorithms) {
++            CycleDetector detector = CycleDetector.create(algorithm);
++            String result = detector.findCycle(graph)
++                    .map(cycle -> "cycle " + cycle)
++                    .orElse("acyclic");
++            System.out.printf("%-4s (%s): %s%n", algorithm, algorithm.description(), result);
++        }
+     }
+ }
+diff --git a/DfsCycleDetector.java b/DfsCycleDetector.java
+new file mode 100644
+index 0000000..d8130af
+--- /dev/null
++++ b/DfsCycleDetector.java
+@@ -0,0 +1,83 @@
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Deque;
++import java.util.List;
++import java.util.Optional;
++
++/**
++ * Cycle detection via depth-first search with three-color vertex marking. A
++ * "back edge" — an edge into a vertex still on the active DFS path — proves a
++ * cycle, and the active path itself yields the offending vertices.
++ *
++ * <p>Runs in O(V + E) time and O(V) extra space. Reconstructing the cycle path
++ * comes for free from the traversal, so this implementation uses the default
++ * {@link CycleDetector#hasCycle} rather than a separate cheaper check.
++ */
++final class DfsCycleDetector implements CycleDetector {
++
++    private enum Mark {
++        /** Not yet reached. */
++        UNVISITED,
++        /** On the current DFS path (its descendants are still being explored). */
++        ON_PATH,
++        /** Fully explored; cannot be part of a cycle reached from here. */
++        DONE
++    }
++
++    @Override
++    public Optional<Cycle> findCycle(DirectedGraph graph) {
++        int vertexCount = graph.vertices();
++        Mark[] marks = new Mark[vertexCount];
++        Arrays.fill(marks, Mark.UNVISITED);
++        Deque<Integer> path = new ArrayDeque<>();
++
++        for (int start = 0; start < vertexCount; start++) {
++            if (marks[start] == Mark.UNVISITED) {
++                List<Integer> cycle = explore(graph, start, marks, path);
++                if (cycle != null) {
++                    return Optional.of(new Cycle(cycle));
++                }
++            }
++        }
++        return Optional.empty();
++    }
++
++    /** Depth-first walk from {@code u}; returns a cycle if a back edge is found, else {@code null}. */
++    private List<Integer> explore(DirectedGraph graph, int u, Mark[] marks, Deque<Integer> path) {
++        marks[u] = Mark.ON_PATH;
++        path.addLast(u);
++
++        for (int v : graph.neighbors(u)) {
++            if (marks[v] == Mark.ON_PATH) {
++                return cycleFrom(path, v);
++            }
++            if (marks[v] == Mark.UNVISITED) {
++                List<Integer> cycle = explore(graph, v, marks, path);
++                if (cycle != null) {
++                    return cycle;
++                }
++            }
++        }
++
++        path.removeLast();
++        marks[u] = Mark.DONE;
++        return null;
++    }
++
++    /** Slices the current path from its first visit to {@code start}, closing the loop back to {@code start}. */
++    private List<Integer> cycleFrom(Deque<Integer> path, int start) {
++        List<Integer> cycle = new ArrayList<>();
++        boolean collecting = false;
++        for (int vertex : path) { // ArrayDeque iterates head -> tail, i.e. root -> current
++            if (vertex == start) {
++                collecting = true;
++            }
++            if (collecting) {
++                cycle.add(vertex);
++            }
++        }
++        cycle.add(start);
++        return cycle;
++    }
++}
+diff --git a/KahnCycleDetector.java b/KahnCycleDetector.java
+new file mode 100644
+index 0000000..eb9ced9
+--- /dev/null
++++ b/KahnCycleDetector.java
+@@ -0,0 +1,136 @@
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Deque;
++import java.util.List;
++import java.util.Optional;
++
++/**
++ * Cycle detection via Kahn's algorithm: repeatedly remove vertices whose
++ * in-degree has dropped to zero. A graph is acyclic exactly when every vertex
++ * can be removed this way; any vertices that remain lie on (or feed into) a cycle.
++ *
++ * <p>Existence is therefore a cheap by-product of the elimination pass, so this
++ * implementation overrides {@link #hasCycle}. Reconstructing an actual cycle
++ * needs a little more work (see {@link #findCycle}) but stays O(V + E).
++ */
++final class KahnCycleDetector implements CycleDetector {
++
++    @Override
++    public boolean hasCycle(DirectedGraph graph) {
++        int vertexCount = graph.vertices();
++        int[] inDegree = inDegrees(graph);
++
++        Deque<Integer> ready = readyQueue(inDegree);
++        int removed = 0;
++        while (!ready.isEmpty()) {
++            int u = ready.poll();
++            removed++;
++            for (int v : graph.neighbors(u)) {
++                if (--inDegree[v] == 0) {
++                    ready.add(v);
++                }
++            }
++        }
++        return removed != vertexCount;
++    }
++
++    @Override
++    public Optional<Cycle> findCycle(DirectedGraph graph) {
++        int vertexCount = graph.vertices();
++        boolean[] onCycleCore = residualCore(graph);
++
++        int start = -1;
++        for (int v = 0; v < vertexCount; v++) {
++            if (onCycleCore[v]) {
++                start = v;
++                break;
++            }
++        }
++        if (start < 0) {
++            return Optional.empty();
++        }
++
++        // Every core vertex has an out-edge to another core vertex, so walking
++        // them must revisit a vertex; the segment between the two visits is a cycle.
++        int[] position = new int[vertexCount];
++        Arrays.fill(position, -1);
++        List<Integer> walk = new ArrayList<>();
++        int current = start;
++        while (position[current] < 0) {
++            position[current] = walk.size();
++            walk.add(current);
++            current = firstCoreNeighbor(graph, current, onCycleCore);
++        }
++
++        List<Integer> cycle = new ArrayList<>(walk.subList(position[current], walk.size()));
++        cycle.add(current);
++        return Optional.of(new Cycle(cycle));
++    }
++
++    /**
++     * Returns the "cycle core": vertices that survive Kahn elimination and still
++     * have an out-edge into the surviving set. Every such vertex is reachable
++     * along core edges to a cycle, and following any core out-edge stays in the core.
++     */
++    private boolean[] residualCore(DirectedGraph graph) {
++        int vertexCount = graph.vertices();
++        int[] inDegree = inDegrees(graph);
++
++        Deque<Integer> ready = readyQueue(inDegree);
++        boolean[] core = new boolean[vertexCount];
++        Arrays.fill(core, true);
++        while (!ready.isEmpty()) {
++            int u = ready.poll();
++            core[u] = false; // u is part of a valid topological prefix, not a cycle
++            for (int v : graph.neighbors(u)) {
++                if (--inDegree[v] == 0) {
++                    ready.add(v);
++                }
++            }
++        }
++
++        // Peel survivors that lead nowhere within the core: they cannot lie on a cycle.
++        boolean changed = true;
++        while (changed) {
++            changed = false;
++            for (int u = 0; u < vertexCount; u++) {
++                if (core[u] && firstCoreNeighbor(graph, u, core) < 0) {
++                    core[u] = false;
++                    changed = true;
++                }
++            }
++        }
++        return core;
++    }
++
++    private static int firstCoreNeighbor(DirectedGraph graph, int u, boolean[] core) {
++        for (int v : graph.neighbors(u)) {
++            if (core[v]) {
++                return v;
++            }
++        }
++        return -1;
++    }
++
++    private static int[] inDegrees(DirectedGraph graph) {
++        int vertexCount = graph.vertices();
++        int[] inDegree = new int[vertexCount];
++        for (int u = 0; u < vertexCount; u++) {
++            for (int v : graph.neighbors(u)) {
++                inDegree[v]++;
++            }
++        }
++        return inDegree;
++    }
++
++    private static Deque<Integer> readyQueue(int[] inDegree) {
++        Deque<Integer> ready = new ArrayDeque<>();
++        for (int v = 0; v < inDegree.length; v++) {
++            if (inDegree[v] == 0) {
++                ready.add(v);
++            }
++        }
++        return ready;
++    }
++}
+diff --git a/README.md b/README.md
+index d8a492a..1b353c8 100644
+--- a/README.md
++++ b/README.md
+@@ -9,12 +9,30 @@ and reports the vertices that form it.
+   `0 .. vertices()-1`. Build one with `DirectedGraph.from(vertexCount, edges)`,
+   where `edges` is an array of `{from, to}` pairs. Construction validates the
+   vertex count and every endpoint.
+-- **`CycleDetector`** — depth-first cycle detection in `O(V + E)`:
++- **`CycleDetector`** — the detection *interface* (`O(V + E)`):
+   - `boolean hasCycle(DirectedGraph)` — whether any cycle exists.
+   - `Optional<Cycle> findCycle(DirectedGraph)` — one cycle if present.
+ - **`Cycle`** — the result: a closed vertex walk such as `[0, 1, 2, 0]`
+   (`toString()` renders it as `0 -> 1 -> 2 -> 0`). A self-loop on `v` is `[v, v]`.
+ 
++### Choosing an algorithm at runtime
++
++`CycleDetector` has two interchangeable implementations, selected through the
++`CycleDetectionAlgorithm` enum:
++
++| Algorithm | Strategy | Notes |
++|-----------|----------|-------|
++| `DFS`  | depth-first search, back-edge detection | reconstructs the cycle path directly from the traversal |
++| `KAHN` | Kahn's topological elimination          | decides *existence* cheaply; reconstructs a cycle from the residual core |
++
++Both satisfy the same contract and agree on every result.
++
++```java
++// pick a concrete algorithm — e.g. from config or a CLI argument
++CycleDetectionAlgorithm algorithm = CycleDetectionAlgorithm.valueOf(args[0]); // "DFS" | "KAHN"
++CycleDetector detector = CycleDetector.create(algorithm);
++```
++
+ ## Example
+ 
+ ```java
+@@ -22,7 +40,8 @@ DirectedGraph graph = DirectedGraph.from(4, new int[][] {
+     {0, 1}, {1, 2}, {2, 0}, {2, 3}
+ });
+ 
+-new CycleDetector().findCycle(graph)
++CycleDetector detector = CycleDetector.create(CycleDetectionAlgorithm.DFS);
++detector.findCycle(graph)
+     .ifPresentOrElse(
+         cycle -> System.out.println("cycle: " + cycle),  // cycle: 0 -> 1 -> 2 -> 0
+         ()    -> System.out.println("acyclic"));
+diff --git a/detect_cycle_directed_graph.java b/detect_cycle_directed_graph.java
+index db6c5bc..51df5fe 100644
+--- a/detect_cycle_directed_graph.java
++++ b/detect_cycle_directed_graph.java
+@@ -1,34 +1,20 @@
+-import java.util.ArrayDeque;
+-import java.util.ArrayList;
+-import java.util.Arrays;
+-import java.util.Deque;
+-import java.util.List;
+ import java.util.Optional;
+ 
+ /**
+- * Detects cycles in a {@link DirectedGraph} via depth-first search with
+- * three-color vertex marking. A "back edge" — an edge into a vertex that is
+- * still on the active DFS path — proves a cycle, and the active path itself
+- * yields the offending vertices.
++ * Strategy interface for directed-graph cycle detection. Callers depend on this
++ * abstraction and pick a concrete algorithm at runtime — either by instantiating
++ * an implementation directly or via {@link #create(CycleDetectionAlgorithm)}.
+  *
+- * <p>Runs in O(V + E) time and O(V) extra space. Instances are stateless and
+- * may be reused across graphs.
++ * <p>Implementations:
++ * <ul>
++ *   <li>{@link DfsCycleDetector} — depth-first search with back-edge detection.</li>
++ *   <li>{@link KahnCycleDetector} — Kahn's topological elimination.</li>
++ * </ul>
++ *
++ * <p>All implementations agree on results; they differ only in approach and in
++ * which operation they compute most cheaply.
+  */
+-final class CycleDetector {
+-
+-    private enum Mark {
+-        /** Not yet reached. */
+-        UNVISITED,
+-        /** On the current DFS path (its descendants are still being explored). */
+-        ON_PATH,
+-        /** Fully explored; cannot be part of a cycle reached from here. */
+-        DONE
+-    }
+-
+-    /** Returns {@code true} if {@code graph} contains at least one directed cycle. */
+-    boolean hasCycle(DirectedGraph graph) {
+-        return findCycle(graph).isPresent();
+-    }
++interface CycleDetector {
+ 
+     /**
+      * Finds one cycle if the graph contains any.
+@@ -36,58 +22,21 @@ final class CycleDetector {
+      * @return a {@link Cycle} (e.g. {@code 0 -> 1 -> 2 -> 0}), or
+      *         {@link Optional#empty()} if the graph is acyclic
+      */
+-    Optional<Cycle> findCycle(DirectedGraph graph) {
+-        int vertexCount = graph.vertices();
+-        Mark[] marks = new Mark[vertexCount];
+-        Arrays.fill(marks, Mark.UNVISITED);
+-        Deque<Integer> path = new ArrayDeque<>();
+-
+-        for (int start = 0; start < vertexCount; start++) {
+-            if (marks[start] == Mark.UNVISITED) {
+-                List<Integer> cycle = explore(graph, start, marks, path);
+-                if (cycle != null) {
+-                    return Optional.of(new Cycle(cycle));
+-                }
+-            }
+-        }
+-        return Optional.empty();
+-    }
+-
+-    /** Depth-first walk from {@code u}; returns a cycle if a back edge is found, else {@code null}. */
+-    private List<Integer> explore(DirectedGraph graph, int u, Mark[] marks, Deque<Integer> path) {
+-        marks[u] = Mark.ON_PATH;
+-        path.addLast(u);
++    Optional<Cycle> findCycle(DirectedGraph graph);
+ 
+-        for (int v : graph.neighbors(u)) {
+-            if (marks[v] == Mark.ON_PATH) {
+-                return cycleFrom(path, v);
+-            }
+-            if (marks[v] == Mark.UNVISITED) {
+-                List<Integer> cycle = explore(graph, v, marks, path);
+-                if (cycle != null) {
+-                    return cycle;
+-                }
+-            }
+-        }
+-
+-        path.removeLast();
+-        marks[u] = Mark.DONE;
+-        return null;
++    /**
++     * Returns {@code true} if {@code graph} contains at least one directed cycle.
++     *
++     * <p>The default derives the answer from {@link #findCycle}; an implementation
++     * that can decide existence more cheaply than it can reconstruct a path should
++     * override this.
++     */
++    default boolean hasCycle(DirectedGraph graph) {
++        return findCycle(graph).isPresent();
+     }
+ 
+-    /** Slices the current path from its first visit to {@code start}, closing the loop back to {@code start}. */
+-    private List<Integer> cycleFrom(Deque<Integer> path, int start) {
+-        List<Integer> cycle = new ArrayList<>();
+-        boolean collecting = false;
+-        for (int vertex : path) { // ArrayDeque iterates head -> tail, i.e. root -> current
+-            if (vertex == start) {
+-                collecting = true;
+-            }
+-            if (collecting) {
+-                cycle.add(vertex);
+-            }
+-        }
+-        cycle.add(start);
+-        return cycle;
++    /** Creates the detector for the requested algorithm. */
++    static CycleDetector create(CycleDetectionAlgorithm algorithm) {
++        return algorithm.create();
+     }
+ }
+diff --git a/test/CycleDetectorTest.java b/test/CycleDetectorTest.java
+index 106aec2..d1acfde 100644
+--- a/test/CycleDetectorTest.java
++++ b/test/CycleDetectorTest.java
+@@ -1,25 +1,26 @@
+ import org.junit.jupiter.api.DisplayName;
+-import org.junit.jupiter.api.Nested;
+ import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.EnumSource;
+ 
+ import java.util.List;
+ import java.util.Optional;
+ 
+ import static org.junit.jupiter.api.Assertions.assertEquals;
+ import static org.junit.jupiter.api.Assertions.assertFalse;
+-import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+ import static org.junit.jupiter.api.Assertions.assertTrue;
+ 
+ /**
+- * JUnit 5 test suite for {@link CycleDetector}.
++ * JUnit 5 test suite for the {@link CycleDetector} strategy and its
++ * implementations. Behavioural tests run against every {@link
++ * CycleDetectionAlgorithm} so all implementations must satisfy the same contract.
+  *
+  * <p>Compile and run with {@code ./run-tests.sh} (no build tool required).
+  */
+ @DisplayName("CycleDetector")
+ class CycleDetectorTest {
+ 
+-    private final CycleDetector detector = new CycleDetector();
+-
+     /** Asserts that {@code cycle} is a valid closed walk along real edges of {@code graph}. */
+     private static void assertIsCycleOf(Cycle cycle, DirectedGraph graph) {
+         List<Integer> v = cycle.vertices();
+@@ -33,96 +34,102 @@ class CycleDetectorTest {
+         }
+     }
+ 
+-    @Nested
+-    @DisplayName("hasCycle")
+-    class HasCycle {
+-
+-        @Test
+-        @DisplayName("reports a cycle in a graph that loops back")
+-        void detectsCycle() {
+-            DirectedGraph graph = DirectedGraph.from(4, new int[][] {
+-                {0, 1}, {1, 2}, {2, 0}, {2, 3}
+-            });
+-            assertTrue(detector.hasCycle(graph));
+-        }
+-
+-        @Test
+-        @DisplayName("reports no cycle in a DAG")
+-        void acyclicDag() {
+-            DirectedGraph graph = DirectedGraph.from(4, new int[][] {
+-                {0, 1}, {0, 2}, {1, 3}, {2, 3}
+-            });
+-            assertFalse(detector.hasCycle(graph));
+-        }
+-
+-        @Test
+-        @DisplayName("treats a self-loop as a cycle")
+-        void selfLoop() {
+-            assertTrue(detector.hasCycle(DirectedGraph.from(1, new int[][] {{0, 0}})));
+-        }
+-
+-        @Test
+-        @DisplayName("an empty graph is acyclic")
+-        void emptyGraph() {
+-            assertFalse(detector.hasCycle(DirectedGraph.from(0, new int[][] {})));
+-        }
+-
+-        @Test
+-        @DisplayName("a graph with vertices but no edges is acyclic")
+-        void noEdges() {
+-            assertFalse(detector.hasCycle(DirectedGraph.from(3, new int[][] {})));
+-        }
++    @ParameterizedTest(name = "{0}")
++    @EnumSource(CycleDetectionAlgorithm.class)
++    @DisplayName("detects a cycle and returns a valid path")
++    void detectsCycle(CycleDetectionAlgorithm algorithm) {
++        CycleDetector detector = CycleDetector.create(algorithm);
++        DirectedGraph graph = DirectedGraph.from(4, new int[][] {
++            {0, 1}, {1, 2}, {2, 0}, {2, 3}
++        });
++        assertTrue(detector.hasCycle(graph));
++        assertIsCycleOf(detector.findCycle(graph).orElseThrow(), graph);
++    }
+ 
+-        @Test
+-        @DisplayName("finds a cycle living in a disconnected component")
+-        void cycleInSeparateComponent() {
+-            DirectedGraph graph = DirectedGraph.from(4, new int[][] {
+-                {0, 1},          // acyclic component
+-                {2, 3}, {3, 2}   // cyclic component
+-            });
+-            assertTrue(detector.hasCycle(graph));
+-        }
++    @ParameterizedTest(name = "{0}")
++    @EnumSource(CycleDetectionAlgorithm.class)
++    @DisplayName("reports a DAG as acyclic")
++    void acyclicDag(CycleDetectionAlgorithm algorithm) {
++        CycleDetector detector = CycleDetector.create(algorithm);
++        DirectedGraph graph = DirectedGraph.from(4, new int[][] {
++            {0, 1}, {0, 2}, {1, 3}, {2, 3}
++        });
++        assertFalse(detector.hasCycle(graph));
++        assertEquals(Optional.empty(), detector.findCycle(graph));
+     }
+ 
+-    @Nested
+-    @DisplayName("findCycle")
+-    class FindCycle {
++    @ParameterizedTest(name = "{0}")
++    @EnumSource(CycleDetectionAlgorithm.class)
++    @DisplayName("represents a self-loop as [v, v]")
++    void selfLoop(CycleDetectionAlgorithm algorithm) {
++        CycleDetector detector = CycleDetector.create(algorithm);
++        DirectedGraph graph = DirectedGraph.from(2, new int[][] {{1, 1}});
++        assertTrue(detector.hasCycle(graph));
++        assertEquals(List.of(1, 1), detector.findCycle(graph).orElseThrow().vertices());
++    }
+ 
+-        @Test
+-        @DisplayName("returns empty for an acyclic graph")
+-        void emptyWhenAcyclic() {
+-            DirectedGraph graph = DirectedGraph.from(3, new int[][] {{0, 1}, {1, 2}});
+-            assertEquals(Optional.empty(), detector.findCycle(graph));
+-        }
++    @ParameterizedTest(name = "{0}")
++    @EnumSource(CycleDetectionAlgorithm.class)
++    @DisplayName("treats empty and edgeless graphs as acyclic")
++    void trivialGraphs(CycleDetectionAlgorithm algorithm) {
++        CycleDetector detector = CycleDetector.create(algorithm);
++        assertFalse(detector.hasCycle(DirectedGraph.from(0, new int[][] {})));
++        assertFalse(detector.hasCycle(DirectedGraph.from(3, new int[][] {})));
++    }
+ 
+-        @Test
+-        @DisplayName("returns a valid closed walk along graph edges")
+-        void returnsValidCycle() {
+-            DirectedGraph graph = DirectedGraph.from(4, new int[][] {
+-                {0, 1}, {1, 2}, {2, 0}, {2, 3}
+-            });
+-            Optional<Cycle> cycle = detector.findCycle(graph);
+-            assertTrue(cycle.isPresent());
+-            assertIsCycleOf(cycle.get(), graph);
+-        }
++    @ParameterizedTest(name = "{0}")
++    @EnumSource(CycleDetectionAlgorithm.class)
++    @DisplayName("finds a cycle living in a disconnected component")
++    void cycleInSeparateComponent(CycleDetectionAlgorithm algorithm) {
++        CycleDetector detector = CycleDetector.create(algorithm);
++        DirectedGraph graph = DirectedGraph.from(4, new int[][] {
++            {0, 1},          // acyclic component
++            {2, 3}, {3, 2}   // cyclic component
++        });
++        Cycle cycle = detector.findCycle(graph).orElseThrow();
++        assertIsCycleOf(cycle, graph);
++        assertFalse(cycle.vertices().contains(0), "component {0,1} is acyclic: " + cycle);
++    }
+ 
+-        @Test
+-        @DisplayName("represents a self-loop as [v, v]")
+-        void selfLoopShape() {
+-            Cycle cycle = detector.findCycle(DirectedGraph.from(2, new int[][] {{1, 1}})).orElseThrow();
+-            assertEquals(List.of(1, 1), cycle.vertices());
++    @Test
++    @DisplayName("all algorithms agree on hasCycle across a battery of graphs")
++    void algorithmsAgree() {
++        DirectedGraph[] graphs = {
++            DirectedGraph.from(3, new int[][] {{0, 1}, {1, 2}, {2, 0}}),       // cycle
++            DirectedGraph.from(3, new int[][] {{0, 1}, {1, 2}}),               // chain
++            DirectedGraph.from(1, new int[][] {{0, 0}}),                       // self-loop
++            DirectedGraph.from(5, new int[][] {{0, 1}, {1, 2}, {3, 4}}),       // forest
++            DirectedGraph.from(4, new int[][] {{0, 1}, {1, 2}, {2, 3}, {3, 1}}), // tail into cycle
++            DirectedGraph.from(0, new int[][] {}),                            // empty
++        };
++        CycleDetector dfs = CycleDetector.create(CycleDetectionAlgorithm.DFS);
++        CycleDetector kahn = CycleDetector.create(CycleDetectionAlgorithm.KAHN);
++        for (DirectedGraph graph : graphs) {
++            assertEquals(dfs.hasCycle(graph), kahn.hasCycle(graph),
++                    "algorithms disagree on " + graph);
+         }
++    }
+ 
+-        @Test
+-        @DisplayName("locates the cycle in a disconnected component")
+-        void cycleInSeparateComponent() {
+-            DirectedGraph graph = DirectedGraph.from(4, new int[][] {
+-                {0, 1}, {2, 3}, {3, 2}
+-            });
+-            Cycle cycle = detector.findCycle(graph).orElseThrow();
+-            assertNotNull(cycle);
++    @Test
++    @DisplayName("a tail leading into a cycle excludes the tail from the reported cycle")
++    void tailExcludedFromCycle() {
++        DirectedGraph graph = DirectedGraph.from(4, new int[][] {
++            {0, 1}, {1, 2}, {2, 3}, {3, 1}   // 0 is a tail into the cycle 1->2->3->1
++        });
++        for (CycleDetectionAlgorithm algorithm : CycleDetectionAlgorithm.values()) {
++            Cycle cycle = CycleDetector.create(algorithm).findCycle(graph).orElseThrow();
+             assertIsCycleOf(cycle, graph);
+-            assertFalse(cycle.vertices().contains(0), "component {0,1} is acyclic: " + cycle);
++            assertFalse(cycle.vertices().contains(0), algorithm + " included the tail: " + cycle);
+         }
+     }
++
++    @Test
++    @DisplayName("factory returns the requested implementation")
++    void factorySelectsImplementation() {
++        assertInstanceOf(DfsCycleDetector.class, CycleDetector.create(CycleDetectionAlgorithm.DFS));
++        assertInstanceOf(KahnCycleDetector.class, CycleDetector.create(CycleDetectionAlgorithm.KAHN));
++        // selection from a runtime string, e.g. config or CLI argument
++        assertInstanceOf(KahnCycleDetector.class,
++                CycleDetector.create(CycleDetectionAlgorithm.valueOf("KAHN")));
++    }
+ }

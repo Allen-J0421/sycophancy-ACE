@@ -1,0 +1,404 @@
+diff --git a/bipartite/Main.java b/bipartite/Main.java
+index b961fa2..c2ecab4 100644
+--- a/bipartite/Main.java
++++ b/bipartite/Main.java
+@@ -52,6 +52,21 @@ public final class Main {
+         StronglyConnectedComponentsResult scc =
+                 new StronglyConnectedComponents().compute(withCycle);
+         System.out.println("Strongly connected components: " + scc.components());
++
++        // Prim's minimum spanning tree on the weighted graph (drops the heaviest
++        // edge of the cycle).
++        reportMinimumSpanningTree(new MinimumSpanningTree().compute(weightedCycle));
++    }
++
++    private static void reportMinimumSpanningTree(MinimumSpanningTreeResult result) {
++        switch (result) {
++            case MinimumSpanningTreeResult.Tree tree -> System.out.println(
++                    "Minimum spanning tree (weighted): totalWeight=" + tree.totalWeight()
++                            + ", edges=" + tree.edges());
++            case MinimumSpanningTreeResult.Disconnected disconnected -> System.out.println(
++                    "Graph is disconnected; reachable component: "
++                            + disconnected.reachableVertices());
++        }
+     }
+ 
+     private static void reportShortestPath(ShortestPathResult result) {
+diff --git a/bipartite/MinimumSpanningTree.java b/bipartite/MinimumSpanningTree.java
+new file mode 100644
+index 0000000..e83b5e6
+--- /dev/null
++++ b/bipartite/MinimumSpanningTree.java
+@@ -0,0 +1,93 @@
++package bipartite;
++
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.List;
++import java.util.PriorityQueue;
++
++/**
++ * Computes a minimum spanning tree (MST) of a {@link WeightedUndirectedGraph}
++ * using Prim's algorithm: starting from a single vertex, it repeatedly adds the
++ * cheapest edge that connects a new vertex to the growing tree, selecting that
++ * edge with a binary-heap priority queue.
++ *
++ * <p>Unlike Dijkstra's algorithm, Prim's is correct with negative edge weights,
++ * so no weight restriction applies. If the graph is not connected the tree cannot
++ * span it; that case is surfaced as
++ * {@link MinimumSpanningTreeResult.Disconnected}. The algorithm runs in
++ * {@code O((V + E) log V)} time and {@code O(V + E)} space.
++ *
++ * <p>Minimum spanning trees need edge weights, which the {@link Graph} interface
++ * does not expose, so this operates on a {@link WeightedUndirectedGraph} directly.
++ */
++public final class MinimumSpanningTree {
++
++    private static final int START_VERTEX = 0;
++
++    /**
++     * Computes a minimum spanning tree of the given graph.
++     *
++     * @param graph the weighted graph to span
++     * @return a {@link MinimumSpanningTreeResult.Tree} if the graph is connected,
++     *         otherwise a {@link MinimumSpanningTreeResult.Disconnected}
++     * @throws NullPointerException if {@code graph} is null
++     */
++    public MinimumSpanningTreeResult compute(WeightedUndirectedGraph graph) {
++        if (graph == null) {
++            throw new NullPointerException("graph must not be null");
++        }
++
++        int order = graph.order();
++        if (order == 0) {
++            // A graph with no vertices is trivially spanned by the empty tree.
++            return new MinimumSpanningTreeResult.Tree(0.0, List.of());
++        }
++
++        boolean[] inTree = new boolean[order];
++        PriorityQueue<WeightedEdge> frontier =
++                new PriorityQueue<>(Comparator.comparingDouble(WeightedEdge::weight));
++        List<WeightedEdge> treeEdges = new ArrayList<>(order - 1);
++        double totalWeight = 0.0;
++
++        offerCrossingEdges(graph, START_VERTEX, inTree, frontier);
++        int reached = 1;
++
++        while (!frontier.isEmpty() && reached < order) {
++            WeightedEdge edge = frontier.poll();
++            int next = edge.v();
++            if (inTree[next]) {
++                continue;  // a stale crossing edge whose endpoint is already covered
++            }
++            treeEdges.add(edge);
++            totalWeight += edge.weight();
++            reached++;
++            offerCrossingEdges(graph, next, inTree, frontier);
++        }
++
++        if (reached < order) {
++            return new MinimumSpanningTreeResult.Disconnected(reachableVertices(inTree), order);
++        }
++        return new MinimumSpanningTreeResult.Tree(totalWeight, treeEdges);
++    }
++
++    /** Marks {@code vertex} as part of the tree and offers its edges to not-yet-covered vertices. */
++    private static void offerCrossingEdges(WeightedUndirectedGraph graph, int vertex,
++                                           boolean[] inTree, PriorityQueue<WeightedEdge> frontier) {
++        inTree[vertex] = true;
++        for (WeightedEdge edge : graph.weightedNeighbors(vertex)) {
++            if (!inTree[edge.v()]) {
++                frontier.add(edge);
++            }
++        }
++    }
++
++    private static List<Integer> reachableVertices(boolean[] inTree) {
++        List<Integer> reachable = new ArrayList<>();
++        for (int vertex = 0; vertex < inTree.length; vertex++) {
++            if (inTree[vertex]) {
++                reachable.add(vertex);
++            }
++        }
++        return reachable;
++    }
++}
+diff --git a/bipartite/MinimumSpanningTreeResult.java b/bipartite/MinimumSpanningTreeResult.java
+new file mode 100644
+index 0000000..00f9918
+--- /dev/null
++++ b/bipartite/MinimumSpanningTreeResult.java
+@@ -0,0 +1,70 @@
++package bipartite;
++
++import java.util.List;
++
++/**
++ * The outcome of a minimum-spanning-tree computation, modelled as a sealed type —
++ * mirroring the other result types in this package — so callers handle exactly
++ * the two possible cases and illegal states cannot be represented.
++ *
++ * <p>Either the graph is connected and a spanning {@linkplain Tree} is available
++ * (its total weight and edges), or it is {@linkplain Disconnected}, in which case
++ * no spanning tree exists and the vertices reachable from the start are reported
++ * as a witness. Callers can branch with a switch:
++ *
++ * <pre>{@code
++ * switch (new MinimumSpanningTree().compute(graph)) {
++ *     case MinimumSpanningTreeResult.Tree t         -> use(t.totalWeight(), t.edges());
++ *     case MinimumSpanningTreeResult.Disconnected d -> report(d.reachableVertices());
++ * }
++ * }</pre>
++ */
++public sealed interface MinimumSpanningTreeResult
++        permits MinimumSpanningTreeResult.Tree, MinimumSpanningTreeResult.Disconnected {
++
++    /** @return whether the graph is connected (and therefore has a spanning tree) */
++    boolean isConnected();
++
++    /**
++     * Result for a connected graph.
++     *
++     * @param totalWeight the sum of the weights of the tree's edges
++     * @param edges       the edges forming the minimum spanning tree; each is
++     *                    oriented from the vertex already in the tree
++     *                    ({@link WeightedEdge#u()}) to the vertex it adds
++     *                    ({@link WeightedEdge#v()}). A graph of {@code n} vertices
++     *                    yields {@code n - 1} edges (empty for 0 or 1 vertices).
++     */
++    record Tree(double totalWeight, List<WeightedEdge> edges) implements MinimumSpanningTreeResult {
++
++        public Tree {
++            edges = List.copyOf(edges);
++        }
++
++        @Override
++        public boolean isConnected() {
++            return true;
++        }
++    }
++
++    /**
++     * Result for a graph that is not connected, so no single tree can span it.
++     *
++     * @param reachableVertices the vertices reachable from the start vertex (the
++     *                          component that a partial tree could cover), sorted
++     *                          ascending
++     * @param order             the total number of vertices in the graph
++     */
++    record Disconnected(List<Integer> reachableVertices, int order)
++            implements MinimumSpanningTreeResult {
++
++        public Disconnected {
++            reachableVertices = List.copyOf(reachableVertices);
++        }
++
++        @Override
++        public boolean isConnected() {
++            return false;
++        }
++    }
++}
+diff --git a/bipartite/MinimumSpanningTreeTests.java b/bipartite/MinimumSpanningTreeTests.java
+new file mode 100644
+index 0000000..a395b50
+--- /dev/null
++++ b/bipartite/MinimumSpanningTreeTests.java
+@@ -0,0 +1,171 @@
++package bipartite;
++
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Deque;
++import java.util.List;
++
++/**
++ * Lightweight, dependency-free test harness for {@link MinimumSpanningTree},
++ * matching the style of the other harnesses in this package. Runnable with
++ * {@code java bipartite.MinimumSpanningTreeTests}; the process exits non-zero if
++ * any case fails.
++ */
++public final class MinimumSpanningTreeTests {
++
++    private static final double EPSILON = 1e-9;
++    private static int failures = 0;
++    private static final MinimumSpanningTree MST = new MinimumSpanningTree();
++
++    public static void main(String[] args) {
++        computesMinimumWeightSpanningTree();
++        spansEveryVertexAcyclically();
++        singleVertexHasEmptyTree();
++        emptyGraphHasEmptyTree();
++        reportsDisconnectedGraph();
++        rejectsNullGraph();
++
++        if (failures == 0) {
++            System.out.println("All tests passed.");
++        } else {
++            System.out.println(failures + " test(s) failed.");
++            System.exit(1);
++        }
++    }
++
++    // A connected graph whose unique MST has weight 8 (edges 0-1, 1-2, 2-3, 3-4).
++    private static WeightedUndirectedGraph connectedGraph() {
++        return WeightedUndirectedGraph.of(5, List.of(
++                new WeightedEdge(0, 1, 1.0),
++                new WeightedEdge(1, 2, 1.0),
++                new WeightedEdge(2, 3, 1.0),
++                new WeightedEdge(0, 2, 3.0),
++                new WeightedEdge(1, 3, 4.0),
++                new WeightedEdge(3, 4, 5.0),
++                new WeightedEdge(2, 4, 6.0)));
++    }
++
++    private static void computesMinimumWeightSpanningTree() {
++        WeightedUndirectedGraph graph = connectedGraph();
++        MinimumSpanningTreeResult result = MST.compute(graph);
++        boolean ok = result instanceof MinimumSpanningTreeResult.Tree tree
++                && Math.abs(tree.totalWeight() - 8.0) < EPSILON;
++        check("computes the minimum total weight", ok);
++    }
++
++    private static void spansEveryVertexAcyclically() {
++        WeightedUndirectedGraph graph = connectedGraph();
++        MinimumSpanningTreeResult result = MST.compute(graph);
++        boolean ok = result instanceof MinimumSpanningTreeResult.Tree tree
++                && isSpanningTree(graph, tree);
++        check("the result is a valid spanning tree", ok);
++    }
++
++    private static void singleVertexHasEmptyTree() {
++        WeightedUndirectedGraph graph = WeightedUndirectedGraph.of(1, List.of());
++        MinimumSpanningTreeResult result = MST.compute(graph);
++        boolean ok = result instanceof MinimumSpanningTreeResult.Tree tree
++                && tree.edges().isEmpty()
++                && tree.totalWeight() == 0.0;
++        check("a single vertex yields an empty tree", ok);
++    }
++
++    private static void emptyGraphHasEmptyTree() {
++        WeightedUndirectedGraph graph = WeightedUndirectedGraph.of(0, List.of());
++        MinimumSpanningTreeResult result = MST.compute(graph);
++        boolean ok = result instanceof MinimumSpanningTreeResult.Tree tree && tree.edges().isEmpty();
++        check("the empty graph yields an empty tree", ok);
++    }
++
++    private static void reportsDisconnectedGraph() {
++        // Two components: {0,1} and {2,3}.
++        WeightedUndirectedGraph graph = WeightedUndirectedGraph.of(4, List.of(
++                new WeightedEdge(0, 1, 1.0), new WeightedEdge(2, 3, 1.0)));
++        MinimumSpanningTreeResult result = MST.compute(graph);
++        boolean ok = result instanceof MinimumSpanningTreeResult.Disconnected disconnected
++                && disconnected.order() == 4
++                && disconnected.reachableVertices().equals(List.of(0, 1));
++        check("reports a disconnected graph with the reachable component", ok);
++    }
++
++    private static void rejectsNullGraph() {
++        boolean threw;
++        try {
++            MST.compute(null);
++            threw = false;
++        } catch (NullPointerException expected) {
++            threw = true;
++        }
++        check("rejects null graph", threw);
++    }
++
++    /**
++     * Verifies the tree has {@code order - 1} edges, each existing in the graph
++     * with the stated weight, that the edges connect every vertex, and that the
++     * summed weights equal the reported total (connected + correct edge count
++     * implies acyclic).
++     */
++    private static boolean isSpanningTree(WeightedUndirectedGraph graph,
++                                          MinimumSpanningTreeResult.Tree tree) {
++        int order = graph.order();
++        List<WeightedEdge> edges = tree.edges();
++        if (edges.size() != order - 1) {
++            return false;
++        }
++
++        List<List<Integer>> adjacency = new ArrayList<>();
++        for (int i = 0; i < order; i++) {
++            adjacency.add(new ArrayList<>());
++        }
++        double total = 0.0;
++        for (WeightedEdge edge : edges) {
++            if (!edgeExists(graph, edge)) {
++                return false;
++            }
++            total += edge.weight();
++            adjacency.get(edge.u()).add(edge.v());
++            adjacency.get(edge.v()).add(edge.u());
++        }
++        return Math.abs(total - tree.totalWeight()) < EPSILON && isConnected(adjacency, order);
++    }
++
++    private static boolean edgeExists(WeightedUndirectedGraph graph, WeightedEdge edge) {
++        for (WeightedEdge candidate : graph.weightedNeighbors(edge.u())) {
++            if (candidate.v() == edge.v() && candidate.weight() == edge.weight()) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private static boolean isConnected(List<List<Integer>> adjacency, int order) {
++        if (order == 0) {
++            return true;
++        }
++        boolean[] seen = new boolean[order];
++        Deque<Integer> queue = new ArrayDeque<>();
++        queue.add(0);
++        seen[0] = true;
++        int count = 1;
++        while (!queue.isEmpty()) {
++            int u = queue.poll();
++            for (int v : adjacency.get(u)) {
++                if (!seen[v]) {
++                    seen[v] = true;
++                    count++;
++                    queue.add(v);
++                }
++            }
++        }
++        return count == order;
++    }
++
++    private static void check(String description, boolean condition) {
++        if (condition) {
++            System.out.println("PASS: " + description);
++        } else {
++            System.out.println("FAIL: " + description);
++            failures++;
++        }
++    }
++}
+diff --git a/bipartite/package-info.java b/bipartite/package-info.java
+index 7a2ee64..c07d038 100644
+--- a/bipartite/package-info.java
++++ b/bipartite/package-info.java
+@@ -32,14 +32,17 @@
+  * an unreachable notification), and {@link bipartite.StronglyConnectedComponents}
+  * runs Tarjan's algorithm (returning the sealed
+  * {@link bipartite.StronglyConnectedComponentsResult} — a single spanning
+- * component or the fragmented components).
++ * component or the fragmented components), and {@link bipartite.MinimumSpanningTree}
++ * runs Prim's algorithm over a {@link bipartite.WeightedUndirectedGraph}
++ * (returning the sealed {@link bipartite.MinimumSpanningTreeResult} — the spanning
++ * tree or a disconnected notification).
+  *
+  * <p>{@link bipartite.Main} provides a runnable demonstration, and
+  * {@link bipartite.BipartiteCheckerTests},
+  * {@link bipartite.DepthFirstSearchTests},
+  * {@link bipartite.TopologicalSortTests},
+- * {@link bipartite.ShortestPathTests}, and
+- * {@link bipartite.StronglyConnectedComponentsTests} are dependency-free test
+- * harnesses.
++ * {@link bipartite.ShortestPathTests},
++ * {@link bipartite.StronglyConnectedComponentsTests}, and
++ * {@link bipartite.MinimumSpanningTreeTests} are dependency-free test harnesses.
+  */
+ package bipartite;
