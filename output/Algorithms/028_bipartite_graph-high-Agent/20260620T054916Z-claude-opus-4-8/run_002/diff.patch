@@ -1,0 +1,381 @@
+diff --git a/bipartite/BipartiteChecker.java b/bipartite/BipartiteChecker.java
+index a6d1a78..1d99128 100644
+--- a/bipartite/BipartiteChecker.java
++++ b/bipartite/BipartiteChecker.java
+@@ -3,8 +3,11 @@ package bipartite;
+ import java.util.ArrayDeque;
+ import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.Collections;
+ import java.util.Deque;
++import java.util.HashMap;
+ import java.util.List;
++import java.util.Map;
+ 
+ /**
+  * Determines whether an {@link UndirectedGraph} is bipartite by attempting a
+@@ -12,12 +15,15 @@ import java.util.List;
+  *
+  * <p>A graph is bipartite if and only if its vertices can be split into two
+  * sets such that every edge crosses between the sets — equivalently, if it
+- * contains no odd-length cycle. The check runs in {@code O(V + E)} time and
+- * {@code O(V)} additional space.
++ * contains no odd-length cycle. When a graph is not bipartite, the checker
++ * reconstructs such an odd cycle from the breadth-first search tree as a
++ * verifiable witness. The check runs in {@code O(V + E)} time and {@code O(V)}
++ * additional space.
+  */
+ public final class BipartiteChecker {
+ 
+     private static final int UNCOLORED = -1;
++    private static final int NO_PARENT = -1;
+     private static final int COLOR_A = 0;
+     private static final int COLOR_B = 1;
+ 
+@@ -25,8 +31,9 @@ public final class BipartiteChecker {
+      * Checks whether the given graph is bipartite.
+      *
+      * @param graph the graph to inspect
+-     * @return a {@link BipartiteResult} that reports the answer and, when
+-     *         bipartite, the two vertex partitions
++     * @return a {@link BipartiteResult.Bipartite} with the two vertex partitions
++     *         if the graph is bipartite, otherwise a
++     *         {@link BipartiteResult.NotBipartite} carrying an odd-cycle witness
+      * @throws NullPointerException if {@code graph} is null
+      */
+     public BipartiteResult check(UndirectedGraph graph) {
+@@ -36,27 +43,35 @@ public final class BipartiteChecker {
+ 
+         int order = graph.order();
+         int[] color = new int[order];
++        int[] parent = new int[order];
+         Arrays.fill(color, UNCOLORED);
++        Arrays.fill(parent, NO_PARENT);
+ 
+         // Each iteration seeds the next uncolored component, so disconnected
+         // graphs are handled correctly.
+         for (int start = 0; start < order; start++) {
+-            if (color[start] == UNCOLORED && !colorComponent(graph, start, color)) {
+-                return BipartiteResult.notBipartite();
++            if (color[start] != UNCOLORED) {
++                continue;
++            }
++            List<Integer> oddCycle = colorComponent(graph, start, color, parent);
++            if (oddCycle != null) {
++                return new BipartiteResult.NotBipartite(oddCycle);
+             }
+         }
+ 
+-        return BipartiteResult.bipartite(verticesWithColor(color, COLOR_A),
++        return new BipartiteResult.Bipartite(verticesWithColor(color, COLOR_A),
+                 verticesWithColor(color, COLOR_B));
+     }
+ 
+     /**
+-     * Colors the component reachable from {@code start} with alternating colors.
++     * Colors the component reachable from {@code start} with alternating colors,
++     * recording BFS parents so an odd cycle can be reconstructed on conflict.
+      *
+-     * @return {@code true} if the component is 2-colorable, {@code false} if a
+-     *         conflicting edge (two neighbors sharing a color) is found
++     * @return {@code null} if the component is 2-colorable, otherwise the
++     *         odd-length cycle formed by the first conflicting edge
+      */
+-    private static boolean colorComponent(UndirectedGraph graph, int start, int[] color) {
++    private static List<Integer> colorComponent(UndirectedGraph graph, int start,
++                                                int[] color, int[] parent) {
+         Deque<Integer> queue = new ArrayDeque<>();
+         color[start] = COLOR_A;
+         queue.add(start);
+@@ -66,13 +81,43 @@ public final class BipartiteChecker {
+             for (int v : graph.neighbors(u)) {
+                 if (color[v] == UNCOLORED) {
+                     color[v] = opposite(color[u]);
++                    parent[v] = u;
+                     queue.add(v);
+                 } else if (color[v] == color[u]) {
+-                    return false;
++                    return reconstructOddCycle(parent, u, v);
+                 }
+             }
+         }
+-        return true;
++        return null;
++    }
++
++    /**
++     * Reconstructs an odd cycle from the conflicting edge {@code (u, v)}, whose
++     * endpoints share a color. The cycle runs up the BFS tree from {@code u} to
++     * the lowest common ancestor of {@code u} and {@code v}, back down to
++     * {@code v}, and closes via the conflicting edge {@code v -> u}.
++     */
++    private static List<Integer> reconstructOddCycle(int[] parent, int u, int v) {
++        Map<Integer, Integer> depthOnUPath = new HashMap<>();
++        List<Integer> uPath = new ArrayList<>();
++        for (int x = u; x != NO_PARENT; x = parent[x]) {
++            depthOnUPath.put(x, uPath.size());
++            uPath.add(x);
++        }
++
++        List<Integer> vPath = new ArrayList<>();
++        int ancestor = v;
++        while (!depthOnUPath.containsKey(ancestor)) {
++            vPath.add(ancestor);
++            ancestor = parent[ancestor];
++        }
++
++        // u ... lowest common ancestor (inclusive)
++        List<Integer> cycle = new ArrayList<>(uPath.subList(0, depthOnUPath.get(ancestor) + 1));
++        // ... back down to v (lca already included above, v's own path reversed)
++        Collections.reverse(vPath);
++        cycle.addAll(vPath);
++        return cycle;
+     }
+ 
+     private static int opposite(int color) {
+diff --git a/bipartite/BipartiteCheckerTests.java b/bipartite/BipartiteCheckerTests.java
+index da7078e..d047de7 100644
+--- a/bipartite/BipartiteCheckerTests.java
++++ b/bipartite/BipartiteCheckerTests.java
+@@ -15,6 +15,8 @@ public final class BipartiteCheckerTests {
+ 
+     public static void main(String[] args) {
+         triangleIsNotBipartite();
++        triangleWitnessIsAValidOddCycle();
++        longOddCycleWitnessIsValid();
+         evenCycleIsBipartite();
+         emptyGraphIsBipartite();
+         disconnectedGraphIsBipartite();
+@@ -37,6 +39,25 @@ public final class BipartiteCheckerTests {
+         check("triangle is not bipartite", !CHECKER.check(graph).isBipartite());
+     }
+ 
++    private static void triangleWitnessIsAValidOddCycle() {
++        UndirectedGraph graph = UndirectedGraph.of(3, new int[][] {{0, 1}, {1, 2}, {2, 0}});
++        BipartiteResult result = CHECKER.check(graph);
++        check("triangle witness is a valid odd cycle",
++                result instanceof BipartiteResult.NotBipartite notBipartite
++                        && isValidOddCycle(graph, notBipartite.oddCycle()));
++    }
++
++    private static void longOddCycleWitnessIsValid() {
++        // A 5-cycle 0-1-2-3-4-0 (odd) plus a pendant vertex 5 hanging off it.
++        UndirectedGraph graph = UndirectedGraph.of(6, new int[][] {
++                {0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 0}, {2, 5}
++        });
++        BipartiteResult result = CHECKER.check(graph);
++        check("longer odd-cycle witness is valid",
++                result instanceof BipartiteResult.NotBipartite notBipartite
++                        && isValidOddCycle(graph, notBipartite.oddCycle()));
++    }
++
+     private static void evenCycleIsBipartite() {
+         UndirectedGraph graph = UndirectedGraph.of(4, new int[][] {{0, 1}, {1, 2}, {2, 3}, {3, 0}});
+         check("even cycle is bipartite", CHECKER.check(graph).isBipartite());
+@@ -56,10 +77,11 @@ public final class BipartiteCheckerTests {
+     private static void partitionsCoverAllVertices() {
+         UndirectedGraph graph = UndirectedGraph.of(4, new int[][] {{0, 1}, {1, 2}, {2, 3}, {3, 0}});
+         BipartiteResult result = CHECKER.check(graph);
+-        int covered = result.partitionA().size() + result.partitionB().size();
+-        check("partitions cover every vertex exactly once", covered == 4
+-                && List.of(0, 2).equals(result.partitionA())
+-                && List.of(1, 3).equals(result.partitionB()));
++        boolean ok = result instanceof BipartiteResult.Bipartite bipartite
++                && bipartite.partitionA().size() + bipartite.partitionB().size() == 4
++                && List.of(0, 2).equals(bipartite.partitionA())
++                && List.of(1, 3).equals(bipartite.partitionB());
++        check("partitions cover every vertex exactly once", ok);
+     }
+ 
+     private static void rejectsEdgeOutOfRange() {
+@@ -88,6 +110,26 @@ public final class BipartiteCheckerTests {
+         check("rejects null graph", threw);
+     }
+ 
++    /**
++     * A witness is valid when it has odd length ({@code >= 3}) and every
++     * consecutive pair of vertices — including the closing edge from the last
++     * vertex back to the first — is actually adjacent in the graph.
++     */
++    private static boolean isValidOddCycle(UndirectedGraph graph, List<Integer> cycle) {
++        int n = cycle.size();
++        if (n < 3 || n % 2 == 0) {
++            return false;
++        }
++        for (int i = 0; i < n; i++) {
++            int from = cycle.get(i);
++            int to = cycle.get((i + 1) % n);
++            if (!graph.neighbors(from).contains(to)) {
++                return false;
++            }
++        }
++        return true;
++    }
++
+     private static boolean throwsIllegalArgument(Runnable action) {
+         try {
+             action.run();
+diff --git a/bipartite/BipartiteResult.java b/bipartite/BipartiteResult.java
+index dd6e636..ef87c79 100644
+--- a/bipartite/BipartiteResult.java
++++ b/bipartite/BipartiteResult.java
+@@ -1,65 +1,66 @@
+ package bipartite;
+ 
+-import java.util.Collections;
+ import java.util.List;
+ 
+ /**
+- * The outcome of a bipartite check.
++ * The outcome of a bipartite check, modelled as a sealed type so that callers
++ * handle exactly the two possible cases and illegal states cannot be
++ * represented.
+  *
+- * <p>When {@link #isBipartite()} is {@code true}, {@link #partitionA()} and
+- * {@link #partitionB()} hold the two independent vertex sets of a valid
+- * 2-coloring. When it is {@code false}, both partitions are empty because no
+- * such 2-coloring exists.
++ * <p>Either the graph {@linkplain Bipartite is bipartite}, in which case the
++ * two independent vertex sets of a valid 2-coloring are available, or it
++ * {@linkplain NotBipartite is not}, in which case an odd-length cycle witnessing
++ * the failure is available. Callers can branch with a switch:
++ *
++ * <pre>{@code
++ * switch (checker.check(graph)) {
++ *     case BipartiteResult.Bipartite b    -> use(b.partitionA(), b.partitionB());
++ *     case BipartiteResult.NotBipartite n -> report(n.oddCycle());
++ * }
++ * }</pre>
+  */
+-public final class BipartiteResult {
+-
+-    private static final BipartiteResult NOT_BIPARTITE =
+-            new BipartiteResult(false, List.of(), List.of());
++public sealed interface BipartiteResult
++        permits BipartiteResult.Bipartite, BipartiteResult.NotBipartite {
+ 
+-    private final boolean bipartite;
+-    private final List<Integer> partitionA;
+-    private final List<Integer> partitionB;
+-
+-    private BipartiteResult(boolean bipartite, List<Integer> partitionA, List<Integer> partitionB) {
+-        this.bipartite = bipartite;
+-        this.partitionA = partitionA;
+-        this.partitionB = partitionB;
+-    }
++    /** @return whether the graph can be 2-colored */
++    boolean isBipartite();
+ 
+-    /** @return a result for a graph that is bipartite, with its two vertex sets */
+-    static BipartiteResult bipartite(List<Integer> partitionA, List<Integer> partitionB) {
+-        return new BipartiteResult(
+-                true,
+-                Collections.unmodifiableList(partitionA),
+-                Collections.unmodifiableList(partitionB));
+-    }
++    /**
++     * Result for a graph that admits a 2-coloring.
++     *
++     * @param partitionA the vertices assigned the first color
++     * @param partitionB the vertices assigned the second color
++     */
++    record Bipartite(List<Integer> partitionA, List<Integer> partitionB)
++            implements BipartiteResult {
+ 
+-    /** @return the shared result for a graph that is not bipartite */
+-    static BipartiteResult notBipartite() {
+-        return NOT_BIPARTITE;
+-    }
++        public Bipartite {
++            partitionA = List.copyOf(partitionA);
++            partitionB = List.copyOf(partitionB);
++        }
+ 
+-    /** @return whether the graph can be 2-colored */
+-    public boolean isBipartite() {
+-        return bipartite;
++        @Override
++        public boolean isBipartite() {
++            return true;
++        }
+     }
+ 
+-    /** @return the vertices assigned the first color (empty if not bipartite) */
+-    public List<Integer> partitionA() {
+-        return partitionA;
+-    }
++    /**
++     * Result for a graph that is not bipartite, carrying a witness.
++     *
++     * @param oddCycle vertices forming an odd-length cycle (the closing edge
++     *                 runs from the last vertex back to the first); its presence
++     *                 proves the graph cannot be 2-colored
++     */
++    record NotBipartite(List<Integer> oddCycle) implements BipartiteResult {
+ 
+-    /** @return the vertices assigned the second color (empty if not bipartite) */
+-    public List<Integer> partitionB() {
+-        return partitionB;
+-    }
++        public NotBipartite {
++            oddCycle = List.copyOf(oddCycle);
++        }
+ 
+-    @Override
+-    public String toString() {
+-        if (!bipartite) {
+-            return "BipartiteResult{bipartite=false}";
++        @Override
++        public boolean isBipartite() {
++            return false;
+         }
+-        return "BipartiteResult{bipartite=true, partitionA=" + partitionA
+-                + ", partitionB=" + partitionB + "}";
+     }
+ }
+diff --git a/bipartite/Main.java b/bipartite/Main.java
+index 422393b..1792bfb 100644
+--- a/bipartite/Main.java
++++ b/bipartite/Main.java
+@@ -18,9 +18,13 @@ public final class Main {
+         BipartiteResult result = new BipartiteChecker().check(graph);
+ 
+         System.out.println("Bipartite: " + result.isBipartite());
+-        if (result.isBipartite()) {
+-            System.out.println("Partition A: " + result.partitionA());
+-            System.out.println("Partition B: " + result.partitionB());
++        switch (result) {
++            case BipartiteResult.Bipartite bipartite -> {
++                System.out.println("Partition A: " + bipartite.partitionA());
++                System.out.println("Partition B: " + bipartite.partitionB());
++            }
++            case BipartiteResult.NotBipartite notBipartite ->
++                    System.out.println("Odd-cycle witness: " + notBipartite.oddCycle());
+         }
+     }
+ }
+diff --git a/bipartite/package-info.java b/bipartite/package-info.java
+new file mode 100644
+index 0000000..831cbe4
+--- /dev/null
++++ b/bipartite/package-info.java
+@@ -0,0 +1,19 @@
++/**
++ * A small, self-contained library for deciding whether an undirected graph is
++ * bipartite.
++ *
++ * <p>The package separates four concerns:
++ * <ul>
++ *   <li>{@link bipartite.Edge} and {@link bipartite.UndirectedGraph} model an
++ *       immutable graph;</li>
++ *   <li>{@link bipartite.GraphInputValidator} validates construction inputs;</li>
++ *   <li>{@link bipartite.BipartiteChecker} runs the breadth-first 2-coloring
++ *       algorithm;</li>
++ *   <li>{@link bipartite.BipartiteResult} is the sealed outcome — either the two
++ *       vertex partitions or an odd-cycle witness.</li>
++ * </ul>
++ *
++ * <p>{@link bipartite.Main} provides a runnable demonstration and
++ * {@link bipartite.BipartiteCheckerTests} a dependency-free test harness.
++ */
++package bipartite;

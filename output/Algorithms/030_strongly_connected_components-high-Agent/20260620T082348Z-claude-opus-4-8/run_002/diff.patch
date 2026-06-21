@@ -1,0 +1,176 @@
+diff --git a/DirectedGraph.java b/DirectedGraph.java
+index 3a8e87d..2ac1e47 100644
+--- a/DirectedGraph.java
++++ b/DirectedGraph.java
+@@ -23,10 +23,10 @@ public final class DirectedGraph<V> {
+ 
+     private final Map<V, List<V>> adjacency;
+ 
+-    DirectedGraph(Map<V, List<V>> adjacency) {
++    DirectedGraph(Map<V, ? extends List<V>> adjacency) {
+         // Defensive copy preserving insertion order; lists made unmodifiable.
+         Map<V, List<V>> copy = new LinkedHashMap<>();
+-        for (Map.Entry<V, List<V>> entry : adjacency.entrySet()) {
++        for (Map.Entry<V, ? extends List<V>> entry : adjacency.entrySet()) {
+             copy.put(entry.getKey(), Collections.unmodifiableList(new ArrayList<>(entry.getValue())));
+         }
+         this.adjacency = Collections.unmodifiableMap(copy);
+diff --git a/DirectedGraphBuilder.java b/DirectedGraphBuilder.java
+index 7414e31..4700e4e 100644
+--- a/DirectedGraphBuilder.java
++++ b/DirectedGraphBuilder.java
+@@ -63,6 +63,8 @@ public final class DirectedGraphBuilder<V> {
+      *         vertices and edges
+      */
+     public DirectedGraph<V> build() {
+-        return new DirectedGraph<>(new LinkedHashMap<>(adjacency));
++        // DirectedGraph's constructor already takes a defensive deep copy, so
++        // passing the live map directly is safe and avoids a redundant copy.
++        return new DirectedGraph<>(adjacency);
+     }
+ }
+diff --git a/StronglyConnectedComponent.java b/StronglyConnectedComponent.java
+index 96b204b..82e16d8 100644
+--- a/StronglyConnectedComponent.java
++++ b/StronglyConnectedComponent.java
+@@ -1,40 +1,68 @@
+ import java.util.ArrayList;
+ import java.util.Collections;
++import java.util.Iterator;
++import java.util.LinkedHashSet;
+ import java.util.List;
++import java.util.Set;
+ 
+ /**
+  * A single strongly connected component: a maximal set of vertices that are
+  * all mutually reachable from one another.
+  *
++ * <p>A component is a value object whose identity is its <em>set</em> of
++ * vertices: two components are equal when they contain the same vertices,
++ * regardless of the order the traversal happened to discover them in. The
++ * insertion-ordered {@link #vertices()} list is retained for stable output.
++ *
+  * @param <V> the vertex label type
+  */
+-public final class StronglyConnectedComponent<V> {
++public final class StronglyConnectedComponent<V> implements Iterable<V> {
+ 
+     private final List<V> vertices;
++    private final Set<V> membership;
+ 
+     public StronglyConnectedComponent(List<V> vertices) {
+         if (vertices == null || vertices.isEmpty()) {
+             throw new IllegalArgumentException("A component must contain at least one vertex");
+         }
+         this.vertices = Collections.unmodifiableList(new ArrayList<>(vertices));
++        // Backing set gives O(1) membership tests and defines value equality.
++        this.membership = Collections.unmodifiableSet(new LinkedHashSet<>(vertices));
+     }
+ 
+-    /** @return the vertices in this component (unmodifiable). */
++    /** @return the vertices in this component, in discovery order (unmodifiable). */
+     public List<V> vertices() {
+         return vertices;
+     }
+ 
+     /** @return the number of vertices in this component. */
+     public int size() {
+-        return vertices.size();
++        return membership.size();
+     }
+ 
+     /**
+      * @param vertex a vertex
+-     * @return {@code true} if the vertex belongs to this component
++     * @return {@code true} if the vertex belongs to this component (O(1))
+      */
+     public boolean contains(V vertex) {
+-        return vertices.contains(vertex);
++        return membership.contains(vertex);
++    }
++
++    @Override
++    public Iterator<V> iterator() {
++        return vertices.iterator();
++    }
++
++    @Override
++    public boolean equals(Object o) {
++        if (this == o) return true;
++        if (!(o instanceof StronglyConnectedComponent)) return false;
++        return membership.equals(((StronglyConnectedComponent<?>) o).membership);
++    }
++
++    @Override
++    public int hashCode() {
++        return membership.hashCode();
+     }
+ 
+     @Override
+diff --git a/StronglyConnectedComponentsResult.java b/StronglyConnectedComponentsResult.java
+index 02902e5..fb98872 100644
+--- a/StronglyConnectedComponentsResult.java
++++ b/StronglyConnectedComponentsResult.java
+@@ -1,6 +1,9 @@
+ import java.util.ArrayList;
+ import java.util.Collections;
++import java.util.HashMap;
++import java.util.Iterator;
+ import java.util.List;
++import java.util.Map;
+ import java.util.Optional;
+ 
+ /**
+@@ -8,15 +11,27 @@ import java.util.Optional;
+  * collection of strongly connected components discovered in a graph, plus a few
+  * convenience queries over them.
+  *
++ * <p>A vertex-to-component index is built once at construction so that
++ * {@link #componentContaining} answers in O(1) rather than scanning every
++ * component.
++ *
+  * @param <V> the vertex label type
+  */
+-public final class StronglyConnectedComponentsResult<V> {
++public final class StronglyConnectedComponentsResult<V>
++        implements Iterable<StronglyConnectedComponent<V>> {
+ 
+     private final List<StronglyConnectedComponent<V>> components;
++    private final Map<V, StronglyConnectedComponent<V>> componentByVertex;
+ 
+     public StronglyConnectedComponentsResult(List<StronglyConnectedComponent<V>> components) {
+-        this.components = Collections.unmodifiableList(
+-                new ArrayList<>(components));
++        this.components = Collections.unmodifiableList(new ArrayList<>(components));
++        Map<V, StronglyConnectedComponent<V>> index = new HashMap<>();
++        for (StronglyConnectedComponent<V> component : this.components) {
++            for (V vertex : component.vertices()) {
++                index.put(vertex, component);
++            }
++        }
++        this.componentByVertex = Collections.unmodifiableMap(index);
+     }
+ 
+     /** @return all components (unmodifiable). */
+@@ -31,14 +46,14 @@ public final class StronglyConnectedComponentsResult<V> {
+ 
+     /**
+      * @param vertex a vertex
+-     * @return the component containing {@code vertex}, if any
++     * @return the component containing {@code vertex}, if any (O(1))
+      */
+     public Optional<StronglyConnectedComponent<V>> componentContaining(V vertex) {
+-        for (StronglyConnectedComponent<V> component : components) {
+-            if (component.contains(vertex)) {
+-                return Optional.of(component);
+-            }
+-        }
+-        return Optional.empty();
++        return Optional.ofNullable(componentByVertex.get(vertex));
++    }
++
++    @Override
++    public Iterator<StronglyConnectedComponent<V>> iterator() {
++        return components.iterator();
+     }
+ }

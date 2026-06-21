@@ -1,0 +1,275 @@
+diff --git a/DetectCycleDemo.java b/DetectCycleDemo.java
+index d742f17..beb018f 100644
+--- a/DetectCycleDemo.java
++++ b/DetectCycleDemo.java
+@@ -39,5 +39,19 @@ final class DetectCycleDemo {
+         ReachableVerticesVisitor reachable = new ReachableVerticesVisitor();
+         GraphTraversal.traverseFrom(graph, 0, reachable);
+         System.out.println("reachable from 0: " + reachable.reachable());
++
++        // Topological sort: detects DAG-ness and produces an ordering at once.
++        TopologicalSorter sorter = new TopologicalSorter();
++        System.out.println("sample graph is a DAG? " + sorter.isDag(graph));
++
++        DirectedGraph dag = DirectedGraph.builder(4)
++                .addEdge(0, 1)
++                .addEdge(0, 2)
++                .addEdge(1, 3)
++                .addEdge(2, 3)
++                .build();
++        sorter.sort(dag).ifPresentOrElse(
++                order -> System.out.println("topological order: " + order),
++                () -> System.out.println("graph is not a DAG"));
+     }
+ }
+diff --git a/README.md b/README.md
+index 021400b..1c50443 100644
+--- a/README.md
++++ b/README.md
+@@ -102,6 +102,30 @@ Run the bundled demo:
+ javac *.java && java DetectCycleDemo
+ ```
+ 
++## Topological sort
++
++`TopologicalSorter` orders a DAG with Kahn's algorithm (iterative, `O(V + E)`).
++A single call answers *both* "is this a DAG?" and "what is a valid ordering?":
++`sort` returns the ordering when the graph is acyclic, or empty when it contains
++a cycle (a cyclic graph has no linear ordering).
++
++```java
++TopologicalSorter sorter = new TopologicalSorter();
++
++DirectedGraph dag = DirectedGraph.builder(4)
++    .addEdge(0, 1).addEdge(0, 2).addEdge(1, 3).addEdge(2, 3)
++    .build();
++
++sorter.sort(dag).ifPresentOrElse(
++    order -> System.out.println("order: " + order),   // every edge u->v has u before v
++    ()    -> System.out.println("not a DAG"));
++
++sorter.isDag(dag);   // true  — convenience over sort(...).isPresent()
++```
++
++This is the constructive counterpart to the `KAHN` cycle detector: both decide
++acyclicity, but the sorter also materialises the ordering.
++
+ ## Custom graph operations (visitor pattern)
+ 
+ Define new operations over a graph — degree statistics, reachability, edge
+diff --git a/TopologicalSorter.java b/TopologicalSorter.java
+new file mode 100644
+index 0000000..9cb006c
+--- /dev/null
++++ b/TopologicalSorter.java
+@@ -0,0 +1,66 @@
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.Deque;
++import java.util.List;
++import java.util.Optional;
++
++/**
++ * Produces a topological ordering of a {@link DirectedGraph} using Kahn's
++ * algorithm: repeatedly emit a vertex whose in-degree has dropped to zero. The
++ * traversal is iterative (queue-driven), so it handles arbitrarily large graphs
++ * without recursion, and it decides the DAG question and the ordering in a single
++ * pass — a graph has a topological ordering exactly when it is acyclic.
++ *
++ * <p>Runs in O(V + E) time and O(V) extra space. This is the constructive
++ * counterpart to {@link KahnCycleDetector}, which answers the same acyclicity
++ * question without materialising an ordering.
++ */
++final class TopologicalSorter {
++
++    /**
++     * Returns a valid topological ordering of {@code graph} if it is a DAG, or
++     * {@link Optional#empty()} if the graph contains a cycle (and therefore has
++     * no linear ordering). For every edge {@code u -> v}, {@code u} precedes
++     * {@code v} in the returned order. The list is unmodifiable.
++     */
++    Optional<List<Integer>> sort(DirectedGraph graph) {
++        int vertexCount = graph.vertices();
++
++        int[] inDegree = new int[vertexCount];
++        for (int u = 0; u < vertexCount; u++) {
++            for (int v : graph.neighbors(u)) {
++                inDegree[v]++;
++            }
++        }
++
++        Deque<Integer> ready = new ArrayDeque<>();
++        for (int v = 0; v < vertexCount; v++) {
++            if (inDegree[v] == 0) {
++                ready.add(v);
++            }
++        }
++
++        List<Integer> order = new ArrayList<>(vertexCount);
++        while (!ready.isEmpty()) {
++            int u = ready.poll();
++            order.add(u);
++            for (int v : graph.neighbors(u)) {
++                if (--inDegree[v] == 0) {
++                    ready.add(v);
++                }
++            }
++        }
++
++        // Fewer vertices ordered than the graph holds => the remainder form a cycle.
++        if (order.size() != vertexCount) {
++            return Optional.empty();
++        }
++        return Optional.of(Collections.unmodifiableList(order));
++    }
++
++    /** Returns whether {@code graph} is a DAG, i.e. it has a topological ordering. */
++    boolean isDag(DirectedGraph graph) {
++        return sort(graph).isPresent();
++    }
++}
+diff --git a/test/TopologicalSorterTest.java b/test/TopologicalSorterTest.java
+new file mode 100644
+index 0000000..f1f3749
+--- /dev/null
++++ b/test/TopologicalSorterTest.java
+@@ -0,0 +1,138 @@
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++
++import java.util.List;
++import java.util.Optional;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++/**
++ * JUnit 5 test suite for {@link TopologicalSorter}.
++ *
++ * <p>Compile and run with {@code ./run-tests.sh} (no build tool required).
++ */
++@DisplayName("TopologicalSorter")
++class TopologicalSorterTest {
++
++    private final TopologicalSorter sorter = new TopologicalSorter();
++
++    /** Asserts {@code order} is a permutation of all vertices respecting every edge. */
++    private static void assertValidTopologicalOrder(List<Integer> order, DirectedGraph graph) {
++        int n = graph.vertices();
++        assertEquals(n, order.size(), "order must cover every vertex: " + order);
++
++        int[] position = new int[n];
++        boolean[] seen = new boolean[n];
++        for (int i = 0; i < order.size(); i++) {
++            int vertex = order.get(i);
++            assertFalse(seen[vertex], "vertex " + vertex + " appears twice: " + order);
++            seen[vertex] = true;
++            position[vertex] = i;
++        }
++        for (int u = 0; u < n; u++) {
++            for (int v : graph.neighbors(u)) {
++                assertTrue(position[u] < position[v],
++                        "edge " + u + " -> " + v + " violates the order " + order);
++            }
++        }
++    }
++
++    @Test
++    @DisplayName("orders a diamond DAG so every edge points forward")
++    void diamondDag() {
++        DirectedGraph dag = DirectedGraph.builder(4)
++                .addEdge(0, 1)
++                .addEdge(0, 2)
++                .addEdge(1, 3)
++                .addEdge(2, 3)
++                .build();
++        assertValidTopologicalOrder(sorter.sort(dag).orElseThrow(), dag);
++    }
++
++    @Test
++    @DisplayName("orders a linear chain in sequence")
++    void linearChain() {
++        DirectedGraph chain = DirectedGraph.builder(4)
++                .addEdge(0, 1)
++                .addEdge(1, 2)
++                .addEdge(2, 3)
++                .build();
++        assertEquals(List.of(0, 1, 2, 3), sorter.sort(chain).orElseThrow());
++    }
++
++    @Test
++    @DisplayName("orders a disconnected DAG, covering isolated vertices")
++    void disconnectedDag() {
++        DirectedGraph graph = DirectedGraph.builder(5)
++                .addEdge(0, 1)   // component {0,1}
++                .addEdge(2, 3)   // component {2,3}
++                .build();        // vertex 4 is isolated
++        assertValidTopologicalOrder(sorter.sort(graph).orElseThrow(), graph);
++    }
++
++    @Test
++    @DisplayName("treats the empty graph as a (trivially ordered) DAG")
++    void emptyGraph() {
++        Optional<List<Integer>> order = sorter.sort(DirectedGraph.builder(0).build());
++        assertEquals(Optional.of(List.of()), order);
++        assertTrue(sorter.isDag(DirectedGraph.builder(0).build()));
++    }
++
++    @Test
++    @DisplayName("returns empty for a cyclic graph")
++    void cyclicGraph() {
++        DirectedGraph cyclic = DirectedGraph.builder(3)
++                .addEdge(0, 1)
++                .addEdge(1, 2)
++                .addEdge(2, 0)
++                .build();
++        assertEquals(Optional.empty(), sorter.sort(cyclic));
++        assertFalse(sorter.isDag(cyclic));
++    }
++
++    @Test
++    @DisplayName("treats a self-loop as cyclic (not a DAG)")
++    void selfLoop() {
++        DirectedGraph graph = DirectedGraph.builder(2).addEdge(1, 1).build();
++        assertFalse(sorter.isDag(graph));
++    }
++
++    @Test
++    @DisplayName("orders only the acyclic part is impossible: a tail into a cycle is not a DAG")
++    void tailIntoCycle() {
++        DirectedGraph graph = DirectedGraph.builder(4)
++                .addEdge(0, 1)
++                .addEdge(1, 2)
++                .addEdge(2, 3)
++                .addEdge(3, 1)   // cycle 1->2->3->1
++                .build();
++        assertEquals(Optional.empty(), sorter.sort(graph));
++    }
++
++    @Test
++    @DisplayName("the returned ordering is unmodifiable")
++    void orderingUnmodifiable() {
++        DirectedGraph dag = DirectedGraph.builder(2).addEdge(0, 1).build();
++        List<Integer> order = sorter.sort(dag).orElseThrow();
++        assertThrows(UnsupportedOperationException.class, () -> order.add(99));
++    }
++
++    @Test
++    @DisplayName("agrees with the cycle detector on DAG-ness")
++    void agreesWithCycleDetector() {
++        DirectedGraph[] graphs = {
++            DirectedGraph.builder(3).addEdge(0, 1).addEdge(1, 2).build(),               // DAG
++            DirectedGraph.builder(3).addEdge(0, 1).addEdge(1, 2).addEdge(2, 0).build(), // cyclic
++            DirectedGraph.builder(1).addEdge(0, 0).build(),                             // self-loop
++            DirectedGraph.builder(4).build(),                                           // edgeless
++        };
++        CycleDetector detector = CycleDetector.create(CycleDetectionAlgorithm.KAHN);
++        for (DirectedGraph graph : graphs) {
++            assertEquals(detector.hasCycle(graph), !sorter.isDag(graph),
++                    "sorter and detector disagree on " + graph);
++        }
++    }
++}

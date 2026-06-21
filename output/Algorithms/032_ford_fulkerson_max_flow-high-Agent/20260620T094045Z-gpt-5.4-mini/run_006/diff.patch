@@ -1,0 +1,406 @@
+diff --git a/maxflow/FlowNetwork.java b/maxflow/FlowNetwork.java
+index fc2caa8..c0f604e 100644
+--- a/maxflow/FlowNetwork.java
++++ b/maxflow/FlowNetwork.java
+@@ -1,11 +1,10 @@
+ package maxflow;
+ 
+ public final class FlowNetwork {
+-    private final int[][] capacities;
++    private final SquareMatrix capacities;
+ 
+     private FlowNetwork(int[][] capacities) {
+-        validateCapacityMatrix(capacities);
+-        this.capacities = copyMatrix(capacities);
++        this.capacities = SquareMatrix.copyOf(capacities, "capacity matrix");
+     }
+ 
+     public static FlowNetwork fromMatrix(int[][] capacities) {
+@@ -13,43 +12,10 @@ public final class FlowNetwork {
+     }
+ 
+     public int vertexCount() {
+-        return capacities.length;
++        return capacities.size();
+     }
+ 
+     public ResidualNetwork createResidualNetwork() {
+         return new ResidualNetwork(capacities);
+     }
+-
+-    private static void validateCapacityMatrix(int[][] matrix) {
+-        if (matrix == null || matrix.length == 0) {
+-            throw new IllegalArgumentException("capacity matrix must not be null or empty");
+-        }
+-
+-        if (matrix[0] == null) {
+-            throw new IllegalArgumentException("capacity matrix rows must not be null");
+-        }
+-
+-        int width = matrix[0].length;
+-        if (width == 0) {
+-            throw new IllegalArgumentException("capacity matrix must contain at least one vertex");
+-        }
+-
+-        if (width != matrix.length) {
+-            throw new IllegalArgumentException("capacity matrix must be square");
+-        }
+-
+-        for (int row = 0; row < matrix.length; row++) {
+-            if (matrix[row] == null || matrix[row].length != width) {
+-                throw new IllegalArgumentException("capacity matrix must be rectangular");
+-            }
+-        }
+-    }
+-
+-    private static int[][] copyMatrix(int[][] sourceMatrix) {
+-        int[][] copy = new int[sourceMatrix.length][sourceMatrix.length];
+-        for (int row = 0; row < sourceMatrix.length; row++) {
+-            System.arraycopy(sourceMatrix[row], 0, copy[row], 0, sourceMatrix[row].length);
+-        }
+-        return copy;
+-    }
+ }
+diff --git a/maxflow/FlowProblem.java b/maxflow/FlowProblem.java
+new file mode 100644
+index 0000000..3d9cb4b
+--- /dev/null
++++ b/maxflow/FlowProblem.java
+@@ -0,0 +1,46 @@
++package maxflow;
++
++public final class FlowProblem {
++    private final FlowNetwork network;
++    private final int source;
++    private final int sink;
++
++    private FlowProblem(FlowNetwork network, int source, int sink) {
++        if (network == null) {
++            throw new IllegalArgumentException("network must not be null");
++        }
++
++        this.network = network;
++        this.source = validateVertex(source, network.vertexCount(), "source");
++        this.sink = validateVertex(sink, network.vertexCount(), "sink");
++
++        if (source == sink) {
++            throw new IllegalArgumentException("source and sink must be different vertices");
++        }
++    }
++
++    public static FlowProblem of(FlowNetwork network, int source, int sink) {
++        return new FlowProblem(network, source, sink);
++    }
++
++    public FlowNetwork network() {
++        return network;
++    }
++
++    public int source() {
++        return source;
++    }
++
++    public int sink() {
++        return sink;
++    }
++
++    private static int validateVertex(int vertex, int vertexCount, String label) {
++        if (vertex < 0 || vertex >= vertexCount) {
++            throw new IllegalArgumentException(
++                label + " vertex must be between 0 and " + (vertexCount - 1));
++        }
++
++        return vertex;
++    }
++}
+diff --git a/maxflow/FordFulkersonDemo.java b/maxflow/FordFulkersonDemo.java
+index bb1af87..94f5fd0 100644
+--- a/maxflow/FordFulkersonDemo.java
++++ b/maxflow/FordFulkersonDemo.java
+@@ -16,7 +16,8 @@ public final class FordFulkersonDemo {
+         };
+ 
+         FlowNetwork network = FlowNetwork.fromMatrix(graph);
+-        MaxFlowSolver solver = new FordFulkersonSolver(network, 0, 5);
++        FlowProblem problem = FlowProblem.of(network, 0, 5);
++        MaxFlowSolver solver = new FordFulkersonSolver(problem);
+         MaxFlowResult result = solver.solve();
+         System.out.println("The maximum possible flow is " + result.value());
+     }
+diff --git a/maxflow/FordFulkersonSolver.java b/maxflow/FordFulkersonSolver.java
+index c9f432a..b5b3d7e 100644
+--- a/maxflow/FordFulkersonSolver.java
++++ b/maxflow/FordFulkersonSolver.java
+@@ -3,13 +3,11 @@ package maxflow;
+ import java.util.Optional;
+ 
+ public final class FordFulkersonSolver implements MaxFlowSolver {
+-    private final FlowNetwork network;
+-    private final int source;
+-    private final int sink;
++    private final FlowProblem problem;
+     private final AugmentingPathFinder augmentingPathFinder;
+ 
+-    public FordFulkersonSolver(FlowNetwork network, int source, int sink) {
+-        this(network, source, sink, new BreadthFirstAugmentingPathFinder());
++    public FordFulkersonSolver(FlowProblem problem) {
++        this(problem, new BreadthFirstAugmentingPathFinder());
+     }
+ 
+     public FordFulkersonSolver(
+@@ -18,45 +16,38 @@ public final class FordFulkersonSolver implements MaxFlowSolver {
+         int sink,
+         AugmentingPathFinder augmentingPathFinder
+     ) {
+-        if (network == null) {
+-            throw new IllegalArgumentException("network must not be null");
++        this(FlowProblem.of(network, source, sink), augmentingPathFinder);
++    }
++
++    public FordFulkersonSolver(FlowNetwork network, int source, int sink) {
++        this(FlowProblem.of(network, source, sink), new BreadthFirstAugmentingPathFinder());
++    }
++
++    public FordFulkersonSolver(FlowProblem problem, AugmentingPathFinder augmentingPathFinder) {
++        if (problem == null) {
++            throw new IllegalArgumentException("problem must not be null");
+         }
+         if (augmentingPathFinder == null) {
+             throw new IllegalArgumentException("augmentingPathFinder must not be null");
+         }
+ 
+-        this.network = network;
+-        this.source = validateVertex(source, network.vertexCount(), "source");
+-        this.sink = validateVertex(sink, network.vertexCount(), "sink");
++        this.problem = problem;
+         this.augmentingPathFinder = augmentingPathFinder;
+-
+-        if (source == sink) {
+-            throw new IllegalArgumentException("source and sink must be different vertices");
+-        }
+     }
+ 
+     @Override
+     public MaxFlowResult solve() {
+-        ResidualNetwork residualNetwork = network.createResidualNetwork();
++        ResidualNetwork residualNetwork = problem.network().createResidualNetwork();
+         int maxFlow = 0;
+ 
+         Optional<AugmentingPath> augmentingPath =
+-            augmentingPathFinder.findPath(residualNetwork, source, sink);
++            augmentingPathFinder.findPath(residualNetwork, problem.source(), problem.sink());
+         while (augmentingPath.isPresent()) {
+             AugmentingPath path = augmentingPath.get();
+             maxFlow += residualNetwork.augmentPath(path);
+-            augmentingPath = augmentingPathFinder.findPath(residualNetwork, source, sink);
+-        }
+-
+-        return new MaxFlowResult(maxFlow, source, sink, residualNetwork.snapshotCapacities());
+-    }
+-
+-    private static int validateVertex(int vertex, int vertexCount, String label) {
+-        if (vertex < 0 || vertex >= vertexCount) {
+-            throw new IllegalArgumentException(
+-                label + " vertex must be between 0 and " + (vertexCount - 1));
++            augmentingPath = augmentingPathFinder.findPath(residualNetwork, problem.source(), problem.sink());
+         }
+ 
+-        return vertex;
++        return new MaxFlowResult(maxFlow, problem.source(), problem.sink(), residualNetwork.snapshotCapacities());
+     }
+ }
+diff --git a/maxflow/MaxFlowResult.java b/maxflow/MaxFlowResult.java
+index c35e10c..05bb1fc 100644
+--- a/maxflow/MaxFlowResult.java
++++ b/maxflow/MaxFlowResult.java
+@@ -4,13 +4,17 @@ public final class MaxFlowResult {
+     private final int value;
+     private final int source;
+     private final int sink;
+-    private final int[][] residualCapacities;
++    private final SquareMatrix residualCapacities;
+ 
+     MaxFlowResult(int value, int source, int sink, int[][] residualCapacities) {
++        this(value, source, sink, SquareMatrix.copyOf(residualCapacities, "residual matrix"));
++    }
++
++    MaxFlowResult(int value, int source, int sink, SquareMatrix residualCapacities) {
+         this.value = value;
+         this.source = source;
+         this.sink = sink;
+-        this.residualCapacities = copyMatrix(residualCapacities);
++        this.residualCapacities = residualCapacities.copy();
+     }
+ 
+     public int value() {
+@@ -26,22 +30,14 @@ public final class MaxFlowResult {
+     }
+ 
+     public int vertexCount() {
+-        return residualCapacities.length;
++        return residualCapacities.size();
+     }
+ 
+     public int residualCapacity(int from, int to) {
+-        return residualCapacities[from][to];
++        return residualCapacities.get(from, to);
+     }
+ 
+     public boolean hasResidualCapacity(int from, int to) {
+-        return residualCapacities[from][to] > 0;
+-    }
+-
+-    private static int[][] copyMatrix(int[][] sourceMatrix) {
+-        int[][] copy = new int[sourceMatrix.length][sourceMatrix.length];
+-        for (int row = 0; row < sourceMatrix.length; row++) {
+-            System.arraycopy(sourceMatrix[row], 0, copy[row], 0, sourceMatrix[row].length);
+-        }
+-        return copy;
++        return residualCapacities.hasPositiveValue(from, to);
+     }
+ }
+diff --git a/maxflow/ResidualNetwork.java b/maxflow/ResidualNetwork.java
+index 9ae25f6..9140e24 100644
+--- a/maxflow/ResidualNetwork.java
++++ b/maxflow/ResidualNetwork.java
+@@ -1,22 +1,22 @@
+ package maxflow;
+ 
+ public final class ResidualNetwork {
+-    private final int[][] residualCapacities;
++    private final SquareMatrix residualCapacities;
+ 
+-    ResidualNetwork(int[][] capacities) {
+-        this.residualCapacities = copyMatrix(capacities);
++    ResidualNetwork(SquareMatrix capacities) {
++        this.residualCapacities = capacities.copy();
+     }
+ 
+     public int vertexCount() {
+-        return residualCapacities.length;
++        return residualCapacities.size();
+     }
+ 
+     public int residualCapacity(int from, int to) {
+-        return residualCapacities[from][to];
++        return residualCapacities.get(from, to);
+     }
+ 
+     public boolean hasResidualCapacity(int from, int to) {
+-        return residualCapacities[from][to] > 0;
++        return residualCapacities.hasPositiveValue(from, to);
+     }
+ 
+     public int bottleneckCapacity(AugmentingPath path) {
+@@ -24,7 +24,7 @@ public final class ResidualNetwork {
+ 
+         for (int vertex = path.sink(); vertex != path.source(); vertex = path.parentOf(vertex)) {
+             int predecessor = path.parentOf(vertex);
+-            pathFlow = Math.min(pathFlow, residualCapacities[predecessor][vertex]);
++            pathFlow = Math.min(pathFlow, residualCapacities.get(predecessor, vertex));
+         }
+ 
+         return pathFlow;
+@@ -34,22 +34,14 @@ public final class ResidualNetwork {
+         int flow = bottleneckCapacity(path);
+         for (int vertex = path.sink(); vertex != path.source(); vertex = path.parentOf(vertex)) {
+             int predecessor = path.parentOf(vertex);
+-            residualCapacities[predecessor][vertex] -= flow;
+-            residualCapacities[vertex][predecessor] += flow;
++            residualCapacities.add(predecessor, vertex, -flow);
++            residualCapacities.add(vertex, predecessor, flow);
+         }
+ 
+         return flow;
+     }
+ 
+     int[][] snapshotCapacities() {
+-        return copyMatrix(residualCapacities);
+-    }
+-
+-    private static int[][] copyMatrix(int[][] sourceMatrix) {
+-        int[][] copy = new int[sourceMatrix.length][sourceMatrix.length];
+-        for (int row = 0; row < sourceMatrix.length; row++) {
+-            System.arraycopy(sourceMatrix[row], 0, copy[row], 0, sourceMatrix[row].length);
+-        }
+-        return copy;
++        return residualCapacities.snapshot();
+     }
+ }
+diff --git a/maxflow/SquareMatrix.java b/maxflow/SquareMatrix.java
+new file mode 100644
+index 0000000..73b0c1d
+--- /dev/null
++++ b/maxflow/SquareMatrix.java
+@@ -0,0 +1,71 @@
++package maxflow;
++
++final class SquareMatrix {
++    private final int[][] values;
++
++    private SquareMatrix(int[][] values) {
++        this.values = values;
++    }
++
++    static SquareMatrix copyOf(int[][] source, String label) {
++        validateSquareMatrix(source, label);
++        return new SquareMatrix(deepCopy(source));
++    }
++
++    SquareMatrix copy() {
++        return new SquareMatrix(deepCopy(values));
++    }
++
++    int size() {
++        return values.length;
++    }
++
++    int get(int row, int col) {
++        return values[row][col];
++    }
++
++    boolean hasPositiveValue(int row, int col) {
++        return values[row][col] > 0;
++    }
++
++    void add(int row, int col, int delta) {
++        values[row][col] += delta;
++    }
++
++    int[][] snapshot() {
++        return deepCopy(values);
++    }
++
++    private static void validateSquareMatrix(int[][] matrix, String label) {
++        if (matrix == null || matrix.length == 0) {
++            throw new IllegalArgumentException(label + " must not be null or empty");
++        }
++
++        if (matrix[0] == null) {
++            throw new IllegalArgumentException(label + " rows must not be null");
++        }
++
++        int width = matrix[0].length;
++        if (width == 0) {
++            throw new IllegalArgumentException(label + " must contain at least one vertex");
++        }
++
++        if (width != matrix.length) {
++            throw new IllegalArgumentException(label + " must be square");
++        }
++
++        for (int row = 0; row < matrix.length; row++) {
++            if (matrix[row] == null || matrix[row].length != width) {
++                throw new IllegalArgumentException(label + " must be rectangular");
++            }
++        }
++    }
++
++    private static int[][] deepCopy(int[][] source) {
++        int[][] copy = new int[source.length][source.length];
++        for (int row = 0; row < source.length; row++) {
++            System.arraycopy(source[row], 0, copy[row], 0, source[row].length);
++        }
++        return copy;
++    }
++}

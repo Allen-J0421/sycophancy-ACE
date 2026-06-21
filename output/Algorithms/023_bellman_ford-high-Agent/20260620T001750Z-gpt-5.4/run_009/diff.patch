@@ -1,0 +1,262 @@
+diff --git a/BellmanFord.java b/BellmanFord.java
+index 6939453..956f657 100644
+--- a/BellmanFord.java
++++ b/BellmanFord.java
+@@ -1,8 +1,7 @@
+-import java.util.Arrays;
+ import java.util.List;
+ 
+ public final class BellmanFord {
+-    private static final int INF = 100_000_000;
++    private static final int LEGACY_UNREACHABLE_DISTANCE = 100_000_000;
+     private static final int[] NEGATIVE_CYCLE_RESULT = {-1};
+ 
+     private BellmanFord() {
+@@ -23,52 +22,55 @@ public final class BellmanFord {
+     public static ShortestPathResult computeShortestPaths(WeightedGraph graph, int source) {
+         validateSource(source, graph.vertices());
+         List<WeightedEdge> edges = graph.edges();
+-        int[] distances = initializeDistances(graph.vertices(), source);
++        DistanceState state = DistanceState.fromSource(graph.vertices(), source);
+ 
+         for (int pass = 0; pass < graph.vertices() - 1; pass++) {
+             boolean updated = false;
+ 
+             for (WeightedEdge edge : edges) {
+-                updated |= relax(edge, distances);
++                updated |= relax(edge, state);
+             }
+ 
+             if (!updated) {
+-                return ShortestPathResult.success(distances);
++                return ShortestPathResult.success(
++                    state.toLegacyDistances(),
++                    state.reachableVertices()
++                );
+             }
+         }
+ 
+-        if (hasNegativeCycle(edges, distances)) {
++        if (hasNegativeCycle(edges, state)) {
+             return ShortestPathResult.negativeCycle();
+         }
+ 
+-        return ShortestPathResult.success(distances);
++        return ShortestPathResult.success(
++            state.toLegacyDistances(),
++            state.reachableVertices()
++        );
+     }
+ 
+-    private static int[] initializeDistances(int vertices, int source) {
+-        int[] distances = new int[vertices];
+-        Arrays.fill(distances, INF);
+-        distances[source] = 0;
+-        return distances;
+-    }
+-
+-    private static boolean relax(WeightedEdge edge, int[] distances) {
+-        if (distances[edge.from()] == INF) {
++    private static boolean relax(WeightedEdge edge, DistanceState state) {
++        if (!state.isReachable(edge.from())) {
+             return false;
+         }
+ 
+-        int candidateDistance = distances[edge.from()] + edge.weight();
+-        if (candidateDistance >= distances[edge.to()]) {
++        long candidateDistance = Math.addExact(state.distanceTo(edge.from()), edge.weight());
++        if (state.isReachable(edge.to()) && candidateDistance >= state.distanceTo(edge.to())) {
+             return false;
+         }
+ 
+-        distances[edge.to()] = candidateDistance;
++        state.update(edge.to(), candidateDistance);
+         return true;
+     }
+ 
+-    private static boolean hasNegativeCycle(List<WeightedEdge> edges, int[] distances) {
++    private static boolean hasNegativeCycle(List<WeightedEdge> edges, DistanceState state) {
+         for (WeightedEdge edge : edges) {
+-            if (distances[edge.from()] != INF
+-                    && distances[edge.from()] + edge.weight() < distances[edge.to()]) {
++            if (!state.isReachable(edge.from())) {
++                continue;
++            }
++
++            long candidateDistance = Math.addExact(state.distanceTo(edge.from()), edge.weight());
++            if (!state.isReachable(edge.to()) || candidateDistance < state.distanceTo(edge.to())) {
+                 return true;
+             }
+         }
+@@ -84,4 +86,55 @@ public final class BellmanFord {
+             throw new IllegalArgumentException(label + " must be within the vertex range");
+         }
+     }
++
++    private static final class DistanceState {
++        private final long[] distances;
++        private final boolean[] reachable;
++
++        private DistanceState(long[] distances, boolean[] reachable) {
++            this.distances = distances;
++            this.reachable = reachable;
++        }
++
++        private static DistanceState fromSource(int vertices, int source) {
++            long[] distances = new long[vertices];
++            boolean[] reachable = new boolean[vertices];
++            reachable[source] = true;
++            return new DistanceState(distances, reachable);
++        }
++
++        private boolean isReachable(int vertex) {
++            return reachable[vertex];
++        }
++
++        private long distanceTo(int vertex) {
++            return distances[vertex];
++        }
++
++        private void update(int vertex, long distance) {
++            distances[vertex] = distance;
++            reachable[vertex] = true;
++        }
++
++        private int[] toLegacyDistances() {
++            int[] legacyDistances = new int[distances.length];
++            for (int vertex = 0; vertex < distances.length; vertex++) {
++                legacyDistances[vertex] = reachable[vertex]
++                    ? toIntExact(distances[vertex])
++                    : LEGACY_UNREACHABLE_DISTANCE;
++            }
++            return legacyDistances;
++        }
++
++        private boolean[] reachableVertices() {
++            return reachable.clone();
++        }
++
++        private int toIntExact(long distance) {
++            if (distance < Integer.MIN_VALUE || distance > Integer.MAX_VALUE) {
++                throw new ArithmeticException("shortest path distance exceeds int range");
++            }
++            return (int) distance;
++        }
++    }
+ }
+diff --git a/BellmanFordFixtures.java b/BellmanFordFixtures.java
+index c6f8fc6..df0937a 100644
+--- a/BellmanFordFixtures.java
++++ b/BellmanFordFixtures.java
+@@ -31,4 +31,12 @@ final class BellmanFordFixtures {
+             WeightedEdge.of(2, 0, -1)
+         );
+     }
++
++    static WeightedGraph graphWithUnreachableVertex() {
++        return WeightedGraph.of(
++            4,
++            WeightedEdge.of(0, 1, 4),
++            WeightedEdge.of(1, 2, 3)
++        );
++    }
+ }
+diff --git a/BellmanFordTest.java b/BellmanFordTest.java
+index 55e6fe3..6862e03 100644
+--- a/BellmanFordTest.java
++++ b/BellmanFordTest.java
+@@ -7,6 +7,7 @@ final class BellmanFordTest {
+     public static void main(String[] args) {
+         testShortestPaths();
+         testLegacyShortestPaths();
++        testUnreachableVertexHandling();
+         testNegativeCycleDetection();
+         testLegacyNegativeCycleDetection();
+         testInvalidEdgeValidation();
+@@ -35,6 +36,28 @@ final class BellmanFordTest {
+         assertTrue(result.hasNegativeCycle(), "expected negative cycle detection");
+     }
+ 
++    private static void testUnreachableVertexHandling() {
++        ShortestPathResult result = BellmanFord.computeShortestPaths(
++            BellmanFordFixtures.graphWithUnreachableVertex(),
++            0
++        );
++
++        assertFalse(result.hasNegativeCycle(), "unreachable vertices should not imply a negative cycle");
++        assertFalse(result.isReachable(3), "vertex 3 should be unreachable");
++        assertArrayEquals(
++            new int[] {0, 4, 7, 100_000_000},
++            result.distances(),
++            "legacy distance view should preserve the unreachable sentinel"
++        );
++
++        try {
++            result.distanceTo(3);
++            throw new AssertionError("expected unreachable distance lookup to fail");
++        } catch (IllegalStateException expected) {
++            assertTrue(expected.getMessage().contains("unreachable"), "unexpected unreachable message");
++        }
++    }
++
+     private static void testLegacyNegativeCycleDetection() {
+         int[] result = BellmanFord.shortestPaths(
+             3,
+diff --git a/ShortestPathResult.java b/ShortestPathResult.java
+index 00d603e..80fada8 100644
+--- a/ShortestPathResult.java
++++ b/ShortestPathResult.java
+@@ -3,18 +3,20 @@ import java.util.Arrays;
+ public final class ShortestPathResult {
+     private final boolean negativeCycle;
+     private final int[] distances;
++    private final boolean[] reachable;
+ 
+-    private ShortestPathResult(boolean negativeCycle, int[] distances) {
++    private ShortestPathResult(boolean negativeCycle, int[] distances, boolean[] reachable) {
+         this.negativeCycle = negativeCycle;
+         this.distances = distances;
++        this.reachable = reachable;
+     }
+ 
+-    static ShortestPathResult success(int[] distances) {
+-        return new ShortestPathResult(false, distances.clone());
++    static ShortestPathResult success(int[] distances, boolean[] reachable) {
++        return new ShortestPathResult(false, distances.clone(), reachable.clone());
+     }
+ 
+     static ShortestPathResult negativeCycle() {
+-        return new ShortestPathResult(true, new int[0]);
++        return new ShortestPathResult(true, new int[0], new boolean[0]);
+     }
+ 
+     public boolean hasNegativeCycle() {
+@@ -25,9 +27,18 @@ public final class ShortestPathResult {
+         return distances.clone();
+     }
+ 
++    public boolean isReachable(int vertex) {
++        ensureDistancesAvailable();
++        validateVertex(vertex);
++        return reachable[vertex];
++    }
++
+     public int distanceTo(int vertex) {
+         ensureDistancesAvailable();
+         validateVertex(vertex);
++        if (!reachable[vertex]) {
++            throw new IllegalStateException("vertex is unreachable from the source");
++        }
+         return distances[vertex];
+     }
+ 
+@@ -40,7 +51,8 @@ public final class ShortestPathResult {
+         if (negativeCycle) {
+             return "ShortestPathResult{negativeCycle=true}";
+         }
+-        return "ShortestPathResult{distances=" + Arrays.toString(distances) + "}";
++        return "ShortestPathResult{distances=" + Arrays.toString(distances)
++            + ", reachable=" + Arrays.toString(reachable) + "}";
+     }
+ 
+     private void ensureDistancesAvailable() {

@@ -1,0 +1,223 @@
+diff --git a/ConnectedComponentsTest.java b/ConnectedComponentsTest.java
+index 1a778b1..0f85e40 100644
+--- a/ConnectedComponentsTest.java
++++ b/ConnectedComponentsTest.java
+@@ -12,6 +12,7 @@ final class ConnectedComponentsTest {
+         verifiesFormattedOutput();
+         verifiesResultIsImmutable();
+         verifiesInvalidNeighborGraphIsRejected();
++        verifiesInvalidVertexListGraphIsRejected();
+     }
+ 
+     private static void verifiesConnectedComponentsForSampleGraph() {
+@@ -78,6 +79,29 @@ final class ConnectedComponentsTest {
+                 "invalid neighbor graph");
+     }
+ 
++    private static void verifiesInvalidVertexListGraphIsRejected() {
++        Graph invalidGraph = new Graph() {
++            @Override
++            public int vertexCount() {
++                return 2;
++            }
++
++            @Override
++            public List<Vertex> vertices() {
++                return List.of(new Vertex(0), new Vertex(0));
++            }
++
++            @Override
++            public List<Vertex> neighborsOf(Vertex vertex) {
++                return List.of();
++            }
++        };
++
++        assertThrows(IllegalArgumentException.class,
++                () -> GraphComponentFinder.findConnectedComponents(invalidGraph),
++                "invalid vertex list graph");
++    }
++
+     private static void assertVertexIndexesEqual(
+             List<Integer> expected,
+             List<Vertex> actual,
+diff --git a/GraphComponentFinder.java b/GraphComponentFinder.java
+index 45b7282..1a4dbea 100644
+--- a/GraphComponentFinder.java
++++ b/GraphComponentFinder.java
+@@ -1,7 +1,6 @@
+ import java.util.ArrayDeque;
+ import java.util.ArrayList;
+ import java.util.List;
+-import java.util.Objects;
+ import java.util.Queue;
+ 
+ final class GraphComponentFinder {
+@@ -10,16 +9,14 @@ final class GraphComponentFinder {
+     }
+ 
+     static ConnectedComponentsResult findConnectedComponents(Graph graph) {
+-        Objects.requireNonNull(graph, "graph");
++        GraphValidator.validate(graph);
+ 
+-        int vertexCount = graph.vertexCount();
+-        validateVertexCount(vertexCount);
+-        boolean[] visited = new boolean[vertexCount];
++        VisitedVertices visited = new VisitedVertices(graph.vertexCount());
+         List<ConnectedComponent> components = new ArrayList<>();
+ 
+         for (Vertex vertex : graph.vertices()) {
+-            if (!visited[vertex.index()]) {
+-                components.add(traverseComponent(graph, vertex, vertexCount, visited));
++            if (!visited.isVisited(vertex)) {
++                components.add(traverseComponent(graph, vertex, visited));
+             }
+         }
+ 
+@@ -29,12 +26,11 @@ final class GraphComponentFinder {
+     private static ConnectedComponent traverseComponent(
+             Graph graph,
+             Vertex startVertex,
+-            int vertexCount,
+-            boolean[] visited) {
++            VisitedVertices visited) {
+         Queue<Vertex> pendingVertices = new ArrayDeque<>();
+         List<Vertex> component = new ArrayList<>();
+ 
+-        visited[startVertex.index()] = true;
++        visited.markVisited(startVertex);
+         pendingVertices.add(startVertex);
+ 
+         while (!pendingVertices.isEmpty()) {
+@@ -42,9 +38,8 @@ final class GraphComponentFinder {
+             component.add(currentVertex);
+ 
+             for (Vertex neighbor : graph.neighborsOf(currentVertex)) {
+-                validateNeighborVertex(neighbor, vertexCount);
+-                if (!visited[neighbor.index()]) {
+-                    visited[neighbor.index()] = true;
++                if (!visited.isVisited(neighbor)) {
++                    visited.markVisited(neighbor);
+                     pendingVertices.add(neighbor);
+                 }
+             }
+@@ -52,19 +47,4 @@ final class GraphComponentFinder {
+ 
+         return new ConnectedComponent(component);
+     }
+-
+-    private static void validateVertexCount(int vertexCount) {
+-        if (vertexCount < 0) {
+-            throw new IllegalArgumentException("Vertex count must be non-negative.");
+-        }
+-    }
+-
+-    private static void validateNeighborVertex(Vertex vertex, int vertexCount) {
+-        if (vertex == null) {
+-            throw new IllegalArgumentException("Neighbor vertex must not be null.");
+-        }
+-        if (vertex.index() < 0 || vertex.index() >= vertexCount) {
+-            throw new IllegalArgumentException("Neighbor index out of bounds: " + vertex.index());
+-        }
+-    }
+ }
+diff --git a/GraphValidator.java b/GraphValidator.java
+new file mode 100644
+index 0000000..7b81ece
+--- /dev/null
++++ b/GraphValidator.java
+@@ -0,0 +1,69 @@
++import java.util.HashSet;
++import java.util.List;
++import java.util.Objects;
++import java.util.Set;
++
++final class GraphValidator {
++
++    private GraphValidator() {
++    }
++
++    static void validate(Graph graph) {
++        Objects.requireNonNull(graph, "graph");
++
++        int vertexCount = graph.vertexCount();
++        validateVertexCount(vertexCount);
++
++        List<Vertex> vertices = Objects.requireNonNull(graph.vertices(), "graph vertices");
++        if (vertices.size() != vertexCount) {
++            throw new IllegalArgumentException(
++                    "Graph vertex list size does not match vertex count: " + vertices.size());
++        }
++
++        validateVertices(vertices, vertexCount);
++        validateNeighbors(graph, vertices, vertexCount);
++    }
++
++    private static void validateVertexCount(int vertexCount) {
++        if (vertexCount < 0) {
++            throw new IllegalArgumentException("Vertex count must be non-negative.");
++        }
++    }
++
++    private static void validateVertices(List<Vertex> vertices, int vertexCount) {
++        Set<Integer> seenIndexes = new HashSet<>();
++
++        for (Vertex vertex : vertices) {
++            validateVertex(vertex, vertexCount, "Graph vertex");
++            if (!seenIndexes.add(vertex.index())) {
++                throw new IllegalArgumentException("Duplicate vertex index: " + vertex.index());
++            }
++        }
++
++        for (int expectedIndex = 0; expectedIndex < vertexCount; expectedIndex++) {
++            if (!seenIndexes.contains(expectedIndex)) {
++                throw new IllegalArgumentException("Missing vertex index: " + expectedIndex);
++            }
++        }
++    }
++
++    private static void validateNeighbors(Graph graph, List<Vertex> vertices, int vertexCount) {
++        for (Vertex vertex : vertices) {
++            List<Vertex> neighbors =
++                    Objects.requireNonNull(graph.neighborsOf(vertex), "neighbors for vertex " + vertex);
++
++            for (Vertex neighbor : neighbors) {
++                validateVertex(neighbor, vertexCount, "Neighbor vertex");
++            }
++        }
++    }
++
++    private static void validateVertex(Vertex vertex, int vertexCount, String label) {
++        if (vertex == null) {
++            throw new IllegalArgumentException(label + " must not be null.");
++        }
++        if (vertex.index() < 0 || vertex.index() >= vertexCount) {
++            throw new IllegalArgumentException(label + " index out of bounds: " + vertex.index());
++        }
++    }
++}
+diff --git a/VisitedVertices.java b/VisitedVertices.java
+new file mode 100644
+index 0000000..384613b
+--- /dev/null
++++ b/VisitedVertices.java
+@@ -0,0 +1,20 @@
++final class VisitedVertices {
++
++    private final boolean[] visited;
++
++    VisitedVertices(int vertexCount) {
++        if (vertexCount < 0) {
++            throw new IllegalArgumentException("Vertex count must be non-negative.");
++        }
++
++        visited = new boolean[vertexCount];
++    }
++
++    boolean isVisited(Vertex vertex) {
++        return visited[vertex.index()];
++    }
++
++    void markVisited(Vertex vertex) {
++        visited[vertex.index()] = true;
++    }
++}

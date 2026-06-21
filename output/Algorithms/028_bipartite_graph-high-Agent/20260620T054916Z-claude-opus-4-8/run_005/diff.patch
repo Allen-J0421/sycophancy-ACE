@@ -1,0 +1,750 @@
+diff --git a/bipartite/AbstractAdjacencyListGraph.java b/bipartite/AbstractAdjacencyListGraph.java
+new file mode 100644
+index 0000000..88fde87
+--- /dev/null
++++ b/bipartite/AbstractAdjacencyListGraph.java
+@@ -0,0 +1,97 @@
++package bipartite;
++
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++
++/**
++ * A generic adjacency-list graph. Every vertex in {@code [0, order())} owns a
++ * list of outgoing <em>incidences</em> of type {@code I}; an incidence records
++ * one edge leaving that vertex and at minimum identifies its target vertex.
++ *
++ * <p>This base owns the vertex array and the adjacency storage, leaving two
++ * decisions to subclasses:
++ * <ul>
++ *   <li><b>What an incidence carries</b> — pick {@code I} (e.g. {@code Integer}
++ *       for an unweighted graph, or {@link WeightedEdge} for a weighted one) and
++ *       implement {@link #targetOf(Object)} to expose its target vertex.</li>
++ *   <li><b>Whether edges are symmetric</b> — an undirected subclass adds a
++ *       reciprocal incidence for each edge during construction; a directed one
++ *       adds only the forward incidence.</li>
++ * </ul>
++ *
++ * <p>Incidences are added only through the protected {@link #addIncidence}, which
++ * subclasses invoke from their factory methods. The adjacency is never exposed
++ * mutably ({@link #neighbors} returns a fresh list and {@link #incidences} an
++ * unmodifiable view), so an instance is effectively immutable once built.
++ *
++ * @param <I> the per-vertex incidence type
++ */
++public abstract class AbstractAdjacencyListGraph<I> implements Graph {
++
++    private final List<List<I>> adjacency;
++
++    /**
++     * @param order the number of vertices; vertices are {@code [0, order)}
++     * @throws IllegalArgumentException if {@code order} is negative
++     */
++    protected AbstractAdjacencyListGraph(int order) {
++        if (order < 0) {
++            throw new IllegalArgumentException("Vertex count must be non-negative, got " + order);
++        }
++        List<List<I>> lists = new ArrayList<>(order);
++        for (int i = 0; i < order; i++) {
++            lists.add(new ArrayList<>());
++        }
++        this.adjacency = lists;
++    }
++
++    /**
++     * Appends one outgoing incidence to {@code source}'s adjacency list. Intended
++     * for use by subclass factory methods during construction.
++     *
++     * @throws IndexOutOfBoundsException if {@code source} is out of range
++     */
++    protected final void addIncidence(int source, I incidence) {
++        requireVertex(source);
++        adjacency.get(source).add(incidence);
++    }
++
++    /** @return the target vertex that {@code incidence} points to */
++    protected abstract int targetOf(I incidence);
++
++    /**
++     * @param vertex a vertex id in {@code [0, order())}
++     * @return an unmodifiable view of the raw incidences leaving {@code vertex},
++     *         preserving any extra data they carry (such as weights)
++     * @throws IndexOutOfBoundsException if {@code vertex} is out of range
++     */
++    protected final List<I> incidences(int vertex) {
++        requireVertex(vertex);
++        return Collections.unmodifiableList(adjacency.get(vertex));
++    }
++
++    @Override
++    public final int order() {
++        return adjacency.size();
++    }
++
++    @Override
++    public final List<Integer> neighbors(int vertex) {
++        requireVertex(vertex);
++        List<I> outgoing = adjacency.get(vertex);
++        List<Integer> targets = new ArrayList<>(outgoing.size());
++        for (I incidence : outgoing) {
++            targets.add(targetOf(incidence));
++        }
++        return Collections.unmodifiableList(targets);
++    }
++
++    /** @throws IndexOutOfBoundsException if {@code vertex} is out of range */
++    protected final void requireVertex(int vertex) {
++        if (vertex < 0 || vertex >= adjacency.size()) {
++            throw new IndexOutOfBoundsException(
++                    "Vertex " + vertex + " is outside the range [0, " + adjacency.size() + ")");
++        }
++    }
++}
+diff --git a/bipartite/BipartiteChecker.java b/bipartite/BipartiteChecker.java
+index 1d99128..7a40778 100644
+--- a/bipartite/BipartiteChecker.java
++++ b/bipartite/BipartiteChecker.java
+@@ -19,6 +19,11 @@ import java.util.Map;
+  * reconstructs such an odd cycle from the breadth-first search tree as a
+  * verifiable witness. The check runs in {@code O(V + E)} time and {@code O(V)}
+  * additional space.
++ *
++ * <p>It depends only on the {@link Graph} interface, so it runs unchanged on any
++ * implementation (for example {@link UndirectedGraph} or
++ * {@link WeightedUndirectedGraph}). Bipartiteness is an undirected-graph
++ * property, so the graph passed in is expected to have symmetric adjacency.
+  */
+ public final class BipartiteChecker {
+ 
+@@ -30,13 +35,13 @@ public final class BipartiteChecker {
+     /**
+      * Checks whether the given graph is bipartite.
+      *
+-     * @param graph the graph to inspect
++     * @param graph the graph to inspect (any {@link Graph} implementation)
+      * @return a {@link BipartiteResult.Bipartite} with the two vertex partitions
+      *         if the graph is bipartite, otherwise a
+      *         {@link BipartiteResult.NotBipartite} carrying an odd-cycle witness
+      * @throws NullPointerException if {@code graph} is null
+      */
+-    public BipartiteResult check(UndirectedGraph graph) {
++    public BipartiteResult check(Graph graph) {
+         if (graph == null) {
+             throw new NullPointerException("graph must not be null");
+         }
+@@ -70,7 +75,7 @@ public final class BipartiteChecker {
+      * @return {@code null} if the component is 2-colorable, otherwise the
+      *         odd-length cycle formed by the first conflicting edge
+      */
+-    private static List<Integer> colorComponent(UndirectedGraph graph, int start,
++    private static List<Integer> colorComponent(Graph graph, int start,
+                                                 int[] color, int[] parent) {
+         Deque<Integer> queue = new ArrayDeque<>();
+         color[start] = COLOR_A;
+diff --git a/bipartite/BipartiteCheckerTests.java b/bipartite/BipartiteCheckerTests.java
+index 70743f2..2f51c2e 100644
+--- a/bipartite/BipartiteCheckerTests.java
++++ b/bipartite/BipartiteCheckerTests.java
+@@ -21,9 +21,13 @@ public final class BipartiteCheckerTests {
+         emptyGraphIsBipartite();
+         disconnectedGraphIsBipartite();
+         partitionsCoverAllVertices();
++        checkerRunsOnWeightedGraphViaInterface();
++        weightedNeighborsCarryWeights();
++        directedGraphStoresOneWayEdges();
+         rejectsEdgeOutOfRange();
+         rejectsMalformedEdgePair();
+         rejectsSelfLoop();
++        rejectsWeightedSelfLoop();
+         rejectsNegativeVertexCount();
+         rejectsNullGraph();
+ 
+@@ -85,6 +89,42 @@ public final class BipartiteCheckerTests {
+         check("partitions cover every vertex exactly once", ok);
+     }
+ 
++    private static void checkerRunsOnWeightedGraphViaInterface() {
++        // A weighted 4-cycle is bipartite; the checker reaches it through the
++        // Graph interface and ignores the weights.
++        Graph graph = WeightedUndirectedGraph.of(4, List.of(
++                new WeightedEdge(0, 1, 2.5),
++                new WeightedEdge(1, 2, 1.0),
++                new WeightedEdge(2, 3, 4.0),
++                new WeightedEdge(3, 0, 0.5)));
++        check("checker runs on a weighted graph via the Graph interface",
++                CHECKER.check(graph).isBipartite());
++    }
++
++    private static void weightedNeighborsCarryWeights() {
++        WeightedUndirectedGraph graph = WeightedUndirectedGraph.of(2,
++                List.of(new WeightedEdge(0, 1, 3.5)));
++        List<WeightedEdge> outgoing = graph.weightedNeighbors(0);
++        boolean ok = outgoing.size() == 1
++                && outgoing.get(0).u() == 0
++                && outgoing.get(0).v() == 1
++                && outgoing.get(0).weight() == 3.5
++                // ... and the reciprocal incidence is stored on vertex 1.
++                && graph.weightedNeighbors(1).equals(List.of(new WeightedEdge(1, 0, 3.5)));
++        check("weighted neighbors carry weights symmetrically", ok);
++    }
++
++    private static void directedGraphStoresOneWayEdges() {
++        DirectedGraph graph = DirectedGraph.of(2, new int[][] {{0, 1}});
++        check("directed graph stores one-way edges",
++                graph.neighbors(0).equals(List.of(1)) && graph.neighbors(1).isEmpty());
++    }
++
++    private static void rejectsWeightedSelfLoop() {
++        check("rejects weighted self-loop edge",
++                throwsIllegalArgument(() -> new WeightedEdge(1, 1, 2.0)));
++    }
++
+     private static void rejectsEdgeOutOfRange() {
+         check("rejects edge referencing missing vertex",
+                 throwsIllegalArgument(() -> UndirectedGraph.of(2, new int[][] {{0, 5}})));
+diff --git a/bipartite/DirectedGraph.java b/bipartite/DirectedGraph.java
+new file mode 100644
+index 0000000..3c6eb45
+--- /dev/null
++++ b/bipartite/DirectedGraph.java
+@@ -0,0 +1,51 @@
++package bipartite;
++
++import java.util.List;
++
++/**
++ * An immutable, unweighted directed graph. Each edge {@code u -> v} is stored
++ * only on the source, so {@link #neighbors(int)} reports a vertex's
++ * out-neighbors. This demonstrates how the generic adjacency-list base supports
++ * a directed representation: the only difference from {@link UndirectedGraph} is
++ * that no reciprocal incidence is added.
++ *
++ * <p>Note that bipartiteness is a property of undirected graphs;
++ * {@link BipartiteChecker} is not meaningful on the directed out-adjacency.
++ */
++public final class DirectedGraph extends AbstractAdjacencyListGraph<Integer> {
++
++    private DirectedGraph(int order) {
++        super(order);
++    }
++
++    /**
++     * Builds a directed graph from a vertex count and a list of edges, each read
++     * as {@code u -> v}.
++     *
++     * @param order the number of vertices; vertices are {@code [0, order)}
++     * @param edges the directed edges
++     * @throws IllegalArgumentException if the inputs are invalid
++     *                                  (see {@link GraphInputValidator})
++     */
++    public static DirectedGraph of(int order, List<Edge> edges) {
++        GraphInputValidator.validate(order, edges);
++        DirectedGraph graph = new DirectedGraph(order);
++        for (Edge edge : edges) {
++            graph.addIncidence(edge.u(), edge.v());
++        }
++        return graph;
++    }
++
++    /**
++     * Convenience overload that accepts edges as {@code {u, v}} pairs, each read
++     * as {@code u -> v}.
++     */
++    public static DirectedGraph of(int order, int[][] edges) {
++        return of(order, Edge.fromPairs(edges));
++    }
++
++    @Override
++    protected int targetOf(Integer incidence) {
++        return incidence;
++    }
++}
+diff --git a/bipartite/Edge.java b/bipartite/Edge.java
+index 25b1302..c4e3281 100644
+--- a/bipartite/Edge.java
++++ b/bipartite/Edge.java
+@@ -1,9 +1,12 @@
+ package bipartite;
+ 
++import java.util.ArrayList;
++import java.util.List;
++
+ /**
+- * An undirected edge connecting two <em>distinct</em> vertices. The order of the
+- * endpoints is irrelevant: {@code new Edge(0, 1)} and {@code new Edge(1, 0)}
+- * describe the same connection.
++ * An unweighted edge connecting two <em>distinct</em> vertices. The meaning of
++ * the endpoint order depends on the graph: irrelevant for an undirected graph,
++ * source-to-target ({@code u -> v}) for a directed one.
+  *
+  * <p>Self-loops are rejected: this models a simple graph, which keeps the
+  * bipartite check well-defined and guarantees that any odd-cycle witness has
+@@ -14,7 +17,7 @@ package bipartite;
+  * @param u one endpoint (a non-negative vertex id)
+  * @param v the other endpoint (a non-negative vertex id, distinct from {@code u})
+  */
+-public record Edge(int u, int v) {
++public record Edge(int u, int v) implements GraphEdge {
+ 
+     public Edge {
+         if (u < 0 || v < 0) {
+@@ -26,4 +29,28 @@ public record Edge(int u, int v) {
+                     "Self-loops are not allowed, got edge (" + u + ", " + v + ")");
+         }
+     }
++
++    /**
++     * Converts an array of {@code {u, v}} pairs into a list of edges, matching
++     * the classic competitive-programming input format. Shared by the
++     * unweighted graph factories.
++     *
++     * @param pairs an array of two-element {@code {u, v}} arrays
++     * @return the corresponding edges
++     * @throws IllegalArgumentException if {@code pairs} is null, or any pair is
++     *                                  null or does not have exactly two endpoints
++     */
++    public static List<Edge> fromPairs(int[][] pairs) {
++        if (pairs == null) {
++            throw new IllegalArgumentException("Edge array must not be null");
++        }
++        List<Edge> edges = new ArrayList<>(pairs.length);
++        for (int[] pair : pairs) {
++            if (pair == null || pair.length != 2) {
++                throw new IllegalArgumentException("Each edge must have exactly two endpoints {u, v}");
++            }
++            edges.add(new Edge(pair[0], pair[1]));
++        }
++        return edges;
++    }
+ }
+diff --git a/bipartite/Graph.java b/bipartite/Graph.java
+new file mode 100644
+index 0000000..f8f8be1
+--- /dev/null
++++ b/bipartite/Graph.java
+@@ -0,0 +1,27 @@
++package bipartite;
++
++import java.util.List;
++
++/**
++ * A read-only graph over the vertices {@code [0, order())}, exposing only what
++ * graph algorithms need to traverse it. Algorithms such as
++ * {@link BipartiteChecker} depend on this interface rather than any concrete
++ * representation, so they work unchanged across undirected, directed, and
++ * weighted implementations.
++ */
++public interface Graph {
++
++    /** @return the number of vertices; vertices are the ids {@code [0, order())} */
++    int order();
++
++    /**
++     * Returns the vertices reachable from {@code vertex} by a single edge. For a
++     * directed graph these are the out-neighbors; for an undirected graph the
++     * relation is symmetric. Any edge weights are not reported here.
++     *
++     * @param vertex a vertex id in {@code [0, order())}
++     * @return an unmodifiable list of adjacent vertex ids
++     * @throws IndexOutOfBoundsException if {@code vertex} is out of range
++     */
++    List<Integer> neighbors(int vertex);
++}
+diff --git a/bipartite/GraphEdge.java b/bipartite/GraphEdge.java
+new file mode 100644
+index 0000000..7322eea
+--- /dev/null
++++ b/bipartite/GraphEdge.java
+@@ -0,0 +1,19 @@
++package bipartite;
++
++/**
++ * The common contract for an edge supplied when building a graph: it connects
++ * two vertices {@code u} and {@code v}. Concrete edge types may carry extra data
++ * (for example {@link WeightedEdge} adds a weight); validation and construction
++ * rely only on the endpoints exposed here.
++ *
++ * <p>For a directed graph the convention is that the edge runs from {@code u} to
++ * {@code v}; for an undirected graph the order is irrelevant.
++ */
++public interface GraphEdge {
++
++    /** @return the first endpoint (the source, for a directed edge) */
++    int u();
++
++    /** @return the second endpoint (the target, for a directed edge) */
++    int v();
++}
+diff --git a/bipartite/GraphInputValidator.java b/bipartite/GraphInputValidator.java
+index d710f00..bcc744b 100644
+--- a/bipartite/GraphInputValidator.java
++++ b/bipartite/GraphInputValidator.java
+@@ -3,9 +3,10 @@ package bipartite;
+ import java.util.List;
+ 
+ /**
+- * Validates the inputs used to build an {@link UndirectedGraph}, failing fast
+- * with descriptive messages instead of surfacing low-level errors (such as
+- * array index exceptions) deep inside graph construction.
++ * Validates the inputs used to build a graph, failing fast with descriptive
++ * messages instead of surfacing low-level errors (such as array index
++ * exceptions) deep inside graph construction. It works with any
++ * {@link GraphEdge}, so every graph implementation shares the same checks.
+  */
+ final class GraphInputValidator {
+ 
+@@ -16,23 +17,25 @@ final class GraphInputValidator {
+      * @param order the number of vertices; vertices are {@code [0, order)}
+      * @param edges the edges to be added to the graph
+      * @throws IllegalArgumentException if the order is negative, the edge list
+-     *                                  is null, or any edge references a vertex
+-     *                                  outside {@code [0, order)}
++     *                                  is null or contains a null edge, or any
++     *                                  edge references a vertex outside
++     *                                  {@code [0, order)}
+      */
+-    static void validate(int order, List<Edge> edges) {
++    static void validate(int order, List<? extends GraphEdge> edges) {
+         if (order < 0) {
+             throw new IllegalArgumentException("Vertex count must be non-negative, got " + order);
+         }
+         if (edges == null) {
+             throw new IllegalArgumentException("Edge list must not be null");
+         }
+-        for (Edge edge : edges) {
++        for (GraphEdge edge : edges) {
+             if (edge == null) {
+                 throw new IllegalArgumentException("Edge list must not contain null edges");
+             }
+-            if (edge.u() >= order || edge.v() >= order) {
++            if (edge.u() < 0 || edge.v() < 0 || edge.u() >= order || edge.v() >= order) {
+                 throw new IllegalArgumentException(
+-                        "Edge " + edge + " references a vertex outside the range [0, " + order + ")");
++                        "Edge (" + edge.u() + ", " + edge.v()
++                                + ") references a vertex outside the range [0, " + order + ")");
+             }
+         }
+     }
+diff --git a/bipartite/Main.java b/bipartite/Main.java
+index 1792bfb..4c6e988 100644
+--- a/bipartite/Main.java
++++ b/bipartite/Main.java
+@@ -1,9 +1,12 @@
+ package bipartite;
+ 
++import java.util.List;
++
+ /**
+- * Small demonstration of the bipartite checker. Mirrors the original example:
+- * a 4-vertex graph containing the triangle 0-1-2, which is <em>not</em>
+- * bipartite because of that odd cycle.
++ * Demonstrates the bipartite checker running against several {@link Graph}
++ * implementations through the shared interface: an unweighted undirected graph
++ * (the original example), a weighted undirected graph, and a directed graph
++ * (shown structurally, since bipartiteness applies to undirected graphs).
+  */
+ public final class Main {
+ 
+@@ -11,20 +14,34 @@ public final class Main {
+     }
+ 
+     public static void main(String[] args) {
+-        UndirectedGraph graph = UndirectedGraph.of(4, new int[][] {
+-                {0, 1}, {0, 2}, {1, 2}, {2, 3}
+-        });
++        BipartiteChecker checker = new BipartiteChecker();
++
++        // Unweighted undirected — the original example: the triangle 0-1-2 makes
++        // it non-bipartite.
++        Graph triangle = UndirectedGraph.of(4, new int[][] {{0, 1}, {0, 2}, {1, 2}, {2, 3}});
++        report("Unweighted undirected", checker.check(triangle));
+ 
+-        BipartiteResult result = new BipartiteChecker().check(graph);
++        // Weighted undirected — the same algorithm via the Graph interface; the
++        // weights are simply ignored by the check.
++        Graph weightedCycle = WeightedUndirectedGraph.of(4, List.of(
++                new WeightedEdge(0, 1, 2.5),
++                new WeightedEdge(1, 2, 1.0),
++                new WeightedEdge(2, 3, 4.0),
++                new WeightedEdge(3, 0, 0.5)));
++        report("Weighted undirected", checker.check(weightedCycle));
++
++        // Directed — demonstrates one-way adjacency on the generic base.
++        DirectedGraph directed = DirectedGraph.of(3, new int[][] {{0, 1}, {0, 2}, {1, 2}});
++        System.out.println("Directed out-neighbors of 0: " + directed.neighbors(0));
++    }
+ 
+-        System.out.println("Bipartite: " + result.isBipartite());
++    private static void report(String label, BipartiteResult result) {
+         switch (result) {
+-            case BipartiteResult.Bipartite bipartite -> {
+-                System.out.println("Partition A: " + bipartite.partitionA());
+-                System.out.println("Partition B: " + bipartite.partitionB());
+-            }
+-            case BipartiteResult.NotBipartite notBipartite ->
+-                    System.out.println("Odd-cycle witness: " + notBipartite.oddCycle());
++            case BipartiteResult.Bipartite bipartite -> System.out.println(
++                    label + ": bipartite=true, A=" + bipartite.partitionA()
++                            + ", B=" + bipartite.partitionB());
++            case BipartiteResult.NotBipartite notBipartite -> System.out.println(
++                    label + ": bipartite=false, odd-cycle witness=" + notBipartite.oddCycle());
+         }
+     }
+ }
+diff --git a/bipartite/UndirectedGraph.java b/bipartite/UndirectedGraph.java
+index d0f0e63..a9799c4 100644
+--- a/bipartite/UndirectedGraph.java
++++ b/bipartite/UndirectedGraph.java
+@@ -1,25 +1,17 @@
+ package bipartite;
+ 
+-import java.util.ArrayList;
+-import java.util.Collections;
+ import java.util.List;
+ 
+ /**
+- * An immutable undirected graph backed by an adjacency list. Vertices are the
+- * integers in the range {@code [0, order())}.
+- *
+- * <p>Instances are created through the {@code of(...)} factory methods, which
+- * validate their inputs and then freeze the adjacency structure so a graph
+- * cannot be mutated after construction.
++ * An immutable, unweighted undirected graph. Each edge {@code {u, v}} is stored
++ * symmetrically, so {@code v} appears among {@code u}'s neighbors and vice
++ * versa. Built through the {@code of(...)} factory methods, which validate their
++ * inputs before construction.
+  */
+-public final class UndirectedGraph {
++public final class UndirectedGraph extends AbstractAdjacencyListGraph<Integer> {
+ 
+-    private final int order;
+-    private final List<List<Integer>> adjacency;
+-
+-    private UndirectedGraph(int order, List<List<Integer>> adjacency) {
+-        this.order = order;
+-        this.adjacency = adjacency;
++    private UndirectedGraph(int order) {
++        super(order);
+     }
+ 
+     /**
+@@ -32,66 +24,28 @@ public final class UndirectedGraph {
+      */
+     public static UndirectedGraph of(int order, List<Edge> edges) {
+         GraphInputValidator.validate(order, edges);
+-
+-        List<List<Integer>> adjacency = new ArrayList<>(order);
+-        for (int i = 0; i < order; i++) {
+-            adjacency.add(new ArrayList<>());
+-        }
++        UndirectedGraph graph = new UndirectedGraph(order);
+         for (Edge edge : edges) {
+-            adjacency.get(edge.u()).add(edge.v());
+-            adjacency.get(edge.v()).add(edge.u());
++            graph.addIncidence(edge.u(), edge.v());
++            graph.addIncidence(edge.v(), edge.u());
+         }
+-
+-        return new UndirectedGraph(order, freeze(adjacency));
++        return graph;
+     }
+ 
+     /**
+-     * Convenience overload that accepts edges as {@code {u, v}} pairs, matching
+-     * the classic competitive-programming input format.
++     * Convenience overload that accepts edges as {@code {u, v}} pairs.
+      *
+      * @param order the number of vertices; vertices are {@code [0, order)}
+      * @param edges an array of two-element {@code {u, v}} arrays
+-     * @throws IllegalArgumentException if any pair does not have exactly two
+-     *                                  endpoints, or if the inputs are invalid
++     * @throws IllegalArgumentException if any pair is malformed or the inputs
++     *                                  are otherwise invalid
+      */
+     public static UndirectedGraph of(int order, int[][] edges) {
+-        if (edges == null) {
+-            throw new IllegalArgumentException("Edge array must not be null");
+-        }
+-        List<Edge> edgeList = new ArrayList<>(edges.length);
+-        for (int[] pair : edges) {
+-            if (pair == null || pair.length != 2) {
+-                throw new IllegalArgumentException(
+-                        "Each edge must have exactly two endpoints {u, v}");
+-            }
+-            edgeList.add(new Edge(pair[0], pair[1]));
+-        }
+-        return of(order, edgeList);
+-    }
+-
+-    /** @return the number of vertices in the graph */
+-    public int order() {
+-        return order;
++        return of(order, Edge.fromPairs(edges));
+     }
+ 
+-    /**
+-     * @param vertex a vertex id in {@code [0, order())}
+-     * @return an unmodifiable view of the vertices adjacent to {@code vertex}
+-     * @throws IndexOutOfBoundsException if {@code vertex} is out of range
+-     */
+-    public List<Integer> neighbors(int vertex) {
+-        if (vertex < 0 || vertex >= order) {
+-            throw new IndexOutOfBoundsException(
+-                    "Vertex " + vertex + " is outside the range [0, " + order + ")");
+-        }
+-        return adjacency.get(vertex);
+-    }
+-
+-    private static List<List<Integer>> freeze(List<List<Integer>> adjacency) {
+-        List<List<Integer>> frozen = new ArrayList<>(adjacency.size());
+-        for (List<Integer> neighbors : adjacency) {
+-            frozen.add(Collections.unmodifiableList(neighbors));
+-        }
+-        return Collections.unmodifiableList(frozen);
++    @Override
++    protected int targetOf(Integer incidence) {
++        return incidence;
+     }
+ }
+diff --git a/bipartite/WeightedEdge.java b/bipartite/WeightedEdge.java
+new file mode 100644
+index 0000000..adc1021
+--- /dev/null
++++ b/bipartite/WeightedEdge.java
+@@ -0,0 +1,29 @@
++package bipartite;
++
++/**
++ * A weighted edge connecting two <em>distinct</em> vertices. As with
++ * {@link Edge}, the endpoint order is irrelevant for an undirected graph and
++ * denotes source-to-target ({@code u -> v}) for a directed one. The weight is an
++ * arbitrary {@code double} (it may be negative); interpreting it is the caller's
++ * concern.
++ *
++ * @param u      one endpoint (a non-negative vertex id)
++ * @param v      the other endpoint (a non-negative vertex id, distinct from {@code u})
++ * @param weight the weight associated with the edge
++ */
++public record WeightedEdge(int u, int v, double weight) implements GraphEdge {
++
++    public WeightedEdge {
++        if (u < 0 || v < 0) {
++            throw new IllegalArgumentException(
++                    "Vertex ids must be non-negative, got edge (" + u + ", " + v + ")");
++        }
++        if (u == v) {
++            throw new IllegalArgumentException(
++                    "Self-loops are not allowed, got edge (" + u + ", " + v + ")");
++        }
++        if (Double.isNaN(weight)) {
++            throw new IllegalArgumentException("Edge weight must not be NaN");
++        }
++    }
++}
+diff --git a/bipartite/WeightedUndirectedGraph.java b/bipartite/WeightedUndirectedGraph.java
+new file mode 100644
+index 0000000..c548e2a
+--- /dev/null
++++ b/bipartite/WeightedUndirectedGraph.java
+@@ -0,0 +1,58 @@
++package bipartite;
++
++import java.util.List;
++
++/**
++ * An immutable, weighted undirected graph. Each edge {@code {u, v}} with a
++ * weight is stored symmetrically as two oriented incidences, so both endpoints
++ * see the connection and its weight.
++ *
++ * <p>This implementation exercises the generic parameter of
++ * {@link AbstractAdjacencyListGraph}: its incidence type is {@link WeightedEdge}
++ * (carrying the weight) rather than a plain vertex id. Because it still exposes
++ * the {@link Graph} interface — {@link #neighbors(int)} drops the weights —
++ * weight-agnostic algorithms such as {@link BipartiteChecker} run on it
++ * unchanged, while {@link #weightedNeighbors(int)} gives weight-aware callers the
++ * full incidence data.
++ */
++public final class WeightedUndirectedGraph extends AbstractAdjacencyListGraph<WeightedEdge> {
++
++    private WeightedUndirectedGraph(int order) {
++        super(order);
++    }
++
++    /**
++     * Builds a weighted graph from a vertex count and a list of weighted edges.
++     *
++     * @param order the number of vertices; vertices are {@code [0, order)}
++     * @param edges the weighted undirected edges
++     * @throws IllegalArgumentException if the inputs are invalid
++     *                                  (see {@link GraphInputValidator})
++     */
++    public static WeightedUndirectedGraph of(int order, List<WeightedEdge> edges) {
++        GraphInputValidator.validate(order, edges);
++        WeightedUndirectedGraph graph = new WeightedUndirectedGraph(order);
++        for (WeightedEdge edge : edges) {
++            // Store each undirected edge as two oriented incidences, so the
++            // incidence read from a vertex always has that vertex as its source.
++            graph.addIncidence(edge.u(), edge);
++            graph.addIncidence(edge.v(), new WeightedEdge(edge.v(), edge.u(), edge.weight()));
++        }
++        return graph;
++    }
++
++    /**
++     * @param vertex a vertex id in {@code [0, order())}
++     * @return the weighted edges leaving {@code vertex}; each has {@code vertex}
++     *         as its {@link WeightedEdge#u() source}
++     * @throws IndexOutOfBoundsException if {@code vertex} is out of range
++     */
++    public List<WeightedEdge> weightedNeighbors(int vertex) {
++        return incidences(vertex);
++    }
++
++    @Override
++    protected int targetOf(WeightedEdge incidence) {
++        return incidence.v();
++    }
++}
+diff --git a/bipartite/package-info.java b/bipartite/package-info.java
+index 831cbe4..3311cef 100644
+--- a/bipartite/package-info.java
++++ b/bipartite/package-info.java
+@@ -1,18 +1,28 @@
+ /**
+  * A small, self-contained library for deciding whether an undirected graph is
+- * bipartite.
++ * bipartite, built around a generic adjacency-list representation.
+  *
+- * <p>The package separates four concerns:
++ * <p>Graph representation is layered so new variants can be added without
++ * touching the algorithms:
+  * <ul>
+- *   <li>{@link bipartite.Edge} and {@link bipartite.UndirectedGraph} model an
+- *       immutable graph;</li>
+- *   <li>{@link bipartite.GraphInputValidator} validates construction inputs;</li>
+- *   <li>{@link bipartite.BipartiteChecker} runs the breadth-first 2-coloring
+- *       algorithm;</li>
+- *   <li>{@link bipartite.BipartiteResult} is the sealed outcome — either the two
+- *       vertex partitions or an odd-cycle witness.</li>
++ *   <li>{@link bipartite.Graph} is the read-only interface algorithms depend
++ *       on;</li>
++ *   <li>{@link bipartite.AbstractAdjacencyListGraph} is a generic adjacency-list
++ *       base parameterised by an incidence type, leaving "what an edge carries"
++ *       and "directed vs. undirected" to subclasses;</li>
++ *   <li>{@link bipartite.UndirectedGraph}, {@link bipartite.DirectedGraph}, and
++ *       {@link bipartite.WeightedUndirectedGraph} are the concrete
++ *       implementations;</li>
++ *   <li>{@link bipartite.GraphEdge} (with {@link bipartite.Edge} and
++ *       {@link bipartite.WeightedEdge}) is the edge contract, and
++ *       {@link bipartite.GraphInputValidator} validates construction inputs.</li>
+  * </ul>
+  *
++ * <p>{@link bipartite.BipartiteChecker} runs a breadth-first 2-coloring against
++ * any {@link bipartite.Graph} and returns the sealed
++ * {@link bipartite.BipartiteResult} — either the two vertex partitions or an
++ * odd-cycle witness.
++ *
+  * <p>{@link bipartite.Main} provides a runnable demonstration and
+  * {@link bipartite.BipartiteCheckerTests} a dependency-free test harness.
+  */

@@ -1,0 +1,422 @@
+diff --git a/ConsoleLogger.java b/ConsoleLogger.java
+new file mode 100644
+index 0000000..5916dfa
+--- /dev/null
++++ b/ConsoleLogger.java
+@@ -0,0 +1,39 @@
++import java.io.PrintStream;
++import java.util.Objects;
++
++/**
++ * A {@link CycleDetectionLogger} that writes human-readable lines to a
++ * {@link PrintStream} (by default {@link System#out}). Depends only on the JDK.
++ */
++final class ConsoleLogger implements CycleDetectionLogger {
++
++    private final PrintStream out;
++
++    ConsoleLogger() {
++        this(System.out);
++    }
++
++    ConsoleLogger(PrintStream out) {
++        this.out = Objects.requireNonNull(out, "out");
++    }
++
++    @Override
++    public void detectionStarted(String algorithm, DirectedGraph graph) {
++        out.printf("[%s] detection started on graph with %d vertices%n", algorithm, graph.vertices());
++    }
++
++    @Override
++    public void cycleFound(String algorithm, Cycle cycle) {
++        out.printf("[%s] cycle found: %s%n", algorithm, cycle);
++    }
++
++    @Override
++    public void cycleDetected(String algorithm) {
++        out.printf("[%s] cycle detected%n", algorithm);
++    }
++
++    @Override
++    public void noCycleFound(String algorithm) {
++        out.printf("[%s] no cycle found (acyclic)%n", algorithm);
++    }
++}
+diff --git a/CycleDetectionLogger.java b/CycleDetectionLogger.java
+new file mode 100644
+index 0000000..93debf0
+--- /dev/null
++++ b/CycleDetectionLogger.java
+@@ -0,0 +1,32 @@
++/**
++ * Dependency-free logging facade for cycle-detection events. The library never
++ * logs on its own; attach a logger to a detector via
++ * {@link CycleDetector#withLogging(CycleDetectionLogger)} to observe events.
++ *
++ * <p>Two implementations ship with the library — {@link NoOpLogger} (silent)
++ * and {@link ConsoleLogger}. To route events into {@code java.util.logging},
++ * SLF4J, Log4j, or any other framework, implement this interface in your own
++ * code: the library itself depends only on the JDK, so the choice of logging
++ * backend stays entirely with the caller.
++ *
++ * <p>The {@code algorithm} argument is the detector's {@link CycleDetector#name()}.
++ */
++interface CycleDetectionLogger {
++
++    /** An algorithm has begun scanning {@code graph}. */
++    void detectionStarted(String algorithm, DirectedGraph graph);
++
++    /** A cycle was located, including its vertex path. Emitted by {@code findCycle}. */
++    void cycleFound(String algorithm, Cycle cycle);
++
++    /** A cycle's existence was confirmed without reconstructing its path. Emitted by {@code hasCycle}. */
++    void cycleDetected(String algorithm);
++
++    /** The graph was determined to be acyclic. */
++    void noCycleFound(String algorithm);
++
++    /** Returns the shared silent logger that discards every event. */
++    static CycleDetectionLogger noOp() {
++        return NoOpLogger.INSTANCE;
++    }
++}
+diff --git a/DetectCycleDemo.java b/DetectCycleDemo.java
+index 50a9b94..3370a4f 100644
+--- a/DetectCycleDemo.java
++++ b/DetectCycleDemo.java
+@@ -19,12 +19,12 @@ final class DetectCycleDemo {
+                 ? new CycleDetectionAlgorithm[] {CycleDetectionAlgorithm.valueOf(args[0].toUpperCase())}
+                 : CycleDetectionAlgorithm.values();
+ 
++        // Attach the console logger to observe detection events; without
++        // withLogging(...) the library runs silently.
++        CycleDetectionLogger logger = new ConsoleLogger();
+         for (CycleDetectionAlgorithm algorithm : algorithms) {
+-            CycleDetector detector = CycleDetector.create(algorithm);
+-            String result = detector.findCycle(graph)
+-                    .map(cycle -> "cycle " + cycle)
+-                    .orElse("acyclic");
+-            System.out.printf("%-4s (%s): %s%n", algorithm, algorithm.description(), result);
++            CycleDetector detector = CycleDetector.create(algorithm).withLogging(logger);
++            detector.findCycle(graph);
+         }
+     }
+ }
+diff --git a/DfsCycleDetector.java b/DfsCycleDetector.java
+index 51d4935..3ef1df4 100644
+--- a/DfsCycleDetector.java
++++ b/DfsCycleDetector.java
+@@ -40,6 +40,11 @@ final class DfsCycleDetector implements CycleDetector {
+         }
+     }
+ 
++    @Override
++    public String name() {
++        return "DFS";
++    }
++
+     @Override
+     public Optional<Cycle> findCycle(DirectedGraph graph) {
+         int vertexCount = graph.vertices();
+diff --git a/KahnCycleDetector.java b/KahnCycleDetector.java
+index eb9ced9..b5c29a4 100644
+--- a/KahnCycleDetector.java
++++ b/KahnCycleDetector.java
+@@ -16,6 +16,11 @@ import java.util.Optional;
+  */
+ final class KahnCycleDetector implements CycleDetector {
+ 
++    @Override
++    public String name() {
++        return "KAHN";
++    }
++
+     @Override
+     public boolean hasCycle(DirectedGraph graph) {
+         int vertexCount = graph.vertices();
+diff --git a/LoggingCycleDetector.java b/LoggingCycleDetector.java
+new file mode 100644
+index 0000000..637dff9
+--- /dev/null
++++ b/LoggingCycleDetector.java
+@@ -0,0 +1,49 @@
++import java.util.Objects;
++import java.util.Optional;
++
++/**
++ * Decorator that emits {@link CycleDetectionLogger} events around another
++ * {@link CycleDetector}, keeping the logging concern out of the algorithm
++ * implementations. Obtain one via {@link CycleDetector#withLogging}.
++ *
++ * <p>Each operation logs {@code detectionStarted} on entry and exactly one
++ * outcome event ({@code cycleFound} / {@code cycleDetected} / {@code noCycleFound})
++ * on exit. Results are passed through unchanged.
++ */
++final class LoggingCycleDetector implements CycleDetector {
++
++    private final CycleDetector delegate;
++    private final CycleDetectionLogger logger;
++
++    LoggingCycleDetector(CycleDetector delegate, CycleDetectionLogger logger) {
++        this.delegate = Objects.requireNonNull(delegate, "delegate");
++        this.logger = Objects.requireNonNull(logger, "logger");
++    }
++
++    @Override
++    public Optional<Cycle> findCycle(DirectedGraph graph) {
++        logger.detectionStarted(name(), graph);
++        Optional<Cycle> result = delegate.findCycle(graph);
++        result.ifPresentOrElse(
++                cycle -> logger.cycleFound(name(), cycle),
++                () -> logger.noCycleFound(name()));
++        return result;
++    }
++
++    @Override
++    public boolean hasCycle(DirectedGraph graph) {
++        logger.detectionStarted(name(), graph);
++        boolean present = delegate.hasCycle(graph);
++        if (present) {
++            logger.cycleDetected(name());
++        } else {
++            logger.noCycleFound(name());
++        }
++        return present;
++    }
++
++    @Override
++    public String name() {
++        return delegate.name();
++    }
++}
+diff --git a/NoOpLogger.java b/NoOpLogger.java
+new file mode 100644
+index 0000000..14ff748
+--- /dev/null
++++ b/NoOpLogger.java
+@@ -0,0 +1,24 @@
++/**
++ * A {@link CycleDetectionLogger} that discards every event. This is the library
++ * default, so detection has zero logging overhead unless a logger is attached.
++ */
++enum NoOpLogger implements CycleDetectionLogger {
++
++    INSTANCE;
++
++    @Override
++    public void detectionStarted(String algorithm, DirectedGraph graph) {
++    }
++
++    @Override
++    public void cycleFound(String algorithm, Cycle cycle) {
++    }
++
++    @Override
++    public void cycleDetected(String algorithm) {
++    }
++
++    @Override
++    public void noCycleFound(String algorithm) {
++    }
++}
+diff --git a/README.md b/README.md
+index b80d64d..4e2e0d0 100644
+--- a/README.md
++++ b/README.md
+@@ -33,6 +33,36 @@ CycleDetectionAlgorithm algorithm = CycleDetectionAlgorithm.valueOf(args[0]); //
+ CycleDetector detector = CycleDetector.create(algorithm);
+ ```
+ 
++### Logging events (optional)
++
++The library is silent by default. To track events — when an algorithm begins,
++when a cycle is found, when a graph is acyclic — attach a `CycleDetectionLogger`
++with `withLogging(...)`:
++
++```java
++CycleDetector detector = CycleDetector.create(CycleDetectionAlgorithm.DFS)
++    .withLogging(new ConsoleLogger());   // prints: [DFS] detection started ... / [DFS] cycle found: 0 -> 1 -> 2 -> 0
++detector.findCycle(graph);
++```
++
++`CycleDetectionLogger` is a dependency-free facade. Built-in implementations:
++`NoOpLogger` (the silent default) and `ConsoleLogger` (writes to a `PrintStream`).
++The library depends only on the JDK, so to route events into `java.util.logging`,
++SLF4J, Log4j, etc., implement the four-method interface yourself:
++
++```java
++CycleDetectionLogger toJul = new CycleDetectionLogger() {
++    private final java.util.logging.Logger log = java.util.logging.Logger.getLogger("cycles");
++    public void detectionStarted(String algo, DirectedGraph g) { log.info(algo + " started"); }
++    public void cycleFound(String algo, Cycle c)               { log.info(algo + " cycle: " + c); }
++    public void cycleDetected(String algo)                     { log.info(algo + " cycle present"); }
++    public void noCycleFound(String algo)                      { log.info(algo + " acyclic"); }
++};
++```
++
++Logging is added by a decorator (`LoggingCycleDetector`), so the algorithm
++implementations themselves carry no logging code.
++
+ ## Example
+ 
+ ```java
+diff --git a/detect_cycle_directed_graph.java b/detect_cycle_directed_graph.java
+index 51df5fe..7a5230a 100644
+--- a/detect_cycle_directed_graph.java
++++ b/detect_cycle_directed_graph.java
+@@ -35,6 +35,19 @@ interface CycleDetector {
+         return findCycle(graph).isPresent();
+     }
+ 
++    /** A short label identifying the algorithm; used in {@link CycleDetectionLogger} events. */
++    default String name() {
++        return getClass().getSimpleName();
++    }
++
++    /**
++     * Returns a view of this detector that emits {@link CycleDetectionLogger}
++     * events around each operation. The underlying algorithm is unchanged.
++     */
++    default CycleDetector withLogging(CycleDetectionLogger logger) {
++        return new LoggingCycleDetector(this, logger);
++    }
++
+     /** Creates the detector for the requested algorithm. */
+     static CycleDetector create(CycleDetectionAlgorithm algorithm) {
+         return algorithm.create();
+diff --git a/test/CycleDetectionLoggerTest.java b/test/CycleDetectionLoggerTest.java
+new file mode 100644
+index 0000000..d89124e
+--- /dev/null
++++ b/test/CycleDetectionLoggerTest.java
+@@ -0,0 +1,129 @@
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.EnumSource;
++
++import java.util.ArrayList;
++import java.util.List;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++/**
++ * JUnit 5 test suite for the {@link CycleDetectionLogger} facade and the
++ * {@link LoggingCycleDetector} decorator.
++ *
++ * <p>Compile and run with {@code ./run-tests.sh} (no build tool required).
++ */
++@DisplayName("CycleDetectionLogger")
++class CycleDetectionLoggerTest {
++
++    /** Test double that records each event as a compact string for assertions. */
++    private static final class RecordingLogger implements CycleDetectionLogger {
++        final List<String> events = new ArrayList<>();
++
++        @Override
++        public void detectionStarted(String algorithm, DirectedGraph graph) {
++            events.add("started:" + algorithm + ":" + graph.vertices());
++        }
++
++        @Override
++        public void cycleFound(String algorithm, Cycle cycle) {
++            events.add("found:" + algorithm + ":" + cycle);
++        }
++
++        @Override
++        public void cycleDetected(String algorithm) {
++            events.add("detected:" + algorithm);
++        }
++
++        @Override
++        public void noCycleFound(String algorithm) {
++            events.add("none:" + algorithm);
++        }
++    }
++
++    private static final DirectedGraph CYCLIC = DirectedGraph.from(3, new int[][] {
++        {0, 1}, {1, 2}, {2, 0}
++    });
++    private static final DirectedGraph ACYCLIC = DirectedGraph.from(3, new int[][] {
++        {0, 1}, {1, 2}
++    });
++
++    @ParameterizedTest(name = "{0}")
++    @EnumSource(CycleDetectionAlgorithm.class)
++    @DisplayName("findCycle emits started then cycleFound for a cyclic graph")
++    void findCycleEmitsFound(CycleDetectionAlgorithm algorithm) {
++        RecordingLogger logger = new RecordingLogger();
++        CycleDetector.create(algorithm).withLogging(logger).findCycle(CYCLIC);
++
++        assertEquals(2, logger.events.size(), logger.events.toString());
++        assertEquals("started:" + algorithm + ":3", logger.events.get(0));
++        assertTrue(logger.events.get(1).startsWith("found:" + algorithm + ":"), logger.events.toString());
++    }
++
++    @ParameterizedTest(name = "{0}")
++    @EnumSource(CycleDetectionAlgorithm.class)
++    @DisplayName("findCycle emits started then noCycleFound for an acyclic graph")
++    void findCycleEmitsNone(CycleDetectionAlgorithm algorithm) {
++        RecordingLogger logger = new RecordingLogger();
++        CycleDetector.create(algorithm).withLogging(logger).findCycle(ACYCLIC);
++
++        assertEquals(List.of("started:" + algorithm + ":3", "none:" + algorithm), logger.events);
++    }
++
++    @ParameterizedTest(name = "{0}")
++    @EnumSource(CycleDetectionAlgorithm.class)
++    @DisplayName("hasCycle emits started then cycleDetected for a cyclic graph")
++    void hasCycleEmitsDetected(CycleDetectionAlgorithm algorithm) {
++        RecordingLogger logger = new RecordingLogger();
++        CycleDetector.create(algorithm).withLogging(logger).hasCycle(CYCLIC);
++
++        assertEquals(List.of("started:" + algorithm + ":3", "detected:" + algorithm), logger.events);
++    }
++
++    @ParameterizedTest(name = "{0}")
++    @EnumSource(CycleDetectionAlgorithm.class)
++    @DisplayName("hasCycle emits started then noCycleFound for an acyclic graph")
++    void hasCycleEmitsNone(CycleDetectionAlgorithm algorithm) {
++        RecordingLogger logger = new RecordingLogger();
++        CycleDetector.create(algorithm).withLogging(logger).hasCycle(ACYCLIC);
++
++        assertEquals(List.of("started:" + algorithm + ":3", "none:" + algorithm), logger.events);
++    }
++
++    @Test
++    @DisplayName("the decorator passes the underlying result through unchanged")
++    void resultUnchanged() {
++        CycleDetector base = CycleDetector.create(CycleDetectionAlgorithm.DFS);
++        CycleDetector logged = base.withLogging(new RecordingLogger());
++        assertEquals(base.findCycle(CYCLIC), logged.findCycle(CYCLIC));
++        assertEquals(base.hasCycle(ACYCLIC), logged.hasCycle(ACYCLIC));
++    }
++
++    @Test
++    @DisplayName("an unwrapped detector logs nothing")
++    void silentByDefault() {
++        RecordingLogger logger = new RecordingLogger();
++        // A plain detector has no logger attached, so nothing is recorded.
++        CycleDetector.create(CycleDetectionAlgorithm.DFS).findCycle(CYCLIC);
++        assertTrue(logger.events.isEmpty());
++    }
++
++    @Test
++    @DisplayName("the no-op logger ignores every event")
++    void noOpLoggerIsSilent() {
++        CycleDetector detector = CycleDetector.create(CycleDetectionAlgorithm.KAHN)
++                .withLogging(CycleDetectionLogger.noOp());
++        // Exercises the no-op path; succeeds simply by not throwing.
++        assertTrue(detector.hasCycle(CYCLIC));
++    }
++
++    @Test
++    @DisplayName("withLogging rejects a null logger")
++    void rejectsNullLogger() {
++        assertThrows(NullPointerException.class,
++                () -> CycleDetector.create(CycleDetectionAlgorithm.DFS).withLogging(null));
++    }
++}

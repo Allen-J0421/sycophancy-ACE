@@ -1,0 +1,171 @@
+diff --git a/RadixSort.java b/RadixSort.java
+index 0b97a88..9189ef7 100644
+--- a/RadixSort.java
++++ b/RadixSort.java
+@@ -3,22 +3,36 @@ import java.util.Arrays;
+ /**
+  * Least-significant-digit (LSD) radix sort for {@code int} arrays.
+  *
+- * <p>This is a stable, non-comparison sort that runs in O(d &middot; n) time,
+- * where {@code n} is the number of elements and {@code d} is the number of
+- * base-10 digits in the value range. It sorts in place.
++ * <p>This is a stable, non-comparison sort. It sorts on one byte at a time
++ * (base 256), so a 32-bit {@code int} takes at most four passes regardless of
++ * the magnitude of the values, giving O(n) time for fixed-width integers. It
++ * sorts in place.
+  *
+- * <p>Unlike the textbook version, this implementation correctly handles
+- * negative values (including {@link Integer#MIN_VALUE}) and empty arrays.
+- * Negatives are supported by biasing every value into a non-negative
+- * {@code long} range before sorting, then mapping back, which keeps the
+- * digit extraction valid and avoids overflow.
++ * <p>Negative values (including {@link Integer#MIN_VALUE}) are handled directly
++ * on the two's-complement representation: when sorting on the most significant
++ * byte the sign bit is flipped, which maps the signed range monotonically onto
++ * the unsigned range so negatives sort ahead of non-negatives. No bias,
++ * widening to {@code long}, or extra arithmetic is required.
++ *
++ * <p>A single read pass tallies a histogram for every byte up front, and any
++ * byte position whose value is identical across all elements is skipped, so
++ * narrow-range inputs cost fewer than four passes.
+  *
+  * <p>This class is a stateless utility and cannot be instantiated.
+  */
+ public final class RadixSort {
+ 
+-    /** Base for digit extraction. Base 10 keeps the algorithm easy to follow. */
+-    private static final int RADIX = 10;
++    /** Number of bits processed per pass. Eight bits = one byte = base 256. */
++    private static final int RADIX_BITS = 8;
++
++    /** Number of buckets per pass (2^RADIX_BITS). */
++    private static final int RADIX = 1 << RADIX_BITS;
++
++    /** Mask selecting a single byte. */
++    private static final int MASK = RADIX - 1;
++
++    /** Passes needed to cover a 32-bit int, one byte at a time. */
++    private static final int PASSES = Integer.BYTES;
+ 
+     private RadixSort() {
+         // Utility class: prevent instantiation.
+@@ -35,78 +49,61 @@ public final class RadixSort {
+             return;
+         }
+ 
+-        int min = arr[0];
+-        int max = arr[0];
++        final int n = arr.length;
++        final int[] aux = new int[n];
++
++        // One read pass tallies a histogram for each byte position at once.
++        final int[][] counts = new int[PASSES][RADIX];
+         for (int value : arr) {
+-            if (value < min) {
+-                min = value;
+-            }
+-            if (value > max) {
+-                max = value;
++            for (int pass = 0; pass < PASSES; pass++) {
++                counts[pass][digit(value, pass)]++;
+             }
+         }
+ 
+-        // All elements equal: already sorted, and the loop below would not run.
+-        if (min == max) {
+-            return;
+-        }
++        // Ping-pong between the caller's array and the scratch buffer.
++        int[] src = arr;
++        int[] dst = aux;
++        for (int pass = 0; pass < PASSES; pass++) {
++            final int[] count = counts[pass];
+ 
+-        // Bias values into [0, range] using long arithmetic so that negatives
+-        // and the full int range (including Integer.MIN_VALUE) are handled
+-        // without overflow. range >= 1 here because min != max.
+-        long range = (long) max - (long) min;
+-        long[] buffer = new long[arr.length];
+-        for (int i = 0; i < arr.length; i++) {
+-            buffer[i] = (long) arr[i] - min;
+-        }
++            // If every element shares this byte, the pass cannot change order.
++            if (count[digit(src[0], pass)] == n) {
++                continue;
++            }
++
++            // Turn the histogram into the starting index of each bucket.
++            int start = 0;
++            for (int bucket = 0; bucket < RADIX; bucket++) {
++                int size = count[bucket];
++                count[bucket] = start;
++                start += size;
++            }
+ 
+-        long[] output = new long[arr.length];
+-        int[] count = new int[RADIX];
++            // Stable scatter: equal keys keep their relative order.
++            for (int i = 0; i < n; i++) {
++                int value = src[i];
++                dst[count[digit(value, pass)]++] = value;
++            }
+ 
+-        for (long exp = 1; range / exp > 0; exp *= RADIX) {
+-            countingSortByDigit(buffer, output, count, exp);
+-            // Reuse the arrays by swapping roles instead of copying back.
+-            long[] swap = buffer;
+-            buffer = output;
+-            output = swap;
++            int[] swap = src;
++            src = dst;
++            dst = swap;
+         }
+ 
+-        // Map the biased values back to their original int domain.
+-        for (int i = 0; i < arr.length; i++) {
+-            arr[i] = (int) (buffer[i] + min);
++        // If the result landed in the scratch buffer, copy it back.
++        if (src != arr) {
++            System.arraycopy(src, 0, arr, 0, n);
+         }
+     }
+ 
+     /**
+-     * Stable counting sort of {@code buffer} into {@code output} keyed on the
+-     * base-10 digit selected by {@code exp} (1, 10, 100, ...).
+-     *
+-     * @param buffer the values to sort (read from)
+-     * @param output destination array, same length as {@code buffer}
+-     * @param count  scratch array of size {@link #RADIX}; cleared on entry
+-     * @param exp    place value selecting the digit to sort on
++     * Extracts the byte of {@code value} for the given pass (0 = least
++     * significant). On the most significant byte the sign bit is flipped so
++     * that two's-complement signed values sort in ascending order.
+      */
+-    private static void countingSortByDigit(long[] buffer, long[] output, int[] count, long exp) {
+-        Arrays.fill(count, 0);
+-
+-        for (long value : buffer) {
+-            count[digit(value, exp)]++;
+-        }
+-
+-        // Turn counts into ending positions (prefix sums).
+-        for (int d = 1; d < RADIX; d++) {
+-            count[d] += count[d - 1];
+-        }
+-
+-        // Walk right-to-left so equal keys keep their relative order (stable).
+-        for (int i = buffer.length - 1; i >= 0; i--) {
+-            output[--count[digit(buffer[i], exp)]] = buffer[i];
+-        }
+-    }
+-
+-    /** Extracts the base-10 digit of {@code value} at place value {@code exp}. */
+-    private static int digit(long value, long exp) {
+-        return (int) ((value / exp) % RADIX);
++    private static int digit(int value, int pass) {
++        int b = (value >>> (pass * RADIX_BITS)) & MASK;
++        return pass == PASSES - 1 ? b ^ 0x80 : b;
+     }
+ 
+     /**

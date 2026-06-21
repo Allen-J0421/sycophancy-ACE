@@ -1,0 +1,195 @@
+diff --git a/BellmanFordDemo.java b/BellmanFordDemo.java
+index 193cbf7..6c46f71 100644
+--- a/BellmanFordDemo.java
++++ b/BellmanFordDemo.java
+@@ -21,6 +21,11 @@ final class BellmanFordDemo {
+                         (distances.isReachable(v) ? distances.distanceTo(v) : "INF") + " ");
+                 }
+                 System.out.println();
++
++                int target = 3;
++                System.out.println("Shortest path " + distances.source() + " -> " + target
++                    + ": " + distances.pathTo(target)
++                    + " (distance " + distances.distanceTo(target) + ")");
+             }
+         }
+     }
+diff --git a/BellmanFordTest.java b/BellmanFordTest.java
+index 7548d6e..0b9ef89 100644
+--- a/BellmanFordTest.java
++++ b/BellmanFordTest.java
+@@ -1,4 +1,5 @@
+ import java.util.Arrays;
++import java.util.List;
+ 
+ /**
+  * Lightweight, dependency-free tests for {@link BellmanFord} and friends.
+@@ -12,6 +13,9 @@ final class BellmanFordTest {
+ 
+     public static void main(String[] args) {
+         sampleGraphProducesKnownDistances();
++        pathsAreReconstructed();
++        pathToSourceIsTheSourceAlone();
++        unreachableVertexHasNoPath();
+         unreachableVerticesAreReported();
+         negativeWeightsAreHandled();
+         negativeCycleIsDetected();
+@@ -34,6 +38,33 @@ final class BellmanFordTest {
+         checkArray("sample distances", new int[] {0, 5, 6, 6, 7}, distances.all());
+     }
+ 
++    private static void pathsAreReconstructed() {
++        WeightedGraph graph = WeightedGraph.from(5, new int[][] {
++            {1, 3, 2}, {4, 3, -1}, {2, 4, 1}, {1, 2, 1}, {0, 1, 5}
++        });
++        Distances distances = succeed(BellmanFord.shortestPaths(graph, 0));
++
++        check("path 0->3 follows the optimal route",
++            distances.pathTo(3).equals(List.of(0, 1, 2, 4, 3)));
++        check("reconstructed path ends at the target", lastOf(distances.pathTo(3)) == 3);
++        check("path source matches result source", distances.pathTo(3).get(0) == 0);
++    }
++
++    private static void pathToSourceIsTheSourceAlone() {
++        WeightedGraph graph = WeightedGraph.of(2, WeightedEdge.of(0, 1, 1));
++        Distances distances = succeed(BellmanFord.shortestPaths(graph, 0));
++
++        check("path to the source is just the source",
++            distances.pathTo(0).equals(List.of(0)));
++    }
++
++    private static void unreachableVertexHasNoPath() {
++        WeightedGraph graph = WeightedGraph.of(3, WeightedEdge.of(0, 1, 4));
++        Distances distances = succeed(BellmanFord.shortestPaths(graph, 0));
++
++        check("unreachable vertex has empty path", distances.pathTo(2).isEmpty());
++    }
++
+     private static void unreachableVerticesAreReported() {
+         // Vertex 2 is isolated; vertex 1 is reachable from 0.
+         WeightedGraph graph = WeightedGraph.of(3, WeightedEdge.of(0, 1, 4));
+@@ -103,6 +134,10 @@ final class BellmanFordTest {
+         throw new AssertionError(result);
+     }
+ 
++    private static int lastOf(List<Integer> path) {
++        return path.get(path.size() - 1);
++    }
++
+     private static void check(String name, boolean condition) {
+         if (condition) {
+             passed++;
+diff --git a/Distances.java b/Distances.java
+index bd064a0..9c29728 100644
+--- a/Distances.java
++++ b/Distances.java
+@@ -1,5 +1,9 @@
++import java.util.ArrayDeque;
++import java.util.List;
++
+ /**
+- * A successful shortest-path result: the distance from the source to every vertex.
++ * A successful shortest-path result: the distance from the source to every vertex,
++ * together with enough information to reconstruct the route to any of them.
+  *
+  * <p>Unreachable vertices carry the {@link #UNREACHABLE} sentinel; prefer
+  * {@link #isReachable(int)} over comparing against it directly.
+@@ -9,10 +13,22 @@ final class Distances implements ShortestPathResult {
+     /** Sentinel distance for a vertex that cannot be reached from the source. */
+     static final int UNREACHABLE = Integer.MAX_VALUE;
+ 
++    /** Sentinel predecessor for the source and for unreachable vertices. */
++    static final int NO_PREDECESSOR = -1;
++
++    private final int source;
+     private final int[] distances;
++    private final int[] predecessors;
+ 
+-    Distances(int[] distances) {
++    Distances(int source, int[] distances, int[] predecessors) {
++        this.source = source;
+         this.distances = distances.clone();
++        this.predecessors = predecessors.clone();
++    }
++
++    /** The vertex these distances and paths originate from. */
++    int source() {
++        return source;
+     }
+ 
+     /** Whether {@code vertex} is reachable from the source. */
+@@ -29,6 +45,27 @@ final class Distances implements ShortestPathResult {
+         return distances[vertex];
+     }
+ 
++    /**
++     * Reconstructs the shortest path from the source to {@code target}.
++     *
++     * <p>The path is returned as the sequence of vertices from the source through
++     * to {@code target} inclusive. The path to the source itself is the single
++     * element {@code [source]}.
++     *
++     * @return the vertex sequence, or an empty list if {@code target} is unreachable
++     */
++    List<Integer> pathTo(int target) {
++        if (!isReachable(target)) {
++            return List.of();
++        }
++        // Walk predecessors back to the source, building the path front-to-back.
++        ArrayDeque<Integer> path = new ArrayDeque<>();
++        for (int v = target; v != NO_PREDECESSOR; v = predecessors[v]) {
++            path.addFirst(v);
++        }
++        return List.copyOf(path);
++    }
++
+     /** A defensive copy of all distances; index {@code i} is the distance to vertex {@code i}. */
+     int[] all() {
+         return distances.clone();
+diff --git a/bellman_ford.java b/bellman_ford.java
+index c02ce8e..2481398 100644
+--- a/bellman_ford.java
++++ b/bellman_ford.java
+@@ -32,24 +32,29 @@ final class BellmanFord {
+         Arrays.fill(dist, Distances.UNREACHABLE);
+         dist[source] = 0;
+ 
++        // predecessors[v] is the vertex preceding v on the best known path to v,
++        // enabling path reconstruction; the source and unreachable vertices have none.
++        int[] predecessors = new int[graph.vertices()];
++        Arrays.fill(predecessors, Distances.NO_PREDECESSOR);
++
+         for (int pass = 0; pass < graph.vertices() - 1; pass++) {
+-            if (!relaxAll(graph, dist)) {
++            if (!relaxAll(graph, dist, predecessors)) {
+                 break; // no edge improved this pass; further passes cannot either
+             }
+         }
+ 
+-        if (relaxAll(graph, dist)) {
++        if (relaxAll(graph, dist, predecessors)) {
+             return new NegativeCycle();
+         }
+-        return new Distances(dist);
++        return new Distances(source, dist, predecessors);
+     }
+ 
+     /**
+-     * Relaxes every edge once.
++     * Relaxes every edge once, recording the predecessor for any improved vertex.
+      *
+      * @return {@code true} if any distance was reduced
+      */
+-    private static boolean relaxAll(WeightedGraph graph, int[] dist) {
++    private static boolean relaxAll(WeightedGraph graph, int[] dist, int[] predecessors) {
+         boolean improved = false;
+         for (WeightedEdge edge : graph.edges()) {
+             int from = dist[edge.from()];
+@@ -59,6 +64,7 @@ final class BellmanFord {
+             int candidate = from + edge.weight();
+             if (candidate < dist[edge.to()]) {
+                 dist[edge.to()] = candidate;
++                predecessors[edge.to()] = edge.from();
+                 improved = true;
+             }
+         }

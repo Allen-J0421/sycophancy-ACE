@@ -1,0 +1,336 @@
+diff --git a/PrimsMst.java b/PrimsMst.java
+index 1a88563..e0e304a 100644
+--- a/PrimsMst.java
++++ b/PrimsMst.java
+@@ -68,6 +68,32 @@ public final class PrimsMst {
+         }
+     }
+ 
++    /**
++     * A pluggable source of graph data for the MST/MSF algorithm. An implementation reports
++     * how many vertices the graph has and feeds each of its edges to a sink; the framework
++     * ({@link Graph#from(GraphBuilder)}, {@link #compute(GraphBuilder)},
++     * {@link #computeForest(GraphBuilder)}) assembles and validates the {@link Graph}.
++     *
++     * <p>Implement this to load a graph from any origin — a file, a database, a network
++     * service, or one generated on the fly — without depending on a particular text format
++     * or on {@code Graph}'s internals. {@link EdgeListGraphBuilder} is the built-in
++     * implementation for the edge-list text format.
++     */
++    public interface GraphBuilder {
++
++        /** The number of vertices in the graph; vertices are indexed {@code 0..count-1}. */
++        int vertexCount();
++
++        /** Feeds every undirected edge of the graph to {@code sink} exactly once. */
++        void provideEdges(EdgeSink sink);
++
++        /** Receives an undirected edge with a positive weight. */
++        @FunctionalInterface
++        interface EdgeSink {
++            void accept(int from, int to, int weight);
++        }
++    }
++
+     /**
+      * An undirected, weighted graph stored as adjacency lists. Edges are added in both
+      * directions; weights must be positive.
+@@ -143,43 +169,74 @@ public final class PrimsMst {
+         }
+ 
+         /**
+-         * Reads a graph from an edge-list file. See {@link #fromEdgeList(Iterable)} for the
+-         * accepted format.
++         * Assembles a graph from any {@link GraphBuilder}. Each provided edge is validated
++         * (endpoints in range, positive weight) as it is added.
++         *
++         * @throws IllegalArgumentException if {@code builder} is null or supplies an invalid edge
++         */
++        static Graph from(GraphBuilder builder) {
++            if (builder == null) {
++                throw new IllegalArgumentException("Graph builder must not be null.");
++            }
++            Graph graph = new Graph(builder.vertexCount());
++            builder.provideEdges(graph::addEdge);
++            return graph;
++        }
++
++        /**
++         * Reads a graph from an edge-list file. See {@link EdgeListGraphBuilder} for the
++         * accepted format. Convenience for {@code from(EdgeListGraphBuilder.fromFile(path))}.
+          *
+          * @throws IOException if the file cannot be read
+          * @throws IllegalArgumentException if {@code path} is null or the content is malformed
+          */
+         static Graph fromEdgeListFile(Path path) throws IOException {
+-            if (path == null) {
+-                throw new IllegalArgumentException("Path must not be null.");
+-            }
+-            return fromEdgeList(Files.readAllLines(path));
++            return from(EdgeListGraphBuilder.fromFile(path));
+         }
+ 
+         /**
+-         * Builds a graph from an edge list given as a sequence of text lines.
++         * Builds a graph from an edge list given as text lines. See {@link EdgeListGraphBuilder}
++         * for the accepted format. Convenience for {@code from(new EdgeListGraphBuilder(lines))}.
+          *
+-         * <p>The format is line-oriented:
+-         * <ul>
+-         *   <li>{@code from to weight} — an undirected edge between two vertex indices with a
+-         *       positive integer weight (tokens separated by any whitespace).</li>
+-         *   <li>{@code vertices N} — an optional directive fixing the vertex count to {@code N},
+-         *       which is how isolated vertices (those in no edge) are represented. It must be at
+-         *       least one greater than the largest vertex index referenced.</li>
+-         *   <li>A {@code #} starts a comment that runs to the end of the line; blank lines are
+-         *       ignored.</li>
+-         * </ul>
+-         * When no {@code vertices} directive is given, the vertex count is inferred as the
+-         * largest referenced index plus one.
++         * @throws IllegalArgumentException if {@code lines} is null or any line is malformed
++         */
++        static Graph fromEdgeList(Iterable<String> lines) {
++            return from(new EdgeListGraphBuilder(lines));
++        }
++    }
++
++    /**
++     * A {@link GraphBuilder} that parses the edge-list text format.
++     *
++     * <p>The format is line-oriented:
++     * <ul>
++     *   <li>{@code from to weight} — an undirected edge between two vertex indices with a
++     *       positive integer weight (tokens separated by any whitespace).</li>
++     *   <li>{@code vertices N} — an optional directive fixing the vertex count to {@code N},
++     *       which is how isolated vertices (those in no edge) are represented. It must be at
++     *       least one greater than the largest vertex index referenced.</li>
++     *   <li>A {@code #} starts a comment that runs to the end of the line; blank lines are
++     *       ignored.</li>
++     * </ul>
++     * When no {@code vertices} directive is given, the vertex count is inferred as the
++     * largest referenced index plus one. The text is parsed once, at construction time.
++     */
++    public static final class EdgeListGraphBuilder implements GraphBuilder {
++
++        private final int vertexCount;
++        private final List<int[]> edges;
++
++        /**
++         * Parses {@code lines} into an in-memory edge list.
+          *
+          * @throws IllegalArgumentException if {@code lines} is null or any line is malformed
+          *                                  (with the offending line number in the message)
+          */
+-        static Graph fromEdgeList(Iterable<String> lines) {
++        public EdgeListGraphBuilder(Iterable<String> lines) {
+             if (lines == null) {
+                 throw new IllegalArgumentException("Edge list must not be null.");
+             }
+-            List<int[]> edges = new ArrayList<>();
++            List<int[]> parsed = new ArrayList<>();
+             int maxVertex = -1;
+             int declaredCount = -1;
+             int lineNumber = 0;
+@@ -206,24 +263,45 @@ public final class PrimsMst {
+                 if (weight <= 0) {
+                     throw malformed(lineNumber, "weight must be positive: " + weight);
+                 }
+-                edges.add(new int[] {from, to, weight});
++                parsed.add(new int[] {from, to, weight});
+                 maxVertex = Math.max(maxVertex, Math.max(from, to));
+             }
+ 
+-            int vertexCount = maxVertex + 1;
++            int count = maxVertex + 1;
+             if (declaredCount >= 0) {
+-                if (declaredCount < vertexCount) {
++                if (declaredCount < count) {
+                     throw new IllegalArgumentException("Declared vertex count " + declaredCount
+                         + " is smaller than the highest referenced vertex index " + maxVertex + ".");
+                 }
+-                vertexCount = declaredCount;
++                count = declaredCount;
++            }
++            this.vertexCount = count;
++            this.edges = parsed;
++        }
++
++        /**
++         * Reads and parses an edge-list file.
++         *
++         * @throws IOException if the file cannot be read
++         * @throws IllegalArgumentException if {@code path} is null or the content is malformed
++         */
++        public static EdgeListGraphBuilder fromFile(Path path) throws IOException {
++            if (path == null) {
++                throw new IllegalArgumentException("Path must not be null.");
+             }
++            return new EdgeListGraphBuilder(Files.readAllLines(path));
++        }
+ 
+-            Graph graph = new Graph(vertexCount);
++        @Override
++        public int vertexCount() {
++            return vertexCount;
++        }
++
++        @Override
++        public void provideEdges(EdgeSink sink) {
+             for (int[] edge : edges) {
+-                graph.addEdge(edge[0], edge[1], edge[2]);
++                sink.accept(edge[0], edge[1], edge[2]);
+             }
+-            return graph;
+         }
+ 
+         /** Returns {@code line} with any {@code #}-comment removed. */
+@@ -267,6 +345,16 @@ public final class PrimsMst {
+         return forest.components().isEmpty() ? new MstResult(List.of(), 0L) : forest.components().get(0);
+     }
+ 
++    /**
++     * Computes the minimum spanning tree of the graph supplied by {@code builder}.
++     * Convenience for {@code compute(Graph.from(builder))}.
++     *
++     * @throws IllegalArgumentException if the graph is null, not connected, or malformed
++     */
++    static MstResult compute(GraphBuilder builder) {
++        return compute(Graph.from(builder));
++    }
++
+     /**
+      * Computes the minimum spanning forest of {@code graph}: a minimum spanning tree for
+      * each connected component. Works for any graph, connected or not.
+@@ -293,6 +381,16 @@ public final class PrimsMst {
+         return new MsfResult(components);
+     }
+ 
++    /**
++     * Computes the minimum spanning forest of the graph supplied by {@code builder}.
++     * Convenience for {@code computeForest(Graph.from(builder))}.
++     *
++     * @throws IllegalArgumentException if the graph is null or malformed
++     */
++    static MsfResult computeForest(GraphBuilder builder) {
++        return computeForest(Graph.from(builder));
++    }
++
+     /**
+      * Grows a single minimum spanning tree from {@code start} over the vertices reachable
+      * from it, marking each visited vertex in {@code inTree}. The frontier empties exactly
+@@ -373,7 +471,7 @@ public final class PrimsMst {
+         System.out.println();
+         System.out.println(format(computeForest(disconnected)));
+ 
+-        // Build a graph from an edge-list description (the same format accepted from a file).
++        // Load a graph through the built-in edge-list GraphBuilder.
+         List<String> edgeList = List.of(
+             "# from to weight",
+             "vertices 4",
+@@ -382,6 +480,21 @@ public final class PrimsMst {
+             "2 3 30",
+             "0 3 40");
+         System.out.println();
+-        System.out.println(format(compute(Graph.fromEdgeList(edgeList))));
++        System.out.println(format(compute(new EdgeListGraphBuilder(edgeList))));
++
++        // Run the algorithm against a custom edge provider: a weighted cycle on 5 vertices
++        // generated on the fly, with no intermediate file or matrix.
++        GraphBuilder cycle = new GraphBuilder() {
++            @Override public int vertexCount() {
++                return 5;
++            }
++            @Override public void provideEdges(EdgeSink sink) {
++                for (int v = 0; v < 5; v++) {
++                    sink.accept(v, (v + 1) % 5, v + 1);
++                }
++            }
++        };
++        System.out.println();
++        System.out.println(format(compute(cycle)));
+     }
+ }
+diff --git a/PrimsMstTest.java b/PrimsMstTest.java
+index b31ca5b..462fe4d 100644
+--- a/PrimsMstTest.java
++++ b/PrimsMstTest.java
+@@ -42,6 +42,11 @@ public final class PrimsMstTest {
+         edgeListDeclaredCountTooSmallThrows();
+         edgeListNullThrows();
+         edgeListFileRoundTrips();
++        graphFromCustomBuilder();
++        computeAcceptsGraphBuilder();
++        computeForestAcceptsGraphBuilder();
++        edgeListGraphBuilderUsableAsInterface();
++        nullBuilderThrows();
+ 
+         System.out.printf("%n%d passed, %d failed%n", passed, failed);
+         if (failed > 0) {
+@@ -148,7 +153,7 @@ public final class PrimsMstTest {
+ 
+     private static void nullGraphThrows() {
+         expectThrows("null graph throws", IllegalArgumentException.class,
+-            () -> PrimsMst.compute(null));
++            () -> PrimsMst.compute((PrimsMst.Graph) null));
+     }
+ 
+     private static void nonPositiveWeightThrows() {
+@@ -292,6 +297,58 @@ public final class PrimsMstTest {
+         }
+     }
+ 
++    // --- GraphBuilder abstraction ---
++
++    /** A custom edge provider: a triangle 0-1-2 with weights 1, 2, 3 (MST weight 3). */
++    private static PrimsMst.GraphBuilder triangleBuilder() {
++        return new PrimsMst.GraphBuilder() {
++            @Override public int vertexCount() {
++                return 3;
++            }
++            @Override public void provideEdges(EdgeSink sink) {
++                sink.accept(0, 1, 1);
++                sink.accept(1, 2, 2);
++                sink.accept(0, 2, 3);
++            }
++        };
++    }
++
++    private static void graphFromCustomBuilder() {
++        PrimsMst.Graph g = PrimsMst.Graph.from(triangleBuilder());
++        check("Graph.from(custom builder) yields MST weight 3", PrimsMst.compute(g).totalWeight() == 3);
++    }
++
++    private static void computeAcceptsGraphBuilder() {
++        check("compute(GraphBuilder) yields MST weight 3", PrimsMst.compute(triangleBuilder()).totalWeight() == 3);
++    }
++
++    private static void computeForestAcceptsGraphBuilder() {
++        // A custom provider describing two disjoint edges over four vertices -> two components.
++        PrimsMst.GraphBuilder twoComponents = new PrimsMst.GraphBuilder() {
++            @Override public int vertexCount() {
++                return 4;
++            }
++            @Override public void provideEdges(EdgeSink sink) {
++                sink.accept(0, 1, 5);
++                sink.accept(2, 3, 7);
++            }
++        };
++        PrimsMst.MsfResult forest = PrimsMst.computeForest(twoComponents);
++        check("computeForest(GraphBuilder) finds 2 components", forest.componentCount() == 2);
++        check("computeForest(GraphBuilder) total weight is 12", forest.totalWeight() == 12);
++    }
++
++    private static void edgeListGraphBuilderUsableAsInterface() {
++        PrimsMst.GraphBuilder builder = new PrimsMst.EdgeListGraphBuilder(List.of("0 1 4", "1 2 6"));
++        check("EdgeListGraphBuilder is a GraphBuilder usable via Graph.from",
++            PrimsMst.compute(PrimsMst.Graph.from(builder)).totalWeight() == 10);
++    }
++
++    private static void nullBuilderThrows() {
++        expectThrows("Graph.from(null) throws", IllegalArgumentException.class,
++            () -> PrimsMst.Graph.from(null));
++    }
++
+     // --- Assertion harness ---
+ 
+     private static void check(String name, boolean condition) {

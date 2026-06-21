@@ -1,0 +1,420 @@
+diff --git a/bipartite/Main.java b/bipartite/Main.java
+index 28b5958..1411e14 100644
+--- a/bipartite/Main.java
++++ b/bipartite/Main.java
+@@ -23,7 +23,7 @@ public final class Main {
+ 
+         // Weighted undirected — the same algorithm via the Graph interface; the
+         // weights are simply ignored by the check.
+-        Graph weightedCycle = WeightedUndirectedGraph.of(4, List.of(
++        WeightedUndirectedGraph weightedCycle = WeightedUndirectedGraph.of(4, List.of(
+                 new WeightedEdge(0, 1, 2.5),
+                 new WeightedEdge(1, 2, 1.0),
+                 new WeightedEdge(2, 3, 4.0),
+@@ -40,6 +40,20 @@ public final class Main {
+ 
+         // Topological sort of the directed acyclic graph above.
+         reportTopologicalSort(new TopologicalSort().sort(directed));
++
++        // Dijkstra shortest path on the weighted graph: 0 -> 2 takes 0-1-2 (3.5)
++        // rather than 0-3-2 (4.5).
++        reportShortestPath(new ShortestPath().compute(weightedCycle, 0, 2));
++    }
++
++    private static void reportShortestPath(ShortestPathResult result) {
++        switch (result) {
++            case ShortestPathResult.Path path -> System.out.println(
++                    "Shortest path 0->2 (weighted): distance=" + path.distance()
++                            + ", via=" + path.vertices());
++            case ShortestPathResult.Unreachable unreachable -> System.out.println(
++                    "No path from " + unreachable.source() + " to " + unreachable.target());
++        }
+     }
+ 
+     private static void reportTopologicalSort(TopologicalSortResult result) {
+diff --git a/bipartite/ShortestPath.java b/bipartite/ShortestPath.java
+new file mode 100644
+index 0000000..fbaefae
+--- /dev/null
++++ b/bipartite/ShortestPath.java
+@@ -0,0 +1,120 @@
++package bipartite;
++
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.Comparator;
++import java.util.List;
++import java.util.PriorityQueue;
++
++/**
++ * Computes a shortest path between two vertices of a {@link WeightedUndirectedGraph}
++ * using Dijkstra's algorithm: it repeatedly settles the nearest unsettled vertex
++ * and relaxes its outgoing edges, backed by a binary-heap priority queue.
++ *
++ * <p>Dijkstra's algorithm requires non-negative edge weights; because
++ * {@link WeightedEdge} permits negative weights, this fails fast with an
++ * {@link IllegalArgumentException} if it encounters one while searching. The
++ * search settles the target as soon as it is reached, so it does no more work
++ * than necessary. It runs in {@code O((V + E) log V)} time and {@code O(V)} space.
++ *
++ * <p>Shortest paths need edge weights, which the {@link Graph} interface does not
++ * expose, so this operates on a {@link WeightedUndirectedGraph} directly.
++ */
++public final class ShortestPath {
++
++    private static final int NO_PREDECESSOR = -1;
++
++    /** A vertex paired with its tentative distance, ordered by distance in the queue. */
++    private record Step(int vertex, double distance) {
++    }
++
++    /**
++     * Computes a shortest path from {@code source} to {@code target}.
++     *
++     * @param graph  the weighted graph to search
++     * @param source the start vertex, in {@code [0, graph.order())}
++     * @param target the destination vertex, in {@code [0, graph.order())}
++     * @return a {@link ShortestPathResult.Path} with the distance and vertex
++     *         sequence if the target is reachable, otherwise a
++     *         {@link ShortestPathResult.Unreachable}
++     * @throws NullPointerException      if {@code graph} is null
++     * @throws IndexOutOfBoundsException if {@code source} or {@code target} is out of range
++     * @throws IllegalArgumentException  if a negative edge weight is encountered
++     */
++    public ShortestPathResult compute(WeightedUndirectedGraph graph, int source, int target) {
++        if (graph == null) {
++            throw new NullPointerException("graph must not be null");
++        }
++        requireVertex(graph, source, "source");
++        requireVertex(graph, target, "target");
++
++        int order = graph.order();
++        double[] distance = new double[order];
++        int[] predecessor = new int[order];
++        boolean[] settled = new boolean[order];
++        Arrays.fill(distance, Double.POSITIVE_INFINITY);
++        Arrays.fill(predecessor, NO_PREDECESSOR);
++        distance[source] = 0.0;
++
++        PriorityQueue<Step> frontier = new PriorityQueue<>(Comparator.comparingDouble(Step::distance));
++        frontier.add(new Step(source, 0.0));
++
++        while (!frontier.isEmpty()) {
++            int u = frontier.poll().vertex();
++            if (settled[u]) {
++                continue;  // a stale queue entry superseded by a shorter one
++            }
++            settled[u] = true;
++            if (u == target) {
++                break;  // the target's distance is now final
++            }
++            relaxNeighbors(graph, u, distance, predecessor, settled, frontier);
++        }
++
++        if (distance[target] == Double.POSITIVE_INFINITY) {
++            return new ShortestPathResult.Unreachable(source, target);
++        }
++        return new ShortestPathResult.Path(distance[target], reconstructPath(predecessor, target));
++    }
++
++    private static void relaxNeighbors(WeightedUndirectedGraph graph, int u, double[] distance,
++                                       int[] predecessor, boolean[] settled,
++                                       PriorityQueue<Step> frontier) {
++        for (WeightedEdge edge : graph.weightedNeighbors(u)) {
++            double weight = edge.weight();
++            if (weight < 0) {
++                throw new IllegalArgumentException(
++                        "Dijkstra's algorithm requires non-negative weights; found " + weight
++                                + " on edge (" + edge.u() + ", " + edge.v() + ")");
++            }
++            int v = edge.v();
++            if (settled[v]) {
++                continue;
++            }
++            double candidate = distance[u] + weight;
++            if (candidate < distance[v]) {
++                distance[v] = candidate;
++                predecessor[v] = u;
++                frontier.add(new Step(v, candidate));
++            }
++        }
++    }
++
++    /** Walks predecessors back from {@code target}, yielding the path source-to-target. */
++    private static List<Integer> reconstructPath(int[] predecessor, int target) {
++        List<Integer> path = new ArrayList<>();
++        for (int at = target; at != NO_PREDECESSOR; at = predecessor[at]) {
++            path.add(at);
++        }
++        Collections.reverse(path);
++        return path;
++    }
++
++    private static void requireVertex(WeightedUndirectedGraph graph, int vertex, String role) {
++        if (vertex < 0 || vertex >= graph.order()) {
++            throw new IndexOutOfBoundsException(
++                    role + " vertex " + vertex + " is outside the range [0, " + graph.order() + ")");
++        }
++    }
++}
+diff --git a/bipartite/ShortestPathResult.java b/bipartite/ShortestPathResult.java
+new file mode 100644
+index 0000000..41b6830
+--- /dev/null
++++ b/bipartite/ShortestPathResult.java
+@@ -0,0 +1,61 @@
++package bipartite;
++
++import java.util.List;
++
++/**
++ * The outcome of a shortest-path query, modelled as a sealed type — mirroring
++ * {@link BipartiteResult} and {@link TopologicalSortResult} — so callers handle
++ * exactly the two possible cases and illegal states cannot be represented.
++ *
++ * <p>Either the target is reachable, in which case the total
++ * {@linkplain Path#distance() distance} and the {@linkplain Path#vertices()
++ * vertex sequence} of a shortest path are available, or it is
++ * {@linkplain Unreachable}, in which case no path exists. Callers can branch with
++ * a switch:
++ *
++ * <pre>{@code
++ * switch (new ShortestPath().compute(graph, source, target)) {
++ *     case ShortestPathResult.Path p        -> use(p.distance(), p.vertices());
++ *     case ShortestPathResult.Unreachable u -> report(u.source(), u.target());
++ * }
++ * }</pre>
++ */
++public sealed interface ShortestPathResult
++        permits ShortestPathResult.Path, ShortestPathResult.Unreachable {
++
++    /** @return whether a path from the source to the target exists */
++    boolean isReachable();
++
++    /**
++     * Result for a reachable target.
++     *
++     * @param distance the total weight of the shortest path
++     * @param vertices the vertices along the shortest path, from source to target
++     *                 inclusive
++     */
++    record Path(double distance, List<Integer> vertices) implements ShortestPathResult {
++
++        public Path {
++            vertices = List.copyOf(vertices);
++        }
++
++        @Override
++        public boolean isReachable() {
++            return true;
++        }
++    }
++
++    /**
++     * Result for a target that cannot be reached from the source.
++     *
++     * @param source the source vertex of the query
++     * @param target the unreachable target vertex
++     */
++    record Unreachable(int source, int target) implements ShortestPathResult {
++
++        @Override
++        public boolean isReachable() {
++            return false;
++        }
++    }
++}
+diff --git a/bipartite/ShortestPathTests.java b/bipartite/ShortestPathTests.java
+new file mode 100644
+index 0000000..10ae605
+--- /dev/null
++++ b/bipartite/ShortestPathTests.java
+@@ -0,0 +1,159 @@
++package bipartite;
++
++import java.util.List;
++
++/**
++ * Lightweight, dependency-free test harness for {@link ShortestPath}, matching
++ * the style of the other harnesses in this package. Runnable with
++ * {@code java bipartite.ShortestPathTests}; the process exits non-zero if any
++ * case fails.
++ */
++public final class ShortestPathTests {
++
++    private static final double EPSILON = 1e-9;
++    private static int failures = 0;
++    private static final ShortestPath SHORTEST_PATH = new ShortestPath();
++
++    // A small weighted graph reused across cases.
++    //   0 -1- 1 -2- 2 -1- 3 -3- 4      (plus the chords 0-2 weight 4, 1-3 weight 5)
++    private static WeightedUndirectedGraph sampleGraph() {
++        return WeightedUndirectedGraph.of(6, List.of(
++                new WeightedEdge(0, 1, 1.0),
++                new WeightedEdge(1, 2, 2.0),
++                new WeightedEdge(0, 2, 4.0),
++                new WeightedEdge(2, 3, 1.0),
++                new WeightedEdge(3, 4, 3.0),
++                new WeightedEdge(1, 3, 5.0)));
++        // Vertex 5 is isolated.
++    }
++
++    public static void main(String[] args) {
++        findsShortestOfCompetingRoutes();
++        distanceMatchesTheReportedPath();
++        sourceEqualsTargetIsZeroLengthPath();
++        reportsUnreachableTarget();
++        rejectsNegativeWeight();
++        rejectsNullGraph();
++        rejectsOutOfRangeEndpoints();
++
++        if (failures == 0) {
++            System.out.println("All tests passed.");
++        } else {
++            System.out.println(failures + " test(s) failed.");
++            System.exit(1);
++        }
++    }
++
++    private static void findsShortestOfCompetingRoutes() {
++        WeightedUndirectedGraph graph = sampleGraph();
++        ShortestPathResult result = SHORTEST_PATH.compute(graph, 0, 3);
++        // 0-1-2-3 = 4 beats 0-2-3 = 5 and 0-1-3 = 6.
++        boolean ok = result instanceof ShortestPathResult.Path path
++                && Math.abs(path.distance() - 4.0) < EPSILON
++                && path.vertices().equals(List.of(0, 1, 2, 3));
++        check("finds the shortest of competing routes", ok);
++    }
++
++    private static void distanceMatchesTheReportedPath() {
++        WeightedUndirectedGraph graph = sampleGraph();
++        ShortestPathResult result = SHORTEST_PATH.compute(graph, 0, 4);
++        boolean ok = result instanceof ShortestPathResult.Path path
++                && isConsistentPath(graph, path, 0, 4);
++        check("reported distance matches the reported path", ok);
++    }
++
++    private static void sourceEqualsTargetIsZeroLengthPath() {
++        WeightedUndirectedGraph graph = sampleGraph();
++        ShortestPathResult result = SHORTEST_PATH.compute(graph, 2, 2);
++        boolean ok = result instanceof ShortestPathResult.Path path
++                && path.distance() == 0.0
++                && path.vertices().equals(List.of(2));
++        check("source equal to target is a zero-length path", ok);
++    }
++
++    private static void reportsUnreachableTarget() {
++        WeightedUndirectedGraph graph = sampleGraph();
++        ShortestPathResult result = SHORTEST_PATH.compute(graph, 0, 5);
++        boolean ok = result instanceof ShortestPathResult.Unreachable unreachable
++                && unreachable.source() == 0
++                && unreachable.target() == 5;
++        check("reports an unreachable target", ok);
++    }
++
++    private static void rejectsNegativeWeight() {
++        WeightedUndirectedGraph graph = WeightedUndirectedGraph.of(2,
++                List.of(new WeightedEdge(0, 1, -2.0)));
++        boolean threw;
++        try {
++            SHORTEST_PATH.compute(graph, 0, 1);
++            threw = false;
++        } catch (IllegalArgumentException expected) {
++            threw = true;
++        }
++        check("rejects a negative edge weight", threw);
++    }
++
++    private static void rejectsNullGraph() {
++        boolean threw;
++        try {
++            SHORTEST_PATH.compute(null, 0, 1);
++            threw = false;
++        } catch (NullPointerException expected) {
++            threw = true;
++        }
++        check("rejects null graph", threw);
++    }
++
++    private static void rejectsOutOfRangeEndpoints() {
++        WeightedUndirectedGraph graph = sampleGraph();
++        boolean threw;
++        try {
++            SHORTEST_PATH.compute(graph, 0, 99);
++            threw = false;
++        } catch (IndexOutOfBoundsException expected) {
++            threw = true;
++        }
++        check("rejects out-of-range endpoints", threw);
++    }
++
++    /**
++     * A path is consistent when it starts at the source, ends at the target,
++     * every consecutive pair is connected by an edge, and the summed edge weights
++     * equal the reported distance.
++     */
++    private static boolean isConsistentPath(WeightedUndirectedGraph graph,
++                                            ShortestPathResult.Path path, int source, int target) {
++        List<Integer> vertices = path.vertices();
++        if (vertices.isEmpty() || vertices.get(0) != source
++                || vertices.get(vertices.size() - 1) != target) {
++            return false;
++        }
++        double total = 0.0;
++        for (int i = 0; i + 1 < vertices.size(); i++) {
++            Double weight = edgeWeight(graph, vertices.get(i), vertices.get(i + 1));
++            if (weight == null) {
++                return false;
++            }
++            total += weight;
++        }
++        return Math.abs(total - path.distance()) < EPSILON;
++    }
++
++    private static Double edgeWeight(WeightedUndirectedGraph graph, int from, int to) {
++        for (WeightedEdge edge : graph.weightedNeighbors(from)) {
++            if (edge.v() == to) {
++                return edge.weight();
++            }
++        }
++        return null;
++    }
++
++    private static void check(String description, boolean condition) {
++        if (condition) {
++            System.out.println("PASS: " + description);
++        } else {
++            System.out.println("FAIL: " + description);
++            failures++;
++        }
++    }
++}
+diff --git a/bipartite/package-info.java b/bipartite/package-info.java
+index 7364d97..493bd7f 100644
+--- a/bipartite/package-info.java
++++ b/bipartite/package-info.java
+@@ -23,14 +23,18 @@
+  * a breadth-first 2-coloring and returns the sealed
+  * {@link bipartite.BipartiteResult} — either the two vertex partitions or an
+  * odd-cycle witness — {@link bipartite.DepthFirstSearch} provides a standard
+- * depth-first traversal, and {@link bipartite.TopologicalSort} orders a
+- * {@link bipartite.DirectedGraph} so dependencies precede dependents, returning
++ * depth-first traversal, {@link bipartite.TopologicalSort} orders a
++ * {@link bipartite.DirectedGraph} so dependencies precede dependents (returning
+  * the sealed {@link bipartite.TopologicalSortResult} — either the order or a
+- * directed-cycle witness.
++ * directed-cycle witness), and {@link bipartite.ShortestPath} runs Dijkstra's
++ * algorithm over a {@link bipartite.WeightedUndirectedGraph} (returning the
++ * sealed {@link bipartite.ShortestPathResult} — either the distance and path or
++ * an unreachable notification).
+  *
+  * <p>{@link bipartite.Main} provides a runnable demonstration, and
+  * {@link bipartite.BipartiteCheckerTests},
+- * {@link bipartite.DepthFirstSearchTests}, and
+- * {@link bipartite.TopologicalSortTests} are dependency-free test harnesses.
++ * {@link bipartite.DepthFirstSearchTests},
++ * {@link bipartite.TopologicalSortTests}, and
++ * {@link bipartite.ShortestPathTests} are dependency-free test harnesses.
+  */
+ package bipartite;

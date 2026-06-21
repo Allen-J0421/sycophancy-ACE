@@ -1,0 +1,198 @@
+diff --git a/KmpMatchResult.java b/KmpMatchResult.java
+new file mode 100644
+index 0000000..ddb5236
+--- /dev/null
++++ b/KmpMatchResult.java
+@@ -0,0 +1,52 @@
++import java.util.List;
++import java.util.OptionalInt;
++
++/**
++ * Immutable description of the matches found for a single search operation.
++ */
++public final class KmpMatchResult {
++    private static final KmpMatchResult NO_MATCHES = new KmpMatchResult(List.of());
++
++    private final List<Integer> matchIndices;
++
++    private KmpMatchResult(List<Integer> matchIndices) {
++        this.matchIndices = matchIndices;
++    }
++
++    public static KmpMatchResult from(List<Integer> matchIndices) {
++        if (matchIndices.isEmpty()) {
++            return NO_MATCHES;
++        }
++
++        return new KmpMatchResult(List.copyOf(matchIndices));
++    }
++
++    public static KmpMatchResult noMatches() {
++        return NO_MATCHES;
++    }
++
++    public List<Integer> matchIndices() {
++        return matchIndices;
++    }
++
++    public int count() {
++        return matchIndices.size();
++    }
++
++    public boolean hasMatches() {
++        return !matchIndices.isEmpty();
++    }
++
++    public OptionalInt firstMatch() {
++        return hasMatches() ? OptionalInt.of(matchIndices.get(0)) : OptionalInt.empty();
++    }
++
++    public OptionalInt lastMatch() {
++        return hasMatches() ? OptionalInt.of(matchIndices.get(matchIndices.size() - 1)) : OptionalInt.empty();
++    }
++
++    @Override
++    public String toString() {
++        return matchIndices.toString();
++    }
++}
+diff --git a/KmpPattern.java b/KmpPattern.java
+index fcccf9b..6aaffee 100644
+--- a/KmpPattern.java
++++ b/KmpPattern.java
+@@ -32,11 +32,11 @@ public final class KmpPattern {
+         return value;
+     }
+ 
+-    public List<Integer> findMatchesIn(CharSequence text) {
++    public KmpMatchResult analyzeIn(CharSequence text) {
+         validateText(text);
+ 
+         if (value.length() > text.length()) {
+-            return List.of();
++            return KmpMatchResult.noMatches();
+         }
+ 
+         List<Integer> matches = new ArrayList<>();
+@@ -44,7 +44,11 @@ public final class KmpPattern {
+             matches.add(matchIndex);
+             return true;
+         });
+-        return List.copyOf(matches);
++        return KmpMatchResult.from(matches);
++    }
++
++    public List<Integer> findMatchesIn(CharSequence text) {
++        return analyzeIn(text).matchIndices();
+     }
+ 
+     public OptionalInt findFirstIn(CharSequence text) {
+diff --git a/KmpSearch.java b/KmpSearch.java
+index 8eb8cd2..caecfb2 100644
+--- a/KmpSearch.java
++++ b/KmpSearch.java
+@@ -21,6 +21,10 @@ public final class KmpSearch {
+         return compile(pattern).findMatchesIn(text);
+     }
+ 
++    public static KmpMatchResult analyze(CharSequence pattern, CharSequence text) {
++        return compile(pattern).analyzeIn(text);
++    }
++
+     public static OptionalInt findFirst(CharSequence pattern, CharSequence text) {
+         return compile(pattern).findFirstIn(text);
+     }
+diff --git a/KmpSearchDemo.java b/KmpSearchDemo.java
+index 040fc84..80f6449 100644
+--- a/KmpSearchDemo.java
++++ b/KmpSearchDemo.java
+@@ -1,6 +1,3 @@
+-import java.util.List;
+-import java.util.OptionalInt;
+-
+ public final class KmpSearchDemo {
+     private static final String DEFAULT_TEXT = "aabaacaadaabaaba";
+     private static final String DEFAULT_PATTERN = "aaba";
+@@ -13,18 +10,25 @@ public final class KmpSearchDemo {
+         String pattern = args.length > 1 ? args[1] : DEFAULT_PATTERN;
+ 
+         KmpPattern compiledPattern = KmpSearch.compile(pattern);
+-        List<Integer> matches = compiledPattern.findMatchesIn(text);
+-        OptionalInt firstMatch = compiledPattern.findFirstIn(text);
++        KmpMatchResult result = compiledPattern.analyzeIn(text);
+ 
+-        System.out.println("Matches: " + matches);
+-        System.out.println("Count: " + compiledPattern.countMatchesIn(text));
+-        System.out.println("First: " + (firstMatch.isPresent() ? firstMatch.getAsInt() : "none"));
++        System.out.println("Matches: " + result.matchIndices());
++        System.out.println("Count: " + result.count());
++        System.out.println("First: " + formatOptional(result.firstMatch()));
++        System.out.println("Last: " + formatOptional(result.lastMatch()));
++        System.out.println("Contains: " + result.hasMatches());
+ 
+         System.out.print("Streamed: ");
+-        compiledPattern.forEachMatchIn(text, matchIndex -> System.out.print(matchIndex + " "));
+-        if (matches.isEmpty()) {
++        for (int matchIndex : result.matchIndices()) {
++            System.out.print(matchIndex + " ");
++        }
++        if (!result.hasMatches()) {
+             System.out.print("none");
+         }
+         System.out.println();
+     }
++
++    private static String formatOptional(java.util.OptionalInt value) {
++        return value.isPresent() ? Integer.toString(value.getAsInt()) : "none";
++    }
+ }
+diff --git a/KmpSearchSelfTest.java b/KmpSearchSelfTest.java
+index 1355d08..7ec5801 100644
+--- a/KmpSearchSelfTest.java
++++ b/KmpSearchSelfTest.java
+@@ -11,6 +11,7 @@ public final class KmpSearchSelfTest {
+         assertEquals(List.of(0, 1, 2), KmpSearch.search("aa", "aaaa"), "overlapping matches");
+         assertEquals(List.of(), KmpSearch.search("xyz", "aaaa"), "no matches");
+         assertEquals(List.of(), KmpSearch.search("longer-pattern", "short"), "pattern longer than text");
++        assertAnalysis(KmpSearch.analyze("aaba", "aabaacaadaabaaba"), List.of(0, 9, 12), "analysis through facade");
+         assertEquals(OptionalInt.of(2), KmpSearch.findFirst("aaba", "xxaabaacaadaabaaba"), "first match through facade");
+         assertEquals(3, KmpSearch.countMatches("aa", "aaaa"), "count matches through facade");
+         assertTrue(KmpSearch.contains("aba", "xxabaxx"), "contains through facade");
+@@ -19,6 +20,7 @@ public final class KmpSearchSelfTest {
+ 
+         KmpPattern compiledPattern = KmpPattern.compile("aba");
+         assertEquals("aba", compiledPattern.value(), "compiled pattern preserves source value");
++        assertAnalysis(compiledPattern.analyzeIn("ababa"), List.of(0, 2), "compiled pattern analysis");
+         assertEquals(List.of(0, 2), compiledPattern.findMatchesIn("ababa"), "compiled pattern search");
+         assertEquals(List.of(0, 2), compiledPattern.findMatchesIn(new StringBuilder("ababa")), "char sequence search");
+         assertEquals(OptionalInt.of(0), compiledPattern.findFirstIn("ababa"), "first match search");
+@@ -35,6 +37,18 @@ public final class KmpSearchSelfTest {
+         assertThrows(NullPointerException.class, () -> compiledPattern.forEachMatchIn("ababa", null), "null match consumer rejected");
+     }
+ 
++    private static void assertAnalysis(KmpMatchResult result, List<Integer> expectedMatches, String scenario) {
++        assertEquals(expectedMatches, result.matchIndices(), scenario + " indices");
++        assertEquals(expectedMatches.size(), result.count(), scenario + " count");
++        assertEquals(!expectedMatches.isEmpty(), result.hasMatches(), scenario + " presence");
++        assertEquals(toOptional(expectedMatches.isEmpty() ? null : expectedMatches.get(0)), result.firstMatch(), scenario + " first");
++        assertEquals(
++                toOptional(expectedMatches.isEmpty() ? null : expectedMatches.get(expectedMatches.size() - 1)),
++                result.lastMatch(),
++                scenario + " last");
++        assertEquals(expectedMatches.toString(), result.toString(), scenario + " string");
++    }
++
+     private static List<Integer> collectMatches(KmpPattern pattern, CharSequence text) {
+         List<Integer> matches = new java.util.ArrayList<>();
+         pattern.forEachMatchIn(text, matches::add);
+@@ -47,6 +61,10 @@ public final class KmpSearchSelfTest {
+         return List.copyOf(matches);
+     }
+ 
++    private static OptionalInt toOptional(Integer value) {
++        return value == null ? OptionalInt.empty() : OptionalInt.of(value);
++    }
++
+     private static void assertEquals(Object expected, Object actual, String scenario) {
+         if (!expected.equals(actual)) {
+             throw new AssertionError(scenario + ": expected " + expected + " but got " + actual);

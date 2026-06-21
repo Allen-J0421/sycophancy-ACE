@@ -1,0 +1,251 @@
+diff --git a/RadixSort.java b/RadixSort.java
+index 0bebfb4..23e519e 100644
+--- a/RadixSort.java
++++ b/RadixSort.java
+@@ -1,13 +1,21 @@
+ import java.util.Arrays;
++import java.util.Objects;
++import java.util.function.ToIntFunction;
+ 
+ /**
+- * Least-significant-digit (LSD) radix sort for {@code int} arrays.
++ * Least-significant-digit (LSD) radix sort for {@code int} arrays, and for
++ * arbitrary objects keyed by an {@code int}.
+  *
+  * <p>This is a stable, non-comparison sort. It sorts on one byte at a time
+  * (base 256), so a 32-bit {@code int} takes at most four passes regardless of
+  * the magnitude of the values, giving O(n) time for fixed-width integers. It
+  * sorts in place.
+  *
++ * <p>The {@link #sort(Object[], ToIntFunction)} overload extends this to any
++ * reference type by deriving an {@code int} key from each element. Because the
++ * sort is stable, elements with equal keys keep their original relative order
++ * &mdash; the usual reason to radix-sort objects rather than compare them.
++ *
+  * <p>Negative values (including {@link Integer#MIN_VALUE}) are handled directly
+  * on the two's-complement representation: when sorting on the most significant
+  * byte the sign bit is flipped, which maps the signed range monotonically onto
+@@ -148,6 +156,129 @@ public final class RadixSort {
+         return copy;
+     }
+ 
++    /**
++     * Sorts {@code array} in place, in ascending order of the {@code int} key
++     * produced by {@code keyExtractor}. The sort is stable: elements with equal
++     * keys retain their original relative order.
++     *
++     * @param array        the array to sort; {@code null} and arrays of length
++     *                     &lt; 2 are left unchanged
++     * @param keyExtractor maps each element to its sort key; must not be
++     *                     {@code null}
++     * @param <T>          the element type
++     * @throws NullPointerException if {@code keyExtractor} is {@code null}
++     */
++    public static <T> void sort(T[] array, ToIntFunction<? super T> keyExtractor) {
++        Objects.requireNonNull(keyExtractor, "keyExtractor");
++        if (array == null || array.length < 2) {
++            return;
++        }
++
++        final int n = array.length;
++
++        // Extract each key exactly once: the extractor may be non-trivial, and
++        // the byte passes below read keys repeatedly.
++        final int[] keys = new int[n];
++        for (int i = 0; i < n; i++) {
++            keys[i] = keyExtractor.applyAsInt(array[i]);
++        }
++
++        if (n <= INSERTION_SORT_THRESHOLD) {
++            insertionSortByKey(array, keys, n);
++            return;
++        }
++
++        // copyOf preserves the array's runtime component type; contents are
++        // overwritten during scatter, so the copied references are harmless.
++        T[] auxArray = Arrays.copyOf(array, n);
++        int[] auxKeys = new int[n];
++
++        // One read pass tallies a histogram for each byte position at once.
++        final int[][] counts = new int[PASSES][RADIX];
++        for (int key : keys) {
++            for (int pass = 0; pass < PASSES; pass++) {
++                counts[pass][digit(key, pass)]++;
++            }
++        }
++
++        // Ping-pong elements and their keys together so the two stay aligned.
++        T[] srcArray = array;
++        T[] dstArray = auxArray;
++        int[] srcKeys = keys;
++        int[] dstKeys = auxKeys;
++        for (int pass = 0; pass < PASSES; pass++) {
++            final int[] count = counts[pass];
++
++            // If every element shares this byte, the pass cannot change order.
++            if (count[digit(srcKeys[0], pass)] == n) {
++                continue;
++            }
++
++            int start = 0;
++            for (int bucket = 0; bucket < RADIX; bucket++) {
++                int size = count[bucket];
++                count[bucket] = start;
++                start += size;
++            }
++
++            // Stable scatter: equal keys keep their relative order.
++            for (int i = 0; i < n; i++) {
++                int key = srcKeys[i];
++                int pos = count[digit(key, pass)]++;
++                dstArray[pos] = srcArray[i];
++                dstKeys[pos] = key;
++            }
++
++            T[] swapArray = srcArray;
++            srcArray = dstArray;
++            dstArray = swapArray;
++            int[] swapKeys = srcKeys;
++            srcKeys = dstKeys;
++            dstKeys = swapKeys;
++        }
++
++        // If the result landed in the scratch buffer, copy it back.
++        if (srcArray != array) {
++            System.arraycopy(srcArray, 0, array, 0, n);
++        }
++    }
++
++    /**
++     * Returns a sorted copy of {@code array} ordered by {@code keyExtractor},
++     * leaving the original untouched.
++     *
++     * @param array        the array to copy and sort; may be {@code null}
++     * @param keyExtractor maps each element to its sort key; must not be
++     *                     {@code null} unless {@code array} is {@code null}
++     * @param <T>          the element type
++     * @return a new sorted array, or {@code null} if {@code array} is
++     *         {@code null}
++     */
++    public static <T> T[] sorted(T[] array, ToIntFunction<? super T> keyExtractor) {
++        if (array == null) {
++            return null;
++        }
++        T[] copy = Arrays.copyOf(array, array.length);
++        sort(copy, keyExtractor);
++        return copy;
++    }
++
++    /** Stable insertion sort of {@code array} (and parallel {@code keys}) by key. */
++    private static <T> void insertionSortByKey(T[] array, int[] keys, int n) {
++        for (int i = 1; i < n; i++) {
++            T item = array[i];
++            int key = keys[i];
++            int j = i - 1;
++            while (j >= 0 && keys[j] > key) {
++                array[j + 1] = array[j];
++                keys[j + 1] = keys[j];
++                j--;
++            }
++            array[j + 1] = item;
++            keys[j + 1] = key;
++        }
++    }
++
+     /** Small demonstration. */
+     public static void main(String[] args) {
+         int[] arr = { 170, 45, 75, 90, 802, 24, 2, 66 };
+@@ -157,5 +288,16 @@ public final class RadixSort {
+ 
+         int[] withNegatives = { 4, -1, 0, -802, 75, -75, Integer.MIN_VALUE, Integer.MAX_VALUE };
+         System.out.println("mixed:  " + Arrays.toString(RadixSort.sorted(withNegatives)));
++
++        // Generic API: sort objects by an int key, including negatives. Ada and
++        // Cy share a score, and the stable sort keeps Ada (listed first) first.
++        record Player(String name, int score) {
++            @Override public String toString() { return name + "(" + score + ")"; }
++        }
++        Player[] players = {
++            new Player("Ada", 90), new Player("Ben", -10),
++            new Player("Cy", 90), new Player("Dot", 5),
++        };
++        System.out.println("byKey:  " + Arrays.toString(RadixSort.sorted(players, Player::score)));
+     }
+ }
+diff --git a/RadixSortTest.java b/RadixSortTest.java
+index 7217c7c..7e30e48 100644
+--- a/RadixSortTest.java
++++ b/RadixSortTest.java
+@@ -1,4 +1,5 @@
+ import java.util.Arrays;
++import java.util.Comparator;
+ import java.util.Random;
+ 
+ /**
+@@ -45,9 +46,66 @@ public final class RadixSortTest {
+         require(Arrays.equals(original, new int[] { 3, 1, 2 }), "sorted() mutated its input");
+         require(Arrays.equals(result, new int[] { 1, 2, 3 }), "sorted() returned wrong order");
+ 
++        checkGenericApi(random);
++
+         System.out.println("All tests passed (" + checks + " checks).");
+     }
+ 
++    /** An element carrying a sort key plus its original position, for stability checks. */
++    private record Item(int key, int seq) {}
++
++    /**
++     * Exercises the generic key-extractor overload: correctness against a
++     * reference comparator sort, and stability (equal keys keep input order)
++     * across sizes that span the insertion-sort / radix boundary.
++     */
++    private static void checkGenericApi(Random random) {
++        // Null and trivial inputs.
++        require(RadixSort.sorted((Item[]) null, Item::key) == null, "sorted(null) should be null");
++
++        // keyExtractor must be validated even though small arrays skip the work.
++        try {
++            RadixSort.sort(new Item[] { new Item(1, 0), new Item(2, 1) }, null);
++            require(false, "null keyExtractor should throw");
++        } catch (NullPointerException expected) {
++            // ok
++        }
++
++        for (int trial = 0; trial < 1000; trial++) {
++            int length = random.nextInt(200);
++            Item[] items = new Item[length];
++            for (int i = 0; i < length; i++) {
++                // Narrow key span so equal keys are common, stressing stability.
++                items[i] = new Item(random.nextInt(10) - 5, i);
++            }
++
++            // Reference: a stable comparator sort by the same key.
++            Item[] expected = items.clone();
++            Arrays.sort(expected, Comparator.comparingInt(Item::key));
++
++            Item[] actual = items.clone();
++            RadixSort.sort(actual, Item::key);
++
++            require(expected.length == actual.length, "length changed");
++            for (int i = 0; i < expected.length; i++) {
++                // Same key sequence...
++                require(expected[i].key() == actual[i].key(),
++                        "key mismatch at " + i + " for " + Arrays.toString(items));
++                // ...and same elements in the same order (proves stability,
++                // since the reference sort is itself stable).
++                require(expected[i].seq() == actual[i].seq(),
++                        "instability at " + i + " for " + Arrays.toString(items));
++            }
++            checks++;
++        }
++
++        // sorted() must not mutate its input.
++        Item[] src = { new Item(2, 0), new Item(1, 1) };
++        Item[] sortedCopy = RadixSort.sorted(src, Item::key);
++        require(src[0].key() == 2 && src[1].key() == 1, "sorted() mutated its input");
++        require(sortedCopy[0].key() == 1 && sortedCopy[1].key() == 2, "sorted() wrong order");
++    }
++
+     /** Sorts a copy with RadixSort and asserts it matches Arrays.sort. */
+     private static void check(int[] input) {
+         int[] expected = input == null ? null : Arrays.copyOf(input, input.length);

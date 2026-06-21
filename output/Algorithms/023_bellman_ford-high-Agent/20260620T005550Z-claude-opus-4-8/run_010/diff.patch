@@ -1,0 +1,137 @@
+diff --git a/WeightedGraph.java b/WeightedGraph.java
+index 114be3e..786d818 100644
+--- a/WeightedGraph.java
++++ b/WeightedGraph.java
+@@ -4,20 +4,31 @@ import java.util.Collections;
+ import java.util.List;
+ 
+ /**
+- * An immutable directed, weighted graph over vertices {@code 0 .. vertices()-1}.
++ * An immutable directed, weighted graph over vertices {@code 0 .. vertices()-1},
++ * stored as an adjacency list: {@code adjacency[u]} holds the arcs leaving {@code u}.
+  *
+- * <p>Construction validates the vertex count and that every edge endpoint refers
+- * to a vertex that actually exists, so the algorithm never has to defend against
+- * malformed input.
++ * <p>Each stored {@link Arc} keeps only its target and weight — the source vertex
++ * is implied by its position in the array, so the redundant per-edge "from" field
++ * is not stored. Vertices with no outgoing arcs share a single empty list rather
++ * than each allocating one.
++ *
++ * <p>Construction validates the vertex count and every edge endpoint, so the
++ * algorithm never has to defend against malformed input.
+  */
+ final class WeightedGraph {
+ 
++    /** An outgoing arc; its source is the index of the adjacency entry holding it. */
++    record Arc(int to, int weight) {
++    }
++
+     private final int vertices;
+-    private final List<WeightedEdge> edges;
++    private final List<Arc>[] adjacency;
++    private final int edgeCount;
+ 
+-    private WeightedGraph(int vertices, List<WeightedEdge> edges) {
++    private WeightedGraph(int vertices, List<Arc>[] adjacency, int edgeCount) {
+         this.vertices = vertices;
+-        this.edges = Collections.unmodifiableList(edges);
++        this.adjacency = adjacency;
++        this.edgeCount = edgeCount;
+     }
+ 
+     /** Builds a graph from a {@code {from, to, weight}} adjacency table. */
+@@ -35,18 +46,30 @@ final class WeightedGraph {
+ 
+     /** Builds a graph from explicit {@link WeightedEdge} values. */
+     static WeightedGraph of(int vertices, WeightedEdge... edges) {
+-        return create(vertices, new ArrayList<>(Arrays.asList(edges)));
++        return create(vertices, Arrays.asList(edges));
+     }
+ 
++    @SuppressWarnings("unchecked") // generic array creation; element type is checked on insert
+     private static WeightedGraph create(int vertices, List<WeightedEdge> edges) {
+         if (vertices <= 0) {
+             throw new IllegalArgumentException("vertices must be positive, got " + vertices);
+         }
++        List<Arc>[] adjacency = (List<Arc>[]) new List[vertices];
+         for (WeightedEdge edge : edges) {
+             requireVertex(edge.from(), vertices, "from");
+             requireVertex(edge.to(), vertices, "to");
++            if (adjacency[edge.from()] == null) {
++                adjacency[edge.from()] = new ArrayList<>();
++            }
++            adjacency[edge.from()].add(new Arc(edge.to(), edge.weight()));
++        }
++        // Freeze each bucket; edge-less vertices share one immutable empty list.
++        for (int u = 0; u < vertices; u++) {
++            adjacency[u] = (adjacency[u] == null)
++                ? List.of()
++                : Collections.unmodifiableList(adjacency[u]);
+         }
+-        return new WeightedGraph(vertices, edges);
++        return new WeightedGraph(vertices, adjacency, edges.size());
+     }
+ 
+     private static void requireVertex(int vertex, int vertices, String role) {
+@@ -60,7 +83,28 @@ final class WeightedGraph {
+         return vertices;
+     }
+ 
++    int edgeCount() {
++        return edgeCount;
++    }
++
++    /** The arcs leaving {@code from}; an empty list if it has none. */
++    List<Arc> outgoing(int from) {
++        return adjacency[from];
++    }
++
++    /**
++     * A flat view of every edge, each reconstructed with its source vertex.
++     *
++     * <p>Bellman-Ford iterates {@link #outgoing(int)} per vertex; this is a
++     * convenience for callers that want the whole edge set in one list.
++     */
+     List<WeightedEdge> edges() {
+-        return edges;
++        List<WeightedEdge> all = new ArrayList<>(edgeCount);
++        for (int u = 0; u < vertices; u++) {
++            for (Arc arc : adjacency[u]) {
++                all.add(WeightedEdge.of(u, arc.to(), arc.weight()));
++            }
++        }
++        return all;
+     }
+ }
+diff --git a/bellman_ford.java b/bellman_ford.java
+index a2a3119..6f722d1 100644
+--- a/bellman_ford.java
++++ b/bellman_ford.java
+@@ -66,16 +66,18 @@ final class BellmanFord {
+      */
+     private static int relaxPass(WeightedGraph graph, int[] dist, int[] predecessors) {
+         int improved = NO_VERTEX;
+-        for (WeightedEdge edge : graph.edges()) {
+-            int from = dist[edge.from()];
+-            if (from == Distances.UNREACHABLE) {
++        for (int from = 0; from < graph.vertices(); from++) {
++            int distFrom = dist[from];
++            if (distFrom == Distances.UNREACHABLE) {
+                 continue; // can't extend a path we haven't reached (also avoids overflow)
+             }
+-            int candidate = from + edge.weight();
+-            if (candidate < dist[edge.to()]) {
+-                dist[edge.to()] = candidate;
+-                predecessors[edge.to()] = edge.from();
+-                improved = edge.to();
++            for (WeightedGraph.Arc arc : graph.outgoing(from)) {
++                int candidate = distFrom + arc.weight();
++                if (candidate < dist[arc.to()]) {
++                    dist[arc.to()] = candidate;
++                    predecessors[arc.to()] = from;
++                    improved = arc.to();
++                }
+             }
+         }
+         return improved;

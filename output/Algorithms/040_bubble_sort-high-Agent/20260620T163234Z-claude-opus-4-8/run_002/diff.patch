@@ -1,0 +1,220 @@
+diff --git a/README.md b/README.md
+index 8892979..dfddbb3 100644
+--- a/README.md
++++ b/README.md
+@@ -10,6 +10,7 @@ All sources live in the `sorting` package:
+ | File                     | Responsibility                                                        |
+ |--------------------------|----------------------------------------------------------------------|
+ | `Sorter.java`            | Strategy interface for in-place, comparator-driven sorting.          |
++| `IntComparator.java`     | Primitive `int` comparison function (no boxing).                     |
+ | `BubbleSort.java`        | Bubble sort (early-exit optimized): generic + primitive `int[]`.     |
+ | `IntArrayFormatter.java` | Formats `int[]` for display, separate from the algorithm and I/O.    |
+ | `BubbleSortDemo.java`    | `main` entry point; reproduces the original program's output.        |
+@@ -20,8 +21,10 @@ All sources live in the `sorting` package:
+ - **Separation of concerns** — sorting, formatting, the demo, and tests are no
+   longer crammed into one class.
+ - **Reusable algorithm** — a `Sorter` Strategy interface plus a generic,
+-  `Comparator`-based `BubbleSort` work on any element type and ordering, while a
+-  primitive `int[]` overload preserves the original allocation-free path.
++  `Comparator`-based `BubbleSort` work on any element type and ordering. The
++  primitive `int[]` path is symmetric: it accepts an `IntComparator` for custom
++  orderings (something the JDK's `Arrays.sort(int[])` cannot do) while staying
++  allocation-free, with `sort(int[])` as an ascending convenience.
+ - **Removed the redundant `n` parameter** — length is derived from the array.
+ - **Tests** — edge cases (empty, single, duplicates, negatives, reverse) and
+   both the primitive and generic paths are covered.
+diff --git a/sorting/BubbleSort.java b/sorting/BubbleSort.java
+index c9cc2a6..c54d31a 100644
+--- a/sorting/BubbleSort.java
++++ b/sorting/BubbleSort.java
+@@ -9,12 +9,13 @@ import java.util.Objects;
+  * algorithm stops early. Worst case is O(n²) comparisons; a sorted (or nearly
+  * sorted) input runs in O(n).
+  *
+- * <p>This class offers two entry points:
++ * <p>The class offers symmetric object and primitive entry points:
+  * <ul>
+  *   <li>the generic {@link #sort(Object[], Comparator)} required by
+  *       {@link Sorter}, for object arrays; and</li>
+- *   <li>a primitive {@link #sort(int[])} overload that preserves the original
+- *       allocation-free {@code int[]} behavior.</li>
++ *   <li>{@link #sort(int[], IntComparator)} for primitive {@code int} arrays,
++ *       with a {@link #sort(int[])} convenience for ascending order. These
++ *       preserve the original allocation-free {@code int[]} behavior.</li>
+  * </ul>
+  */
+ public final class BubbleSort implements Sorter {
+@@ -28,9 +29,7 @@ public final class BubbleSort implements Sorter {
+             boolean swapped = false;
+             for (int j = 0; j < n - i - 1; j++) {
+                 if (comparator.compare(array[j], array[j + 1]) > 0) {
+-                    T temp = array[j];
+-                    array[j] = array[j + 1];
+-                    array[j + 1] = temp;
++                    swap(array, j, j + 1);
+                     swapped = true;
+                 }
+             }
+@@ -43,22 +42,28 @@ public final class BubbleSort implements Sorter {
+     /**
+      * Sorts a primitive {@code int} array in place in ascending order.
+      *
+-     * <p>This mirrors the behavior of the original {@code bubbleSort} routine
+-     * while deriving the length from the array itself rather than a separate
+-     * {@code n} parameter.
+-     *
+      * @param array the array to sort; must not be {@code null}
+      */
+     public static void sort(int[] array) {
++        sort(array, IntComparator.ASCENDING);
++    }
++
++    /**
++     * Sorts a primitive {@code int} array in place using {@code comparator},
++     * with no boxing.
++     *
++     * @param array      the array to sort; must not be {@code null}
++     * @param comparator the ordering to impose; must not be {@code null}
++     */
++    public static void sort(int[] array, IntComparator comparator) {
+         Objects.requireNonNull(array, "array");
++        Objects.requireNonNull(comparator, "comparator");
+         int n = array.length;
+         for (int i = 0; i < n - 1; i++) {
+             boolean swapped = false;
+             for (int j = 0; j < n - i - 1; j++) {
+-                if (array[j] > array[j + 1]) {
+-                    int temp = array[j];
+-                    array[j] = array[j + 1];
+-                    array[j + 1] = temp;
++                if (comparator.compare(array[j], array[j + 1]) > 0) {
++                    swap(array, j, j + 1);
+                     swapped = true;
+                 }
+             }
+@@ -67,4 +72,16 @@ public final class BubbleSort implements Sorter {
+             }
+         }
+     }
++
++    private static <T> void swap(T[] array, int i, int j) {
++        T temp = array[i];
++        array[i] = array[j];
++        array[j] = temp;
++    }
++
++    private static void swap(int[] array, int i, int j) {
++        int temp = array[i];
++        array[i] = array[j];
++        array[j] = temp;
++    }
+ }
+diff --git a/sorting/BubbleSortTest.java b/sorting/BubbleSortTest.java
+index 8fa70e2..b9ad53e 100644
+--- a/sorting/BubbleSortTest.java
++++ b/sorting/BubbleSortTest.java
+@@ -17,29 +17,34 @@ public final class BubbleSortTest {
+     public static void main(String[] args) {
+         BubbleSort sorter = new BubbleSort();
+ 
+-        // Primitive int[] path.
+-        checkInts("already sorted", new int[]{1, 2, 3}, new int[]{1, 2, 3});
+-        checkInts("reverse order", new int[]{3, 2, 1}, new int[]{1, 2, 3});
+-        checkInts("with duplicates", new int[]{2, 1, 2, 1}, new int[]{1, 1, 2, 2});
+-        checkInts("empty array", new int[]{}, new int[]{});
+-        checkInts("single element", new int[]{42}, new int[]{42});
+-        checkInts("negatives", new int[]{0, -1, 5, -10}, new int[]{-10, -1, 0, 5});
+-        checkInts("original demo data",
++        // Primitive int[] ascending convenience path.
++        sortAscAndCheck("already sorted", new int[]{1, 2, 3}, new int[]{1, 2, 3});
++        sortAscAndCheck("reverse order", new int[]{3, 2, 1}, new int[]{1, 2, 3});
++        sortAscAndCheck("with duplicates", new int[]{2, 1, 2, 1}, new int[]{1, 1, 2, 2});
++        sortAscAndCheck("empty array", new int[]{}, new int[]{});
++        sortAscAndCheck("single element", new int[]{42}, new int[]{42});
++        sortAscAndCheck("negatives", new int[]{0, -1, 5, -10}, new int[]{-10, -1, 0, 5});
++        sortAscAndCheck("original demo data",
+                 new int[]{64, 34, 25, 12, 22, 11, 90},
+                 new int[]{11, 12, 22, 25, 34, 64, 90});
+ 
++        // Primitive int[] with a custom comparator (no boxing).
++        int[] descending = {1, 4, 2, 3};
++        BubbleSort.sort(descending, IntComparator.DESCENDING);
++        assertInts("primitive descending", descending, new int[]{4, 3, 2, 1});
++
+         // Generic comparator path.
+         Integer[] natural = {5, 3, 4, 1, 2};
+         sorter.sort(natural);
+-        checkObjects("generic natural order", natural, new Integer[]{1, 2, 3, 4, 5});
++        assertObjects("generic natural order", natural, new Integer[]{1, 2, 3, 4, 5});
+ 
+         Integer[] reversed = {1, 2, 3};
+         sorter.sort(reversed, Comparator.reverseOrder());
+-        checkObjects("generic reverse order", reversed, new Integer[]{3, 2, 1});
++        assertObjects("generic reverse order", reversed, new Integer[]{3, 2, 1});
+ 
+         String[] words = {"banana", "apple", "cherry"};
+         sorter.sort(words);
+-        checkObjects("strings", words, new String[]{"apple", "banana", "cherry"});
++        assertObjects("strings", words, new String[]{"apple", "banana", "cherry"});
+ 
+         System.out.printf("%nTests: %d passed, %d failed%n", passed, failed);
+         if (failed > 0) {
+@@ -47,16 +52,20 @@ public final class BubbleSortTest {
+         }
+     }
+ 
+-    private static void checkInts(String name, int[] input, int[] expected) {
++    private static void sortAscAndCheck(String name, int[] input, int[] expected) {
+         BubbleSort.sort(input);
+-        if (Arrays.equals(input, expected)) {
++        assertInts(name, input, expected);
++    }
++
++    private static void assertInts(String name, int[] actual, int[] expected) {
++        if (Arrays.equals(actual, expected)) {
+             pass(name);
+         } else {
+-            fail(name, Arrays.toString(expected), Arrays.toString(input));
++            fail(name, Arrays.toString(expected), Arrays.toString(actual));
+         }
+     }
+ 
+-    private static <T> void checkObjects(String name, T[] actual, T[] expected) {
++    private static <T> void assertObjects(String name, T[] actual, T[] expected) {
+         if (Arrays.equals(actual, expected)) {
+             pass(name);
+         } else {
+diff --git a/sorting/IntComparator.java b/sorting/IntComparator.java
+new file mode 100644
+index 0000000..ca02a4a
+--- /dev/null
++++ b/sorting/IntComparator.java
+@@ -0,0 +1,28 @@
++package sorting;
++
++/**
++ * A comparison function for primitive {@code int} values.
++ *
++ * <p>The JDK's {@link java.util.Comparator} cannot order a primitive array
++ * without boxing every element. This primitive-specialized variant lets
++ * {@link BubbleSort} impose a custom ordering on an {@code int[]} with no
++ * allocation, mirroring the comparator support already offered for object
++ * arrays.
++ */
++@FunctionalInterface
++public interface IntComparator {
++
++    /** Natural ascending order, equivalent to {@link Integer#compare}. */
++    IntComparator ASCENDING = Integer::compare;
++
++    /** Reverse (descending) order. */
++    IntComparator DESCENDING = (a, b) -> Integer.compare(b, a);
++
++    /**
++     * Compares its two arguments for order.
++     *
++     * @return a negative integer, zero, or a positive integer as {@code a} is
++     *         less than, equal to, or greater than {@code b}
++     */
++    int compare(int a, int b);
++}
