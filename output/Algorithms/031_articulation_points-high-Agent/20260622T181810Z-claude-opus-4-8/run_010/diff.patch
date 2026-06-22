@@ -1,0 +1,784 @@
+diff --git a/DepthFirstSearch.java b/DepthFirstSearch.java
+new file mode 100644
+index 0000000..cfa02e1
+--- /dev/null
++++ b/DepthFirstSearch.java
+@@ -0,0 +1,82 @@
++import java.util.ArrayDeque;
++import java.util.Deque;
++import java.util.List;
++
++/**
++ * An iterative depth-first traversal of a {@link Graph} that drives a
++ * {@link DfsVisitor}. It visits every vertex once, starting a fresh DFS tree at
++ * each undiscovered vertex (in ascending order), and reports discovery, tree
++ * edges, non-tree edges, and post-order completion through the visitor's hooks.
++ *
++ * <p>The traversal is direction-agnostic: it follows {@link Graph#edgesFrom(int)}
++ * to {@link Edge#other(int)} and reports <em>every</em> edge it considers. On an
++ * undirected graph this includes the reverse traversal of the tree edge (the same
++ * {@link Edge#id() edge id}) as a non-tree edge; a visitor that must ignore it —
++ * such as bridge detection — compares against the tree edge it recorded, while a
++ * visitor that treats undirected edges as bidirectional — such as
++ * strongly-connected components — processes it. The engine stays free of either
++ * interpretation.
++ *
++ * <p>The traversal is iterative, so it handles arbitrarily deep graphs without
++ * risking a {@link StackOverflowError}. Instances are stateless and reusable.
++ */
++public final class DepthFirstSearch {
++
++    /**
++     * Traverses {@code graph}, invoking {@code visitor}'s hooks along the way.
++     *
++     * @param graph   the graph to traverse
++     * @param visitor the visitor to drive
++     */
++    public void traverse(Graph graph, DfsVisitor visitor) {
++        int vertexCount = graph.vertexCount();
++        boolean[] visited = new boolean[vertexCount];
++        for (int root = 0; root < vertexCount; root++) {
++            if (!visited[root]) {
++                exploreFrom(root, graph, visitor, visited);
++            }
++        }
++    }
++
++    private void exploreFrom(int root, Graph graph, DfsVisitor visitor, boolean[] visited) {
++        Deque<Frame> stack = new ArrayDeque<>();
++        visited[root] = true;
++        visitor.discoverVertex(root);
++        stack.push(new Frame(root));
++
++        while (!stack.isEmpty()) {
++            Frame frame = stack.peek();
++            int v = frame.vertex;
++            List<Edge> edges = graph.edgesFrom(v);
++
++            if (frame.nextEdge < edges.size()) {
++                Edge edge = edges.get(frame.nextEdge++);
++                int w = edge.other(v);
++                if (!visited[w]) {
++                    visited[w] = true;
++                    visitor.treeEdge(v, w, edge);
++                    visitor.discoverVertex(w);
++                    stack.push(new Frame(w));
++                } else {
++                    visitor.nonTreeEdge(v, w, edge);
++                }
++            } else {
++                stack.pop();
++                visitor.finishVertex(v);
++            }
++        }
++    }
++
++    /** One vertex's state on the explicit DFS stack. */
++    private static final class Frame {
++
++        final int vertex;
++
++        /** Index of the next edge to consider from {@link #vertex}. */
++        int nextEdge;
++
++        Frame(int vertex) {
++            this.vertex = vertex;
++        }
++    }
++}
+diff --git a/DepthFirstSearchTest.java b/DepthFirstSearchTest.java
+new file mode 100644
+index 0000000..f7ea240
+--- /dev/null
++++ b/DepthFirstSearchTest.java
+@@ -0,0 +1,123 @@
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * A small, dependency-free test runner for {@link DepthFirstSearch} and the
++ * {@link DfsVisitor} hooks. Run with {@code java DepthFirstSearchTest}; it prints a
++ * summary and exits with a non-zero status if any test fails.
++ */
++public final class DepthFirstSearchTest {
++
++    private int passed;
++    private int failed;
++
++    public static void main(String[] args) {
++        DepthFirstSearchTest tests = new DepthFirstSearchTest();
++        tests.run();
++        System.out.printf("%n%d passed, %d failed%n", tests.passed, tests.failed);
++        if (tests.failed > 0) {
++            System.exit(1);
++        }
++    }
++
++    private void run() {
++        directedTraversalReportsHooksInOrder();
++        undirectedTreeEdgesEqualVertexCountMinusComponents();
++        customVisitorCanDetectDirectedCycles();
++    }
++
++    /** A visitor that records the sequence and counts of every hook. */
++    private static final class RecordingVisitor implements DfsVisitor {
++        final List<Integer> discovered = new ArrayList<>();
++        final List<Integer> finished = new ArrayList<>();
++        int treeEdges;
++        int nonTreeEdges;
++
++        @Override public void discoverVertex(int v) {
++            discovered.add(v);
++        }
++
++        @Override public void treeEdge(int from, int to, Edge edge) {
++            treeEdges++;
++        }
++
++        @Override public void nonTreeEdge(int from, int to, Edge edge) {
++            nonTreeEdges++;
++        }
++
++        @Override public void finishVertex(int v) {
++            finished.add(v);
++        }
++    }
++
++    private void directedTraversalReportsHooksInOrder() {
++        // 0 -> 1 -> 2 and 0 -> 2. DFS from 0 follows 0->1->2, then sees 0->2 as a
++        // non-tree edge.
++        Graph graph = GraphBuilder.directed().edge(0, 1).edge(1, 2).edge(0, 2).build();
++        RecordingVisitor visitor = new RecordingVisitor();
++        new DepthFirstSearch().traverse(graph, visitor);
++
++        check("directed discovery order", visitor.discovered, List.of(0, 1, 2));
++        check("directed finish order", visitor.finished, List.of(2, 1, 0));
++        check("directed tree edges", visitor.treeEdges, 2);
++        check("directed non-tree edges", visitor.nonTreeEdges, 1);
++    }
++
++    private void undirectedTreeEdgesEqualVertexCountMinusComponents() {
++        // Two components: a triangle {0,1,2} and an edge {3,4}. A spanning forest
++        // has (vertices - components) tree edges = 5 - 2 = 3.
++        Graph graph = GraphBuilder.undirected()
++                .edge(0, 1).edge(1, 2).edge(2, 0).edge(3, 4)
++                .build();
++        RecordingVisitor visitor = new RecordingVisitor();
++        new DepthFirstSearch().traverse(graph, visitor);
++
++        check("undirected discovers every vertex", visitor.discovered.size(), 5);
++        check("undirected spanning-forest tree edges", visitor.treeEdges, 3);
++    }
++
++    private void customVisitorCanDetectDirectedCycles() {
++        // Demonstrates a brand-new algorithm built only from the hooks, with no
++        // change to the engine or the existing analyses: a directed graph has a
++        // cycle iff some edge leads back to a vertex still on the DFS stack.
++        check("cycle present", hasDirectedCycle(
++                GraphBuilder.directed().edge(0, 1).edge(1, 2).edge(2, 0).build()), true);
++        check("self-loop is a cycle", hasDirectedCycle(
++                GraphBuilder.directed().edge(0, 0).build()), true);
++        check("DAG has no cycle", hasDirectedCycle(
++                GraphBuilder.directed().edge(0, 1).edge(1, 2).edge(0, 2).build()), false);
++    }
++
++    /** Detects a cycle in a directed graph using only the DFS visitor hooks. */
++    private static boolean hasDirectedCycle(Graph graph) {
++        boolean[] onStack = new boolean[graph.vertexCount()];
++        boolean[] found = {false};
++        DfsVisitor cycleDetector = new DfsVisitor() {
++            @Override public void discoverVertex(int v) {
++                onStack[v] = true;
++            }
++
++            @Override public void nonTreeEdge(int from, int to, Edge edge) {
++                if (onStack[to]) {
++                    found[0] = true;
++                }
++            }
++
++            @Override public void finishVertex(int v) {
++                onStack[v] = false;
++            }
++        };
++        new DepthFirstSearch().traverse(graph, cycleDetector);
++        return found[0];
++    }
++
++    private void check(String name, Object actual, Object expected) {
++        if (expected.equals(actual)) {
++            passed++;
++            System.out.println("PASS " + name);
++        } else {
++            failed++;
++            System.out.println("FAIL " + name + ": expected " + expected + " but was " + actual);
++        }
++    }
++}
+diff --git a/DfsVisitor.java b/DfsVisitor.java
+new file mode 100644
+index 0000000..ac284ef
+--- /dev/null
++++ b/DfsVisitor.java
+@@ -0,0 +1,42 @@
++/**
++ * Receives callbacks during a depth-first traversal driven by
++ * {@link DepthFirstSearch}. Implementations override only the hooks they need;
++ * every hook defaults to a no-op.
++ *
++ * <p>The hooks, for each vertex {@code v} reached from a start vertex:
++ * <ul>
++ *   <li>{@link #discoverVertex(int)} — the first time {@code v} is reached
++ *       (pre-order). For a non-root vertex it fires immediately after the
++ *       {@link #treeEdge(int, int, Edge) treeEdge} that reaches it.</li>
++ *   <li>{@link #treeEdge(int, int, Edge)} — when the search follows an edge from
++ *       an explored vertex to a not-yet-discovered one.</li>
++ *   <li>{@link #nonTreeEdge(int, int, Edge)} — when an edge leads to an
++ *       already-discovered vertex and is <em>not</em> the edge the search arrived
++ *       on. (On an undirected graph the single reverse traversal of the tree edge
++ *       is suppressed by edge identity, but parallel edges and self-loops are
++ *       reported; on a directed graph every non-tree arc is reported.)</li>
++ *   <li>{@link #finishVertex(int)} — when {@code v}'s outgoing edges are
++ *       exhausted (post-order).</li>
++ * </ul>
++ */
++public interface DfsVisitor {
++
++    /** Called the first time {@code v} is reached. */
++    default void discoverVertex(int v) {
++    }
++
++    /** Called when {@code edge} is followed from {@code from} to undiscovered {@code to}. */
++    default void treeEdge(int from, int to, Edge edge) {
++    }
++
++    /**
++     * Called when {@code edge} leads from {@code from} to already-discovered
++     * {@code to} and is not the edge the search arrived on at {@code from}.
++     */
++    default void nonTreeEdge(int from, int to, Edge edge) {
++    }
++
++    /** Called when {@code v}'s outgoing edges are exhausted (post-order). */
++    default void finishVertex(int v) {
++    }
++}
+diff --git a/GraphConnectivity.java b/GraphConnectivity.java
+index 90b7a17..bc315c1 100644
+--- a/GraphConnectivity.java
++++ b/GraphConnectivity.java
+@@ -1,20 +1,20 @@
+-import java.util.ArrayDeque;
+ import java.util.ArrayList;
++import java.util.Arrays;
+ import java.util.Comparator;
+-import java.util.Deque;
+ import java.util.List;
+ 
+ /**
+  * Computes the articulation points (cut vertices) and bridges (cut edges) of an
+- * undirected graph using Tarjan's depth-first search algorithm. Both are derived
+- * from the same low-link traversal in a single {@code O(V + E)} pass.
++ * undirected graph using Tarjan's algorithm, expressed as a {@link DfsVisitor}
++ * over a shared {@link DepthFirstSearch}. The whole analysis is a single
++ * {@code O(V + E)} pass.
+  *
+  * <p>A vertex is an articulation point if removing it increases the number of
+  * connected components; an edge is a bridge if removing it does. Multigraphs are
+- * handled correctly: the traversal skips only the specific tree edge it arrived
+- * on (by {@link Edge#id() edge id}), so a parallel edge back to the parent
+- * is treated as a genuine back edge. This matters for bridges, whose strict
+- * {@code low[child] > disc[parent]} test a parallel edge can flip.
++ * handled correctly: the traversal reports a parallel edge back to the parent as a
++ * genuine non-tree edge (only the single arrival edge is suppressed), which
++ * matters for bridges, whose strict {@code low[child] > disc[parent]} test a
++ * parallel edge can flip.
+  *
+  * <p>Articulation points and bridges are only meaningful on an
+  * {@link UndirectedGraph}. The analysis accepts any {@link Graph}, but on a
+@@ -22,10 +22,7 @@ import java.util.List;
+  * meaningful.
+  *
+  * <p>Instances are stateless and therefore reusable and thread-safe: each call to
+- * {@link #analyze(Graph)} allocates its own traversal state.
+- *
+- * <p>The traversal is implemented with an explicit stack rather than recursion, so
+- * it handles arbitrarily deep graphs without risking a {@link StackOverflowError}.
++ * {@link #analyze(Graph)} allocates its own visitor.
+  */
+ public final class GraphConnectivity {
+ 
+@@ -42,147 +39,99 @@ public final class GraphConnectivity {
+      * @return its articulation points and bridges
+      */
+     public ConnectivityResult analyze(Graph graph) {
+-        return new Search(graph).run();
++        ConnectivityVisitor visitor = new ConnectivityVisitor(graph.vertexCount());
++        new DepthFirstSearch().traverse(graph, visitor);
++        return visitor.toResult();
+     }
+ 
+     /**
+-     * Holds the mutable depth-first-search state for a single
+-     * {@link #analyze(Graph)} invocation, keeping {@link GraphConnectivity}
+-     * itself stateless.
++     * Accumulates articulation points and bridges from the DFS hooks. Low-link
++     * values and discovery times live in {@link LowLinkState}; the DFS tree
++     * structure (parent, incoming edge, child count) is recorded as the traversal
++     * reports it.
+      */
+-    private static final class Search {
++    private static final class ConnectivityVisitor implements DfsVisitor {
+ 
+-        private final Graph graph;
++        private final int vertexCount;
+         private final LowLinkState state;
+         private final boolean[] isArticulationPoint;
++        private final int[] parent;
++        private final Edge[] incomingEdge;
++        private final int[] childCount;
+         private final List<Edge> bridges = new ArrayList<>();
+ 
+-        Search(Graph graph) {
+-            int vertexCount = graph.vertexCount();
+-            this.graph = graph;
++        ConnectivityVisitor(int vertexCount) {
++            this.vertexCount = vertexCount;
+             this.state = new LowLinkState(vertexCount);
+             this.isArticulationPoint = new boolean[vertexCount];
++            this.parent = new int[vertexCount];
++            this.incomingEdge = new Edge[vertexCount];
++            this.childCount = new int[vertexCount];
++            Arrays.fill(parent, -1);
+         }
+ 
+-        ConnectivityResult run() {
+-            int vertexCount = graph.vertexCount();
+-            for (int u = 0; u < vertexCount; u++) {
+-                if (!state.isDiscovered(u)) {
+-                    explore(u);
+-                }
+-            }
+-
+-            List<Integer> articulationPoints = new ArrayList<>();
+-            for (int u = 0; u < vertexCount; u++) {
+-                if (isArticulationPoint[u]) {
+-                    articulationPoints.add(u);
+-                }
+-            }
+-            bridges.sort(BRIDGE_ORDER);
+-            return new ConnectivityResult(
+-                    List.copyOf(articulationPoints), List.copyOf(bridges));
++        @Override
++        public void discoverVertex(int v) {
++            state.discover(v);
+         }
+ 
+-        /**
+-         * Explores the DFS tree rooted at {@code root} using an explicit stack.
+-         *
+-         * <p>The stack always holds the current root-to-node path, which lets each
+-         * vertex fold its low-link, cut-vertex verdict, and the bridge status of its
+-         * incoming edge into its parent the moment it is fully explored — the
+-         * iterative equivalent of returning from a recursive call.
+-         */
+-        private void explore(int root) {
+-            state.discover(root);
+-
+-            Deque<Frame> stack = new ArrayDeque<>();
+-            stack.push(new Frame(root, null));
+-
+-            while (!stack.isEmpty()) {
+-                Frame frame = stack.peek();
+-                int u = frame.vertex;
+-                List<Edge> incident = graph.edgesFrom(u);
++        @Override
++        public void treeEdge(int from, int to, Edge edge) {
++            parent[to] = from;
++            incomingEdge[to] = edge;
++            childCount[from]++;
++        }
+ 
+-                if (frame.nextEdge < incident.size()) {
+-                    Edge edge = incident.get(frame.nextEdge++);
+-                    int v = edge.other(u);
+-                    if (v == u) {
+-                        // Self-loop: irrelevant to articulation points and bridges.
+-                        continue;
+-                    }
+-                    if (!state.isDiscovered(v)) {
+-                        frame.children++;
+-                        state.discover(v);
+-                        stack.push(new Frame(v, edge));
+-                    } else if (!edge.equals(frame.parentEdge)) {
+-                        // Back edge — but skip only the single tree edge we arrived on.
+-                        // A parallel edge to the parent has a different id, so it counts.
+-                        state.relaxAgainstAncestor(u, v);
+-                    }
+-                } else {
+-                    // u is fully explored; fold its result into its parent.
+-                    stack.pop();
+-                    foldIntoParent(u, frame, stack.peek());
+-                }
++        @Override
++        public void nonTreeEdge(int from, int to, Edge edge) {
++            // Ignore the single reverse traversal of the tree edge we arrived on:
++            // in an undirected graph it is the same edge, not a back edge. A
++            // parallel edge to the parent has a different id and is a real back
++            // edge (this is what makes multigraph bridge detection correct).
++            Edge treeEdge = incomingEdge[from];
++            if (treeEdge != null && edge.id() == treeEdge.id()) {
++                return;
+             }
++            state.relaxAgainstAncestor(from, to);
+         }
+ 
+-        /**
+-         * Applies the post-order step for a fully explored vertex {@code u}: the DFS
+-         * root becomes a cut vertex with more than one child, while any other vertex
+-         * propagates its low-link upward, may mark its parent as a cut vertex, and may
+-         * mark its incoming tree edge as a bridge.
+-         *
+-         * @param u           the vertex that has just finished exploring
+-         * @param frame       {@code u}'s traversal frame
+-         * @param parentFrame the frame of {@code u}'s parent, or {@code null} if
+-         *                    {@code u} is the DFS root
+-         */
+-        private void foldIntoParent(int u, Frame frame, Frame parentFrame) {
+-            Edge incoming = frame.parentEdge;
+-            if (incoming == null) {
+-                // The DFS root is a cut vertex only if it has more than one DFS child.
+-                if (frame.children > 1) {
+-                    isArticulationPoint[u] = true;
++        @Override
++        public void finishVertex(int v) {
++            int p = parent[v];
++            if (p == -1) {
++                // The DFS root is a cut vertex only if it has more than one child.
++                if (childCount[v] > 1) {
++                    isArticulationPoint[v] = true;
+                 }
+                 return;
+             }
+ 
+-            int parent = incoming.other(u);
+-            state.propagateFromChild(parent, u);
++            state.propagateFromChild(p, v);
+ 
+-            // The incoming tree edge is a bridge when u's subtree has no back edge
+-            // reaching the parent or above (strict inequality, so a parallel edge
+-            // back to the parent disqualifies it).
+-            if (state.low(u) > state.discovery(parent)) {
+-                bridges.add(incoming);
++            // The incoming tree edge is a bridge when v's subtree has no back edge
++            // reaching p or above (strict inequality, so a parallel edge back to p
++            // disqualifies it).
++            if (state.low(v) > state.discovery(p)) {
++                bridges.add(incomingEdge[v]);
+             }
+ 
+-            // A non-root vertex is a cut vertex when one of its children's subtrees
+-            // cannot reach above it via a back edge.
+-            boolean parentIsRoot = parentFrame.parentEdge == null;
+-            if (!parentIsRoot && state.low(u) >= state.discovery(parent)) {
+-                isArticulationPoint[parent] = true;
++            // A non-root vertex p is a cut vertex when one of its children's
++            // subtrees cannot reach above it via a back edge.
++            boolean parentIsRoot = parent[p] == -1;
++            if (!parentIsRoot && state.low(v) >= state.discovery(p)) {
++                isArticulationPoint[p] = true;
+             }
+         }
+-    }
+-
+-    /** One vertex's state on the explicit DFS stack. */
+-    private static final class Frame {
+-
+-        final int vertex;
+-
+-        /** The tree edge by which {@link #vertex} was reached, or {@code null} for the root. */
+-        final Edge parentEdge;
+-
+-        /** Index of the next incident edge to visit from {@link #vertex}. */
+-        int nextEdge;
+ 
+-        /** Number of DFS-tree children discovered from {@link #vertex}. */
+-        int children;
+-
+-        Frame(int vertex, Edge parentEdge) {
+-            this.vertex = vertex;
+-            this.parentEdge = parentEdge;
++        ConnectivityResult toResult() {
++            List<Integer> articulationPoints = new ArrayList<>();
++            for (int v = 0; v < vertexCount; v++) {
++                if (isArticulationPoint[v]) {
++                    articulationPoints.add(v);
++                }
++            }
++            bridges.sort(BRIDGE_ORDER);
++            return new ConnectivityResult(List.copyOf(articulationPoints), List.copyOf(bridges));
+         }
+     }
+ }
+diff --git a/README.md b/README.md
+index d51aaa0..12a60bb 100644
+--- a/README.md
++++ b/README.md
+@@ -9,7 +9,8 @@ iterative Tarjan-style low-link depth-first search (each `O(V + E)`):
+ Undirected connectivity and SCCs remain *separate algorithms* on purpose:
+ articulation points/bridges and SCCs are defined on different graph types and do
+ not generalize into one another. What they *do* share is the graph representation
+-(`Graph`) and the low-link traversal state (`LowLinkState`).
++(`Graph`), the DFS traversal engine (`DepthFirstSearch` / `DfsVisitor`), and the
++low-link traversal state (`LowLinkState`).
+ 
+ ## Shared abstractions
+ 
+@@ -27,11 +28,23 @@ any `Graph`, either can run on a shared graph object — but which analysis is
+   `UndirectedGraph` it computes the **connected components** (every edge is
+   symmetric). This is a genuinely useful shared-type case and is tested.
+ 
++**`DepthFirstSearch`** is a reusable iterative DFS engine that drives a
++`DfsVisitor` with four hooks — `discoverVertex`, `treeEdge`, `nonTreeEdge`,
++`finishVertex`. Both `GraphConnectivity` and `StronglyConnectedComponents` are
++just visitors over this engine, and new traversal algorithms (cycle detection,
++topological order, …) can be written the same way without touching the engine
++(see `DepthFirstSearchTest` for a cycle detector built only from the hooks). The
++engine reports *every* edge and stays free of algorithm semantics: on an
++undirected graph the reverse of a tree edge is reported as a non-tree edge, which
++bridge detection filters out (same edge id) but SCC processes (treating an
++undirected edge as bidirectional, which is why SCC on an undirected graph yields
++connected components).
++
+ **`LowLinkState`** owns each vertex's discovery time and low-link value and the
+ operations that maintain them (`discover`, `relaxAgainstAncestor`,
+-`propagateFromChild`, `isLowLinkRoot`). The traversal control flow and the
+-algorithm-specific verdicts (cut vertices/edges vs. SCC extraction) stay with
+-each algorithm, since those genuinely differ.
++`propagateFromChild`, `isLowLinkRoot`). The algorithm-specific verdicts (cut
++vertices/edges vs. SCC extraction) live in each visitor, since those genuinely
++differ.
+ 
+ ## Layout
+ 
+@@ -42,11 +55,14 @@ each algorithm, since those genuinely differ.
+ | `UndirectedGraph.java` | Undirected `Graph`; edges shared between both endpoints |
+ | `DirectedGraph.java` | Directed `Graph`; arcs stored at their tail |
+ | `GraphBuilder.java` | Fluent, auto-sizing builder for either graph type |
++| `DepthFirstSearch.java` | Reusable iterative DFS engine |
++| `DfsVisitor.java` | Traversal hooks: discover / tree edge / non-tree edge / finish |
+ | `LowLinkState.java` | Shared DFS state: discovery times + low-link logic |
+-| `GraphConnectivity.java` | Articulation points + bridges; stateless, iterative |
++| `GraphConnectivity.java` | Articulation points + bridges, as a `DfsVisitor` |
+ | `ConnectivityResult.java` | Result holder: articulation points + bridges |
+-| `StronglyConnectedComponents.java` | Tarjan's SCC algorithm; stateless, iterative |
++| `StronglyConnectedComponents.java` | Tarjan's SCC, as a `DfsVisitor` |
+ | `Main.java` | Runnable demo of all three analyses |
++| `DepthFirstSearchTest.java` | Dependency-free test runner (DFS engine) |
+ | `GraphConnectivityTest.java` | Dependency-free test runner (undirected) |
+ | `StronglyConnectedComponentsTest.java` | Dependency-free test runner (SCC) |
+ 
+@@ -55,6 +71,7 @@ each algorithm, since those genuinely differ.
+ ```sh
+ javac -d out *.java     # compile
+ java -cp out Main       # run the demo
++java -cp out DepthFirstSearchTest             # DFS engine tests (exits non-zero on failure)
+ java -cp out GraphConnectivityTest            # undirected tests (exits non-zero on failure)
+ java -cp out StronglyConnectedComponentsTest  # SCC tests (exits non-zero on failure)
+ java -cp out GraphBuilderTest                 # builder tests (exits non-zero on failure)
+diff --git a/StronglyConnectedComponents.java b/StronglyConnectedComponents.java
+index ff5fff3..b467d0a 100644
+--- a/StronglyConnectedComponents.java
++++ b/StronglyConnectedComponents.java
+@@ -1,5 +1,6 @@
+ import java.util.ArrayDeque;
+ import java.util.ArrayList;
++import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.Comparator;
+ import java.util.Deque;
+@@ -7,20 +8,19 @@ import java.util.List;
+ 
+ /**
+  * Computes the strongly connected components (SCCs) of a graph using Tarjan's
+- * algorithm in a single {@code O(V + E)} pass.
++ * algorithm, expressed as a {@link DfsVisitor} over a shared
++ * {@link DepthFirstSearch}. The whole analysis is a single {@code O(V + E)} pass.
+  *
+  * <p>Two vertices are in the same SCC if each is reachable from the other. On a
+  * {@link DirectedGraph} these are the usual SCCs; on an {@link UndirectedGraph}
+  * every edge is symmetric, so the result is the graph's connected components.
+  *
+- * <p>This shares the low-link DFS technique with {@link GraphConnectivity} (via
+- * {@link LowLinkState}) but is otherwise an independent algorithm, because SCCs
+- * and articulation points/bridges are different concepts.
++ * <p>This shares the DFS engine and {@link LowLinkState} with
++ * {@link GraphConnectivity} but is otherwise an independent algorithm, because
++ * SCCs and articulation points/bridges are different concepts.
+  *
+  * <p>Instances are stateless and therefore reusable and thread-safe: each call to
+- * {@link #find(Graph)} allocates its own traversal state. The traversal is
+- * iterative, so it handles arbitrarily deep graphs without risking a
+- * {@link StackOverflowError}.
++ * {@link #find(Graph)} allocates its own visitor.
+  */
+ public final class StronglyConnectedComponents {
+ 
+@@ -35,17 +35,20 @@ public final class StronglyConnectedComponents {
+      * @return the list of strongly connected components
+      */
+     public List<List<Integer>> find(Graph graph) {
+-        return new Search(graph).run();
++        SccVisitor visitor = new SccVisitor(graph.vertexCount());
++        new DepthFirstSearch().traverse(graph, visitor);
++        return visitor.components();
+     }
+ 
+     /**
+-     * Holds the mutable Tarjan-SCC state for a single {@link #find(Graph)}
+-     * invocation, keeping {@link StronglyConnectedComponents} itself stateless.
++     * Accumulates strongly connected components from the DFS hooks. A vertex is the
++     * root of an SCC when its low-link returns to its own discovery time; at that
++     * point the component is popped off the component stack.
+      */
+-    private static final class Search {
++    private static final class SccVisitor implements DfsVisitor {
+ 
+-        private final Graph graph;
+         private final LowLinkState state;
++        private final int[] parent;
+ 
+         /** Whether each vertex is currently on the component stack. */
+         private final boolean[] onStack;
+@@ -55,75 +58,43 @@ public final class StronglyConnectedComponents {
+ 
+         private final List<List<Integer>> components = new ArrayList<>();
+ 
+-        Search(Graph graph) {
+-            int vertexCount = graph.vertexCount();
+-            this.graph = graph;
++        SccVisitor(int vertexCount) {
+             this.state = new LowLinkState(vertexCount);
++            this.parent = new int[vertexCount];
+             this.onStack = new boolean[vertexCount];
++            Arrays.fill(parent, -1);
+         }
+ 
+-        List<List<Integer>> run() {
+-            int vertexCount = graph.vertexCount();
+-            for (int v = 0; v < vertexCount; v++) {
+-                if (!state.isDiscovered(v)) {
+-                    explore(v);
+-                }
+-            }
+-
+-            for (List<Integer> component : components) {
+-                Collections.sort(component);
+-            }
+-            components.sort(Comparator.comparingInt(component -> component.get(0)));
+-
+-            List<List<Integer>> result = new ArrayList<>(components.size());
+-            for (List<Integer> component : components) {
+-                result.add(List.copyOf(component));
+-            }
+-            return List.copyOf(result);
++        @Override
++        public void discoverVertex(int v) {
++            state.discover(v);
++            componentStack.push(v);
++            onStack[v] = true;
+         }
+ 
+-        /**
+-         * Explores the DFS tree rooted at {@code root} with an explicit stack. When a
+-         * vertex's low-link equals its own discovery index, it is the root of an SCC,
+-         * and that component is popped off the component stack.
+-         */
+-        private void explore(int root) {
+-            Deque<Frame> work = new ArrayDeque<>();
+-            discover(root);
+-            work.push(new Frame(root));
+-
+-            while (!work.isEmpty()) {
+-                Frame frame = work.peek();
+-                int v = frame.vertex;
+-                List<Edge> outEdges = graph.edgesFrom(v);
++        @Override
++        public void treeEdge(int from, int to, Edge edge) {
++            parent[to] = from;
++        }
+ 
+-                if (frame.nextArc < outEdges.size()) {
+-                    int w = outEdges.get(frame.nextArc++).other(v);
+-                    if (!state.isDiscovered(w)) {
+-                        discover(w);
+-                        work.push(new Frame(w));
+-                    } else if (onStack[w]) {
+-                        // Back or cross arc into a vertex still on the stack.
+-                        state.relaxAgainstAncestor(v, w);
+-                    }
+-                } else {
+-                    // v is fully explored; propagate its low-link to its parent.
+-                    work.pop();
+-                    Frame parentFrame = work.peek();
+-                    if (parentFrame != null) {
+-                        state.propagateFromChild(parentFrame.vertex, v);
+-                    }
+-                    if (state.isLowLinkRoot(v)) {
+-                        popComponent(v);
+-                    }
+-                }
++        @Override
++        public void nonTreeEdge(int from, int to, Edge edge) {
++            // Only relax against vertices still on the stack; an edge into an
++            // already-finished SCC must not affect this one.
++            if (onStack[to]) {
++                state.relaxAgainstAncestor(from, to);
+             }
+         }
+ 
+-        private void discover(int v) {
+-            state.discover(v);
+-            componentStack.push(v);
+-            onStack[v] = true;
++        @Override
++        public void finishVertex(int v) {
++            int p = parent[v];
++            if (p != -1) {
++                state.propagateFromChild(p, v);
++            }
++            if (state.isLowLinkRoot(v)) {
++                popComponent(v);
++            }
+         }
+ 
+         /** Pops the component stack down to and including its SCC root {@code root}. */
+@@ -137,18 +108,18 @@ public final class StronglyConnectedComponents {
+             } while (w != root);
+             components.add(component);
+         }
+-    }
+-
+-    /** One vertex's state on the explicit DFS stack. */
+-    private static final class Frame {
+ 
+-        final int vertex;
+-
+-        /** Index of the next out-arc to follow from {@link #vertex}. */
+-        int nextArc;
++        List<List<Integer>> components() {
++            for (List<Integer> component : components) {
++                Collections.sort(component);
++            }
++            components.sort(Comparator.comparingInt(component -> component.get(0)));
+ 
+-        Frame(int vertex) {
+-            this.vertex = vertex;
++            List<List<Integer>> result = new ArrayList<>(components.size());
++            for (List<Integer> component : components) {
++                result.add(List.copyOf(component));
++            }
++            return List.copyOf(result);
+         }
+     }
+ }

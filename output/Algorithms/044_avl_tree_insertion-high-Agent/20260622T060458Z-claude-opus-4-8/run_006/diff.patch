@@ -1,0 +1,235 @@
+diff --git a/AVLTree.java b/AVLTree.java
+index 03e236f..f89acd1 100644
+--- a/AVLTree.java
++++ b/AVLTree.java
+@@ -1,5 +1,6 @@
+ import java.util.ArrayDeque;
+ import java.util.ArrayList;
++import java.util.Comparator;
+ import java.util.Deque;
+ import java.util.Iterator;
+ import java.util.List;
+@@ -12,13 +13,17 @@ import java.util.NoSuchElementException;
+  * left and right subtrees differ by at most one. This guarantees O(log n)
+  * insertion and lookup.
+  *
+- * <p>The tree is generic over any {@link Comparable} key type and stores at most
+- * one node per distinct key (duplicate insertions are ignored). It is not
+- * thread-safe; external synchronization is required for concurrent use.
++ * <p>Keys are ordered either by their {@linkplain Comparable natural ordering}
++ * or by a {@link Comparator} supplied at construction, mirroring
++ * {@link java.util.TreeMap}. When no comparator is given, keys must implement
++ * {@code Comparable}; otherwise insertion throws {@link ClassCastException}.
++ * The tree stores at most one node per distinct key (duplicates, as judged by
++ * the active ordering, are ignored). It is not thread-safe; external
++ * synchronization is required for concurrent use.
+  *
+  * @param <T> the type of keys stored in the tree
+  */
+-public class AVLTree<T extends Comparable<? super T>> implements Iterable<T> {
++public class AVLTree<T> implements Iterable<T> {
+ 
+     /**
+      * An internal tree node. This is an implementation detail and is never
+@@ -36,9 +41,40 @@ public class AVLTree<T extends Comparable<? super T>> implements Iterable<T> {
+         }
+     }
+ 
++    /** Ordering supplied at construction, or {@code null} for natural ordering. */
++    private final Comparator<? super T> comparator;
++
+     private Node<T> root;
+     private int size;
+ 
++    /**
++     * Creates a tree that orders keys by their natural ordering. Keys must
++     * implement {@link Comparable}.
++     */
++    public AVLTree() {
++        this.comparator = null;
++    }
++
++    /**
++     * Creates a tree that orders keys using the given comparator. This allows
++     * custom orderings and keys that do not implement {@link Comparable}.
++     *
++     * @param comparator the ordering to use; must not be {@code null} (use the
++     *                    no-arg constructor for natural ordering)
++     */
++    public AVLTree(Comparator<? super T> comparator) {
++        if (comparator == null) {
++            throw new NullPointerException(
++                    "comparator must not be null; use AVLTree() for natural ordering");
++        }
++        this.comparator = comparator;
++    }
++
++    /** Returns the comparator used to order keys, or {@code null} for natural ordering. */
++    public Comparator<? super T> comparator() {
++        return comparator;
++    }
++
+     /** Inserts {@code key} into the tree. Duplicate keys are ignored. */
+     public void insert(T key) {
+         if (key == null) {
+@@ -51,7 +87,7 @@ public class AVLTree<T extends Comparable<? super T>> implements Iterable<T> {
+     public boolean contains(T key) {
+         Node<T> current = root;
+         while (current != null) {
+-            int cmp = key.compareTo(current.key);
++            int cmp = compare(key, current.key);
+             if (cmp < 0) {
+                 current = current.left;
+             } else if (cmp > 0) {
+@@ -113,13 +149,28 @@ public class AVLTree<T extends Comparable<? super T>> implements Iterable<T> {
+ 
+     // --- Internal recursion and balancing -------------------------------
+ 
++    /**
++     * Compares two keys using the configured comparator, or their natural
++     * ordering when none was supplied.
++     *
++     * @throws ClassCastException if natural ordering is in effect and the keys
++     *                            are not mutually comparable
++     */
++    @SuppressWarnings("unchecked")
++    private int compare(T a, T b) {
++        if (comparator != null) {
++            return comparator.compare(a, b);
++        }
++        return ((Comparable<? super T>) a).compareTo(b);
++    }
++
+     private Node<T> insert(Node<T> node, T key) {
+         if (node == null) {
+             size++;
+             return new Node<>(key);
+         }
+ 
+-        int cmp = key.compareTo(node.key);
++        int cmp = compare(key, node.key);
+         if (cmp < 0) {
+             node.left = insert(node.left, key);
+         } else if (cmp > 0) {
+@@ -138,7 +189,7 @@ public class AVLTree<T extends Comparable<? super T>> implements Iterable<T> {
+ 
+         // Left-heavy
+         if (balance > 1) {
+-            if (insertedKey.compareTo(node.left.key) > 0) {
++            if (compare(insertedKey, node.left.key) > 0) {
+                 node.left = leftRotate(node.left); // Left-Right case
+             }
+             return rightRotate(node);
+@@ -146,7 +197,7 @@ public class AVLTree<T extends Comparable<? super T>> implements Iterable<T> {
+ 
+         // Right-heavy
+         if (balance < -1) {
+-            if (insertedKey.compareTo(node.right.key) < 0) {
++            if (compare(insertedKey, node.right.key) < 0) {
+                 node.right = rightRotate(node.right); // Right-Left case
+             }
+             return leftRotate(node);
+diff --git a/AVLTreeTest.java b/AVLTreeTest.java
+index 75ef8e0..98565b2 100644
+--- a/AVLTreeTest.java
++++ b/AVLTreeTest.java
+@@ -1,6 +1,7 @@
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Collections;
++import java.util.Comparator;
+ import java.util.List;
+ 
+ /**
+@@ -27,6 +28,11 @@ public class AVLTreeTest {
+         iterableYieldsAscendingOrder();
+         lazyIteratorDrainsInOrderThenThrows();
+         staysBalancedUnderManyInsertions();
++        comparatorControlsOrdering();
++        comparatorSupportsNonComparableKeys();
++        comparatorIsExposed();
++        nullComparatorRejected();
++        naturalOrderingOnNonComparableThrows();
+ 
+         if (failures == 0) {
+             System.out.println("All AVL tree tests passed.");
+@@ -145,6 +151,70 @@ public class AVLTreeTest {
+         check("balanced height within AVL bound", true, withinBound);
+     }
+ 
++    private static void comparatorControlsOrdering() {
++        AVLTree<Integer> tree = new AVLTree<>(Comparator.reverseOrder());
++        for (int key : new int[] {10, 20, 30, 5, 25}) {
++            tree.insert(key);
++        }
++        // In-order traversal follows the comparator, so it is descending here.
++        check("comparator in-order", Arrays.asList(30, 25, 20, 10, 5), tree.inOrder());
++    }
++
++    private static void comparatorSupportsNonComparableKeys() {
++        // Point does not implement Comparable; ordering comes solely from the comparator.
++        AVLTree<Point> tree = new AVLTree<>(
++                Comparator.comparingInt((Point p) -> p.x).thenComparingInt(p -> p.y));
++        tree.insert(new Point(2, 1));
++        tree.insert(new Point(1, 9));
++        tree.insert(new Point(2, 0));
++        tree.insert(new Point(1, 9)); // duplicate by the comparator
++
++        check("non-comparable size", 3, tree.size());
++        check("non-comparable contains", true, tree.contains(new Point(2, 0)));
++        List<String> ordered = new ArrayList<>();
++        for (Point p : tree) {
++            ordered.add(p.x + "," + p.y);
++        }
++        check("non-comparable order", Arrays.asList("1,9", "2,0", "2,1"), ordered);
++    }
++
++    private static void comparatorIsExposed() {
++        Comparator<Integer> cmp = Comparator.reverseOrder();
++        check("comparator() returns supplied", cmp, new AVLTree<>(cmp).comparator());
++        check("comparator() null for natural", null, new AVLTree<Integer>().comparator());
++    }
++
++    private static void nullComparatorRejected() {
++        try {
++            new AVLTree<Integer>((Comparator<Integer>) null);
++            check("null comparator rejected", "NullPointerException", "no exception thrown");
++        } catch (NullPointerException expected) {
++            check("null comparator rejected", true, true);
++        }
++    }
++
++    private static void naturalOrderingOnNonComparableThrows() {
++        AVLTree<Point> tree = new AVLTree<>(); // no comparator, Point is not Comparable
++        tree.insert(new Point(0, 0)); // first insert never compares; the second must
++        try {
++            tree.insert(new Point(1, 1));
++            check("natural ordering on non-comparable", "ClassCastException", "no exception thrown");
++        } catch (ClassCastException expected) {
++            check("natural ordering on non-comparable", true, true);
++        }
++    }
++
++    /** A deliberately non-{@link Comparable} key type for comparator tests. */
++    private static final class Point {
++        final int x;
++        final int y;
++
++        Point(int x, int y) {
++            this.x = x;
++            this.y = y;
++        }
++    }
++
+     // --- helpers --------------------------------------------------------
+ 
+     private static AVLTree<Integer> newTree(int... keys) {
+@@ -156,7 +226,7 @@ public class AVLTreeTest {
+     }
+ 
+     private static void check(String name, Object expected, Object actual) {
+-        if (expected.equals(actual)) {
++        if (java.util.Objects.equals(expected, actual)) {
+             System.out.println("PASS: " + name);
+         } else {
+             failures++;

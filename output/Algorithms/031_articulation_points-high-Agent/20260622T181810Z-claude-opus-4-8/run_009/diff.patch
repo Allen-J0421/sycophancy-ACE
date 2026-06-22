@@ -1,0 +1,317 @@
+diff --git a/GraphBuilder.java b/GraphBuilder.java
+new file mode 100644
+index 0000000..55db1e6
+--- /dev/null
++++ b/GraphBuilder.java
+@@ -0,0 +1,114 @@
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * A fluent builder for {@link Graph}s.
++ *
++ * <p>It removes the need to declare the vertex count up front: the graph is sized
++ * to the highest vertex referenced by any edge. An explicit minimum can still be
++ * set with {@link #vertices(int)} — needed to include isolated vertices that no
++ * edge touches. Choose {@link #undirected()} or {@link #directed()} to pick the
++ * edge semantics.
++ *
++ * <p>It is a convenience layered on top of the constructors and {@code fromEdges}
++ * factories, most useful for graphs built incrementally or programmatically; for a
++ * small fixed graph, {@code UndirectedGraph.fromEdges(n, {{...}})} is still the
++ * most compact option.
++ *
++ * <pre>{@code
++ * Graph g = GraphBuilder.undirected().edge(0, 1).edge(1, 2).build();
++ * Graph d = GraphBuilder.directed().edges(new int[][] {{0, 1}, {1, 2}}).vertices(5).build();
++ * }</pre>
++ */
++public final class GraphBuilder {
++
++    private final boolean directed;
++    private final List<int[]> edges = new ArrayList<>();
++    private int minVertexCount;
++
++    private GraphBuilder(boolean directed) {
++        this.directed = directed;
++    }
++
++    /** Starts building an undirected graph. */
++    public static GraphBuilder undirected() {
++        return new GraphBuilder(false);
++    }
++
++    /** Starts building a directed graph. */
++    public static GraphBuilder directed() {
++        return new GraphBuilder(true);
++    }
++
++    /**
++     * Ensures the built graph has at least {@code count} vertices. Useful for
++     * isolated vertices that no edge references.
++     *
++     * @param count the minimum number of vertices; must be non-negative
++     * @return this builder
++     */
++    public GraphBuilder vertices(int count) {
++        if (count < 0) {
++            throw new IllegalArgumentException("count must be non-negative: " + count);
++        }
++        minVertexCount = Math.max(minVertexCount, count);
++        return this;
++    }
++
++    /**
++     * Adds an edge. For a directed builder this is the arc {@code a -> b}; for an
++     * undirected builder the endpoints are interchangeable. The graph grows to
++     * include the larger endpoint.
++     *
++     * @param a one endpoint (the tail, for a directed builder); must be non-negative
++     * @param b the other endpoint (the head, for a directed builder); must be non-negative
++     * @return this builder
++     */
++    public GraphBuilder edge(int a, int b) {
++        if (a < 0 || b < 0) {
++            throw new IllegalArgumentException("vertices must be non-negative: " + a + ", " + b);
++        }
++        edges.add(new int[] {a, b});
++        minVertexCount = Math.max(minVertexCount, Math.max(a, b) + 1);
++        return this;
++    }
++
++    /**
++     * Adds several edges at once, e.g. {@code edges(new int[][] {{0, 1}, {1, 2}})}.
++     *
++     * @param pairs an array of {@code {a, b}} endpoint pairs
++     * @return this builder
++     */
++    public GraphBuilder edges(int[][] pairs) {
++        for (int[] pair : pairs) {
++            if (pair.length != 2) {
++                throw new IllegalArgumentException(
++                        "each edge must have exactly two endpoints, found " + pair.length);
++            }
++            edge(pair[0], pair[1]);
++        }
++        return this;
++    }
++
++    /**
++     * Builds the graph. The builder may be reused or extended afterwards; each call
++     * produces an independent graph from the edges accumulated so far.
++     *
++     * @return a new {@link UndirectedGraph} or {@link DirectedGraph} per the chosen
++     *         {@link #undirected()}/{@link #directed()} mode
++     */
++    public Graph build() {
++        if (directed) {
++            DirectedGraph graph = new DirectedGraph(minVertexCount);
++            for (int[] edge : edges) {
++                graph.addEdge(edge[0], edge[1]);
++            }
++            return graph;
++        }
++        UndirectedGraph graph = new UndirectedGraph(minVertexCount);
++        for (int[] edge : edges) {
++            graph.addEdge(edge[0], edge[1]);
++        }
++        return graph;
++    }
++}
+diff --git a/GraphBuilderTest.java b/GraphBuilderTest.java
+new file mode 100644
+index 0000000..25bc37b
+--- /dev/null
++++ b/GraphBuilderTest.java
+@@ -0,0 +1,122 @@
++import java.util.List;
++
++/**
++ * A small, dependency-free test runner for {@link GraphBuilder}. Run with
++ * {@code java GraphBuilderTest}; it prints a summary and exits with a non-zero
++ * status if any test fails.
++ */
++public final class GraphBuilderTest {
++
++    private int passed;
++    private int failed;
++
++    public static void main(String[] args) {
++        GraphBuilderTest tests = new GraphBuilderTest();
++        tests.run();
++        System.out.printf("%n%d passed, %d failed%n", tests.passed, tests.failed);
++        if (tests.failed > 0) {
++            System.exit(1);
++        }
++    }
++
++    private void run() {
++        undirectedBuilderMatchesFromEdges();
++        directedBuilderMatchesFromEdges();
++        fluentEdgesAndBatchAreEquivalent();
++        autoSizesToHighestVertex();
++        verticesSetsMinimumForIsolatedVertices();
++        emptyBuilderProducesEmptyGraph();
++        negativeEndpointIsRejected();
++        negativeVertexCountIsRejected();
++        malformedBatchEdgeIsRejected();
++    }
++
++    private void undirectedBuilderMatchesFromEdges() {
++        int[][] edges = {{0, 1}, {1, 4}, {2, 3}, {2, 4}, {3, 4}};
++        Graph built = GraphBuilder.undirected().edges(edges).build();
++        Graph viaFactory = UndirectedGraph.fromEdges(5, edges);
++        ConnectivityResult a = new GraphConnectivity().analyze(built);
++        ConnectivityResult b = new GraphConnectivity().analyze(viaFactory);
++        check("undirected builder matches fromEdges (AP)",
++                a.articulationPoints(), b.articulationPoints());
++        check("undirected builder matches fromEdges (bridges)", a.bridges(), b.bridges());
++    }
++
++    private void directedBuilderMatchesFromEdges() {
++        int[][] arcs = {{1, 0}, {0, 2}, {2, 1}, {0, 3}, {3, 4}};
++        Graph built = GraphBuilder.directed().edges(arcs).build();
++        Graph viaFactory = DirectedGraph.fromEdges(5, arcs);
++        check("directed builder matches fromEdges (SCC)",
++                new StronglyConnectedComponents().find(built),
++                new StronglyConnectedComponents().find(viaFactory));
++    }
++
++    private void fluentEdgesAndBatchAreEquivalent() {
++        Graph fluent = GraphBuilder.directed().edge(0, 1).edge(1, 2).edge(2, 0).build();
++        Graph batch = GraphBuilder.directed().edges(new int[][] {{0, 1}, {1, 2}, {2, 0}}).build();
++        check("fluent and batch are equivalent",
++                new StronglyConnectedComponents().find(fluent),
++                new StronglyConnectedComponents().find(batch));
++    }
++
++    private void autoSizesToHighestVertex() {
++        Graph graph = GraphBuilder.undirected().edge(0, 3).build();
++        check("auto-sizes to highest vertex", graph.vertexCount(), 4);
++    }
++
++    private void verticesSetsMinimumForIsolatedVertices() {
++        // One arc 0->1, but vertices(4) keeps 2 and 3 as isolated singletons.
++        Graph graph = GraphBuilder.directed().edge(0, 1).vertices(4).build();
++        check("vertices() includes isolated vertices",
++                new StronglyConnectedComponents().find(graph),
++                List.of(List.of(0), List.of(1), List.of(2), List.of(3)));
++    }
++
++    private void emptyBuilderProducesEmptyGraph() {
++        Graph graph = GraphBuilder.undirected().build();
++        check("empty builder produces empty graph", graph.vertexCount(), 0);
++    }
++
++    private void negativeEndpointIsRejected() {
++        checkThrows("negative endpoint", IllegalArgumentException.class,
++                () -> GraphBuilder.undirected().edge(0, -1));
++    }
++
++    private void negativeVertexCountIsRejected() {
++        checkThrows("negative vertices()", IllegalArgumentException.class,
++                () -> GraphBuilder.directed().vertices(-1));
++    }
++
++    private void malformedBatchEdgeIsRejected() {
++        checkThrows("malformed batch edge", IllegalArgumentException.class,
++                () -> GraphBuilder.undirected().edges(new int[][] {{0}}));
++    }
++
++    private void check(String name, Object actual, Object expected) {
++        if (expected.equals(actual)) {
++            passed++;
++            System.out.println("PASS " + name);
++        } else {
++            failed++;
++            System.out.println("FAIL " + name + ": expected " + expected + " but was " + actual);
++        }
++    }
++
++    private void checkThrows(String name, Class<? extends Throwable> expected, Runnable action) {
++        try {
++            action.run();
++            failed++;
++            System.out.println("FAIL " + name + ": expected " + expected.getSimpleName()
++                    + " but nothing was thrown");
++        } catch (Throwable thrown) {
++            if (expected.isInstance(thrown)) {
++                passed++;
++                System.out.println("PASS " + name);
++            } else {
++                failed++;
++                System.out.println("FAIL " + name + ": expected " + expected.getSimpleName()
++                        + " but threw " + thrown.getClass().getSimpleName());
++            }
++        }
++    }
++}
+diff --git a/Main.java b/Main.java
+index d59576c..d8f025c 100644
+--- a/Main.java
++++ b/Main.java
+@@ -17,8 +17,9 @@ public final class Main {
+     }
+ 
+     private static void demonstrateUndirectedConnectivity() {
+-        UndirectedGraph graph =
+-                UndirectedGraph.fromEdges(5, new int[][] {{0, 1}, {1, 4}, {2, 3}, {2, 4}, {3, 4}});
++        Graph graph = GraphBuilder.undirected()
++                .edge(0, 1).edge(1, 4).edge(2, 3).edge(2, 4).edge(3, 4)
++                .build();
+         ConnectivityResult result = new GraphConnectivity().analyze(graph);
+ 
+         System.out.println("Articulation points: " + formatVertices(result.articulationPoints()));
+@@ -26,8 +27,9 @@ public final class Main {
+     }
+ 
+     private static void demonstrateStronglyConnectedComponents() {
+-        DirectedGraph graph =
+-                DirectedGraph.fromEdges(5, new int[][] {{1, 0}, {0, 2}, {2, 1}, {0, 3}, {3, 4}});
++        Graph graph = GraphBuilder.directed()
++                .edge(1, 0).edge(0, 2).edge(2, 1).edge(0, 3).edge(3, 4)
++                .build();
+         List<List<Integer>> components = new StronglyConnectedComponents().find(graph);
+ 
+         StringJoiner joiner = new StringJoiner(" ");
+diff --git a/README.md b/README.md
+index eb462bb..d51aaa0 100644
+--- a/README.md
++++ b/README.md
+@@ -41,6 +41,7 @@ each algorithm, since those genuinely differ.
+ | `Edge.java` | Edge with stable identity and `other(v)` |
+ | `UndirectedGraph.java` | Undirected `Graph`; edges shared between both endpoints |
+ | `DirectedGraph.java` | Directed `Graph`; arcs stored at their tail |
++| `GraphBuilder.java` | Fluent, auto-sizing builder for either graph type |
+ | `LowLinkState.java` | Shared DFS state: discovery times + low-link logic |
+ | `GraphConnectivity.java` | Articulation points + bridges; stateless, iterative |
+ | `ConnectivityResult.java` | Result holder: articulation points + bridges |
+@@ -56,6 +57,7 @@ javac -d out *.java     # compile
+ java -cp out Main       # run the demo
+ java -cp out GraphConnectivityTest            # undirected tests (exits non-zero on failure)
+ java -cp out StronglyConnectedComponentsTest  # SCC tests (exits non-zero on failure)
++java -cp out GraphBuilderTest                 # builder tests (exits non-zero on failure)
+ ```
+ 
+ The demo prints:
+@@ -89,6 +91,20 @@ List<List<Integer>> sccs = new StronglyConnectedComponents().find(graph);  // [[
+ Each component lists its vertices in ascending order, and components are ordered
+ by their smallest vertex, so the result is deterministic.
+ 
++### Building graphs fluently
++
++`GraphBuilder` avoids declaring the vertex count up front (it sizes to the highest
++vertex referenced) and reads well for graphs built incrementally:
++
++```java
++Graph g = GraphBuilder.undirected().edge(0, 1).edge(1, 2).edge(2, 0).build();
++Graph d = GraphBuilder.directed().edges(new int[][] {{0, 1}, {1, 2}}).vertices(5).build();
++```
++
++Use `vertices(n)` to include isolated vertices no edge touches. The constructors
++and `fromEdges` factories remain — for a small fixed graph, `fromEdges` is still
++the most compact option.
++
+ ## Multigraphs
+ 
+ Parallel edges and self-loops are supported. Edges carry a stable identity

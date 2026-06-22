@@ -1,0 +1,316 @@
+diff --git a/FloydWarshall.java b/FloydWarshall.java
+index 5b01348..b07fb7b 100644
+--- a/FloydWarshall.java
++++ b/FloydWarshall.java
+@@ -3,7 +3,8 @@
+  *
+  * <p>The algorithm runs in {@code O(V^3)} time and {@code O(V^2)} space and
+  * supports negative edge weights. It does not mutate its input: callers receive
+- * a fresh {@link Graph} of shortest-path distances.
++ * a fresh {@link ShortestPaths} carrying both distances and path-reconstruction
++ * data.
+  */
+ public final class FloydWarshall {
+ 
+@@ -12,17 +13,18 @@ public final class FloydWarshall {
+     }
+ 
+     /**
+-     * Returns a graph whose cells hold the shortest-path distance between every
+-     * pair of vertices.
++     * Computes shortest-path distances and paths between every pair of vertices.
+      *
+      * @param graph the input graph
+-     * @return shortest-path distances, with {@link Graph#INF} for unreachable pairs
++     * @return distances (with {@link Graph#INF} for unreachable pairs) and the
++     *         means to reconstruct the actual shortest paths
+      * @throws IllegalArgumentException if the graph contains a negative cycle,
+      *                                  for which shortest paths are undefined
+      */
+-    public static Graph shortestPaths(Graph graph) {
++    public static ShortestPaths shortestPaths(Graph graph) {
+         int n = graph.size();
+         int[][] dist = graph.toMatrix();
++        int[][] next = initialNextHops(graph, dist);
+ 
+         for (int k = 0; k < n; k++) {
+             for (int i = 0; i < n; i++) {
+@@ -37,13 +39,31 @@ public final class FloydWarshall {
+                     int throughK = dist[i][k] + dist[k][j];
+                     if (throughK < dist[i][j]) {
+                         dist[i][j] = throughK;
++                        next[i][j] = next[i][k];
+                     }
+                 }
+             }
+         }
+ 
+         detectNegativeCycle(dist);
+-        return Graph.of(dist);
++        return new ShortestPaths(dist, next);
++    }
++
++    /**
++     * Seeds the next-hop matrix from the direct edges: the first hop from
++     * {@code i} toward {@code j} is {@code j} itself when a direct edge exists.
++     */
++    private static int[][] initialNextHops(Graph graph, int[][] dist) {
++        int n = graph.size();
++        int[][] next = new int[n][n];
++        for (int i = 0; i < n; i++) {
++            for (int j = 0; j < n; j++) {
++                next[i][j] = (i != j && dist[i][j] != Graph.INF)
++                        ? j
++                        : ShortestPaths.NO_PATH;
++            }
++        }
++        return next;
+     }
+ 
+     /**
+diff --git a/FloydWarshallTest.java b/FloydWarshallTest.java
+index a6796d0..e589a85 100644
+--- a/FloydWarshallTest.java
++++ b/FloydWarshallTest.java
+@@ -1,4 +1,5 @@
+ import java.util.Arrays;
++import java.util.List;
+ 
+ /**
+  * Dependency-free test runner for {@link FloydWarshall} and {@link Graph}.
+@@ -21,6 +22,10 @@ public final class FloydWarshallTest {
+         emptyMatrixIsRejected();
+         inputGraphIsNotMutated();
+         singleVertexGraphIsTrivial();
++        pathReconstructionFollowsShortestRoute();
++        pathToSelfIsSingleVertex();
++        unreachablePathIsEmpty();
++        directEdgePathIsTwoVertices();
+ 
+         if (failures == 0) {
+             System.out.println("All tests passed.");
+@@ -45,7 +50,7 @@ public final class FloydWarshallTest {
+                 {3, 7, 1, 0, 2},
+                 {1, 5, 5, 4, 0}
+         };
+-        check("known example", expected, FloydWarshall.shortestPaths(g).toMatrix());
++        check("known example", expected, FloydWarshall.shortestPaths(g).distances().toMatrix());
+     }
+ 
+     private static void unreachableVerticesStayInfinite() {
+@@ -58,7 +63,7 @@ public final class FloydWarshallTest {
+                 {0,   7},
+                 {INF, 0}
+         };
+-        check("unreachable stays INF", expected, FloydWarshall.shortestPaths(g).toMatrix());
++        check("unreachable stays INF", expected, FloydWarshall.shortestPaths(g).distances().toMatrix());
+     }
+ 
+     private static void negativeEdgesWithoutCycleAreHandled() {
+@@ -72,7 +77,7 @@ public final class FloydWarshallTest {
+                 {INF, 0,   3},
+                 {INF, INF, 0}
+         };
+-        check("negative edges, no cycle", expected, FloydWarshall.shortestPaths(g).toMatrix());
++        check("negative edges, no cycle", expected, FloydWarshall.shortestPaths(g).distances().toMatrix());
+     }
+ 
+     private static void negativeCycleIsDetected() {
+@@ -106,7 +111,46 @@ public final class FloydWarshallTest {
+ 
+     private static void singleVertexGraphIsTrivial() {
+         Graph g = Graph.of(new int[][] {{0}});
+-        check("single vertex", new int[][] {{0}}, FloydWarshall.shortestPaths(g).toMatrix());
++        check("single vertex", new int[][] {{0}}, FloydWarshall.shortestPaths(g).distances().toMatrix());
++    }
++
++    private static ShortestPaths knownExample() {
++        return FloydWarshall.shortestPaths(Graph.of(new int[][] {
++                {0,   4,   INF, 5,   INF},
++                {INF, 0,   1,   INF, 6},
++                {2,   INF, 0,   3,   INF},
++                {INF, INF, 1,   0,   2},
++                {1,   INF, INF, 4,   0}
++        }));
++    }
++
++    private static void pathReconstructionFollowsShortestRoute() {
++        // 1 -> 0 has no direct edge; the shortest route is 1 ->2 ->0 (1 + 2 = 3).
++        check("path follows shortest route",
++                List.of(1, 2, 0), knownExample().path(1, 0));
++    }
++
++    private static void pathToSelfIsSingleVertex() {
++        check("path to self", List.of(2), knownExample().path(2, 2));
++    }
++
++    private static void unreachablePathIsEmpty() {
++        Graph g = Graph.of(new int[][] {
++                {0,   7},
++                {INF, 0}
++        });
++        ShortestPaths sp = FloydWarshall.shortestPaths(g);
++        check("unreachable path is empty", List.of(), sp.path(1, 0));
++        if (sp.hasPath(1, 0)) {
++            failures++;
++            System.out.println("FAIL: hasPath false for unreachable");
++        } else {
++            System.out.println("PASS: hasPath false for unreachable");
++        }
++    }
++
++    private static void directEdgePathIsTwoVertices() {
++        check("direct edge path", List.of(0, 1), knownExample().path(0, 1));
+     }
+ 
+     // --- tiny assertion helpers ---
+@@ -122,6 +166,17 @@ public final class FloydWarshallTest {
+         }
+     }
+ 
++    private static void check(String name, List<Integer> expected, List<Integer> actual) {
++        if (expected.equals(actual)) {
++            System.out.println("PASS: " + name);
++        } else {
++            failures++;
++            System.out.println("FAIL: " + name);
++            System.out.println("  expected: " + expected);
++            System.out.println("  actual:   " + actual);
++        }
++    }
++
+     private static void checkThrows(String name, Runnable action) {
+         try {
+             action.run();
+diff --git a/Main.java b/Main.java
+index 5a46f78..927a21c 100644
+--- a/Main.java
++++ b/Main.java
+@@ -1,6 +1,8 @@
++import java.util.List;
++
+ /**
+- * Demonstrates {@link FloydWarshall} on a small sample graph and prints the
+- * resulting all-pairs shortest-path matrix.
++ * Demonstrates {@link FloydWarshall}: prints the all-pairs shortest-path matrix
++ * and reconstructs a few concrete shortest paths.
+  */
+ public final class Main {
+ 
+@@ -15,8 +17,14 @@ public final class Main {
+                 {1,   inf, inf, 4,   0}
+         });
+ 
+-        Graph shortest = FloydWarshall.shortestPaths(graph);
+-        printMatrix(shortest);
++        ShortestPaths result = FloydWarshall.shortestPaths(graph);
++
++        printMatrix(result.distances());
++
++        System.out.println();
++        printPath(result, 1, 0);
++        printPath(result, 4, 1);
++        printPath(result, 0, 4);
+     }
+ 
+     /** Prints the distance matrix, rendering {@link Graph#INF} as "INF". */
+@@ -33,4 +41,15 @@ public final class Main {
+         }
+         System.out.print(sb);
+     }
++
++    /** Prints the shortest path and its distance between two vertices. */
++    private static void printPath(ShortestPaths result, int from, int to) {
++        List<Integer> path = result.path(from, to);
++        if (path.isEmpty()) {
++            System.out.printf("%d -> %d: unreachable%n", from, to);
++        } else {
++            System.out.printf("%d -> %d (distance %d): %s%n",
++                    from, to, result.distance(from, to), path);
++        }
++    }
+ }
+diff --git a/ShortestPaths.java b/ShortestPaths.java
+new file mode 100644
+index 0000000..276b0f4
+--- /dev/null
++++ b/ShortestPaths.java
+@@ -0,0 +1,78 @@
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * The result of an all-pairs shortest-path computation: the distance between
++ * every pair of vertices, plus enough information to reconstruct an actual
++ * shortest path as a sequence of vertices.
++ *
++ * <p>Instances are produced by {@link FloydWarshall#shortestPaths(Graph)} and
++ * are immutable from a caller's perspective: the internal matrices are never
++ * exposed by reference.
++ */
++public final class ShortestPaths {
++
++    /** Sentinel for {@code next} cells with no onward hop (no path). */
++    static final int NO_PATH = -1;
++
++    private final int[][] dist;
++    private final int[][] next;
++
++    /**
++     * Takes ownership of the given matrices; they must not be retained or
++     * mutated by the caller afterwards. Package-private by design — only the
++     * algorithm constructs results.
++     *
++     * @param dist shortest-path distances ({@link Graph#INF} when unreachable)
++     * @param next {@code next[i][j]} is the first vertex after {@code i} on a
++     *             shortest path to {@code j}, or {@link #NO_PATH}
++     */
++    ShortestPaths(int[][] dist, int[][] next) {
++        this.dist = dist;
++        this.next = next;
++    }
++
++    /** Number of vertices. */
++    public int size() {
++        return dist.length;
++    }
++
++    /**
++     * Shortest-path distance from {@code i} to {@code j}, or {@link Graph#INF}
++     * if {@code j} is unreachable from {@code i}.
++     */
++    public int distance(int i, int j) {
++        return dist[i][j];
++    }
++
++    /** Whether any path exists from {@code i} to {@code j}. */
++    public boolean hasPath(int i, int j) {
++        return i == j || next[i][j] != NO_PATH;
++    }
++
++    /**
++     * Reconstructs a shortest path from {@code i} to {@code j} as the sequence
++     * of vertices visited, inclusive of both endpoints.
++     *
++     * @return the vertex sequence, {@code [i]} when {@code i == j}, or an empty
++     *         list when {@code j} is unreachable from {@code i}
++     */
++    public List<Integer> path(int i, int j) {
++        if (!hasPath(i, j)) {
++            return List.of();
++        }
++        List<Integer> path = new ArrayList<>();
++        int at = i;
++        path.add(at);
++        while (at != j) {
++            at = next[at][j];
++            path.add(at);
++        }
++        return path;
++    }
++
++    /** A {@link Graph} view of the shortest-path distance matrix. */
++    public Graph distances() {
++        return Graph.of(dist);
++    }
++}

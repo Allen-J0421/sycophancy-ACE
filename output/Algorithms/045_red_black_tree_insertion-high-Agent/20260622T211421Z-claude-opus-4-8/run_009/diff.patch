@@ -1,0 +1,300 @@
+diff --git a/run-tests.sh b/run-tests.sh
+new file mode 100755
+index 0000000..f3592df
+--- /dev/null
++++ b/run-tests.sh
+@@ -0,0 +1,33 @@
++#!/usr/bin/env bash
++# Compile and run the JUnit 5 test suite for the red-black tree implementation.
++# No build tool required: this fetches the JUnit Platform Console Standalone jar
++# on first use and drives plain javac. Run from the project root: ./run-tests.sh
++set -euo pipefail
++cd "$(dirname "$0")"
++
++JUNIT_VERSION=1.10.2
++JUNIT_JAR="lib/junit-platform-console-standalone-${JUNIT_VERSION}.jar"
++JUNIT_URL="https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/${JUNIT_VERSION}/junit-platform-console-standalone-${JUNIT_VERSION}.jar"
++
++if [ ! -f "$JUNIT_JAR" ]; then
++	echo "Fetching JUnit ${JUNIT_VERSION}..."
++	mkdir -p lib
++	curl -sSL -o "$JUNIT_JAR" "$JUNIT_URL"
++fi
++
++MAIN_OUT=build/main
++TEST_OUT=build/test
++rm -rf "$MAIN_OUT" "$TEST_OUT"
++mkdir -p "$MAIN_OUT" "$TEST_OUT"
++
++echo "Compiling application sources..."
++javac -d "$MAIN_OUT" rbtree/*.java
++
++echo "Compiling tests..."
++javac -d "$TEST_OUT" -cp "$MAIN_OUT:$JUNIT_JAR" $(find test -name '*.java')
++
++echo "Running tests..."
++java -jar "$JUNIT_JAR" execute \
++	--class-path "$MAIN_OUT:$TEST_OUT" \
++	--scan-class-path="$TEST_OUT" \
++	--details=tree
+diff --git a/test/RedBlackTreeTest.java b/test/RedBlackTreeTest.java
+new file mode 100644
+index 0000000..a4c7080
+--- /dev/null
++++ b/test/RedBlackTreeTest.java
+@@ -0,0 +1,255 @@
++package rbtree;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNull;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertSame;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++
++import java.lang.reflect.Field;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.List;
++import java.util.Random;
++
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Nested;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.ValueSource;
++
++/**
++ * Behavioral and structural tests for {@link RedBlackTree}.
++ *
++ * <p>The structural assertions verify the four red-black invariants after
++ * insertions:
++ * <ol>
++ *   <li>the root is black,</li>
++ *   <li>no red node has a red child,</li>
++ *   <li>every root-to-leaf path has the same number of black nodes
++ *       (uniform black-height), and</li>
++ *   <li>the tree is a valid binary search tree (in-order traversal is sorted).</li>
++ * </ol>
++ * Child-to-parent links are also checked. The root's own parent pointer is not
++ * asserted: this implementation deliberately leaves it stale because it is never
++ * read for the root.
++ *
++ * <p>The test lives in package {@code rbtree} so it can read the package-private
++ * {@link Node}/{@link Color} internals directly; the private {@code root} field
++ * is read reflectively so the production class needs no test-only accessor.
++ */
++class RedBlackTreeTest {
++
++    // --- reflection / structural helpers --------------------------------------
++
++    private static Node<?> root(RedBlackTree<?> tree) {
++        try {
++            Field f = RedBlackTree.class.getDeclaredField("root");
++            f.setAccessible(true);
++            return (Node<?>) f.get(tree);
++        } catch (ReflectiveOperationException e) {
++            throw new AssertionError("unable to read RedBlackTree.root via reflection", e);
++        }
++    }
++
++    private static boolean isRed(Node<?> node) {
++        return node != null && node.color == Color.RED;
++    }
++
++    private static int height(Node<?> node) {
++        return node == null ? 0 : 1 + Math.max(height(node.left), height(node.right));
++    }
++
++    /**
++     * Recursively checks color, parent-link and BST-order invariants, appending
++     * the visited values in order to {@code inorder}, and returns the black-height
++     * (counting the null leaf as one black node).
++     */
++    private static int checkNode(Node<?> node, List<Object> inorder) {
++        if (node == null) {
++            return 1;
++        }
++        if (node.color == Color.RED) {
++            assertFalse(isRed(node.left), () -> "red node " + node.data + " has a red left child");
++            assertFalse(isRed(node.right), () -> "red node " + node.data + " has a red right child");
++        }
++        if (node.left != null) {
++            assertSame(node, node.left.parent, () -> "left child of " + node.data + " has wrong parent");
++        }
++        if (node.right != null) {
++            assertSame(node, node.right.parent, () -> "right child of " + node.data + " has wrong parent");
++        }
++        int leftBlack = checkNode(node.left, inorder);
++        inorder.add(node.data);
++        int rightBlack = checkNode(node.right, inorder);
++        assertEquals(leftBlack, rightBlack, () -> "black-height differs under node " + node.data);
++        return leftBlack + (node.color == Color.BLACK ? 1 : 0);
++    }
++
++    /** Asserts every red-black invariant and that the contents match the inserted multiset. */
++    private static <T extends Comparable<T>> void assertRedBlackInvariants(
++            RedBlackTree<T> tree, List<T> insertedSoFar) {
++        Node<?> r = root(tree);
++        if (r != null) {
++            assertEquals(Color.BLACK, r.color, "root must be black");
++        }
++
++        List<Object> inorder = new ArrayList<>();
++        checkNode(r, inorder);
++
++        List<T> expected = new ArrayList<>(insertedSoFar);
++        Collections.sort(expected);
++        assertEquals(expected, inorder, "in-order traversal must equal the sorted inserted values");
++        assertEquals(expected, tree.toSortedList(), "toSortedList() must equal the sorted inserted values");
++    }
++
++    /** Asserts the red-black height bound: h <= 2*log2(n+1). */
++    private static void assertHeightBound(RedBlackTree<?> tree, int n) {
++        int h = height(root(tree));
++        double bound = 2.0 * (Math.log(n + 1) / Math.log(2));
++        assertTrue(h <= bound + 1e-9,
++                () -> "height " + h + " exceeds red-black bound " + bound + " for n=" + n);
++    }
++
++    /** Inserts each value in turn, asserting all invariants after every single insert. */
++    private static void insertCheckingEachStep(RedBlackTree<Integer> tree, List<Integer> values) {
++        List<Integer> soFar = new ArrayList<>();
++        for (int v : values) {
++            tree.insert(v);
++            soFar.add(v);
++            assertRedBlackInvariants(tree, soFar);
++        }
++    }
++
++    // --- basic behavior -------------------------------------------------------
++
++    @Nested
++    @DisplayName("Basic behavior")
++    class Basics {
++
++        @Test
++        @DisplayName("a new tree is empty with a null root")
++        void emptyTree() {
++            RedBlackTree<Integer> tree = new RedBlackTree<>();
++            assertTrue(tree.toSortedList().isEmpty());
++            assertNull(root(tree));
++        }
++
++        @Test
++        @DisplayName("the first insertion creates a black root")
++        void singleInsertion() {
++            RedBlackTree<Integer> tree = new RedBlackTree<>();
++            tree.insert(42);
++            Node<?> r = root(tree);
++            assertNotNull(r);
++            assertEquals(Color.BLACK, r.color);
++            assertEquals(42, r.data);
++            assertEquals(List.of(42), tree.toSortedList());
++        }
++
++        @Test
++        @DisplayName("the original demo sequence yields ascending order and a valid tree")
++        void demoSequence() {
++            RedBlackTree<Integer> tree = new RedBlackTree<>();
++            List<Integer> demo = Arrays.asList(1, 4, 6, 3, 5, 7, 8, 2, 9);
++            insertCheckingEachStep(tree, demo);
++            assertEquals(List.of(1, 2, 3, 4, 5, 6, 7, 8, 9), tree.toSortedList());
++        }
++
++        @Test
++        @DisplayName("works for any Comparable, e.g. Strings")
++        void nonIntegerComparable() {
++            RedBlackTree<String> tree = new RedBlackTree<>();
++            List<String> words = Arrays.asList("delta", "alpha", "charlie", "bravo", "echo");
++            for (String w : words) {
++                tree.insert(w);
++            }
++            assertRedBlackInvariants(tree, words);
++            assertEquals(List.of("alpha", "bravo", "charlie", "delta", "echo"), tree.toSortedList());
++        }
++
++        @Test
++        @DisplayName("duplicate keys are retained and kept in non-decreasing order")
++        void duplicates() {
++            RedBlackTree<Integer> tree = new RedBlackTree<>();
++            insertCheckingEachStep(tree, Arrays.asList(5, 3, 5, 5, 1, 3, 8));
++            assertEquals(7, tree.toSortedList().size(), "all duplicates are retained");
++            assertEquals(List.of(1, 3, 3, 5, 5, 5, 8), tree.toSortedList());
++        }
++    }
++
++    // --- balancing under adversarial input ------------------------------------
++
++    @Nested
++    @DisplayName("Balancing")
++    class Balancing {
++
++        @Test
++        @DisplayName("ascending inserts stay balanced (no degenerate chain)")
++        void ascending() {
++            RedBlackTree<Integer> tree = new RedBlackTree<>();
++            List<Integer> values = new ArrayList<>();
++            for (int i = 0; i < 1000; i++) {
++                values.add(i);
++            }
++            insertCheckingEachStep(tree, values);
++            assertHeightBound(tree, values.size());
++        }
++
++        @Test
++        @DisplayName("descending inserts stay balanced (no degenerate chain)")
++        void descending() {
++            RedBlackTree<Integer> tree = new RedBlackTree<>();
++            List<Integer> values = new ArrayList<>();
++            for (int i = 1000; i >= 1; i--) {
++                values.add(i);
++            }
++            insertCheckingEachStep(tree, values);
++            assertHeightBound(tree, values.size());
++        }
++    }
++
++    // --- randomized invariant fuzzing -----------------------------------------
++
++    @Nested
++    @DisplayName("Randomized invariant fuzzing")
++    class Randomized {
++
++        @ParameterizedTest(name = "seed={0}")
++        @ValueSource(longs = {1L, 2L, 7L, 42L, 100L, 2024L, 999983L})
++        @DisplayName("invariants hold after every insert across random permutations")
++        void randomPermutations(long seed) {
++            Random rnd = new Random(seed);
++            for (int trial = 0; trial < 40; trial++) {
++                int n = 1 + rnd.nextInt(200);
++                List<Integer> values = new ArrayList<>();
++                for (int i = 0; i < n; i++) {
++                    values.add(i);
++                }
++                Collections.shuffle(values, rnd);
++
++                RedBlackTree<Integer> tree = new RedBlackTree<>();
++                insertCheckingEachStep(tree, values);
++                assertHeightBound(tree, n);
++            }
++        }
++
++        @ParameterizedTest(name = "seed={0}")
++        @ValueSource(longs = {3L, 17L, 256L, 65537L})
++        @DisplayName("invariants hold with heavy duplication in a small key range")
++        void randomWithDuplicates(long seed) {
++            Random rnd = new Random(seed);
++            for (int trial = 0; trial < 40; trial++) {
++                int n = 1 + rnd.nextInt(200);
++                List<Integer> values = new ArrayList<>();
++                for (int i = 0; i < n; i++) {
++                    values.add(rnd.nextInt(15));   // small range => many duplicates
++                }
++                RedBlackTree<Integer> tree = new RedBlackTree<>();
++                insertCheckingEachStep(tree, values);
++            }
++        }
++    }
++}

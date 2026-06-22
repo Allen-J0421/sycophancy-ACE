@@ -1,0 +1,956 @@
+diff --git a/ConnectivityResult.java b/ConnectivityResult.java
+index 4822c1e..b59026f 100644
+--- a/ConnectivityResult.java
++++ b/ConnectivityResult.java
+@@ -7,5 +7,5 @@ import java.util.List;
+  * @param articulationPoints the cut vertices, in ascending order
+  * @param bridges            the cut edges, ordered by endpoints then edge id
+  */
+-public record ConnectivityResult(List<Integer> articulationPoints, List<Graph.Edge> bridges) {
++public record ConnectivityResult(List<Integer> articulationPoints, List<Edge> bridges) {
+ }
+diff --git a/DirectedGraph.java b/DirectedGraph.java
+index 296dc6e..109513f 100644
+--- a/DirectedGraph.java
++++ b/DirectedGraph.java
+@@ -3,18 +3,21 @@ import java.util.Collections;
+ import java.util.List;
+ 
+ /**
+- * A directed graph backed by an adjacency list of out-neighbors.
++ * A directed {@link Graph} backed by an adjacency list of out-arcs. Each arc is
++ * stored only in its tail's list, so {@link #edgesFrom(int)} returns a vertex's
++ * out-arcs. Parallel arcs and self-loops are permitted.
+  *
+- * <p>Vertices are identified by integers in the range {@code [0, vertexCount())}.
+- * Parallel arcs and self-loops are permitted; they do not affect strongly
+- * connected components, so this representation tracks targets rather than edge
+- * identities (unlike the undirected {@link Graph}, whose bridge detection needs
+- * them).
++ * <p>Arcs carry an {@link Edge#id() identity} for uniformity with the shared
++ * {@link Graph} interface, though strongly-connected-components analysis does not
++ * rely on it.
+  */
+-public final class DirectedGraph {
++public final class DirectedGraph implements Graph {
+ 
+-    /** For each vertex, the vertices it has an arc to. */
+-    private final List<List<Integer>> outAdjacency;
++    /** For each vertex, the arcs whose tail is that vertex. */
++    private final List<List<Edge>> outArcs;
++
++    /** All arcs, in insertion order; an arc's index equals its {@link Edge#id()}. */
++    private final List<Edge> arcs = new ArrayList<>();
+ 
+     /**
+      * Creates a directed graph with the given number of vertices and no arcs.
+@@ -25,9 +28,9 @@ public final class DirectedGraph {
+         if (vertexCount < 0) {
+             throw new IllegalArgumentException("vertexCount must be non-negative: " + vertexCount);
+         }
+-        outAdjacency = new ArrayList<>(vertexCount);
++        outArcs = new ArrayList<>(vertexCount);
+         for (int i = 0; i < vertexCount; i++) {
+-            outAdjacency.add(new ArrayList<>());
++            outArcs.add(new ArrayList<>());
+         }
+     }
+ 
+@@ -55,34 +58,42 @@ public final class DirectedGraph {
+      *
+      * @param from the tail (source) vertex
+      * @param to   the head (target) vertex
++     * @return the newly created arc
+      */
+-    public void addEdge(int from, int to) {
++    public Edge addEdge(int from, int to) {
+         checkVertex(from);
+         checkVertex(to);
+-        outAdjacency.get(from).add(to);
++        Edge arc = new Edge(from, to, arcs.size());
++        arcs.add(arc);
++        outArcs.get(from).add(arc);
++        return arc;
+     }
+ 
+-    /** Returns the number of vertices in the graph. */
++    @Override
+     public int vertexCount() {
+-        return outAdjacency.size();
++        return outArcs.size();
+     }
+ 
+-    /**
+-     * Returns an unmodifiable view of the vertices reachable from {@code u} by a
+-     * single arc.
+-     *
+-     * @param u the source vertex
+-     * @return the out-neighbors of {@code u}
+-     */
+-    public List<Integer> outNeighbors(int u) {
+-        checkVertex(u);
+-        return Collections.unmodifiableList(outAdjacency.get(u));
++    /** Returns the number of arcs in the graph. */
++    public int arcCount() {
++        return arcs.size();
++    }
++
++    @Override
++    public List<Edge> edgesFrom(int v) {
++        checkVertex(v);
++        return Collections.unmodifiableList(outArcs.get(v));
++    }
++
++    /** Returns an unmodifiable view of all arcs in the graph. */
++    public List<Edge> arcs() {
++        return Collections.unmodifiableList(arcs);
+     }
+ 
+     private void checkVertex(int u) {
+-        if (u < 0 || u >= outAdjacency.size()) {
++        if (u < 0 || u >= outArcs.size()) {
+             throw new IndexOutOfBoundsException(
+-                    "vertex " + u + " is out of range [0, " + outAdjacency.size() + ")");
++                    "vertex " + u + " is out of range [0, " + outArcs.size() + ")");
+         }
+     }
+ }
+diff --git a/Edge.java b/Edge.java
+new file mode 100644
+index 0000000..286e956
+--- /dev/null
++++ b/Edge.java
+@@ -0,0 +1,31 @@
++/**
++ * An edge between two vertices, with an identity that is unique within its graph.
++ * The identity is what separates parallel edges from one another (which bridge
++ * detection requires).
++ *
++ * <p>For an undirected edge the two endpoints are interchangeable. For a directed
++ * arc, {@code u} is the tail (source) and {@code v} is the head (target).
++ *
++ * @param u  one endpoint (the tail, for a directed arc)
++ * @param v  the other endpoint (the head, for a directed arc)
++ * @param id the edge's unique identifier within its graph
++ */
++public record Edge(int u, int v, int id) {
++
++    /**
++     * Returns the endpoint of this edge other than {@code endpoint}.
++     *
++     * @param endpoint one endpoint of this edge
++     * @return the opposite endpoint (equal to {@code endpoint} for a self-loop)
++     * @throws IllegalArgumentException if {@code endpoint} is not an endpoint
++     */
++    public int other(int endpoint) {
++        if (endpoint == u) {
++            return v;
++        }
++        if (endpoint == v) {
++            return u;
++        }
++        throw new IllegalArgumentException(endpoint + " is not an endpoint of " + this);
++    }
++}
+diff --git a/Graph.java b/Graph.java
+index 94e84dc..e45d177 100644
+--- a/Graph.java
++++ b/Graph.java
+@@ -1,137 +1,43 @@
+-import java.util.ArrayList;
+-import java.util.Collections;
+ import java.util.List;
+ 
+ /**
+- * An undirected graph backed by an adjacency list.
++ * A graph as the traversal algorithms see it: a fixed set of integer vertices in
++ * {@code [0, vertexCount())} and, for each vertex, the edges that can be traversed
++ * leaving it.
+  *
+- * <p>Vertices are identified by integers in the range {@code [0, vertexCount())}.
+- * Each edge carries a stable identity (see {@link Edge}), so parallel edges
+- * between the same pair of vertices are distinguishable — which algorithms such as
+- * bridge detection require.
++ * <p>This is the single representation shared by {@link UndirectedGraph} and
++ * {@link DirectedGraph}. The only structural difference between them is what
++ * {@link #edgesFrom(int)} returns: an undirected edge appears in <em>both</em>
++ * endpoints' lists, whereas a directed arc appears only in its tail's list.
++ * Algorithms stay representation-agnostic by traversing to {@link Edge#other(int)
++ * edge.other(v)} and using {@link Edge#id() edge.id()} when they need edge
++ * identity.
++ *
++ * <p><strong>Which analysis is meaningful on which graph</strong> is a matter of
++ * graph theory, not of this API:
++ * <ul>
++ *   <li>{@link GraphConnectivity} (articulation points and bridges) is meaningful
++ *       only on an {@link UndirectedGraph}.</li>
++ *   <li>{@link StronglyConnectedComponents} computes SCCs on a
++ *       {@link DirectedGraph}; run on an {@link UndirectedGraph} it computes the
++ *       connected components, since every undirected edge is symmetric.</li>
++ * </ul>
++ * Both algorithms accept any {@code Graph}, so either can run on a shared graph
++ * object, but the caller is responsible for choosing a combination that means
++ * what they intend.
+  */
+-public final class Graph {
+-
+-    /**
+-     * An undirected edge between two vertices, with an identity that is unique
+-     * within its graph. The identity is what separates parallel edges from one
+-     * another.
+-     *
+-     * @param u  one endpoint
+-     * @param v  the other endpoint
+-     * @param id the edge's unique identifier within its graph
+-     */
+-    public record Edge(int u, int v, int id) {
+-
+-        /**
+-         * Returns the endpoint of this edge other than {@code endpoint}.
+-         *
+-         * @param endpoint one endpoint of this edge
+-         * @return the opposite endpoint (equal to {@code endpoint} for a self-loop)
+-         * @throws IllegalArgumentException if {@code endpoint} is not an endpoint
+-         */
+-        public int other(int endpoint) {
+-            if (endpoint == u) {
+-                return v;
+-            }
+-            if (endpoint == v) {
+-                return u;
+-            }
+-            throw new IllegalArgumentException(endpoint + " is not an endpoint of " + this);
+-        }
+-    }
+-
+-    /** For each vertex, the edges incident to it. */
+-    private final List<List<Edge>> incidence;
+-
+-    /** All edges, in insertion order; an edge's index equals its {@link Edge#id()}. */
+-    private final List<Edge> edges = new ArrayList<>();
+-
+-    /**
+-     * Creates a graph with the given number of vertices and no edges.
+-     *
+-     * @param vertexCount the number of vertices; must be non-negative
+-     */
+-    public Graph(int vertexCount) {
+-        if (vertexCount < 0) {
+-            throw new IllegalArgumentException("vertexCount must be non-negative: " + vertexCount);
+-        }
+-        incidence = new ArrayList<>(vertexCount);
+-        for (int i = 0; i < vertexCount; i++) {
+-            incidence.add(new ArrayList<>());
+-        }
+-    }
+-
+-    /**
+-     * Builds a graph from a list of undirected edges.
+-     *
+-     * @param vertexCount the number of vertices
+-     * @param edges       an array of {@code {u, v}} pairs
+-     * @return the constructed graph
+-     */
+-    public static Graph fromEdges(int vertexCount, int[][] edges) {
+-        Graph graph = new Graph(vertexCount);
+-        for (int[] edge : edges) {
+-            if (edge.length != 2) {
+-                throw new IllegalArgumentException(
+-                        "each edge must have exactly two endpoints, found " + edge.length);
+-            }
+-            graph.addEdge(edge[0], edge[1]);
+-        }
+-        return graph;
+-    }
+-
+-    /**
+-     * Adds an undirected edge between two vertices. Parallel edges and self-loops
+-     * are permitted; each call adds a distinct edge.
+-     *
+-     * @param u one endpoint
+-     * @param v the other endpoint
+-     * @return the newly created edge
+-     */
+-    public Edge addEdge(int u, int v) {
+-        checkVertex(u);
+-        checkVertex(v);
+-        Edge edge = new Edge(u, v, edges.size());
+-        edges.add(edge);
+-        incidence.get(u).add(edge);
+-        if (u != v) {
+-            incidence.get(v).add(edge);
+-        }
+-        return edge;
+-    }
++public interface Graph {
+ 
+     /** Returns the number of vertices in the graph. */
+-    public int vertexCount() {
+-        return incidence.size();
+-    }
+-
+-    /** Returns the number of edges in the graph. */
+-    public int edgeCount() {
+-        return edges.size();
+-    }
++    int vertexCount();
+ 
+     /**
+-     * Returns an unmodifiable view of the edges incident to {@code u}. From each
+-     * edge, {@link Edge#other(int) edge.other(u)} gives the adjacent vertex.
++     * Returns an unmodifiable view of the edges that can be traversed leaving
++     * {@code v}. For each returned edge, {@link Edge#other(int) edge.other(v)} is
++     * the vertex reached.
+      *
+-     * @param u the vertex whose incident edges are requested
+-     * @return the edges incident to {@code u}
++     * @param v the source vertex
++     * @return the edges leaving {@code v}
+      */
+-    public List<Edge> incidentEdges(int u) {
+-        checkVertex(u);
+-        return Collections.unmodifiableList(incidence.get(u));
+-    }
+-
+-    /** Returns an unmodifiable view of all edges in the graph. */
+-    public List<Edge> edges() {
+-        return Collections.unmodifiableList(edges);
+-    }
+-
+-    private void checkVertex(int u) {
+-        if (u < 0 || u >= incidence.size()) {
+-            throw new IndexOutOfBoundsException(
+-                    "vertex " + u + " is out of range [0, " + incidence.size() + ")");
+-        }
+-    }
++    List<Edge> edgesFrom(int v);
+ }
+diff --git a/GraphConnectivity.java b/GraphConnectivity.java
+index de9ceac..90b7a17 100644
+--- a/GraphConnectivity.java
++++ b/GraphConnectivity.java
+@@ -12,10 +12,15 @@ import java.util.List;
+  * <p>A vertex is an articulation point if removing it increases the number of
+  * connected components; an edge is a bridge if removing it does. Multigraphs are
+  * handled correctly: the traversal skips only the specific tree edge it arrived
+- * on (by {@link Graph.Edge#id() edge id}), so a parallel edge back to the parent
++ * on (by {@link Edge#id() edge id}), so a parallel edge back to the parent
+  * is treated as a genuine back edge. This matters for bridges, whose strict
+  * {@code low[child] > disc[parent]} test a parallel edge can flip.
+  *
++ * <p>Articulation points and bridges are only meaningful on an
++ * {@link UndirectedGraph}. The analysis accepts any {@link Graph}, but on a
++ * {@link DirectedGraph} (whose arcs are one-directional) the results are not
++ * meaningful.
++ *
+  * <p>Instances are stateless and therefore reusable and thread-safe: each call to
+  * {@link #analyze(Graph)} allocates its own traversal state.
+  *
+@@ -25,10 +30,10 @@ import java.util.List;
+ public final class GraphConnectivity {
+ 
+     /** Orders bridges deterministically by smaller endpoint, larger endpoint, then id. */
+-    private static final Comparator<Graph.Edge> BRIDGE_ORDER = Comparator
+-            .comparingInt((Graph.Edge e) -> Math.min(e.u(), e.v()))
++    private static final Comparator<Edge> BRIDGE_ORDER = Comparator
++            .comparingInt((Edge e) -> Math.min(e.u(), e.v()))
+             .thenComparingInt(e -> Math.max(e.u(), e.v()))
+-            .thenComparingInt(Graph.Edge::id);
++            .thenComparingInt(Edge::id);
+ 
+     /**
+      * Analyzes the given graph's connectivity.
+@@ -50,7 +55,7 @@ public final class GraphConnectivity {
+         private final Graph graph;
+         private final LowLinkState state;
+         private final boolean[] isArticulationPoint;
+-        private final List<Graph.Edge> bridges = new ArrayList<>();
++        private final List<Edge> bridges = new ArrayList<>();
+ 
+         Search(Graph graph) {
+             int vertexCount = graph.vertexCount();
+@@ -95,10 +100,10 @@ public final class GraphConnectivity {
+             while (!stack.isEmpty()) {
+                 Frame frame = stack.peek();
+                 int u = frame.vertex;
+-                List<Graph.Edge> incident = graph.incidentEdges(u);
++                List<Edge> incident = graph.edgesFrom(u);
+ 
+                 if (frame.nextEdge < incident.size()) {
+-                    Graph.Edge edge = incident.get(frame.nextEdge++);
++                    Edge edge = incident.get(frame.nextEdge++);
+                     int v = edge.other(u);
+                     if (v == u) {
+                         // Self-loop: irrelevant to articulation points and bridges.
+@@ -133,7 +138,7 @@ public final class GraphConnectivity {
+          *                    {@code u} is the DFS root
+          */
+         private void foldIntoParent(int u, Frame frame, Frame parentFrame) {
+-            Graph.Edge incoming = frame.parentEdge;
++            Edge incoming = frame.parentEdge;
+             if (incoming == null) {
+                 // The DFS root is a cut vertex only if it has more than one DFS child.
+                 if (frame.children > 1) {
+@@ -167,7 +172,7 @@ public final class GraphConnectivity {
+         final int vertex;
+ 
+         /** The tree edge by which {@link #vertex} was reached, or {@code null} for the root. */
+-        final Graph.Edge parentEdge;
++        final Edge parentEdge;
+ 
+         /** Index of the next incident edge to visit from {@link #vertex}. */
+         int nextEdge;
+@@ -175,7 +180,7 @@ public final class GraphConnectivity {
+         /** Number of DFS-tree children discovered from {@link #vertex}. */
+         int children;
+ 
+-        Frame(int vertex, Graph.Edge parentEdge) {
++        Frame(int vertex, Edge parentEdge) {
+             this.vertex = vertex;
+             this.parentEdge = parentEdge;
+         }
+diff --git a/GraphConnectivityTest.java b/GraphConnectivityTest.java
+index eed607b..5bcac9f 100644
+--- a/GraphConnectivityTest.java
++++ b/GraphConnectivityTest.java
+@@ -3,8 +3,8 @@ import java.util.List;
+ 
+ /**
+  * A small, dependency-free test runner for {@link GraphConnectivity} and
+- * {@link Graph}. Run with {@code java GraphConnectivityTest}; it prints a summary
+- * and exits with a non-zero status if any test fails.
++ * {@link UndirectedGraph}. Run with {@code java GraphConnectivityTest}; it prints a
++ * summary and exits with a non-zero status if any test fails.
+  */
+ public final class GraphConnectivityTest {
+ 
+@@ -60,67 +60,72 @@ public final class GraphConnectivityTest {
+     // --- Articulation points -------------------------------------------------
+ 
+     private void emptyGraphHasNoArticulationPoints() {
+-        check("empty graph", articulationPoints(new Graph(0)), List.of());
++        check("empty graph", articulationPoints(new UndirectedGraph(0)), List.of());
+     }
+ 
+     private void singleVertexHasNoArticulationPoints() {
+-        check("single vertex", articulationPoints(new Graph(1)), List.of());
++        check("single vertex", articulationPoints(new UndirectedGraph(1)), List.of());
+     }
+ 
+     private void triangleHasNoArticulationPoints() {
+-        Graph triangle = Graph.fromEdges(3, new int[][] {{0, 1}, {1, 2}, {2, 0}});
++        UndirectedGraph triangle = UndirectedGraph.fromEdges(3, new int[][] {{0, 1}, {1, 2}, {2, 0}});
+         check("triangle (AP)", articulationPoints(triangle), List.of());
+     }
+ 
+     private void pathExposesInteriorVertices() {
+-        Graph path = Graph.fromEdges(4, new int[][] {{0, 1}, {1, 2}, {2, 3}});
++        UndirectedGraph path = UndirectedGraph.fromEdges(4, new int[][] {{0, 1}, {1, 2}, {2, 3}});
+         check("path 0-1-2-3 (AP)", articulationPoints(path), List.of(1, 2));
+     }
+ 
+     private void starCenterIsArticulationPoint() {
+-        Graph star = Graph.fromEdges(4, new int[][] {{0, 1}, {0, 2}, {0, 3}});
++        UndirectedGraph star = UndirectedGraph.fromEdges(4, new int[][] {{0, 1}, {0, 2}, {0, 3}});
+         check("star centered at 0 (AP)", articulationPoints(star), List.of(0));
+     }
+ 
+     private void disconnectedComponentsHandledIndependently() {
+-        Graph forest = Graph.fromEdges(6, new int[][] {{0, 1}, {1, 2}, {3, 4}, {4, 5}});
++        UndirectedGraph forest =
++                UndirectedGraph.fromEdges(6, new int[][] {{0, 1}, {1, 2}, {3, 4}, {4, 5}});
+         check("disconnected paths (AP)", articulationPoints(forest), List.of(1, 4));
+     }
+ 
+     private void rootIsArticulationPointOnlyWithMultipleChildren() {
+-        Graph graph = Graph.fromEdges(5, new int[][] {{0, 1}, {1, 2}, {0, 3}, {3, 4}});
++        UndirectedGraph graph =
++                UndirectedGraph.fromEdges(5, new int[][] {{0, 1}, {1, 2}, {0, 3}, {3, 4}});
+         check("root with two children (AP)", articulationPoints(graph), List.of(0, 1, 3));
+     }
+ 
+     private void exampleFromMainMatchesExpectedOutput() {
+-        Graph graph = Graph.fromEdges(5, new int[][] {{0, 1}, {1, 4}, {2, 3}, {2, 4}, {3, 4}});
++        UndirectedGraph graph =
++                UndirectedGraph.fromEdges(5, new int[][] {{0, 1}, {1, 4}, {2, 3}, {2, 4}, {3, 4}});
+         check("Main example (AP)", articulationPoints(graph), List.of(1, 4));
+     }
+ 
+     // --- Bridges -------------------------------------------------------------
+ 
+     private void pathEdgesAreAllBridges() {
+-        Graph path = Graph.fromEdges(4, new int[][] {{0, 1}, {1, 2}, {2, 3}});
++        UndirectedGraph path = UndirectedGraph.fromEdges(4, new int[][] {{0, 1}, {1, 2}, {2, 3}});
+         check("path 0-1-2-3 (bridges)", bridges(path), List.of("0-1", "1-2", "2-3"));
+     }
+ 
+     private void triangleHasNoBridges() {
+-        Graph triangle = Graph.fromEdges(3, new int[][] {{0, 1}, {1, 2}, {2, 0}});
++        UndirectedGraph triangle = UndirectedGraph.fromEdges(3, new int[][] {{0, 1}, {1, 2}, {2, 0}});
+         check("triangle (bridges)", bridges(triangle), List.of());
+     }
+ 
+     private void starEdgesAreAllBridges() {
+-        Graph star = Graph.fromEdges(4, new int[][] {{0, 1}, {0, 2}, {0, 3}});
++        UndirectedGraph star = UndirectedGraph.fromEdges(4, new int[][] {{0, 1}, {0, 2}, {0, 3}});
+         check("star centered at 0 (bridges)", bridges(star), List.of("0-1", "0-2", "0-3"));
+     }
+ 
+     private void exampleFromMainBridges() {
+-        Graph graph = Graph.fromEdges(5, new int[][] {{0, 1}, {1, 4}, {2, 3}, {2, 4}, {3, 4}});
++        UndirectedGraph graph =
++                UndirectedGraph.fromEdges(5, new int[][] {{0, 1}, {1, 4}, {2, 3}, {2, 4}, {3, 4}});
+         check("Main example (bridges)", bridges(graph), List.of("0-1", "1-4"));
+     }
+ 
+     private void disconnectedComponentBridges() {
+-        Graph forest = Graph.fromEdges(6, new int[][] {{0, 1}, {1, 2}, {3, 4}, {4, 5}});
++        UndirectedGraph forest =
++                UndirectedGraph.fromEdges(6, new int[][] {{0, 1}, {1, 2}, {3, 4}, {4, 5}});
+         check("disconnected paths (bridges)", bridges(forest),
+                 List.of("0-1", "1-2", "3-4", "4-5"));
+     }
+@@ -128,18 +133,19 @@ public final class GraphConnectivityTest {
+     // --- Multigraphs ---------------------------------------------------------
+ 
+     private void parallelEdgesBetweenTwoVerticesHaveNoArticulationPoint() {
+-        Graph graph = Graph.fromEdges(2, new int[][] {{0, 1}, {0, 1}});
++        UndirectedGraph graph = UndirectedGraph.fromEdges(2, new int[][] {{0, 1}, {0, 1}});
+         check("parallel edges, two vertices (AP)", articulationPoints(graph), List.of());
+     }
+ 
+     private void parallelEdgesBetweenTwoVerticesHaveNoBridge() {
+         // A single 0-1 edge is a bridge; doubling it removes that.
+-        Graph graph = Graph.fromEdges(2, new int[][] {{0, 1}, {0, 1}});
++        UndirectedGraph graph = UndirectedGraph.fromEdges(2, new int[][] {{0, 1}, {0, 1}});
+         check("parallel edges, two vertices (bridges)", bridges(graph), List.of());
+     }
+ 
+     private void parallelEdgesAlongPathPreserveInteriorCutVertices() {
+-        Graph graph = Graph.fromEdges(4, new int[][] {{0, 1}, {1, 2}, {1, 2}, {2, 3}});
++        UndirectedGraph graph =
++                UndirectedGraph.fromEdges(4, new int[][] {{0, 1}, {1, 2}, {1, 2}, {2, 3}});
+         check("parallel edge on a path (AP)", articulationPoints(graph), List.of(1, 2));
+     }
+ 
+@@ -147,22 +153,25 @@ public final class GraphConnectivityTest {
+         // The doubled 1-2 edge is NOT a bridge (its twin keeps 1 and 2 connected),
+         // while the single 0-1 and 2-3 edges still are. This is the case that fails
+         // without per-edge identity.
+-        Graph graph = Graph.fromEdges(4, new int[][] {{0, 1}, {1, 2}, {1, 2}, {2, 3}});
++        UndirectedGraph graph =
++                UndirectedGraph.fromEdges(4, new int[][] {{0, 1}, {1, 2}, {1, 2}, {2, 3}});
+         check("parallel edge on a path (bridges)", bridges(graph), List.of("0-1", "2-3"));
+     }
+ 
+     private void parallelEdgeAcrossTriangleHasNoArticulationPoint() {
+-        Graph graph = Graph.fromEdges(3, new int[][] {{0, 1}, {1, 2}, {2, 0}, {2, 0}});
++        UndirectedGraph graph =
++                UndirectedGraph.fromEdges(3, new int[][] {{0, 1}, {1, 2}, {2, 0}, {2, 0}});
+         check("parallel edge across a triangle (AP)", articulationPoints(graph), List.of());
+     }
+ 
+     private void parallelEdgeAcrossTriangleHasNoBridges() {
+-        Graph graph = Graph.fromEdges(3, new int[][] {{0, 1}, {1, 2}, {2, 0}, {2, 0}});
++        UndirectedGraph graph =
++                UndirectedGraph.fromEdges(3, new int[][] {{0, 1}, {1, 2}, {2, 0}, {2, 0}});
+         check("parallel edge across a triangle (bridges)", bridges(graph), List.of());
+     }
+ 
+     private void selfLoopIsIgnored() {
+-        Graph graph = Graph.fromEdges(3, new int[][] {{0, 1}, {1, 2}, {1, 1}});
++        UndirectedGraph graph = UndirectedGraph.fromEdges(3, new int[][] {{0, 1}, {1, 2}, {1, 1}});
+         ConnectivityResult result = new GraphConnectivity().analyze(graph);
+         check("self-loop ignored (AP)", result.articulationPoints(), List.of(1));
+         check("self-loop ignored (bridges)", bridgeKeys(result), List.of("0-1", "1-2"));
+@@ -171,23 +180,24 @@ public final class GraphConnectivityTest {
+     // --- Robustness ----------------------------------------------------------
+ 
+     private void negativeVertexCountIsRejected() {
+-        checkThrows("negative vertex count", IllegalArgumentException.class, () -> new Graph(-1));
++        checkThrows("negative vertex count", IllegalArgumentException.class,
++                () -> new UndirectedGraph(-1));
+     }
+ 
+     private void outOfRangeEdgeIsRejected() {
+         checkThrows("out-of-range edge", IndexOutOfBoundsException.class,
+-                () -> Graph.fromEdges(2, new int[][] {{0, 5}}));
++                () -> UndirectedGraph.fromEdges(2, new int[][] {{0, 5}}));
+     }
+ 
+     private void malformedEdgeIsRejected() {
+         checkThrows("malformed edge", IllegalArgumentException.class,
+-                () -> Graph.fromEdges(2, new int[][] {{0}}));
++                () -> UndirectedGraph.fromEdges(2, new int[][] {{0}}));
+     }
+ 
+     private void analyzerIsReusableAcrossGraphs() {
+         GraphConnectivity analyzer = new GraphConnectivity();
+-        Graph path = Graph.fromEdges(3, new int[][] {{0, 1}, {1, 2}});
+-        Graph triangle = Graph.fromEdges(3, new int[][] {{0, 1}, {1, 2}, {2, 0}});
++        UndirectedGraph path = UndirectedGraph.fromEdges(3, new int[][] {{0, 1}, {1, 2}});
++        UndirectedGraph triangle = UndirectedGraph.fromEdges(3, new int[][] {{0, 1}, {1, 2}, {2, 0}});
+         check("reuse: path then triangle (1)", analyzer.analyze(path).articulationPoints(),
+                 List.of(1));
+         check("reuse: path then triangle (2)", analyzer.analyze(triangle).articulationPoints(),
+@@ -203,7 +213,8 @@ public final class GraphConnectivityTest {
+         for (int i = 0; i < vertexCount - 1; i++) {
+             edges[i] = new int[] {i, i + 1};
+         }
+-        ConnectivityResult result = new GraphConnectivity().analyze(Graph.fromEdges(vertexCount, edges));
++        ConnectivityResult result =
++                new GraphConnectivity().analyze(UndirectedGraph.fromEdges(vertexCount, edges));
+         List<Integer> points = result.articulationPoints();
+         boolean correct = points.size() == vertexCount - 2
+                 && points.get(0) == 1
+@@ -214,18 +225,18 @@ public final class GraphConnectivityTest {
+ 
+     // --- Helpers -------------------------------------------------------------
+ 
+-    private static List<Integer> articulationPoints(Graph graph) {
++    private static List<Integer> articulationPoints(UndirectedGraph graph) {
+         return new GraphConnectivity().analyze(graph).articulationPoints();
+     }
+ 
+     /** Returns the bridges as sorted {@code "min-max"} endpoint keys. */
+-    private static List<String> bridges(Graph graph) {
++    private static List<String> bridges(UndirectedGraph graph) {
+         return bridgeKeys(new GraphConnectivity().analyze(graph));
+     }
+ 
+     private static List<String> bridgeKeys(ConnectivityResult result) {
+         List<String> keys = new ArrayList<>();
+-        for (Graph.Edge edge : result.bridges()) {
++        for (Edge edge : result.bridges()) {
+             keys.add(Math.min(edge.u(), edge.v()) + "-" + Math.max(edge.u(), edge.v()));
+         }
+         return keys;
+diff --git a/Main.java b/Main.java
+index f2b18a6..d59576c 100644
+--- a/Main.java
++++ b/Main.java
+@@ -17,7 +17,8 @@ public final class Main {
+     }
+ 
+     private static void demonstrateUndirectedConnectivity() {
+-        Graph graph = Graph.fromEdges(5, new int[][] {{0, 1}, {1, 4}, {2, 3}, {2, 4}, {3, 4}});
++        UndirectedGraph graph =
++                UndirectedGraph.fromEdges(5, new int[][] {{0, 1}, {1, 4}, {2, 3}, {2, 4}, {3, 4}});
+         ConnectivityResult result = new GraphConnectivity().analyze(graph);
+ 
+         System.out.println("Articulation points: " + formatVertices(result.articulationPoints()));
+@@ -55,12 +56,12 @@ public final class Main {
+      * Formats bridges as {@code u-v} pairs for display, using {@code -1} to denote
+      * a graph with none.
+      */
+-    private static String formatEdges(List<Graph.Edge> edges) {
++    private static String formatEdges(List<Edge> edges) {
+         if (edges.isEmpty()) {
+             return "-1";
+         }
+         StringJoiner joiner = new StringJoiner(" ");
+-        for (Graph.Edge edge : edges) {
++        for (Edge edge : edges) {
+             joiner.add(edge.u() + "-" + edge.v());
+         }
+         return joiner.toString();
+diff --git a/README.md b/README.md
+index 8653bc4..eb462bb 100644
+--- a/README.md
++++ b/README.md
+@@ -6,32 +6,49 @@ iterative Tarjan-style low-link depth-first search (each `O(V + E)`):
+ - **Undirected:** articulation points (cut vertices) and bridges (cut edges).
+ - **Directed:** strongly connected components (SCCs).
+ 
+-Undirected connectivity and SCCs are *separate* implementations on purpose:
++Undirected connectivity and SCCs remain *separate algorithms* on purpose:
+ articulation points/bridges and SCCs are defined on different graph types and do
+-not generalize into one another (modeling an undirected graph as a directed one
+-and running SCC just collapses each connected component into a single SCC). They
+-share the low-link DFS technique, not an algorithm.
++not generalize into one another. What they *do* share is the graph representation
++(`Graph`) and the low-link traversal state (`LowLinkState`).
++
++## Shared abstractions
++
++**`Graph`** is a common interface — a set of integer vertices plus, per vertex,
++the edges traversable leaving it (`edgesFrom(v)`; the neighbor is
++`edge.other(v)`). `UndirectedGraph` and `DirectedGraph` both implement it; the
++only structural difference is that an undirected edge appears in *both* endpoints'
++lists while a directed arc appears only in its tail's. Edges keep a stable
++`id`, so multigraph bridge detection still works. Because both algorithms accept
++any `Graph`, either can run on a shared graph object — but which analysis is
++*meaningful* on which graph is graph theory, not API:
++
++- Articulation points / bridges are meaningful only on an `UndirectedGraph`.
++- `StronglyConnectedComponents` gives SCCs on a `DirectedGraph`; run on an
++  `UndirectedGraph` it computes the **connected components** (every edge is
++  symmetric). This is a genuinely useful shared-type case and is tested.
++
++**`LowLinkState`** owns each vertex's discovery time and low-link value and the
++operations that maintain them (`discover`, `relaxAgainstAncestor`,
++`propagateFromChild`, `isLowLinkRoot`). The traversal control flow and the
++algorithm-specific verdicts (cut vertices/edges vs. SCC extraction) stay with
++each algorithm, since those genuinely differ.
+ 
+ ## Layout
+ 
+ | File | Responsibility |
+ |------|----------------|
++| `Graph.java` | Common graph interface: vertices + `edgesFrom(v)` |
++| `Edge.java` | Edge with stable identity and `other(v)` |
++| `UndirectedGraph.java` | Undirected `Graph`; edges shared between both endpoints |
++| `DirectedGraph.java` | Directed `Graph`; arcs stored at their tail |
+ | `LowLinkState.java` | Shared DFS state: discovery times + low-link logic |
+-| `Graph.java` | Undirected graph (adjacency list) with edge identity, validation |
+ | `GraphConnectivity.java` | Articulation points + bridges; stateless, iterative |
+ | `ConnectivityResult.java` | Result holder: articulation points + bridges |
+-| `DirectedGraph.java` | Directed graph (out-adjacency list), validation |
+ | `StronglyConnectedComponents.java` | Tarjan's SCC algorithm; stateless, iterative |
+ | `Main.java` | Runnable demo of all three analyses |
+ | `GraphConnectivityTest.java` | Dependency-free test runner (undirected) |
+ | `StronglyConnectedComponentsTest.java` | Dependency-free test runner (SCC) |
+ 
+-Both connectivity algorithms share `LowLinkState`, which owns each vertex's
+-discovery time and low-link value and the operations that maintain them
+-(`discover`, `relaxAgainstAncestor`, `propagateFromChild`, `isLowLinkRoot`). The
+-traversal control flow and the algorithm-specific verdicts (cut vertices/edges
+-vs. SCC extraction) stay with each algorithm, since those genuinely differ.
+-
+ ## Build and run
+ 
+ ```sh
+@@ -52,7 +69,7 @@ Strongly connected components: [0, 1, 2] [3] [4]
+ ## Usage
+ 
+ ```java
+-Graph graph = Graph.fromEdges(5, new int[][] {{0, 1}, {1, 4}, {2, 3}, {2, 4}, {3, 4}});
++UndirectedGraph graph = UndirectedGraph.fromEdges(5, new int[][] {{0, 1}, {1, 4}, {2, 3}, {2, 4}, {3, 4}});
+ ConnectivityResult result = new GraphConnectivity().analyze(graph);
+ result.articulationPoints();  // [1, 4]
+ result.bridges();             // [Edge[u=0, v=1, id=0], Edge[u=1, v=4, id=1]]
+@@ -75,7 +92,7 @@ by their smallest vertex, so the result is deterministic.
+ ## Multigraphs
+ 
+ Parallel edges and self-loops are supported. Edges carry a stable identity
+-(`Graph.Edge.id()`), and the traversal skips only the specific tree edge it
++(`Edge.id()`), and the traversal skips only the specific tree edge it
+ arrived on — so a parallel edge back to the parent is treated as a genuine back
+ edge.
+ 
+diff --git a/StronglyConnectedComponents.java b/StronglyConnectedComponents.java
+index 69fc896..ff5fff3 100644
+--- a/StronglyConnectedComponents.java
++++ b/StronglyConnectedComponents.java
+@@ -6,18 +6,19 @@ import java.util.Deque;
+ import java.util.List;
+ 
+ /**
+- * Computes the strongly connected components (SCCs) of a directed graph using
+- * Tarjan's algorithm in a single {@code O(V + E)} pass.
++ * Computes the strongly connected components (SCCs) of a graph using Tarjan's
++ * algorithm in a single {@code O(V + E)} pass.
+  *
+- * <p>Two vertices are in the same SCC if each is reachable from the other.
++ * <p>Two vertices are in the same SCC if each is reachable from the other. On a
++ * {@link DirectedGraph} these are the usual SCCs; on an {@link UndirectedGraph}
++ * every edge is symmetric, so the result is the graph's connected components.
+  *
+- * <p>This is the directed-graph counterpart to the undirected
+- * {@link GraphConnectivity}; the two share the low-link DFS technique but are
+- * otherwise independent, because SCCs and articulation points/bridges are defined
+- * on different kinds of graphs.
++ * <p>This shares the low-link DFS technique with {@link GraphConnectivity} (via
++ * {@link LowLinkState}) but is otherwise an independent algorithm, because SCCs
++ * and articulation points/bridges are different concepts.
+  *
+  * <p>Instances are stateless and therefore reusable and thread-safe: each call to
+- * {@link #find(DirectedGraph)} allocates its own traversal state. The traversal is
++ * {@link #find(Graph)} allocates its own traversal state. The traversal is
+  * iterative, so it handles arbitrarily deep graphs without risking a
+  * {@link StackOverflowError}.
+  */
+@@ -30,20 +31,20 @@ public final class StronglyConnectedComponents {
+      * themselves are ordered by their smallest vertex, so the result is
+      * deterministic.
+      *
+-     * @param graph the directed graph to analyze
++     * @param graph the graph to analyze
+      * @return the list of strongly connected components
+      */
+-    public List<List<Integer>> find(DirectedGraph graph) {
++    public List<List<Integer>> find(Graph graph) {
+         return new Search(graph).run();
+     }
+ 
+     /**
+-     * Holds the mutable Tarjan-SCC state for a single {@link #find(DirectedGraph)}
++     * Holds the mutable Tarjan-SCC state for a single {@link #find(Graph)}
+      * invocation, keeping {@link StronglyConnectedComponents} itself stateless.
+      */
+     private static final class Search {
+ 
+-        private final DirectedGraph graph;
++        private final Graph graph;
+         private final LowLinkState state;
+ 
+         /** Whether each vertex is currently on the component stack. */
+@@ -54,7 +55,7 @@ public final class StronglyConnectedComponents {
+ 
+         private final List<List<Integer>> components = new ArrayList<>();
+ 
+-        Search(DirectedGraph graph) {
++        Search(Graph graph) {
+             int vertexCount = graph.vertexCount();
+             this.graph = graph;
+             this.state = new LowLinkState(vertexCount);
+@@ -94,10 +95,10 @@ public final class StronglyConnectedComponents {
+             while (!work.isEmpty()) {
+                 Frame frame = work.peek();
+                 int v = frame.vertex;
+-                List<Integer> outNeighbors = graph.outNeighbors(v);
++                List<Edge> outEdges = graph.edgesFrom(v);
+ 
+-                if (frame.nextArc < outNeighbors.size()) {
+-                    int w = outNeighbors.get(frame.nextArc++);
++                if (frame.nextArc < outEdges.size()) {
++                    int w = outEdges.get(frame.nextArc++).other(v);
+                     if (!state.isDiscovered(w)) {
+                         discover(w);
+                         work.push(new Frame(w));
+diff --git a/StronglyConnectedComponentsTest.java b/StronglyConnectedComponentsTest.java
+index 85dca70..b77023d 100644
+--- a/StronglyConnectedComponentsTest.java
++++ b/StronglyConnectedComponentsTest.java
+@@ -30,6 +30,7 @@ public final class StronglyConnectedComponentsTest {
+         disconnectedGraphHandledIndependently();
+         parallelArcsDoNotChangeComponents();
+         twoVerticesNeedBothDirectionsToMerge();
++        sccOnUndirectedGraphYieldsConnectedComponents();
+ 
+         negativeVertexCountIsRejected();
+         outOfRangeArcIsRejected();
+@@ -98,6 +99,17 @@ public final class StronglyConnectedComponentsTest {
+         check("one-way arc", scc(graph), List.of(List.of(0), List.of(1)));
+     }
+ 
++    private void sccOnUndirectedGraphYieldsConnectedComponents() {
++        // The analyzer accepts any Graph. On an undirected graph every edge is
++        // symmetric, so "strongly connected" reduces to "connected": the result is
++        // the connected components. Here {0,1,2} are linked and {3,4} are linked.
++        UndirectedGraph graph =
++                UndirectedGraph.fromEdges(5, new int[][] {{0, 1}, {1, 2}, {3, 4}});
++        check("SCC on undirected = connected components",
++                new StronglyConnectedComponents().find(graph),
++                List.of(List.of(0, 1, 2), List.of(3, 4)));
++    }
++
+     private void negativeVertexCountIsRejected() {
+         checkThrows("negative vertex count", IllegalArgumentException.class,
+                 () -> new DirectedGraph(-1));
+diff --git a/UndirectedGraph.java b/UndirectedGraph.java
+new file mode 100644
+index 0000000..2dfe07f
+--- /dev/null
++++ b/UndirectedGraph.java
+@@ -0,0 +1,100 @@
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++
++/**
++ * An undirected {@link Graph} backed by an adjacency list. Each edge carries a
++ * stable {@link Edge#id() identity} and is shared between its two endpoints'
++ * incidence lists, so parallel edges are distinguishable — which bridge detection
++ * requires. Parallel edges and self-loops are permitted.
++ */
++public final class UndirectedGraph implements Graph {
++
++    /** For each vertex, the edges incident to it (each undirected edge appears twice). */
++    private final List<List<Edge>> incidence;
++
++    /** All edges, in insertion order; an edge's index equals its {@link Edge#id()}. */
++    private final List<Edge> edges = new ArrayList<>();
++
++    /**
++     * Creates a graph with the given number of vertices and no edges.
++     *
++     * @param vertexCount the number of vertices; must be non-negative
++     */
++    public UndirectedGraph(int vertexCount) {
++        if (vertexCount < 0) {
++            throw new IllegalArgumentException("vertexCount must be non-negative: " + vertexCount);
++        }
++        incidence = new ArrayList<>(vertexCount);
++        for (int i = 0; i < vertexCount; i++) {
++            incidence.add(new ArrayList<>());
++        }
++    }
++
++    /**
++     * Builds an undirected graph from a list of edges.
++     *
++     * @param vertexCount the number of vertices
++     * @param edges       an array of {@code {u, v}} pairs
++     * @return the constructed graph
++     */
++    public static UndirectedGraph fromEdges(int vertexCount, int[][] edges) {
++        UndirectedGraph graph = new UndirectedGraph(vertexCount);
++        for (int[] edge : edges) {
++            if (edge.length != 2) {
++                throw new IllegalArgumentException(
++                        "each edge must have exactly two endpoints, found " + edge.length);
++            }
++            graph.addEdge(edge[0], edge[1]);
++        }
++        return graph;
++    }
++
++    /**
++     * Adds an undirected edge between two vertices. Parallel edges and self-loops
++     * are permitted; each call adds a distinct edge.
++     *
++     * @param u one endpoint
++     * @param v the other endpoint
++     * @return the newly created edge
++     */
++    public Edge addEdge(int u, int v) {
++        checkVertex(u);
++        checkVertex(v);
++        Edge edge = new Edge(u, v, edges.size());
++        edges.add(edge);
++        incidence.get(u).add(edge);
++        if (u != v) {
++            incidence.get(v).add(edge);
++        }
++        return edge;
++    }
++
++    @Override
++    public int vertexCount() {
++        return incidence.size();
++    }
++
++    /** Returns the number of edges in the graph. */
++    public int edgeCount() {
++        return edges.size();
++    }
++
++    @Override
++    public List<Edge> edgesFrom(int v) {
++        checkVertex(v);
++        return Collections.unmodifiableList(incidence.get(v));
++    }
++
++    /** Returns an unmodifiable view of all edges in the graph. */
++    public List<Edge> edges() {
++        return Collections.unmodifiableList(edges);
++    }
++
++    private void checkVertex(int u) {
++        if (u < 0 || u >= incidence.size()) {
++            throw new IndexOutOfBoundsException(
++                    "vertex " + u + " is out of range [0, " + incidence.size() + ")");
++        }
++    }
++}

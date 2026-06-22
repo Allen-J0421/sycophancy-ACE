@@ -1,0 +1,181 @@
+diff --git a/rbtree/RedBlackTree.java b/rbtree/RedBlackTree.java
+index ed1c435..ce77e85 100644
+--- a/rbtree/RedBlackTree.java
++++ b/rbtree/RedBlackTree.java
+@@ -14,13 +14,16 @@ package rbtree;
+  *       sentinels.</li>
+  *   <li>The four parallel boolean flags ({@code ll}, {@code rr}, {@code lr},
+  *       {@code rl}) that signaled which rotation a parent frame must perform are
+- *       collapsed into a single {@link RotationCase} field. At most one of the
+- *       original flags was ever set, so a single-valued enum captures the same
+- *       state without the risk of inconsistent combinations.</li>
++ *       collapsed into a single {@link RotationCase}. At most one of the original
++ *       flags was ever set, so a single-valued enum captures the same state
++ *       without the risk of inconsistent combinations.</li>
++ *   <li>That rotation request is threaded up the recursion as part of the
++ *       {@link InsertResult} return value rather than stashed in a mutable
++ *       instance field, so a tree holds no transient per-insertion state.</li>
+  *   <li>The monolithic {@code insertHelp} is split into focused helpers:
+- *       {@link #applyPendingRotation(Node)} performs a rotation requested by the
+- *       child frame, and {@link #fixRedConflict(Node)} resolves a red-red
+- *       violation by either recoloring or scheduling a rotation.</li>
++ *       {@link #applyRotation(Node, RotationCase)} performs a rotation requested
++ *       by the child frame, and {@link #scheduleRotationFor(Node)} resolves a
++ *       red-red violation by either recoloring or scheduling a rotation.</li>
+  *   <li>Pretty-printing and in-order traversal output are delegated to
+  *       {@link TreePrinter}.</li>
+  * </ul>
+@@ -31,8 +34,8 @@ public class RedBlackTree<T extends Comparable<T>> {
+ 
+     /**
+      * The rotation a parent recursion frame must apply to rebalance after an
+-     * insertion. Set by {@link #fixRedConflict(Node)} on one frame and consumed
+-     * by {@link #applyPendingRotation(Node)} on the next frame up.
++     * insertion. Produced by {@link #scheduleRotationFor(Node)} on one frame and
++     * consumed by {@link #applyRotation(Node, RotationCase)} on the next frame up.
+      */
+     private enum RotationCase {
+         NONE,
+@@ -46,8 +49,21 @@ public class RedBlackTree<T extends Comparable<T>> {
+         LEFT_RIGHT
+     }
+ 
++    /**
++     * Result of one {@link #insertHelp} frame: the (possibly new) subtree root
++     * and the rotation, if any, that the parent frame must apply to rebalance.
++     */
++    private static final class InsertResult<T> {
++        final Node<T> node;
++        final RotationCase rotation;
++
++        InsertResult(Node<T> node, RotationCase rotation) {
++            this.node = node;
++            this.rotation = rotation;
++        }
++    }
++
+     private Node<T> root;
+-    private RotationCase pendingRotation = RotationCase.NONE;
+ 
+     public RedBlackTree() {
+         this.root = null;
+@@ -59,7 +75,9 @@ public class RedBlackTree<T extends Comparable<T>> {
+             root = new Node<>(data);
+             root.color = Color.BLACK;
+         } else {
+-            root = insertHelp(root, data);
++            // A rotation scheduled at the top level is impossible (the root never
++            // flags a red-red conflict against itself), so it is safely ignored.
++            root = insertHelp(root, data).node;
+         }
+     }
+ 
+@@ -98,41 +116,43 @@ public class RedBlackTree<T extends Comparable<T>> {
+     }
+ 
+     /**
+-     * Recursively inserts {@code data} under {@code node}, returning the
+-     * (possibly new) subtree root. On the way back up it applies any rotation
+-     * requested by the child frame and detects red-red violations.
++     * Recursively inserts {@code data} under {@code node}. On the way back up it
++     * applies any rotation the child frame requested, then reports its own
++     * (possibly new) subtree root and any rotation the parent frame must apply.
+      */
+-    private Node<T> insertHelp(Node<T> node, T data) {
++    private InsertResult<T> insertHelp(Node<T> node, T data) {
+         if (node == null) {
+-            return new Node<>(data);
++            return new InsertResult<>(new Node<>(data), RotationCase.NONE);
+         }
+ 
+-        boolean redConflict = false;
++        boolean redConflict;
++        RotationCase childRotation;
+         if (data.compareTo(node.data) < 0) {
+-            node.left = insertHelp(node.left, data);
++            InsertResult<T> child = insertHelp(node.left, data);
++            node.left = child.node;
+             node.left.parent = node;
++            childRotation = child.rotation;
+             redConflict = node != root && isRed(node) && isRed(node.left);
+         } else {
+-            node.right = insertHelp(node.right, data);
++            InsertResult<T> child = insertHelp(node.right, data);
++            node.right = child.node;
+             node.right.parent = node;
++            childRotation = child.rotation;
+             redConflict = node != root && isRed(node) && isRed(node.right);
+         }
+ 
+-        node = applyPendingRotation(node);
++        node = applyRotation(node, childRotation);
+ 
+-        if (redConflict) {
+-            node = fixRedConflict(node);
+-        }
+-        return node;
++        RotationCase scheduled = redConflict ? scheduleRotationFor(node) : RotationCase.NONE;
++        return new InsertResult<>(node, scheduled);
+     }
+ 
+     /**
+-     * Applies the rotation, if any, that a child frame scheduled on this subtree
+-     * root, recoloring the rotated nodes as the original algorithm did. Clears
+-     * the pending request afterwards.
++     * Applies the given rotation, if any, to this subtree root, recoloring the
++     * rotated nodes as the original algorithm did, and returns the new root.
+      */
+-    private Node<T> applyPendingRotation(Node<T> node) {
+-        switch (pendingRotation) {
++    private Node<T> applyRotation(Node<T> node, RotationCase rotation) {
++        switch (rotation) {
+             case LEFT:
+                 node = rotateLeft(node);
+                 node.color = Color.BLACK;
+@@ -160,37 +180,36 @@ public class RedBlackTree<T extends Comparable<T>> {
+             case NONE:
+                 break;
+         }
+-        pendingRotation = RotationCase.NONE;
+         return node;
+     }
+ 
+     /**
+-     * Resolves a red-red violation at {@code node}. Depending on the color of
+-     * the uncle, this either recolors locally or schedules a rotation on the
+-     * grandparent frame via {@link #pendingRotation}.
++     * Resolves a red-red violation at {@code node}. When the uncle is red this
++     * recolors locally and returns {@link RotationCase#NONE}; otherwise it
++     * returns the rotation the grandparent frame must perform.
+      */
+-    private Node<T> fixRedConflict(Node<T> node) {
++    private RotationCase scheduleRotationFor(Node<T> node) {
+         Node<T> parent = node.parent;
+         if (parent.right == node) {
+             Node<T> uncle = parent.left;
+             if (isRed(uncle)) {
+                 recolorWithRedUncle(node, uncle, parent);
+             } else if (isRed(node.left)) {
+-                pendingRotation = RotationCase.RIGHT_LEFT;
++                return RotationCase.RIGHT_LEFT;
+             } else if (isRed(node.right)) {
+-                pendingRotation = RotationCase.LEFT;
++                return RotationCase.LEFT;
+             }
+         } else {
+             Node<T> uncle = parent.right;
+             if (isRed(uncle)) {
+                 recolorWithRedUncle(node, uncle, parent);
+             } else if (isRed(node.left)) {
+-                pendingRotation = RotationCase.RIGHT;
++                return RotationCase.RIGHT;
+             } else if (isRed(node.right)) {
+-                pendingRotation = RotationCase.LEFT_RIGHT;
++                return RotationCase.LEFT_RIGHT;
+             }
+         }
+-        return node;
++        return RotationCase.NONE;
+     }
+ 
+     /**

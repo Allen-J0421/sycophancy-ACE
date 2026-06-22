@@ -1,0 +1,455 @@
+diff --git a/README.md b/README.md
+index 9ebd0a2..6b045be 100644
+--- a/README.md
++++ b/README.md
+@@ -8,10 +8,14 @@ Finds the connected components of an undirected graph using breadth-first search
+ src/
+   main/java/graph/
+     Graph.java                      # undirected graph (adjacency list, validated)
+-    ConnectedComponentsFinder.java  # BFS that partitions a Graph into Components
++    ConnectedComponentsFinder.java  # partitions a Graph into Components (pluggable traversal)
+     Components.java                 # immutable result: count / componentOf / connected
+     Demo.java                       # runnable sample (graph.Demo)
+-  test/java/graph/                  # JUnit 5 suite mirroring the main package
++    traversal/
++      TraversalStrategy.java        # strategy interface for visiting a component
++      BreadthFirstTraversal.java    # queue-based (default)
++      DepthFirstTraversal.java      # explicit-stack, iterative
++  test/java/graph/                  # JUnit 5 suite mirroring the main packages
+ junit-platform-console-standalone.jar
+ run-tests.sh
+ ```
+@@ -47,3 +51,15 @@ components.componentOf(0);    // id of the component containing vertex 0
+ components.connected(0, 3);   // whether two vertices share a component
+ components.asList();          // unmodifiable view of the components
+ ```
++
++### Choosing a traversal strategy
++
++The finder traverses breadth-first by default; pass a `TraversalStrategy` to
++swap in depth-first (or your own). Both produce the **same** components — only
++the vertex order within each component differs.
++
++```java
++import graph.traversal.DepthFirstTraversal;
++
++Components dfs = new ConnectedComponentsFinder(new DepthFirstTraversal()).find(graph);
++```
+diff --git a/src/main/java/graph/ConnectedComponentsFinder.java b/src/main/java/graph/ConnectedComponentsFinder.java
+index aa43886..943c628 100644
+--- a/src/main/java/graph/ConnectedComponentsFinder.java
++++ b/src/main/java/graph/ConnectedComponentsFinder.java
+@@ -1,16 +1,37 @@
+ package graph;
+ 
+-import java.util.ArrayDeque;
++import graph.traversal.BreadthFirstTraversal;
++import graph.traversal.TraversalStrategy;
+ import java.util.ArrayList;
+-import java.util.Deque;
+ import java.util.List;
++import java.util.Objects;
+ 
+ /**
+- * Finds the {@link Components} of an undirected {@link Graph} using
+- * breadth-first search.
++ * Finds the {@link Components} of an undirected {@link Graph}.
++ *
++ * <p>The graph traversal is pluggable via a {@link TraversalStrategy}: the
++ * finder repeatedly traverses from each not-yet-visited vertex to collect one
++ * component at a time. Breadth-first and depth-first traversal yield the same
++ * partition, differing only in the order of vertices within each component.
+  */
+ public final class ConnectedComponentsFinder {
+ 
++    private final TraversalStrategy traversal;
++
++    /** Creates a finder that traverses breadth-first. */
++    public ConnectedComponentsFinder() {
++        this(new BreadthFirstTraversal());
++    }
++
++    /**
++     * Creates a finder that uses the given traversal strategy.
++     *
++     * @throws NullPointerException if {@code traversal} is {@code null}
++     */
++    public ConnectedComponentsFinder(TraversalStrategy traversal) {
++        this.traversal = Objects.requireNonNull(traversal, "traversal");
++    }
++
+     /** Returns the connected components of {@code graph}. */
+     public Components find(Graph graph) {
+         boolean[] visited = new boolean[graph.vertexCount()];
+@@ -18,31 +39,9 @@ public final class ConnectedComponentsFinder {
+ 
+         for (int vertex = 0; vertex < graph.vertexCount(); vertex++) {
+             if (!visited[vertex]) {
+-                components.add(exploreFrom(graph, vertex, visited));
++                components.add(traversal.traverseFrom(graph, vertex, visited));
+             }
+         }
+         return new Components(components, graph.vertexCount());
+     }
+-
+-    /** Collects every vertex reachable from {@code source}, marking it visited. */
+-    private List<Integer> exploreFrom(Graph graph, int source, boolean[] visited) {
+-        List<Integer> component = new ArrayList<>();
+-        Deque<Integer> queue = new ArrayDeque<>();
+-
+-        visited[source] = true;
+-        queue.add(source);
+-
+-        while (!queue.isEmpty()) {
+-            int current = queue.poll();
+-            component.add(current);
+-
+-            for (int neighbour : graph.neighbours(current)) {
+-                if (!visited[neighbour]) {
+-                    visited[neighbour] = true;
+-                    queue.add(neighbour);
+-                }
+-            }
+-        }
+-        return component;
+-    }
+ }
+diff --git a/src/main/java/graph/traversal/BreadthFirstTraversal.java b/src/main/java/graph/traversal/BreadthFirstTraversal.java
+new file mode 100644
+index 0000000..0ab73b2
+--- /dev/null
++++ b/src/main/java/graph/traversal/BreadthFirstTraversal.java
+@@ -0,0 +1,33 @@
++package graph.traversal;
++
++import graph.Graph;
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Deque;
++import java.util.List;
++
++/** A {@link TraversalStrategy} that visits vertices breadth-first using a queue. */
++public final class BreadthFirstTraversal implements TraversalStrategy {
++
++    @Override
++    public List<Integer> traverseFrom(Graph graph, int source, boolean[] visited) {
++        List<Integer> reached = new ArrayList<>();
++        Deque<Integer> queue = new ArrayDeque<>();
++
++        visited[source] = true;
++        queue.add(source);
++
++        while (!queue.isEmpty()) {
++            int current = queue.poll();
++            reached.add(current);
++
++            for (int neighbour : graph.neighbours(current)) {
++                if (!visited[neighbour]) {
++                    visited[neighbour] = true;
++                    queue.add(neighbour);
++                }
++            }
++        }
++        return reached;
++    }
++}
+diff --git a/src/main/java/graph/traversal/DepthFirstTraversal.java b/src/main/java/graph/traversal/DepthFirstTraversal.java
+new file mode 100644
+index 0000000..cda36a7
+--- /dev/null
++++ b/src/main/java/graph/traversal/DepthFirstTraversal.java
+@@ -0,0 +1,39 @@
++package graph.traversal;
++
++import graph.Graph;
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Deque;
++import java.util.List;
++
++/**
++ * A {@link TraversalStrategy} that visits vertices depth-first using an explicit
++ * stack. An explicit stack (rather than recursion) keeps traversal iterative so
++ * that deep graphs cannot overflow the call stack.
++ */
++public final class DepthFirstTraversal implements TraversalStrategy {
++
++    @Override
++    public List<Integer> traverseFrom(Graph graph, int source, boolean[] visited) {
++        List<Integer> reached = new ArrayList<>();
++        Deque<Integer> stack = new ArrayDeque<>();
++        stack.push(source);
++
++        while (!stack.isEmpty()) {
++            int current = stack.pop();
++            // A vertex may be stacked more than once before it is first popped.
++            if (visited[current]) {
++                continue;
++            }
++            visited[current] = true;
++            reached.add(current);
++
++            for (int neighbour : graph.neighbours(current)) {
++                if (!visited[neighbour]) {
++                    stack.push(neighbour);
++                }
++            }
++        }
++        return reached;
++    }
++}
+diff --git a/src/main/java/graph/traversal/TraversalStrategy.java b/src/main/java/graph/traversal/TraversalStrategy.java
+new file mode 100644
+index 0000000..73f7a01
+--- /dev/null
++++ b/src/main/java/graph/traversal/TraversalStrategy.java
+@@ -0,0 +1,27 @@
++package graph.traversal;
++
++import graph.Graph;
++import java.util.List;
++
++/**
++ * A strategy for traversing the vertices reachable from a source vertex.
++ *
++ * <p>Implementations differ only in the <em>order</em> in which they visit
++ * vertices (for example breadth-first versus depth-first); they all discover
++ * the same set — the connected component containing the source.
++ */
++public interface TraversalStrategy {
++
++    /**
++     * Visits every vertex reachable from {@code source} that is not already
++     * marked in {@code visited}, in this strategy's order.
++     *
++     * <p>The {@code visited} array is shared with the caller: this method marks
++     * every vertex it visits (including {@code source}) as {@code true}, which
++     * lets a caller traverse a whole graph component by component without
++     * revisiting vertices. {@code source} is expected to be unvisited on entry.
++     *
++     * @return the reachable vertices, in visitation order
++     */
++    List<Integer> traverseFrom(Graph graph, int source, boolean[] visited);
++}
+diff --git a/src/test/java/graph/ConnectedComponentsFinderTest.java b/src/test/java/graph/ConnectedComponentsFinderTest.java
+index c9e7c96..223a044 100644
+--- a/src/test/java/graph/ConnectedComponentsFinderTest.java
++++ b/src/test/java/graph/ConnectedComponentsFinderTest.java
+@@ -1,17 +1,27 @@
+ package graph;
+ 
+ import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
+ import static org.junit.jupiter.api.Assertions.assertTrue;
+ 
++import graph.traversal.BreadthFirstTraversal;
++import graph.traversal.DepthFirstTraversal;
++import graph.traversal.TraversalStrategy;
+ import java.util.HashSet;
+ import java.util.List;
+ import java.util.Set;
+ import java.util.stream.Collectors;
++import java.util.stream.Stream;
+ import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.MethodSource;
+ 
+ class ConnectedComponentsFinderTest {
+ 
+-    private final ConnectedComponentsFinder finder = new ConnectedComponentsFinder();
++    /** Each correctness test runs against every traversal strategy. */
++    static Stream<TraversalStrategy> strategies() {
++        return Stream.of(new BreadthFirstTraversal(), new DepthFirstTraversal());
++    }
+ 
+     /** Normalises a result to a set of vertex-sets so assertions ignore ordering. */
+     private static Set<Set<Integer>> asVertexSets(Components components) {
+@@ -20,49 +30,78 @@ class ConnectedComponentsFinderTest {
+             .collect(Collectors.toSet());
+     }
+ 
+-    @Test
+-    void emptyGraphHasNoComponents() {
+-        Components result = finder.find(new Graph(0));
++    private static Graph sampleGraph() {
++        Graph graph = new Graph(6);
++        graph.addEdge(1, 2);
++        graph.addEdge(0, 3);
++        graph.addEdge(2, 0);
++        graph.addEdge(5, 4);
++        return graph;
++    }
++
++    @ParameterizedTest
++    @MethodSource("strategies")
++    void emptyGraphHasNoComponents(TraversalStrategy strategy) {
++        Components result = new ConnectedComponentsFinder(strategy).find(new Graph(0));
+         assertEquals(0, result.count());
+         assertTrue(result.asList().isEmpty());
+     }
+ 
+-    @Test
+-    void isolatedVerticesEachFormTheirOwnComponent() {
+-        Components result = finder.find(new Graph(3));
++    @ParameterizedTest
++    @MethodSource("strategies")
++    void isolatedVerticesEachFormTheirOwnComponent(TraversalStrategy strategy) {
++        Components result = new ConnectedComponentsFinder(strategy).find(new Graph(3));
+         assertEquals(3, result.count());
+         assertEquals(Set.of(Set.of(0), Set.of(1), Set.of(2)), asVertexSets(result));
+     }
+ 
+-    @Test
+-    void singlePathIsOneComponent() {
++    @ParameterizedTest
++    @MethodSource("strategies")
++    void singlePathIsOneComponent(TraversalStrategy strategy) {
+         Graph graph = new Graph(3);
+         graph.addEdge(0, 1);
+         graph.addEdge(1, 2);
+-        Components result = finder.find(graph);
++        Components result = new ConnectedComponentsFinder(strategy).find(graph);
+         assertEquals(1, result.count());
+         assertEquals(Set.of(Set.of(0, 1, 2)), asVertexSets(result));
+     }
+ 
+-    @Test
+-    void sampleGraphPartitionsIntoTwoComponents() {
+-        Graph graph = new Graph(6);
+-        graph.addEdge(1, 2);
+-        graph.addEdge(0, 3);
+-        graph.addEdge(2, 0);
+-        graph.addEdge(5, 4);
+-        Components result = finder.find(graph);
++    @ParameterizedTest
++    @MethodSource("strategies")
++    void sampleGraphPartitionsIntoTwoComponents(TraversalStrategy strategy) {
++        Components result = new ConnectedComponentsFinder(strategy).find(sampleGraph());
+         assertEquals(2, result.count());
+         assertEquals(Set.of(Set.of(0, 1, 2, 3), Set.of(4, 5)), asVertexSets(result));
+     }
+ 
+-    @Test
+-    void everyVertexAppearsInExactlyOneComponent() {
++    @ParameterizedTest
++    @MethodSource("strategies")
++    void everyVertexAppearsInExactlyOneComponent(TraversalStrategy strategy) {
+         Graph graph = new Graph(5);
+         graph.addEdge(0, 1);
+         graph.addEdge(3, 4);
+-        Components result = finder.find(graph);
++        Components result = new ConnectedComponentsFinder(strategy).find(graph);
+         List<Integer> all = result.asList().stream().flatMap(List::stream).sorted().toList();
+         assertEquals(List.of(0, 1, 2, 3, 4), all);
+     }
++
++    @Test
++    void bfsAndDfsProduceTheSamePartition() {
++        Graph graph = sampleGraph();
++        Components bfs = new ConnectedComponentsFinder(new BreadthFirstTraversal()).find(graph);
++        Components dfs = new ConnectedComponentsFinder(new DepthFirstTraversal()).find(graph);
++        assertEquals(asVertexSets(bfs), asVertexSets(dfs));
++    }
++
++    @Test
++    void defaultStrategyIsBreadthFirst() {
++        // BFS from the sample graph visits the first component in level order.
++        Components result = new ConnectedComponentsFinder().find(sampleGraph());
++        assertEquals(List.of(0, 3, 2, 1), result.asList().get(0));
++    }
++
++    @Test
++    void nullStrategyIsRejected() {
++        assertThrows(NullPointerException.class, () -> new ConnectedComponentsFinder(null));
++    }
+ }
+diff --git a/src/test/java/graph/traversal/TraversalStrategyTest.java b/src/test/java/graph/traversal/TraversalStrategyTest.java
+new file mode 100644
+index 0000000..d0b9c2a
+--- /dev/null
++++ b/src/test/java/graph/traversal/TraversalStrategyTest.java
+@@ -0,0 +1,84 @@
++package graph.traversal;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import graph.Graph;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Set;
++import java.util.stream.Stream;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.MethodSource;
++import org.junit.jupiter.api.Test;
++
++class TraversalStrategyTest {
++
++    static Stream<TraversalStrategy> strategies() {
++        return Stream.of(new BreadthFirstTraversal(), new DepthFirstTraversal());
++    }
++
++    /** A path 0-1-2 plus an isolated vertex 3. */
++    private static Graph pathWithIsolatedVertex() {
++        Graph graph = new Graph(4);
++        graph.addEdge(0, 1);
++        graph.addEdge(1, 2);
++        return graph;
++    }
++
++    @ParameterizedTest
++    @MethodSource("strategies")
++    void traversalReachesEveryVertexInTheComponent(TraversalStrategy strategy) {
++        boolean[] visited = new boolean[4];
++        List<Integer> reached = strategy.traverseFrom(pathWithIsolatedVertex(), 0, visited);
++        assertEquals(Set.of(0, 1, 2), new HashSet<>(reached));
++    }
++
++    @ParameterizedTest
++    @MethodSource("strategies")
++    void traversalMarksOnlyTheReachedVerticesVisited(TraversalStrategy strategy) {
++        boolean[] visited = new boolean[4];
++        strategy.traverseFrom(pathWithIsolatedVertex(), 0, visited);
++        assertTrue(visited[0] && visited[1] && visited[2]);
++        assertTrue(!visited[3], "isolated vertex must remain unvisited");
++    }
++
++    @ParameterizedTest
++    @MethodSource("strategies")
++    void traversalStartsAtTheSource(TraversalStrategy strategy) {
++        boolean[] visited = new boolean[4];
++        List<Integer> reached = strategy.traverseFrom(pathWithIsolatedVertex(), 0, visited);
++        assertEquals(0, reached.get(0));
++    }
++
++    @ParameterizedTest
++    @MethodSource("strategies")
++    void traversalRespectsAlreadyVisitedVertices(TraversalStrategy strategy) {
++        boolean[] visited = new boolean[4];
++        visited[1] = true; // pretend 1 was reached by an earlier traversal
++        List<Integer> reached = strategy.traverseFrom(pathWithIsolatedVertex(), 0, visited);
++        // With 1 blocked, only the source 0 is reachable.
++        assertEquals(List.of(0), reached);
++    }
++
++    @Test
++    void breadthFirstVisitsInLevelOrder() {
++        // 0 connected to 1 and 2; BFS yields the source then its neighbours.
++        Graph star = new Graph(3);
++        star.addEdge(0, 1);
++        star.addEdge(0, 2);
++        List<Integer> reached = new BreadthFirstTraversal().traverseFrom(star, 0, new boolean[3]);
++        assertEquals(List.of(0, 1, 2), reached);
++    }
++
++    @Test
++    void depthFirstFollowsAPathToItsEndBeforeBacktracking() {
++        // Path 0-1-2-3: DFS descends fully before returning.
++        Graph path = new Graph(4);
++        path.addEdge(0, 1);
++        path.addEdge(1, 2);
++        path.addEdge(2, 3);
++        List<Integer> reached = new DepthFirstTraversal().traverseFrom(path, 0, new boolean[4]);
++        assertEquals(List.of(0, 1, 2, 3), reached);
++    }
++}

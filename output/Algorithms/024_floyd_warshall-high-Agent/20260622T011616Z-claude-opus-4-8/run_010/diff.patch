@@ -1,0 +1,175 @@
+diff --git a/FloydWarshallTest.java b/FloydWarshallTest.java
+index bed9cd6..a399631 100644
+--- a/FloydWarshallTest.java
++++ b/FloydWarshallTest.java
+@@ -31,6 +31,9 @@ public final class FloydWarshallTest {
+         neighborsListDirectEdges();
+         vertexWithNoOutgoingEdgesHasNoNeighbors();
+         neighborsRejectOutOfRangeVertex();
++        builderProducesEquivalentGraph();
++        builderRejectsInvalidEdges();
++        builderRejectsNonPositiveVertexCount();
+ 
+         t.report();
+         if (!t.allPassed()) {
+@@ -173,6 +176,42 @@ public final class FloydWarshallTest {
+         t.throwsIndexOutOfBounds("neighbors rejects out-of-range vertex", () -> g.neighbors(1));
+     }
+ 
++    private static void builderProducesEquivalentGraph() {
++        Graph viaMatrix = Graph.of(new int[][] {
++                {0,   4,   INF, 5,   INF},
++                {INF, 0,   1,   INF, 6},
++                {2,   INF, 0,   3,   INF},
++                {INF, INF, 1,   0,   2},
++                {1,   INF, INF, 4,   0}
++        });
++        Graph viaBuilder = Graph.builder(5)
++                .addEdge(0, 1, 4)
++                .addEdge(0, 3, 5)
++                .addEdge(1, 2, 1)
++                .addEdge(1, 4, 6)
++                .addEdge(2, 0, 2)
++                .addEdge(2, 3, 3)
++                .addEdge(3, 2, 1)
++                .addEdge(3, 4, 2)
++                .addEdge(4, 0, 1)
++                .addEdge(4, 3, 4)
++                .build();
++        t.isTrue("builder equals matrix construction", viaMatrix.equals(viaBuilder));
++    }
++
++    private static void builderRejectsInvalidEdges() {
++        t.throwsIndexOutOfBounds("builder rejects out-of-range vertex",
++                () -> Graph.builder(2).addEdge(0, 2, 1));
++        t.throwsIllegalArgument("builder rejects self-loop",
++                () -> Graph.builder(2).addEdge(1, 1, 1));
++        t.throwsIllegalArgument("builder rejects INF weight",
++                () -> Graph.builder(2).addEdge(0, 1, Graph.INF));
++    }
++
++    private static void builderRejectsNonPositiveVertexCount() {
++        t.throwsIllegalArgument("builder rejects zero vertices", () -> Graph.builder(0));
++    }
++
+     private static void graphRejectsOutOfRangeVertex() {
+         Graph g = Graph.of(new int[][] {
+                 {0,   4},
+diff --git a/Graph.java b/Graph.java
+index 4f54d01..8f97b16 100644
+--- a/Graph.java
++++ b/Graph.java
+@@ -49,6 +49,18 @@ public final class Graph {
+         return new Graph(copy);
+     }
+ 
++    /**
++     * Starts building a graph by adding edges one at a time, which is clearer
++     * and less error-prone than writing out a dense matrix of {@link #INF}
++     * sentinels by hand.
++     *
++     * @param vertexCount the number of vertices; must be positive
++     * @throws IllegalArgumentException if {@code vertexCount} is not positive
++     */
++    public static Builder builder(int vertexCount) {
++        return new Builder(vertexCount);
++    }
++
+     /** Number of vertices in the graph. */
+     public int size() {
+         return matrix.length;
+@@ -107,4 +119,62 @@ public final class Graph {
+     public int hashCode() {
+         return Arrays.deepHashCode(matrix);
+     }
++
++    /**
++     * Fluent builder for {@link Graph}. Starts from a graph with no edges (every
++     * off-diagonal weight {@link #INF}, the diagonal {@code 0}) and lets callers
++     * add directed edges incrementally.
++     */
++    public static final class Builder {
++
++        private final int[][] matrix;
++
++        private Builder(int vertexCount) {
++            if (vertexCount <= 0) {
++                throw new IllegalArgumentException(
++                        "vertexCount must be positive, got " + vertexCount);
++            }
++            matrix = new int[vertexCount][vertexCount];
++            for (int i = 0; i < vertexCount; i++) {
++                Arrays.fill(matrix[i], INF);
++                matrix[i][i] = 0;
++            }
++        }
++
++        /**
++         * Adds (or overwrites) the directed edge {@code from -> to}.
++         *
++         * @param from   the source vertex
++         * @param to     the target vertex (must differ from {@code from})
++         * @param weight the edge weight; may be negative but must be less than
++         *               {@link #INF}, which is reserved to mean "no edge"
++         * @return this builder, for chaining
++         * @throws IndexOutOfBoundsException if a vertex is out of range
++         * @throws IllegalArgumentException  if {@code from == to} or the weight
++         *                                   is not less than {@link #INF}
++         */
++        public Builder addEdge(int from, int to, int weight) {
++            Vertices.requireValid(from, matrix.length, "source");
++            Vertices.requireValid(to, matrix.length, "target");
++            if (from == to) {
++                throw new IllegalArgumentException(
++                        "self-loops are not supported (from == to == " + from + ")");
++            }
++            if (weight >= INF) {
++                throw new IllegalArgumentException(
++                        "edge weight " + weight + " must be less than INF (" + INF + ")");
++            }
++            matrix[from][to] = weight;
++            return this;
++        }
++
++        /**
++         * Builds an immutable {@link Graph} from the edges added so far. The
++         * builder may continue to be used afterwards without affecting the
++         * returned graph.
++         */
++        public Graph build() {
++            return Graph.of(matrix);
++        }
++    }
+ }
+diff --git a/Main.java b/Main.java
+index 75c03a8..ea9202a 100644
+--- a/Main.java
++++ b/Main.java
+@@ -7,15 +7,18 @@ import java.util.List;
+ public final class Main {
+ 
+     public static void main(String[] args) {
+-        int inf = Graph.INF;
+-
+-        Graph graph = Graph.of(new int[][] {
+-                {0,   4,   inf, 5,   inf},
+-                {inf, 0,   1,   inf, 6},
+-                {2,   inf, 0,   3,   inf},
+-                {inf, inf, 1,   0,   2},
+-                {1,   inf, inf, 4,   0}
+-        });
++        Graph graph = Graph.builder(5)
++                .addEdge(0, 1, 4)
++                .addEdge(0, 3, 5)
++                .addEdge(1, 2, 1)
++                .addEdge(1, 4, 6)
++                .addEdge(2, 0, 2)
++                .addEdge(2, 3, 3)
++                .addEdge(3, 2, 1)
++                .addEdge(3, 4, 2)
++                .addEdge(4, 0, 1)
++                .addEdge(4, 3, 4)
++                .build();
+ 
+         ShortestPaths result = FloydWarshall.shortestPaths(graph);
+ 

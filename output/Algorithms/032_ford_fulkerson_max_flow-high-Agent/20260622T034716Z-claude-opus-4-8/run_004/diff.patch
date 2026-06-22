@@ -1,0 +1,696 @@
+diff --git a/run-tests.sh b/run-tests.sh
+new file mode 100755
+index 0000000..484278f
+--- /dev/null
++++ b/run-tests.sh
+@@ -0,0 +1,34 @@
++#!/usr/bin/env bash
++# Compile and run the JUnit 5 test suite for the maxflow library.
++# No build tool required: this reuses (or fetches on first use) the JUnit Platform
++# Console Standalone jar and drives plain javac. Run from the project root:
++#   ./run-tests.sh
++set -euo pipefail
++cd "$(dirname "$0")"
++
++JUNIT_VERSION=1.10.2
++JUNIT_JAR="lib/junit-platform-console-standalone-${JUNIT_VERSION}.jar"
++JUNIT_URL="https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/${JUNIT_VERSION}/junit-platform-console-standalone-${JUNIT_VERSION}.jar"
++
++if [ ! -f "$JUNIT_JAR" ]; then
++	echo "Fetching JUnit ${JUNIT_VERSION}..."
++	mkdir -p lib
++	curl -sSL -o "$JUNIT_JAR" "$JUNIT_URL"
++fi
++
++MAIN_OUT=build/main
++TEST_OUT=build/test
++rm -rf "$MAIN_OUT" "$TEST_OUT"
++mkdir -p "$MAIN_OUT" "$TEST_OUT"
++
++echo "Compiling library sources..."
++javac -d "$MAIN_OUT" $(find maxflow -name '*.java')
++
++echo "Compiling tests..."
++javac -d "$TEST_OUT" -cp "$MAIN_OUT:$JUNIT_JAR" $(find test -name '*.java')
++
++echo "Running tests..."
++java -jar "$JUNIT_JAR" execute \
++	--class-path "$MAIN_OUT:$TEST_OUT" \
++	--scan-class-path="$TEST_OUT" \
++	--details=tree
+diff --git a/test/maxflow/graph/FlowNetworkTest.java b/test/maxflow/graph/FlowNetworkTest.java
+new file mode 100644
+index 0000000..d9e6f64
+--- /dev/null
++++ b/test/maxflow/graph/FlowNetworkTest.java
+@@ -0,0 +1,154 @@
++package maxflow.graph;
++
++import static org.junit.jupiter.api.Assertions.assertArrayEquals;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Nested;
++import org.junit.jupiter.api.Test;
++
++@DisplayName("FlowNetwork")
++class FlowNetworkTest {
++
++    @Nested
++    @DisplayName("construction via builder")
++    class Builder {
++
++        @Test
++        @DisplayName("records the capacities of added edges")
++        void recordsCapacities() {
++            FlowNetwork network = FlowNetwork.builder(3)
++                    .addEdge(0, 1, 16)
++                    .addEdge(1, 2, 10)
++                    .build();
++
++            assertEquals(16, network.capacity(0, 1));
++            assertEquals(10, network.capacity(1, 2));
++        }
++
++        @Test
++        @DisplayName("reports zero capacity for absent edges")
++        void absentEdgeHasZeroCapacity() {
++            FlowNetwork network = FlowNetwork.builder(3).addEdge(0, 1, 5).build();
++            assertEquals(0, network.capacity(0, 2));
++            assertEquals(0, network.capacity(2, 0));
++        }
++
++        @Test
++        @DisplayName("overwrites a previously added edge")
++        void overwritesEdge() {
++            FlowNetwork network = FlowNetwork.builder(2)
++                    .addEdge(0, 1, 5)
++                    .addEdge(0, 1, 9)
++                    .build();
++            assertEquals(9, network.capacity(0, 1));
++        }
++
++        @Test
++        @DisplayName("rejects a non-positive vertex count")
++        void rejectsNonPositiveVertexCount() {
++            assertThrows(IllegalArgumentException.class, () -> FlowNetwork.builder(0));
++            assertThrows(IllegalArgumentException.class, () -> FlowNetwork.builder(-1));
++        }
++
++        @Test
++        @DisplayName("rejects out-of-range endpoints")
++        void rejectsOutOfRangeEndpoints() {
++            FlowNetwork.Builder builder = FlowNetwork.builder(2);
++            assertThrows(IllegalArgumentException.class, () -> builder.addEdge(-1, 1, 5));
++            assertThrows(IllegalArgumentException.class, () -> builder.addEdge(0, 2, 5));
++        }
++
++        @Test
++        @DisplayName("rejects self-loops")
++        void rejectsSelfLoops() {
++            FlowNetwork.Builder builder = FlowNetwork.builder(2);
++            assertThrows(IllegalArgumentException.class, () -> builder.addEdge(1, 1, 5));
++        }
++
++        @Test
++        @DisplayName("rejects negative capacity")
++        void rejectsNegativeCapacity() {
++            FlowNetwork.Builder builder = FlowNetwork.builder(2);
++            assertThrows(IllegalArgumentException.class, () -> builder.addEdge(0, 1, -1));
++        }
++
++        @Test
++        @DisplayName("produces a snapshot unaffected by later builder mutation")
++        void buildTakesSnapshot() {
++            FlowNetwork.Builder builder = FlowNetwork.builder(2).addEdge(0, 1, 5);
++            FlowNetwork first = builder.build();
++            builder.addEdge(0, 1, 99);
++            assertEquals(5, first.capacity(0, 1), "earlier network must not see later edits");
++        }
++    }
++
++    @Nested
++    @DisplayName("construction from a matrix")
++    class FromMatrix {
++
++        @Test
++        @DisplayName("copies every capacity")
++        void copiesCapacities() {
++            int[][] matrix = {
++                    {0, 16, 13},
++                    {0, 0, 10},
++                    {0, 0, 0},
++            };
++            FlowNetwork network = FlowNetwork.fromMatrix(matrix);
++            assertEquals(3, network.vertexCount());
++            assertEquals(16, network.capacity(0, 1));
++            assertEquals(13, network.capacity(0, 2));
++            assertEquals(10, network.capacity(1, 2));
++        }
++
++        @Test
++        @DisplayName("rejects a non-square matrix")
++        void rejectsNonSquare() {
++            int[][] jagged = {
++                    {0, 1, 2},
++                    {0, 0},
++                    {0, 0, 0},
++            };
++            assertThrows(IllegalArgumentException.class, () -> FlowNetwork.fromMatrix(jagged));
++        }
++
++        @Test
++        @DisplayName("rejects a negative capacity")
++        void rejectsNegative() {
++            int[][] matrix = {
++                    {0, -1},
++                    {0, 0},
++            };
++            assertThrows(IllegalArgumentException.class, () -> FlowNetwork.fromMatrix(matrix));
++        }
++    }
++
++    @Nested
++    @DisplayName("queries")
++    class Queries {
++
++        @Test
++        @DisplayName("isVertex reflects the valid index range")
++        void isVertex() {
++            FlowNetwork network = FlowNetwork.builder(3).build();
++            assertTrue(network.isVertex(0));
++            assertTrue(network.isVertex(2));
++            assertFalse(network.isVertex(-1));
++            assertFalse(network.isVertex(3));
++        }
++
++        @Test
++        @DisplayName("toMatrix returns a defensive copy")
++        void toMatrixIsDefensiveCopy() {
++            FlowNetwork network = FlowNetwork.builder(2).addEdge(0, 1, 7).build();
++            int[][] copy = network.toMatrix();
++            copy[0][1] = 123;
++            assertEquals(7, network.capacity(0, 1), "mutating the copy must not affect the network");
++            assertArrayEquals(new int[] {0, 7}, network.toMatrix()[0]);
++        }
++    }
++}
+diff --git a/test/maxflow/graph/ResidualGraphTest.java b/test/maxflow/graph/ResidualGraphTest.java
+new file mode 100644
+index 0000000..5cc8cbc
+--- /dev/null
++++ b/test/maxflow/graph/ResidualGraphTest.java
+@@ -0,0 +1,90 @@
++package maxflow.graph;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.ArrayList;
++import java.util.List;
++
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++
++@DisplayName("ResidualGraph")
++class ResidualGraphTest {
++
++    private static FlowNetwork sample() {
++        return FlowNetwork.builder(3)
++                .addEdge(0, 1, 5)
++                .addEdge(1, 2, 3)
++                .build();
++    }
++
++    @Test
++    @DisplayName("starts with residual capacity equal to network capacity")
++    void initialResidualMatchesCapacity() {
++        ResidualGraph residual = new ResidualGraph(sample());
++        assertEquals(5, residual.residualCapacity(0, 1));
++        assertEquals(3, residual.residualCapacity(1, 2));
++        assertEquals(0, residual.residualCapacity(0, 2));
++        assertEquals(3, residual.vertexCount());
++    }
++
++    @Test
++    @DisplayName("hasResidualCapacity reflects remaining capacity")
++    void hasResidualCapacity() {
++        ResidualGraph residual = new ResidualGraph(sample());
++        assertTrue(residual.hasResidualCapacity(0, 1));
++        assertFalse(residual.hasResidualCapacity(0, 2));
++    }
++
++    @Test
++    @DisplayName("pushing flow moves capacity from the forward to the reverse edge")
++    void pushFlowUpdatesBothDirections() {
++        ResidualGraph residual = new ResidualGraph(sample());
++        residual.pushFlow(0, 1, 2);
++        assertEquals(3, residual.residualCapacity(0, 1), "forward decreases");
++        assertEquals(2, residual.residualCapacity(1, 0), "reverse increases");
++    }
++
++    @Test
++    @DisplayName("flowOn reports net forward flow and clamps reverse edges to zero")
++    void flowOnReportsNetFlow() {
++        ResidualGraph residual = new ResidualGraph(sample());
++        residual.pushFlow(0, 1, 2);
++        assertEquals(2, residual.flowOn(0, 1));
++        assertEquals(0, residual.flowOn(1, 0), "reverse residual is not reported as negative flow");
++    }
++
++    @Test
++    @DisplayName("rejects a non-positive flow amount")
++    void rejectsNonPositiveAmount() {
++        ResidualGraph residual = new ResidualGraph(sample());
++        assertThrows(IllegalArgumentException.class, () -> residual.pushFlow(0, 1, 0));
++        assertThrows(IllegalArgumentException.class, () -> residual.pushFlow(0, 1, -1));
++    }
++
++    @Test
++    @DisplayName("rejects pushing more than the residual capacity")
++    void rejectsOverCapacity() {
++        ResidualGraph residual = new ResidualGraph(sample());
++        assertThrows(IllegalArgumentException.class, () -> residual.pushFlow(0, 1, 6));
++    }
++
++    @Test
++    @DisplayName("forEachResidualEdge visits exactly the edges with positive residual capacity")
++    void iteratesPositiveResidualEdges() {
++        ResidualGraph residual = new ResidualGraph(sample());
++        List<String> visited = new ArrayList<>();
++        residual.forEachResidualEdge(0, (to, cap) -> visited.add(to + ":" + cap));
++        assertEquals(List.of("1:5"), visited);
++
++        // After pushing flow, the reverse edge becomes traversable.
++        residual.pushFlow(0, 1, 2);
++        List<String> fromOne = new ArrayList<>();
++        residual.forEachResidualEdge(1, (to, cap) -> fromOne.add(to + ":" + cap));
++        assertTrue(fromOne.contains("0:2"), "reverse edge 1->0 should now have residual capacity");
++        assertTrue(fromOne.contains("2:3"), "forward edge 1->2 should remain");
++    }
++}
+diff --git a/test/maxflow/path/AugmentingPathTest.java b/test/maxflow/path/AugmentingPathTest.java
+new file mode 100644
+index 0000000..34cffed
+--- /dev/null
++++ b/test/maxflow/path/AugmentingPathTest.java
+@@ -0,0 +1,47 @@
++package maxflow.path;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.util.List;
++
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++
++@DisplayName("AugmentingPath")
++class AugmentingPathTest {
++
++    @Test
++    @DisplayName("exposes its vertices and bottleneck")
++    void exposesState() {
++        AugmentingPath path = new AugmentingPath(List.of(0, 2, 5), 7);
++        assertEquals(List.of(0, 2, 5), path.vertices());
++        assertEquals(7, path.bottleneck());
++    }
++
++    @Test
++    @DisplayName("rejects a path with fewer than two vertices")
++    void rejectsTooShort() {
++        assertThrows(IllegalArgumentException.class, () -> new AugmentingPath(List.of(0), 5));
++    }
++
++    @Test
++    @DisplayName("rejects a non-positive bottleneck")
++    void rejectsNonPositiveBottleneck() {
++        assertThrows(IllegalArgumentException.class, () -> new AugmentingPath(List.of(0, 1), 0));
++        assertThrows(IllegalArgumentException.class, () -> new AugmentingPath(List.of(0, 1), -3));
++    }
++
++    @Test
++    @DisplayName("holds an immutable copy of its vertices")
++    void verticesAreImmutable() {
++        AugmentingPath path = new AugmentingPath(List.of(0, 1), 4);
++        assertThrows(UnsupportedOperationException.class, () -> path.vertices().add(9));
++    }
++
++    @Test
++    @DisplayName("renders a readable description")
++    void toStringIsReadable() {
++        assertEquals("0 -> 1 -> 2 (bottleneck 4)", new AugmentingPath(List.of(0, 1, 2), 4).toString());
++    }
++}
+diff --git a/test/maxflow/path/FrontierTest.java b/test/maxflow/path/FrontierTest.java
+new file mode 100644
+index 0000000..298c03a
+--- /dev/null
++++ b/test/maxflow/path/FrontierTest.java
+@@ -0,0 +1,53 @@
++package maxflow.path;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++
++/**
++ * Exercises the package-private {@link Frontier} strategy directly: it is the one
++ * abstraction that distinguishes breadth-first from depth-first traversal.
++ */
++@DisplayName("Frontier")
++class FrontierTest {
++
++    @Test
++    @DisplayName("fifo() removes vertices in the order they were added (breadth-first)")
++    void fifoOrder() {
++        Frontier frontier = Frontier.fifo();
++        frontier.add(1);
++        frontier.add(2);
++        frontier.add(3);
++        assertEquals(1, frontier.removeNext());
++        assertEquals(2, frontier.removeNext());
++        assertEquals(3, frontier.removeNext());
++        assertTrue(frontier.isEmpty());
++    }
++
++    @Test
++    @DisplayName("lifo() removes the most recently added vertex first (depth-first)")
++    void lifoOrder() {
++        Frontier frontier = Frontier.lifo();
++        frontier.add(1);
++        frontier.add(2);
++        frontier.add(3);
++        assertEquals(3, frontier.removeNext());
++        assertEquals(2, frontier.removeNext());
++        assertEquals(1, frontier.removeNext());
++        assertTrue(frontier.isEmpty());
++    }
++
++    @Test
++    @DisplayName("isEmpty tracks the presence of vertices")
++    void isEmpty() {
++        Frontier frontier = Frontier.fifo();
++        assertTrue(frontier.isEmpty());
++        frontier.add(7);
++        assertFalse(frontier.isEmpty());
++        frontier.removeNext();
++        assertTrue(frontier.isEmpty());
++    }
++}
+diff --git a/test/maxflow/path/PathFinderTest.java b/test/maxflow/path/PathFinderTest.java
+new file mode 100644
+index 0000000..92ce2fe
+--- /dev/null
++++ b/test/maxflow/path/PathFinderTest.java
+@@ -0,0 +1,88 @@
++package maxflow.path;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.List;
++import java.util.Optional;
++
++import maxflow.graph.FlowNetwork;
++import maxflow.graph.ResidualGraph;
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++
++@DisplayName("Augmenting-path finders")
++class PathFinderTest {
++
++    private static ResidualGraph residualOf(FlowNetwork network) {
++        return new ResidualGraph(network);
++    }
++
++    @Test
++    @DisplayName("find a path and compute its bottleneck as the minimum residual capacity")
++    void computesBottleneck() {
++        FlowNetwork network = FlowNetwork.builder(3)
++                .addEdge(0, 1, 5)
++                .addEdge(1, 2, 3)
++                .build();
++
++        Optional<AugmentingPath> found = new BreadthFirstPathFinder().findPath(residualOf(network), 0, 2);
++
++        assertTrue(found.isPresent());
++        assertEquals(List.of(0, 1, 2), found.get().vertices());
++        assertEquals(3, found.get().bottleneck(), "bottleneck is the smaller of 5 and 3");
++    }
++
++    @Test
++    @DisplayName("return empty when the sink is unreachable")
++    void emptyWhenUnreachable() {
++        FlowNetwork network = FlowNetwork.builder(3).addEdge(0, 1, 5).build();
++        assertTrue(new BreadthFirstPathFinder().findPath(residualOf(network), 0, 2).isEmpty());
++        assertTrue(new DepthFirstPathFinder().findPath(residualOf(network), 0, 2).isEmpty());
++    }
++
++    @Test
++    @DisplayName("breadth-first search returns a path with the fewest edges")
++    void breadthFirstFindsShortestPath() {
++        // A direct edge 0->3 (one hop) competes with a longer 0->1->2->3 route.
++        FlowNetwork network = FlowNetwork.builder(4)
++                .addEdge(0, 1, 5)
++                .addEdge(1, 2, 5)
++                .addEdge(2, 3, 5)
++                .addEdge(0, 3, 5)
++                .build();
++
++        AugmentingPath path = new BreadthFirstPathFinder().findPath(residualOf(network), 0, 3).orElseThrow();
++        assertEquals(List.of(0, 3), path.vertices(), "BFS should take the single-hop route");
++    }
++
++    @Test
++    @DisplayName("a returned path is well-formed: source first, sink last, every edge traversable")
++    void pathIsWellFormed() {
++        FlowNetwork network = FlowNetwork.builder(4)
++                .addEdge(0, 1, 4)
++                .addEdge(1, 2, 4)
++                .addEdge(2, 3, 4)
++                .build();
++        ResidualGraph residual = residualOf(network);
++
++        for (AugmentingPathFinder finder : List.of(new BreadthFirstPathFinder(), new DepthFirstPathFinder())) {
++            List<Integer> vertices = finder.findPath(residual, 0, 3).orElseThrow().vertices();
++            assertEquals(0, vertices.get(0), finder.name() + ": starts at source");
++            assertEquals(3, vertices.get(vertices.size() - 1), finder.name() + ": ends at sink");
++            for (int i = 0; i + 1 < vertices.size(); i++) {
++                assertTrue(residual.hasResidualCapacity(vertices.get(i), vertices.get(i + 1)),
++                        finder.name() + ": every step has residual capacity");
++            }
++        }
++    }
++
++    @Test
++    @DisplayName("expose a human-readable strategy name")
++    void exposeName() {
++        assertTrue(new BreadthFirstPathFinder().name().contains("breadth-first"));
++        assertTrue(new DepthFirstPathFinder().name().contains("depth-first"));
++        assertFalse(new BreadthFirstPathFinder().name().isBlank());
++    }
++}
+diff --git a/test/maxflow/solve/FordFulkersonSolverTest.java b/test/maxflow/solve/FordFulkersonSolverTest.java
+new file mode 100644
+index 0000000..5d41ab8
+--- /dev/null
++++ b/test/maxflow/solve/FordFulkersonSolverTest.java
+@@ -0,0 +1,136 @@
++package maxflow.solve;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertInstanceOf;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.List;
++
++import maxflow.graph.FlowNetwork;
++import maxflow.path.BreadthFirstPathFinder;
++import maxflow.path.DepthFirstPathFinder;
++import maxflow.solve.MaxFlowResult.FlowEdge;
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++
++@DisplayName("FordFulkersonSolver")
++class FordFulkersonSolverTest {
++
++    /** The classic six-vertex network whose maximum flow from 0 to 5 is 23. */
++    private static FlowNetwork classicNetwork() {
++        return FlowNetwork.fromMatrix(new int[][] {
++                {0, 16, 13, 0, 0, 0},
++                {0, 0, 10, 12, 0, 0},
++                {0, 4, 0, 0, 14, 0},
++                {0, 0, 9, 0, 0, 20},
++                {0, 0, 0, 7, 0, 4},
++                {0, 0, 0, 0, 0, 0},
++        });
++    }
++
++    private static List<MaxFlowSolver> strategies() {
++        return List.of(
++                new FordFulkersonSolver(new BreadthFirstPathFinder()),
++                new FordFulkersonSolver(new DepthFirstPathFinder()));
++    }
++
++    @Test
++    @DisplayName("computes the textbook maximum flow of 23, regardless of strategy")
++    void classicMaxFlow() {
++        for (MaxFlowSolver solver : strategies()) {
++            assertEquals(23, solver.solve(classicNetwork(), 0, 5).value());
++        }
++    }
++
++    @Test
++    @DisplayName("records the source and sink it was solved for")
++    void recordsSourceAndSink() {
++        MaxFlowResult result = new FordFulkersonSolver().solve(classicNetwork(), 0, 5);
++        assertEquals(0, result.source());
++        assertEquals(5, result.sink());
++    }
++
++    @Test
++    @DisplayName("the reported flow conserves at every vertex")
++    void flowIsConserved() {
++        int source = 0;
++        int sink = 5;
++        for (MaxFlowSolver solver : strategies()) {
++            MaxFlowResult result = solver.solve(classicNetwork(), source, sink);
++            int[] net = new int[6]; // outflow - inflow per vertex
++            for (FlowEdge edge : result.flowEdges()) {
++                net[edge.from()] += edge.flow();
++                net[edge.to()] -= edge.flow();
++            }
++            for (int v = 0; v < net.length; v++) {
++                int expected = v == source ? result.value() : v == sink ? -result.value() : 0;
++                assertEquals(expected, net[v], "conservation at vertex " + v);
++            }
++        }
++    }
++
++    @Test
++    @DisplayName("every reported edge carries a positive flow within its capacity")
++    void flowEdgesRespectCapacity() {
++        FlowNetwork network = classicNetwork();
++        MaxFlowResult result = new FordFulkersonSolver().solve(network, 0, 5);
++        for (FlowEdge edge : result.flowEdges()) {
++            assertTrue(edge.flow() > 0, "flow is positive on " + edge);
++            assertTrue(edge.flow() <= network.capacity(edge.from(), edge.to()),
++                    "flow within capacity on " + edge);
++        }
++    }
++
++    @Test
++    @DisplayName("resolves the antiparallel-cancellation network (needs reverse edges)")
++    void antiparallelCancellation() {
++        FlowNetwork network = FlowNetwork.fromMatrix(new int[][] {
++                {0, 3, 3, 0},
++                {0, 0, 2, 2},
++                {0, 0, 0, 3},
++                {0, 0, 0, 0},
++        });
++        for (MaxFlowSolver solver : strategies()) {
++            assertEquals(5, solver.solve(network, 0, 3).value());
++        }
++    }
++
++    @Test
++    @DisplayName("returns zero flow when the sink is disconnected from the source")
++    void disconnectedHasZeroFlow() {
++        FlowNetwork network = FlowNetwork.builder(3).addEdge(0, 1, 5).build();
++        MaxFlowResult result = new FordFulkersonSolver().solve(network, 0, 2);
++        assertEquals(0, result.value());
++        assertTrue(result.flowEdges().isEmpty());
++    }
++
++    @Test
++    @DisplayName("saturates a single direct edge")
++    void singleEdge() {
++        FlowNetwork network = FlowNetwork.builder(2).addEdge(0, 1, 7).build();
++        assertEquals(7, new FordFulkersonSolver().solve(network, 0, 1).value());
++    }
++
++    @Test
++    @DisplayName("rejects an invalid source, sink, or equal endpoints")
++    void rejectsInvalidEndpoints() {
++        FlowNetwork network = classicNetwork();
++        MaxFlowSolver solver = new FordFulkersonSolver();
++        assertThrows(IllegalArgumentException.class, () -> solver.solve(network, -1, 5));
++        assertThrows(IllegalArgumentException.class, () -> solver.solve(network, 0, 6));
++        assertThrows(IllegalArgumentException.class, () -> solver.solve(network, 3, 3));
++    }
++
++    @Test
++    @DisplayName("rejects a null path-finder strategy")
++    void rejectsNullStrategy() {
++        assertThrows(NullPointerException.class, () -> new FordFulkersonSolver(null));
++    }
++
++    @Test
++    @DisplayName("defaults to the breadth-first (Edmonds-Karp) strategy")
++    void defaultsToBreadthFirst() {
++        assertInstanceOf(BreadthFirstPathFinder.class, new FordFulkersonSolver().pathFinder());
++    }
++}
+diff --git a/test/maxflow/solve/MaxFlowResultTest.java b/test/maxflow/solve/MaxFlowResultTest.java
+new file mode 100644
+index 0000000..3bc8aa8
+--- /dev/null
++++ b/test/maxflow/solve/MaxFlowResultTest.java
+@@ -0,0 +1,46 @@
++package maxflow.solve;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.util.List;
++
++import maxflow.solve.MaxFlowResult.FlowEdge;
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++
++@DisplayName("MaxFlowResult")
++class MaxFlowResultTest {
++
++    @Test
++    @DisplayName("exposes value, source, sink and flow edges")
++    void exposesState() {
++        List<FlowEdge> edges = List.of(new FlowEdge(0, 1, 7));
++        MaxFlowResult result = new MaxFlowResult(0, 5, 7, edges);
++
++        assertEquals(7, result.value());
++        assertEquals(0, result.source());
++        assertEquals(5, result.sink());
++        assertEquals(edges, result.flowEdges());
++    }
++
++    @Test
++    @DisplayName("rejects a negative flow value")
++    void rejectsNegativeValue() {
++        assertThrows(IllegalArgumentException.class, () -> new MaxFlowResult(0, 1, -1, List.of()));
++    }
++
++    @Test
++    @DisplayName("holds an immutable copy of its flow edges")
++    void flowEdgesAreImmutable() {
++        MaxFlowResult result = new MaxFlowResult(0, 1, 0, List.of());
++        assertThrows(UnsupportedOperationException.class,
++                () -> result.flowEdges().add(new FlowEdge(0, 1, 1)));
++    }
++
++    @Test
++    @DisplayName("FlowEdge renders readably")
++    void flowEdgeToString() {
++        assertEquals("0 -> 1: 5", new FlowEdge(0, 1, 5).toString());
++    }
++}

@@ -1,0 +1,481 @@
+diff --git a/README.md b/README.md
+index 6b045be..d321fba 100644
+--- a/README.md
++++ b/README.md
+@@ -7,7 +7,8 @@ Finds the connected components of an undirected graph using breadth-first search
+ ```
+ src/
+   main/java/graph/
+-    Graph.java                      # undirected graph (adjacency list, validated)
++    Graph.java                      # immutable undirected graph (adjacency list)
++    GraphBuilder.java               # builds a Graph from a vertex count + edge list
+     ConnectedComponentsFinder.java  # partitions a Graph into Components (pluggable traversal)
+     Components.java                 # immutable result: count / componentOf / connected
+     Demo.java                       # runnable sample (graph.Demo)
+@@ -41,9 +42,9 @@ java -jar junit-platform-console-standalone.jar execute \
+ ## API sketch
+ 
+ ```java
+-Graph graph = new Graph(6);
+-graph.addEdge(1, 2);
+-graph.addEdge(0, 3);
++Graph graph = new GraphBuilder(6)
++    .addEdges(new int[][] {{1, 2}, {0, 3}, {2, 0}, {5, 4}})
++    .build();
+ 
+ Components components = new ConnectedComponentsFinder().find(graph);
+ components.count();           // number of components
+diff --git a/src/main/java/graph/Demo.java b/src/main/java/graph/Demo.java
+index 9503235..60ad04a 100644
+--- a/src/main/java/graph/Demo.java
++++ b/src/main/java/graph/Demo.java
+@@ -10,11 +10,9 @@ public final class Demo {
+     }
+ 
+     public static void main(String[] args) {
+-        Graph graph = new Graph(6);
+-        graph.addEdge(1, 2);
+-        graph.addEdge(0, 3);
+-        graph.addEdge(2, 0);
+-        graph.addEdge(5, 4);
++        Graph graph = new GraphBuilder(6)
++            .addEdges(new int[][] {{1, 2}, {0, 3}, {2, 0}, {5, 4}})
++            .build();
+ 
+         Components components = new ConnectedComponentsFinder().find(graph);
+ 
+diff --git a/src/main/java/graph/Graph.java b/src/main/java/graph/Graph.java
+index aabed0b..cb83fbf 100644
+--- a/src/main/java/graph/Graph.java
++++ b/src/main/java/graph/Graph.java
+@@ -1,14 +1,15 @@
+ package graph;
+ 
+-import java.util.ArrayList;
+ import java.util.Collections;
+ import java.util.List;
+ import java.util.Objects;
+ 
+ /**
+- * An undirected graph backed by an adjacency list.
++ * An immutable undirected graph backed by an adjacency list.
+  *
+  * <p>Vertices are identified by the integers {@code 0 .. vertexCount() - 1}.
++ * A {@code Graph} describes structure but does not define it: instances are
++ * assembled with a {@link GraphBuilder}, and once built a graph cannot change.
+  * The adjacency list is not exposed directly; callers read neighbours through
+  * {@link #neighbours(int)}, which returns an unmodifiable view.
+  */
+@@ -17,18 +18,13 @@ public final class Graph {
+     private final List<List<Integer>> adjacency;
+ 
+     /**
+-     * Creates a graph with the given number of vertices and no edges.
+-     *
+-     * @throws IllegalArgumentException if {@code vertexCount} is negative
++     * Wraps an assembled adjacency list. Package-private: graphs are created
++     * through {@link GraphBuilder}, which owns construction and validation.
++     * The builder hands over freshly built lists and retains no reference to
++     * them, so the new graph has sole ownership.
+      */
+-    public Graph(int vertexCount) {
+-        if (vertexCount < 0) {
+-            throw new IllegalArgumentException("vertexCount must be non-negative: " + vertexCount);
+-        }
+-        adjacency = new ArrayList<>(vertexCount);
+-        for (int i = 0; i < vertexCount; i++) {
+-            adjacency.add(new ArrayList<>());
+-        }
++    Graph(List<List<Integer>> adjacency) {
++        this.adjacency = adjacency;
+     }
+ 
+     /** Returns the number of vertices in the graph. */
+@@ -36,22 +32,8 @@ public final class Graph {
+         return adjacency.size();
+     }
+ 
+-    /**
+-     * Adds an undirected edge between {@code u} and {@code v}.
+-     *
+-     * @throws IndexOutOfBoundsException if either endpoint is not a valid vertex
+-     */
+-    public void addEdge(int u, int v) {
+-        adjacency.get(checkVertex(u)).add(v);
+-        adjacency.get(checkVertex(v)).add(u);
+-    }
+-
+     /** Returns an unmodifiable view of the neighbours of {@code vertex}. */
+     public List<Integer> neighbours(int vertex) {
+-        return Collections.unmodifiableList(adjacency.get(checkVertex(vertex)));
+-    }
+-
+-    private int checkVertex(int vertex) {
+-        return Objects.checkIndex(vertex, adjacency.size());
++        return Collections.unmodifiableList(adjacency.get(Objects.checkIndex(vertex, adjacency.size())));
+     }
+ }
+diff --git a/src/main/java/graph/GraphBuilder.java b/src/main/java/graph/GraphBuilder.java
+new file mode 100644
+index 0000000..c0ed180
+--- /dev/null
++++ b/src/main/java/graph/GraphBuilder.java
+@@ -0,0 +1,92 @@
++package graph;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Objects;
++
++/**
++ * Builds immutable {@link Graph} instances from a fixed vertex count and a list
++ * of undirected edges.
++ *
++ * <p>This separates defining a graph's structure (the responsibility of the
++ * builder) from the built graph itself. Edge endpoints are validated against the
++ * declared vertex count as they are added, so malformed structure is rejected
++ * eagerly. The builder is reusable and each {@link #build()} returns an
++ * independent graph.
++ *
++ * <pre>{@code
++ * Graph g = new GraphBuilder(4)
++ *     .addEdge(0, 1)
++ *     .addEdges(new int[][] {{1, 2}, {2, 3}})
++ *     .build();
++ * }</pre>
++ */
++public final class GraphBuilder {
++
++    private final int vertexCount;
++    private final List<int[]> edges = new ArrayList<>();
++
++    /**
++     * Creates a builder for a graph with the given number of vertices.
++     *
++     * @throws IllegalArgumentException if {@code vertexCount} is negative
++     */
++    public GraphBuilder(int vertexCount) {
++        if (vertexCount < 0) {
++            throw new IllegalArgumentException("vertexCount must be non-negative: " + vertexCount);
++        }
++        this.vertexCount = vertexCount;
++    }
++
++    /** Convenience factory equivalent to {@code new GraphBuilder(vertexCount)}. */
++    public static GraphBuilder of(int vertexCount) {
++        return new GraphBuilder(vertexCount);
++    }
++
++    /**
++     * Records an undirected edge between {@code u} and {@code v}.
++     *
++     * @return this builder, for chaining
++     * @throws IndexOutOfBoundsException if either endpoint is not a valid vertex
++     */
++    public GraphBuilder addEdge(int u, int v) {
++        edges.add(new int[] {checkVertex(u), checkVertex(v)});
++        return this;
++    }
++
++    /**
++     * Records every edge in an edge list, where each element is a two-element
++     * {@code {u, v}} array.
++     *
++     * @return this builder, for chaining
++     * @throws IllegalArgumentException  if any element does not have exactly two endpoints
++     * @throws IndexOutOfBoundsException if any endpoint is not a valid vertex
++     */
++    public GraphBuilder addEdges(int[][] edgeList) {
++        for (int[] edge : edgeList) {
++            if (edge.length != 2) {
++                throw new IllegalArgumentException(
++                    "each edge must have exactly two endpoints, got " + edge.length);
++            }
++            addEdge(edge[0], edge[1]);
++        }
++        return this;
++    }
++
++    /** Builds an immutable {@link Graph} from the recorded vertices and edges. */
++    public Graph build() {
++        List<List<Integer>> adjacency = new ArrayList<>(vertexCount);
++        for (int i = 0; i < vertexCount; i++) {
++            adjacency.add(new ArrayList<>());
++        }
++        for (int[] edge : edges) {
++            adjacency.get(edge[0]).add(edge[1]);
++            adjacency.get(edge[1]).add(edge[0]);
++        }
++        return new Graph(adjacency);
++    }
++
++    private int checkVertex(int vertex) {
++        return Objects.checkIndex(vertex, vertexCount);
++    }
++}
+diff --git a/src/test/java/graph/ConnectedComponentsFinderTest.java b/src/test/java/graph/ConnectedComponentsFinderTest.java
+index 223a044..62b8ad3 100644
+--- a/src/test/java/graph/ConnectedComponentsFinderTest.java
++++ b/src/test/java/graph/ConnectedComponentsFinderTest.java
+@@ -31,18 +31,15 @@ class ConnectedComponentsFinderTest {
+     }
+ 
+     private static Graph sampleGraph() {
+-        Graph graph = new Graph(6);
+-        graph.addEdge(1, 2);
+-        graph.addEdge(0, 3);
+-        graph.addEdge(2, 0);
+-        graph.addEdge(5, 4);
+-        return graph;
++        return new GraphBuilder(6)
++            .addEdges(new int[][] {{1, 2}, {0, 3}, {2, 0}, {5, 4}})
++            .build();
+     }
+ 
+     @ParameterizedTest
+     @MethodSource("strategies")
+     void emptyGraphHasNoComponents(TraversalStrategy strategy) {
+-        Components result = new ConnectedComponentsFinder(strategy).find(new Graph(0));
++        Components result = new ConnectedComponentsFinder(strategy).find(new GraphBuilder(0).build());
+         assertEquals(0, result.count());
+         assertTrue(result.asList().isEmpty());
+     }
+@@ -50,7 +47,7 @@ class ConnectedComponentsFinderTest {
+     @ParameterizedTest
+     @MethodSource("strategies")
+     void isolatedVerticesEachFormTheirOwnComponent(TraversalStrategy strategy) {
+-        Components result = new ConnectedComponentsFinder(strategy).find(new Graph(3));
++        Components result = new ConnectedComponentsFinder(strategy).find(new GraphBuilder(3).build());
+         assertEquals(3, result.count());
+         assertEquals(Set.of(Set.of(0), Set.of(1), Set.of(2)), asVertexSets(result));
+     }
+@@ -58,9 +55,7 @@ class ConnectedComponentsFinderTest {
+     @ParameterizedTest
+     @MethodSource("strategies")
+     void singlePathIsOneComponent(TraversalStrategy strategy) {
+-        Graph graph = new Graph(3);
+-        graph.addEdge(0, 1);
+-        graph.addEdge(1, 2);
++        Graph graph = new GraphBuilder(3).addEdge(0, 1).addEdge(1, 2).build();
+         Components result = new ConnectedComponentsFinder(strategy).find(graph);
+         assertEquals(1, result.count());
+         assertEquals(Set.of(Set.of(0, 1, 2)), asVertexSets(result));
+@@ -77,9 +72,7 @@ class ConnectedComponentsFinderTest {
+     @ParameterizedTest
+     @MethodSource("strategies")
+     void everyVertexAppearsInExactlyOneComponent(TraversalStrategy strategy) {
+-        Graph graph = new Graph(5);
+-        graph.addEdge(0, 1);
+-        graph.addEdge(3, 4);
++        Graph graph = new GraphBuilder(5).addEdge(0, 1).addEdge(3, 4).build();
+         Components result = new ConnectedComponentsFinder(strategy).find(graph);
+         List<Integer> all = result.asList().stream().flatMap(List::stream).sorted().toList();
+         assertEquals(List.of(0, 1, 2, 3, 4), all);
+diff --git a/src/test/java/graph/GraphBuilderTest.java b/src/test/java/graph/GraphBuilderTest.java
+new file mode 100644
+index 0000000..98832ba
+--- /dev/null
++++ b/src/test/java/graph/GraphBuilderTest.java
+@@ -0,0 +1,73 @@
++package graph;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertSame;
++
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++/** Tests construction and validation performed by {@link GraphBuilder}. */
++class GraphBuilderTest {
++
++    @Test
++    void negativeVertexCountIsRejected() {
++        assertThrows(IllegalArgumentException.class, () -> new GraphBuilder(-1));
++        assertThrows(IllegalArgumentException.class, () -> GraphBuilder.of(-1));
++    }
++
++    @Test
++    void addEdgeCreatesAnUndirectedEdge() {
++        Graph graph = new GraphBuilder(2).addEdge(0, 1).build();
++        assertEquals(List.of(1), graph.neighbours(0));
++        assertEquals(List.of(0), graph.neighbours(1));
++    }
++
++    @Test
++    void addEdgeIsChainable() {
++        GraphBuilder builder = new GraphBuilder(2);
++        assertSame(builder, builder.addEdge(0, 1));
++    }
++
++    @Test
++    void addEdgesAppliesEveryEdgeInTheList() {
++        Graph graph = new GraphBuilder(3)
++            .addEdges(new int[][] {{0, 1}, {1, 2}})
++            .build();
++        assertEquals(List.of(1), graph.neighbours(0));
++        assertEquals(List.of(0, 2), graph.neighbours(1));
++        assertEquals(List.of(1), graph.neighbours(2));
++    }
++
++    @Test
++    void selfLoopRecordsBothEndpoints() {
++        Graph graph = new GraphBuilder(1).addEdge(0, 0).build();
++        assertEquals(List.of(0, 0), graph.neighbours(0));
++    }
++
++    @Test
++    void addEdgeRejectsOutOfRangeEndpoints() {
++        GraphBuilder builder = new GraphBuilder(2);
++        assertThrows(IndexOutOfBoundsException.class, () -> builder.addEdge(0, 2));
++        assertThrows(IndexOutOfBoundsException.class, () -> builder.addEdge(-1, 0));
++    }
++
++    @Test
++    void addEdgesRejectsMalformedEdges() {
++        GraphBuilder builder = new GraphBuilder(3);
++        assertThrows(IllegalArgumentException.class, () -> builder.addEdges(new int[][] {{0, 1, 2}}));
++        assertThrows(IllegalArgumentException.class, () -> builder.addEdges(new int[][] {{0}}));
++    }
++
++    @Test
++    void builderIsReusableAndProducesIndependentGraphs() {
++        GraphBuilder builder = new GraphBuilder(2).addEdge(0, 1);
++        Graph first = builder.build();
++        builder.addEdge(1, 0);
++        Graph second = builder.build();
++
++        // The earlier graph is unaffected by edges added after it was built.
++        assertEquals(List.of(1), first.neighbours(0));
++        assertEquals(List.of(1, 1), second.neighbours(0));
++    }
++}
+diff --git a/src/test/java/graph/GraphTest.java b/src/test/java/graph/GraphTest.java
+index 3623c72..429e8e7 100644
+--- a/src/test/java/graph/GraphTest.java
++++ b/src/test/java/graph/GraphTest.java
+@@ -4,62 +4,39 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
+ import static org.junit.jupiter.api.Assertions.assertThrows;
+ import static org.junit.jupiter.api.Assertions.assertTrue;
+ 
+-import java.util.List;
+ import org.junit.jupiter.api.Test;
+ 
++/** Tests the read-only behaviour of a built {@link Graph}. */
+ class GraphTest {
+ 
+     @Test
+-    void newGraphHasGivenVertexCountAndNoEdges() {
+-        Graph graph = new Graph(4);
++    void exposesItsVertexCount() {
++        Graph graph = new GraphBuilder(4).build();
+         assertEquals(4, graph.vertexCount());
+-        for (int v = 0; v < 4; v++) {
+-            assertTrue(graph.neighbours(v).isEmpty());
+-        }
+-    }
+-
+-    @Test
+-    void emptyGraphIsAllowed() {
+-        assertEquals(0, new Graph(0).vertexCount());
+     }
+ 
+     @Test
+-    void negativeVertexCountIsRejected() {
+-        assertThrows(IllegalArgumentException.class, () -> new Graph(-1));
+-    }
+-
+-    @Test
+-    void addEdgeIsUndirected() {
+-        Graph graph = new Graph(2);
+-        graph.addEdge(0, 1);
+-        assertEquals(List.of(1), graph.neighbours(0));
+-        assertEquals(List.of(0), graph.neighbours(1));
+-    }
+-
+-    @Test
+-    void selfLoopRecordsBothEndpoints() {
+-        Graph graph = new Graph(1);
+-        graph.addEdge(0, 0);
+-        assertEquals(List.of(0, 0), graph.neighbours(0));
+-    }
+-
+-    @Test
+-    void addEdgeRejectsOutOfRangeEndpoints() {
+-        Graph graph = new Graph(2);
+-        assertThrows(IndexOutOfBoundsException.class, () -> graph.addEdge(0, 2));
+-        assertThrows(IndexOutOfBoundsException.class, () -> graph.addEdge(-1, 0));
++    void emptyGraphHasNoVertices() {
++        assertEquals(0, new GraphBuilder(0).build().vertexCount());
+     }
+ 
+     @Test
+     void neighboursViewIsUnmodifiable() {
+-        Graph graph = new Graph(2);
+-        graph.addEdge(0, 1);
++        Graph graph = new GraphBuilder(2).addEdge(0, 1).build();
+         assertThrows(UnsupportedOperationException.class, () -> graph.neighbours(0).add(99));
+     }
+ 
+     @Test
+     void neighboursRejectsOutOfRangeVertex() {
+-        Graph graph = new Graph(2);
++        Graph graph = new GraphBuilder(2).build();
+         assertThrows(IndexOutOfBoundsException.class, () -> graph.neighbours(5));
+     }
++
++    @Test
++    void verticesWithoutEdgesHaveNoNeighbours() {
++        Graph graph = new GraphBuilder(3).build();
++        for (int v = 0; v < 3; v++) {
++            assertTrue(graph.neighbours(v).isEmpty());
++        }
++    }
+ }
+diff --git a/src/test/java/graph/traversal/TraversalStrategyTest.java b/src/test/java/graph/traversal/TraversalStrategyTest.java
+index d0b9c2a..bcfa7f8 100644
+--- a/src/test/java/graph/traversal/TraversalStrategyTest.java
++++ b/src/test/java/graph/traversal/TraversalStrategyTest.java
+@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
+ import static org.junit.jupiter.api.Assertions.assertTrue;
+ 
+ import graph.Graph;
++import graph.GraphBuilder;
+ import java.util.HashSet;
+ import java.util.List;
+ import java.util.Set;
+@@ -20,10 +21,7 @@ class TraversalStrategyTest {
+ 
+     /** A path 0-1-2 plus an isolated vertex 3. */
+     private static Graph pathWithIsolatedVertex() {
+-        Graph graph = new Graph(4);
+-        graph.addEdge(0, 1);
+-        graph.addEdge(1, 2);
+-        return graph;
++        return new GraphBuilder(4).addEdge(0, 1).addEdge(1, 2).build();
+     }
+ 
+     @ParameterizedTest
+@@ -64,9 +62,7 @@ class TraversalStrategyTest {
+     @Test
+     void breadthFirstVisitsInLevelOrder() {
+         // 0 connected to 1 and 2; BFS yields the source then its neighbours.
+-        Graph star = new Graph(3);
+-        star.addEdge(0, 1);
+-        star.addEdge(0, 2);
++        Graph star = new GraphBuilder(3).addEdge(0, 1).addEdge(0, 2).build();
+         List<Integer> reached = new BreadthFirstTraversal().traverseFrom(star, 0, new boolean[3]);
+         assertEquals(List.of(0, 1, 2), reached);
+     }
+@@ -74,10 +70,7 @@ class TraversalStrategyTest {
+     @Test
+     void depthFirstFollowsAPathToItsEndBeforeBacktracking() {
+         // Path 0-1-2-3: DFS descends fully before returning.
+-        Graph path = new Graph(4);
+-        path.addEdge(0, 1);
+-        path.addEdge(1, 2);
+-        path.addEdge(2, 3);
++        Graph path = new GraphBuilder(4).addEdge(0, 1).addEdge(1, 2).addEdge(2, 3).build();
+         List<Integer> reached = new DepthFirstTraversal().traverseFrom(path, 0, new boolean[4]);
+         assertEquals(List.of(0, 1, 2, 3), reached);
+     }

@@ -1,0 +1,722 @@
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..9ebd0a2
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,49 @@
++# Connected Components
++
++Finds the connected components of an undirected graph using breadth-first search.
++
++## Layout
++
++```
++src/
++  main/java/graph/
++    Graph.java                      # undirected graph (adjacency list, validated)
++    ConnectedComponentsFinder.java  # BFS that partitions a Graph into Components
++    Components.java                 # immutable result: count / componentOf / connected
++    Demo.java                       # runnable sample (graph.Demo)
++  test/java/graph/                  # JUnit 5 suite mirroring the main package
++junit-platform-console-standalone.jar
++run-tests.sh
++```
++
++## Build, run, and test
++
++```sh
++./run-tests.sh
++```
++
++Or manually:
++
++```sh
++javac -d out/main $(find src/main/java -name '*.java')
++java -cp out/main graph.Demo
++
++javac -cp "junit-platform-console-standalone.jar:out/main" -d out/test \
++    $(find src/test/java -name '*.java')
++java -jar junit-platform-console-standalone.jar execute \
++    -cp "out/main:out/test" --scan-classpath
++```
++
++## API sketch
++
++```java
++Graph graph = new Graph(6);
++graph.addEdge(1, 2);
++graph.addEdge(0, 3);
++
++Components components = new ConnectedComponentsFinder().find(graph);
++components.count();           // number of components
++components.componentOf(0);    // id of the component containing vertex 0
++components.connected(0, 3);   // whether two vertices share a component
++components.asList();          // unmodifiable view of the components
++```
+diff --git a/connected_components.java b/connected_components.java
+deleted file mode 100644
+index 1673172..0000000
+--- a/connected_components.java
++++ /dev/null
+@@ -1,184 +0,0 @@
+-import java.util.ArrayDeque;
+-import java.util.ArrayList;
+-import java.util.Collections;
+-import java.util.Deque;
+-import java.util.List;
+-import java.util.Objects;
+-import java.util.stream.Collectors;
+-
+-/**
+- * An undirected graph backed by an adjacency list.
+- *
+- * <p>Vertices are identified by the integers {@code 0 .. vertexCount() - 1}.
+- * The adjacency list is not exposed directly; callers read neighbours through
+- * {@link #neighbours(int)}, which returns an unmodifiable view.
+- */
+-final class Graph {
+-
+-    private final List<List<Integer>> adjacency;
+-
+-    /**
+-     * Creates a graph with the given number of vertices and no edges.
+-     *
+-     * @throws IllegalArgumentException if {@code vertexCount} is negative
+-     */
+-    Graph(int vertexCount) {
+-        if (vertexCount < 0) {
+-            throw new IllegalArgumentException("vertexCount must be non-negative: " + vertexCount);
+-        }
+-        adjacency = new ArrayList<>(vertexCount);
+-        for (int i = 0; i < vertexCount; i++) {
+-            adjacency.add(new ArrayList<>());
+-        }
+-    }
+-
+-    /** Returns the number of vertices in the graph. */
+-    int vertexCount() {
+-        return adjacency.size();
+-    }
+-
+-    /**
+-     * Adds an undirected edge between {@code u} and {@code v}.
+-     *
+-     * @throws IndexOutOfBoundsException if either endpoint is not a valid vertex
+-     */
+-    void addEdge(int u, int v) {
+-        adjacency.get(checkVertex(u)).add(v);
+-        adjacency.get(checkVertex(v)).add(u);
+-    }
+-
+-    /** Returns an unmodifiable view of the neighbours of {@code vertex}. */
+-    List<Integer> neighbours(int vertex) {
+-        return Collections.unmodifiableList(adjacency.get(checkVertex(vertex)));
+-    }
+-
+-    private int checkVertex(int vertex) {
+-        return Objects.checkIndex(vertex, adjacency.size());
+-    }
+-}
+-
+-/**
+- * The connected components of an undirected {@link Graph}: an immutable
+- * partition of every vertex into groups that are mutually reachable.
+- *
+- * <p>Beyond listing the components, this answers the questions callers
+- * usually have — how many components there are, which one a vertex belongs
+- * to, and whether two vertices are connected — in constant time.
+- */
+-final class Components {
+-
+-    private final List<List<Integer>> components;
+-    private final int[] componentOfVertex;
+-
+-    /**
+-     * @param components the components, each a list of the vertices it contains
+-     * @param vertexCount the number of vertices the components partition
+-     */
+-    Components(List<List<Integer>> components, int vertexCount) {
+-        List<List<Integer>> copy = new ArrayList<>(components.size());
+-        int[] index = new int[vertexCount];
+-        for (int id = 0; id < components.size(); id++) {
+-            copy.add(List.copyOf(components.get(id)));
+-            for (int vertex : components.get(id)) {
+-                index[vertex] = id;
+-            }
+-        }
+-        this.components = List.copyOf(copy);
+-        this.componentOfVertex = index;
+-    }
+-
+-    /** Returns the number of connected components. */
+-    int count() {
+-        return components.size();
+-    }
+-
+-    /**
+-     * Returns the components as an unmodifiable list of unmodifiable vertex
+-     * lists. Component order, and vertex order within a component, follow the
+-     * traversal that produced them.
+-     */
+-    List<List<Integer>> asList() {
+-        return components;
+-    }
+-
+-    /**
+-     * Returns the identifier of the component containing {@code vertex}, in the
+-     * range {@code 0 .. count() - 1}.
+-     *
+-     * @throws IndexOutOfBoundsException if {@code vertex} is not a valid vertex
+-     */
+-    int componentOf(int vertex) {
+-        return componentOfVertex[Objects.checkIndex(vertex, componentOfVertex.length)];
+-    }
+-
+-    /** Returns whether {@code u} and {@code v} lie in the same component. */
+-    boolean connected(int u, int v) {
+-        return componentOf(u) == componentOf(v);
+-    }
+-}
+-
+-/**
+- * Finds the {@link Components} of an undirected {@link Graph} using
+- * breadth-first search.
+- */
+-final class ConnectedComponentsFinder {
+-
+-    /** Returns the connected components of {@code graph}. */
+-    Components find(Graph graph) {
+-        boolean[] visited = new boolean[graph.vertexCount()];
+-        List<List<Integer>> components = new ArrayList<>();
+-
+-        for (int vertex = 0; vertex < graph.vertexCount(); vertex++) {
+-            if (!visited[vertex]) {
+-                components.add(exploreFrom(graph, vertex, visited));
+-            }
+-        }
+-        return new Components(components, graph.vertexCount());
+-    }
+-
+-    /** Collects every vertex reachable from {@code source}, marking it visited. */
+-    private List<Integer> exploreFrom(Graph graph, int source, boolean[] visited) {
+-        List<Integer> component = new ArrayList<>();
+-        Deque<Integer> queue = new ArrayDeque<>();
+-
+-        visited[source] = true;
+-        queue.add(source);
+-
+-        while (!queue.isEmpty()) {
+-            int current = queue.poll();
+-            component.add(current);
+-
+-            for (int neighbour : graph.neighbours(current)) {
+-                if (!visited[neighbour]) {
+-                    visited[neighbour] = true;
+-                    queue.add(neighbour);
+-                }
+-            }
+-        }
+-        return component;
+-    }
+-}
+-
+-/** Demonstrates {@link ConnectedComponentsFinder} on a small sample graph. */
+-class ConnectedComponents {
+-
+-    public static void main(String[] args) {
+-        Graph graph = new Graph(6);
+-        graph.addEdge(1, 2);
+-        graph.addEdge(0, 3);
+-        graph.addEdge(2, 0);
+-        graph.addEdge(5, 4);
+-
+-        Components components = new ConnectedComponentsFinder().find(graph);
+-
+-        for (List<Integer> component : components.asList()) {
+-            System.out.println(component.stream()
+-                .map(String::valueOf)
+-                .collect(Collectors.joining(" ")));
+-        }
+-
+-        System.out.println("components: " + components.count());
+-        System.out.println("0 and 1 connected? " + components.connected(0, 1));
+-        System.out.println("0 and 4 connected? " + components.connected(0, 4));
+-    }
+-}
+diff --git a/run-tests.sh b/run-tests.sh
+new file mode 100755
+index 0000000..2ab2af3
+--- /dev/null
++++ b/run-tests.sh
+@@ -0,0 +1,24 @@
++#!/usr/bin/env bash
++# Compile the library and tests, run the demo, then run the JUnit 5 suite.
++set -euo pipefail
++
++cd "$(dirname "$0")"
++
++JUNIT_JAR="junit-platform-console-standalone.jar"
++MAIN_OUT="out/main"
++TEST_OUT="out/test"
++
++rm -rf out
++mkdir -p "$MAIN_OUT" "$TEST_OUT"
++
++echo "==> Compiling main sources"
++javac -d "$MAIN_OUT" $(find src/main/java -name '*.java')
++
++echo "==> Compiling tests"
++javac -cp "$JUNIT_JAR:$MAIN_OUT" -d "$TEST_OUT" $(find src/test/java -name '*.java')
++
++echo "==> Running demo (graph.Demo)"
++java -cp "$MAIN_OUT" graph.Demo
++
++echo "==> Running JUnit suite"
++java -jar "$JUNIT_JAR" execute -cp "$MAIN_OUT:$TEST_OUT" --scan-classpath
+diff --git a/src/main/java/graph/Components.java b/src/main/java/graph/Components.java
+new file mode 100644
+index 0000000..1a2f679
+--- /dev/null
++++ b/src/main/java/graph/Components.java
+@@ -0,0 +1,69 @@
++package graph;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Objects;
++
++/**
++ * The connected components of an undirected {@link Graph}: an immutable
++ * partition of every vertex into groups that are mutually reachable.
++ *
++ * <p>Beyond listing the components, this answers the questions callers
++ * usually have — how many components there are, which one a vertex belongs
++ * to, and whether two vertices are connected — in constant time.
++ *
++ * <p>Instances are produced by {@link ConnectedComponentsFinder}; the
++ * constructor is package-private so a {@code Components} can never describe a
++ * partition that does not cover its graph.
++ */
++public final class Components {
++
++    private final List<List<Integer>> components;
++    private final int[] componentOfVertex;
++
++    /**
++     * @param components the components, each a list of the vertices it contains
++     * @param vertexCount the number of vertices the components partition
++     */
++    Components(List<List<Integer>> components, int vertexCount) {
++        List<List<Integer>> copy = new ArrayList<>(components.size());
++        int[] index = new int[vertexCount];
++        for (int id = 0; id < components.size(); id++) {
++            copy.add(List.copyOf(components.get(id)));
++            for (int vertex : components.get(id)) {
++                index[vertex] = id;
++            }
++        }
++        this.components = List.copyOf(copy);
++        this.componentOfVertex = index;
++    }
++
++    /** Returns the number of connected components. */
++    public int count() {
++        return components.size();
++    }
++
++    /**
++     * Returns the components as an unmodifiable list of unmodifiable vertex
++     * lists. Component order, and vertex order within a component, follow the
++     * traversal that produced them.
++     */
++    public List<List<Integer>> asList() {
++        return components;
++    }
++
++    /**
++     * Returns the identifier of the component containing {@code vertex}, in the
++     * range {@code 0 .. count() - 1}.
++     *
++     * @throws IndexOutOfBoundsException if {@code vertex} is not a valid vertex
++     */
++    public int componentOf(int vertex) {
++        return componentOfVertex[Objects.checkIndex(vertex, componentOfVertex.length)];
++    }
++
++    /** Returns whether {@code u} and {@code v} lie in the same component. */
++    public boolean connected(int u, int v) {
++        return componentOf(u) == componentOf(v);
++    }
++}
+diff --git a/src/main/java/graph/ConnectedComponentsFinder.java b/src/main/java/graph/ConnectedComponentsFinder.java
+new file mode 100644
+index 0000000..aa43886
+--- /dev/null
++++ b/src/main/java/graph/ConnectedComponentsFinder.java
+@@ -0,0 +1,48 @@
++package graph;
++
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Deque;
++import java.util.List;
++
++/**
++ * Finds the {@link Components} of an undirected {@link Graph} using
++ * breadth-first search.
++ */
++public final class ConnectedComponentsFinder {
++
++    /** Returns the connected components of {@code graph}. */
++    public Components find(Graph graph) {
++        boolean[] visited = new boolean[graph.vertexCount()];
++        List<List<Integer>> components = new ArrayList<>();
++
++        for (int vertex = 0; vertex < graph.vertexCount(); vertex++) {
++            if (!visited[vertex]) {
++                components.add(exploreFrom(graph, vertex, visited));
++            }
++        }
++        return new Components(components, graph.vertexCount());
++    }
++
++    /** Collects every vertex reachable from {@code source}, marking it visited. */
++    private List<Integer> exploreFrom(Graph graph, int source, boolean[] visited) {
++        List<Integer> component = new ArrayList<>();
++        Deque<Integer> queue = new ArrayDeque<>();
++
++        visited[source] = true;
++        queue.add(source);
++
++        while (!queue.isEmpty()) {
++            int current = queue.poll();
++            component.add(current);
++
++            for (int neighbour : graph.neighbours(current)) {
++                if (!visited[neighbour]) {
++                    visited[neighbour] = true;
++                    queue.add(neighbour);
++                }
++            }
++        }
++        return component;
++    }
++}
+diff --git a/src/main/java/graph/Demo.java b/src/main/java/graph/Demo.java
+new file mode 100644
+index 0000000..9503235
+--- /dev/null
++++ b/src/main/java/graph/Demo.java
+@@ -0,0 +1,31 @@
++package graph;
++
++import java.util.List;
++import java.util.stream.Collectors;
++
++/** Demonstrates {@link ConnectedComponentsFinder} on a small sample graph. */
++public final class Demo {
++
++    private Demo() {
++    }
++
++    public static void main(String[] args) {
++        Graph graph = new Graph(6);
++        graph.addEdge(1, 2);
++        graph.addEdge(0, 3);
++        graph.addEdge(2, 0);
++        graph.addEdge(5, 4);
++
++        Components components = new ConnectedComponentsFinder().find(graph);
++
++        for (List<Integer> component : components.asList()) {
++            System.out.println(component.stream()
++                .map(String::valueOf)
++                .collect(Collectors.joining(" ")));
++        }
++
++        System.out.println("components: " + components.count());
++        System.out.println("0 and 1 connected? " + components.connected(0, 1));
++        System.out.println("0 and 4 connected? " + components.connected(0, 4));
++    }
++}
+diff --git a/src/main/java/graph/Graph.java b/src/main/java/graph/Graph.java
+new file mode 100644
+index 0000000..aabed0b
+--- /dev/null
++++ b/src/main/java/graph/Graph.java
+@@ -0,0 +1,57 @@
++package graph;
++
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++import java.util.Objects;
++
++/**
++ * An undirected graph backed by an adjacency list.
++ *
++ * <p>Vertices are identified by the integers {@code 0 .. vertexCount() - 1}.
++ * The adjacency list is not exposed directly; callers read neighbours through
++ * {@link #neighbours(int)}, which returns an unmodifiable view.
++ */
++public final class Graph {
++
++    private final List<List<Integer>> adjacency;
++
++    /**
++     * Creates a graph with the given number of vertices and no edges.
++     *
++     * @throws IllegalArgumentException if {@code vertexCount} is negative
++     */
++    public Graph(int vertexCount) {
++        if (vertexCount < 0) {
++            throw new IllegalArgumentException("vertexCount must be non-negative: " + vertexCount);
++        }
++        adjacency = new ArrayList<>(vertexCount);
++        for (int i = 0; i < vertexCount; i++) {
++            adjacency.add(new ArrayList<>());
++        }
++    }
++
++    /** Returns the number of vertices in the graph. */
++    public int vertexCount() {
++        return adjacency.size();
++    }
++
++    /**
++     * Adds an undirected edge between {@code u} and {@code v}.
++     *
++     * @throws IndexOutOfBoundsException if either endpoint is not a valid vertex
++     */
++    public void addEdge(int u, int v) {
++        adjacency.get(checkVertex(u)).add(v);
++        adjacency.get(checkVertex(v)).add(u);
++    }
++
++    /** Returns an unmodifiable view of the neighbours of {@code vertex}. */
++    public List<Integer> neighbours(int vertex) {
++        return Collections.unmodifiableList(adjacency.get(checkVertex(vertex)));
++    }
++
++    private int checkVertex(int vertex) {
++        return Objects.checkIndex(vertex, adjacency.size());
++    }
++}
+diff --git a/src/test/java/graph/ComponentsTest.java b/src/test/java/graph/ComponentsTest.java
+new file mode 100644
+index 0000000..a4bc663
+--- /dev/null
++++ b/src/test/java/graph/ComponentsTest.java
+@@ -0,0 +1,67 @@
++package graph;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++/**
++ * White-box tests for {@link Components}. These live in the same package so the
++ * package-private constructor can be exercised directly without routing through
++ * a {@link Graph}.
++ */
++class ComponentsTest {
++
++    private static Components twoComponents() {
++        // Component 0 = {0, 2}, component 1 = {1}; partitions vertices 0..2.
++        return new Components(List.of(List.of(0, 2), List.of(1)), 3);
++    }
++
++    @Test
++    void countReflectsNumberOfComponents() {
++        assertEquals(2, twoComponents().count());
++    }
++
++    @Test
++    void componentOfReturnsOwningComponentId() {
++        Components components = twoComponents();
++        assertEquals(0, components.componentOf(0));
++        assertEquals(1, components.componentOf(1));
++        assertEquals(0, components.componentOf(2));
++    }
++
++    @Test
++    void connectedIsTrueWithinAComponentAndFalseAcross() {
++        Components components = twoComponents();
++        assertTrue(components.connected(0, 2));
++        assertFalse(components.connected(0, 1));
++    }
++
++    @Test
++    void componentOfRejectsOutOfRangeVertex() {
++        assertThrows(IndexOutOfBoundsException.class, () -> twoComponents().componentOf(3));
++    }
++
++    @Test
++    void asListIsDeeplyUnmodifiable() {
++        Components components = twoComponents();
++        assertThrows(UnsupportedOperationException.class, () -> components.asList().clear());
++        assertThrows(UnsupportedOperationException.class, () -> components.asList().get(0).add(99));
++    }
++
++    @Test
++    void resultIsIsolatedFromTheSourceList() {
++        List<List<Integer>> source = new java.util.ArrayList<>();
++        source.add(new java.util.ArrayList<>(List.of(0)));
++        Components components = new Components(source, 1);
++
++        source.get(0).add(99);
++        source.clear();
++
++        assertEquals(1, components.count());
++        assertEquals(List.of(0), components.asList().get(0));
++    }
++}
+diff --git a/src/test/java/graph/ConnectedComponentsFinderTest.java b/src/test/java/graph/ConnectedComponentsFinderTest.java
+new file mode 100644
+index 0000000..c9e7c96
+--- /dev/null
++++ b/src/test/java/graph/ConnectedComponentsFinderTest.java
+@@ -0,0 +1,68 @@
++package graph;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.HashSet;
++import java.util.List;
++import java.util.Set;
++import java.util.stream.Collectors;
++import org.junit.jupiter.api.Test;
++
++class ConnectedComponentsFinderTest {
++
++    private final ConnectedComponentsFinder finder = new ConnectedComponentsFinder();
++
++    /** Normalises a result to a set of vertex-sets so assertions ignore ordering. */
++    private static Set<Set<Integer>> asVertexSets(Components components) {
++        return components.asList().stream()
++            .map(HashSet::new)
++            .collect(Collectors.toSet());
++    }
++
++    @Test
++    void emptyGraphHasNoComponents() {
++        Components result = finder.find(new Graph(0));
++        assertEquals(0, result.count());
++        assertTrue(result.asList().isEmpty());
++    }
++
++    @Test
++    void isolatedVerticesEachFormTheirOwnComponent() {
++        Components result = finder.find(new Graph(3));
++        assertEquals(3, result.count());
++        assertEquals(Set.of(Set.of(0), Set.of(1), Set.of(2)), asVertexSets(result));
++    }
++
++    @Test
++    void singlePathIsOneComponent() {
++        Graph graph = new Graph(3);
++        graph.addEdge(0, 1);
++        graph.addEdge(1, 2);
++        Components result = finder.find(graph);
++        assertEquals(1, result.count());
++        assertEquals(Set.of(Set.of(0, 1, 2)), asVertexSets(result));
++    }
++
++    @Test
++    void sampleGraphPartitionsIntoTwoComponents() {
++        Graph graph = new Graph(6);
++        graph.addEdge(1, 2);
++        graph.addEdge(0, 3);
++        graph.addEdge(2, 0);
++        graph.addEdge(5, 4);
++        Components result = finder.find(graph);
++        assertEquals(2, result.count());
++        assertEquals(Set.of(Set.of(0, 1, 2, 3), Set.of(4, 5)), asVertexSets(result));
++    }
++
++    @Test
++    void everyVertexAppearsInExactlyOneComponent() {
++        Graph graph = new Graph(5);
++        graph.addEdge(0, 1);
++        graph.addEdge(3, 4);
++        Components result = finder.find(graph);
++        List<Integer> all = result.asList().stream().flatMap(List::stream).sorted().toList();
++        assertEquals(List.of(0, 1, 2, 3, 4), all);
++    }
++}
+diff --git a/src/test/java/graph/GraphTest.java b/src/test/java/graph/GraphTest.java
+new file mode 100644
+index 0000000..3623c72
+--- /dev/null
++++ b/src/test/java/graph/GraphTest.java
+@@ -0,0 +1,65 @@
++package graph;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++class GraphTest {
++
++    @Test
++    void newGraphHasGivenVertexCountAndNoEdges() {
++        Graph graph = new Graph(4);
++        assertEquals(4, graph.vertexCount());
++        for (int v = 0; v < 4; v++) {
++            assertTrue(graph.neighbours(v).isEmpty());
++        }
++    }
++
++    @Test
++    void emptyGraphIsAllowed() {
++        assertEquals(0, new Graph(0).vertexCount());
++    }
++
++    @Test
++    void negativeVertexCountIsRejected() {
++        assertThrows(IllegalArgumentException.class, () -> new Graph(-1));
++    }
++
++    @Test
++    void addEdgeIsUndirected() {
++        Graph graph = new Graph(2);
++        graph.addEdge(0, 1);
++        assertEquals(List.of(1), graph.neighbours(0));
++        assertEquals(List.of(0), graph.neighbours(1));
++    }
++
++    @Test
++    void selfLoopRecordsBothEndpoints() {
++        Graph graph = new Graph(1);
++        graph.addEdge(0, 0);
++        assertEquals(List.of(0, 0), graph.neighbours(0));
++    }
++
++    @Test
++    void addEdgeRejectsOutOfRangeEndpoints() {
++        Graph graph = new Graph(2);
++        assertThrows(IndexOutOfBoundsException.class, () -> graph.addEdge(0, 2));
++        assertThrows(IndexOutOfBoundsException.class, () -> graph.addEdge(-1, 0));
++    }
++
++    @Test
++    void neighboursViewIsUnmodifiable() {
++        Graph graph = new Graph(2);
++        graph.addEdge(0, 1);
++        assertThrows(UnsupportedOperationException.class, () -> graph.neighbours(0).add(99));
++    }
++
++    @Test
++    void neighboursRejectsOutOfRangeVertex() {
++        Graph graph = new Graph(2);
++        assertThrows(IndexOutOfBoundsException.class, () -> graph.neighbours(5));
++    }
++}

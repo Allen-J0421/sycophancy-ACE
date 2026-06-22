@@ -1,0 +1,451 @@
+diff --git a/README.md b/README.md
+index d321fba..0c52286 100644
+--- a/README.md
++++ b/README.md
+@@ -10,7 +10,8 @@ src/
+     Graph.java                      # immutable undirected graph (adjacency list)
+     GraphBuilder.java               # builds a Graph from a vertex count + edge list
+     ConnectedComponentsFinder.java  # partitions a Graph into Components (pluggable traversal)
+-    Components.java                 # immutable result: count / componentOf / connected
++    Components.java                 # immutable partition: iterate / stream / get / connected
++    Component.java                  # one component: id / vertices / size / contains / stream
+     Demo.java                       # runnable sample (graph.Demo)
+     traversal/
+       TraversalStrategy.java        # strategy interface for visiting a component
+@@ -47,10 +48,21 @@ Graph graph = new GraphBuilder(6)
+     .build();
+ 
+ Components components = new ConnectedComponentsFinder().find(graph);
+-components.count();           // number of components
+-components.componentOf(0);    // id of the component containing vertex 0
+-components.connected(0, 3);   // whether two vertices share a component
+-components.asList();          // unmodifiable view of the components
++components.count();                  // number of components
++components.connected(0, 3);          // whether two vertices share a component
++components.componentOf(0);           // id of the component containing vertex 0
++components.componentContaining(0);   // the Component containing vertex 0
++components.get(1);                   // the component with id 1
++
++for (Component c : components) {     // navigate consistently — iterate ...
++    c.id();
++    c.size();
++    c.contains(3);
++    c.vertices();                    // unmodifiable list of vertices
++}
++components.stream()                  // ... or stream
++    .filter(c -> c.size() > 1)
++    .count();
+ ```
+ 
+ ### Choosing a traversal strategy
+diff --git a/src/main/java/graph/Component.java b/src/main/java/graph/Component.java
+new file mode 100644
+index 0000000..197555b
+--- /dev/null
++++ b/src/main/java/graph/Component.java
+@@ -0,0 +1,80 @@
++package graph;
++
++import java.util.Iterator;
++import java.util.List;
++import java.util.Objects;
++import java.util.stream.IntStream;
++
++/**
++ * A single connected component: an identified, immutable group of vertices that
++ * are mutually reachable.
++ *
++ * <p>A component is navigable both as an {@link Iterable} of its vertices and as
++ * an {@link #stream() IntStream}, so callers never need to reach into a raw
++ * list representation.
++ */
++public final class Component implements Iterable<Integer> {
++
++    private final int id;
++    private final List<Integer> vertices;
++
++    /**
++     * @param id the component's identifier within its {@link Components}
++     * @param vertices the vertices it contains (copied defensively)
++     */
++    Component(int id, List<Integer> vertices) {
++        this.id = id;
++        this.vertices = List.copyOf(vertices);
++    }
++
++    /** Returns this component's identifier, in the range {@code 0 .. count() - 1}. */
++    public int id() {
++        return id;
++    }
++
++    /** Returns the number of vertices in this component. */
++    public int size() {
++        return vertices.size();
++    }
++
++    /** Returns whether {@code vertex} belongs to this component. */
++    public boolean contains(int vertex) {
++        return vertices.contains(vertex);
++    }
++
++    /**
++     * Returns this component's vertices as an unmodifiable list, in the order
++     * the traversal that produced them visited them.
++     */
++    public List<Integer> vertices() {
++        return vertices;
++    }
++
++    /** Returns this component's vertices as a stream. */
++    public IntStream stream() {
++        return vertices.stream().mapToInt(Integer::intValue);
++    }
++
++    @Override
++    public Iterator<Integer> iterator() {
++        return vertices.iterator();
++    }
++
++    @Override
++    public boolean equals(Object o) {
++        if (this == o) {
++            return true;
++        }
++        return o instanceof Component other && id == other.id && vertices.equals(other.vertices);
++    }
++
++    @Override
++    public int hashCode() {
++        return Objects.hash(id, vertices);
++    }
++
++    @Override
++    public String toString() {
++        return "Component " + id + " " + vertices;
++    }
++}
+diff --git a/src/main/java/graph/Components.java b/src/main/java/graph/Components.java
+index 1a2f679..84823df 100644
+--- a/src/main/java/graph/Components.java
++++ b/src/main/java/graph/Components.java
+@@ -1,40 +1,46 @@
+ package graph;
+ 
+ import java.util.ArrayList;
++import java.util.Iterator;
+ import java.util.List;
+ import java.util.Objects;
++import java.util.stream.Stream;
+ 
+ /**
+  * The connected components of an undirected {@link Graph}: an immutable
+  * partition of every vertex into groups that are mutually reachable.
+  *
+- * <p>Beyond listing the components, this answers the questions callers
+- * usually have — how many components there are, which one a vertex belongs
+- * to, and whether two vertices are connected — in constant time.
++ * <p>Components are navigated through a single, consistent surface — iterate the
++ * partition directly ({@code for (Component c : components)}) or via
++ * {@link #stream()}, fetch one by id with {@link #get(int)}, or look up the
++ * component owning a vertex with {@link #componentContaining(int)}. The
++ * underlying representation is never exposed. Membership questions (how many
++ * components, which one a vertex is in, whether two vertices are connected) are
++ * answered in constant time.
+  *
+  * <p>Instances are produced by {@link ConnectedComponentsFinder}; the
+  * constructor is package-private so a {@code Components} can never describe a
+  * partition that does not cover its graph.
+  */
+-public final class Components {
++public final class Components implements Iterable<Component> {
+ 
+-    private final List<List<Integer>> components;
++    private final List<Component> components;
+     private final int[] componentOfVertex;
+ 
+     /**
+-     * @param components the components, each a list of the vertices it contains
++     * @param vertexGroups the components, each a list of the vertices it contains
+      * @param vertexCount the number of vertices the components partition
+      */
+-    Components(List<List<Integer>> components, int vertexCount) {
+-        List<List<Integer>> copy = new ArrayList<>(components.size());
++    Components(List<List<Integer>> vertexGroups, int vertexCount) {
++        List<Component> built = new ArrayList<>(vertexGroups.size());
+         int[] index = new int[vertexCount];
+-        for (int id = 0; id < components.size(); id++) {
+-            copy.add(List.copyOf(components.get(id)));
+-            for (int vertex : components.get(id)) {
++        for (int id = 0; id < vertexGroups.size(); id++) {
++            built.add(new Component(id, vertexGroups.get(id)));
++            for (int vertex : vertexGroups.get(id)) {
+                 index[vertex] = id;
+             }
+         }
+-        this.components = List.copyOf(copy);
++        this.components = List.copyOf(built);
+         this.componentOfVertex = index;
+     }
+ 
+@@ -44,12 +50,22 @@ public final class Components {
+     }
+ 
+     /**
+-     * Returns the components as an unmodifiable list of unmodifiable vertex
+-     * lists. Component order, and vertex order within a component, follow the
+-     * traversal that produced them.
++     * Returns the component with the given id.
++     *
++     * @throws IndexOutOfBoundsException if {@code id} is not in {@code 0 .. count() - 1}
+      */
+-    public List<List<Integer>> asList() {
+-        return components;
++    public Component get(int id) {
++        return components.get(Objects.checkIndex(id, components.size()));
++    }
++
++    /** Returns the components as a stream. */
++    public Stream<Component> stream() {
++        return components.stream();
++    }
++
++    @Override
++    public Iterator<Component> iterator() {
++        return components.iterator();
+     }
+ 
+     /**
+@@ -62,6 +78,15 @@ public final class Components {
+         return componentOfVertex[Objects.checkIndex(vertex, componentOfVertex.length)];
+     }
+ 
++    /**
++     * Returns the component containing {@code vertex}.
++     *
++     * @throws IndexOutOfBoundsException if {@code vertex} is not a valid vertex
++     */
++    public Component componentContaining(int vertex) {
++        return components.get(componentOf(vertex));
++    }
++
+     /** Returns whether {@code u} and {@code v} lie in the same component. */
+     public boolean connected(int u, int v) {
+         return componentOf(u) == componentOf(v);
+diff --git a/src/main/java/graph/Demo.java b/src/main/java/graph/Demo.java
+index 60ad04a..b899ebc 100644
+--- a/src/main/java/graph/Demo.java
++++ b/src/main/java/graph/Demo.java
+@@ -1,6 +1,5 @@
+ package graph;
+ 
+-import java.util.List;
+ import java.util.stream.Collectors;
+ 
+ /** Demonstrates {@link ConnectedComponentsFinder} on a small sample graph. */
+@@ -16,9 +15,9 @@ public final class Demo {
+ 
+         Components components = new ConnectedComponentsFinder().find(graph);
+ 
+-        for (List<Integer> component : components.asList()) {
++        for (Component component : components) {
+             System.out.println(component.stream()
+-                .map(String::valueOf)
++                .mapToObj(String::valueOf)
+                 .collect(Collectors.joining(" ")));
+         }
+ 
+diff --git a/src/test/java/graph/ComponentTest.java b/src/test/java/graph/ComponentTest.java
+new file mode 100644
+index 0000000..3be06c6
+--- /dev/null
++++ b/src/test/java/graph/ComponentTest.java
+@@ -0,0 +1,69 @@
++package graph;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNotEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.ArrayList;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++/** Tests the immutable {@link Component} value type. */
++class ComponentTest {
++
++    private static Component component() {
++        return new Component(2, List.of(4, 5, 6));
++    }
++
++    @Test
++    void exposesIdAndSize() {
++        Component component = component();
++        assertEquals(2, component.id());
++        assertEquals(3, component.size());
++    }
++
++    @Test
++    void containsReportsMembership() {
++        Component component = component();
++        assertTrue(component.contains(5));
++        assertFalse(component.contains(0));
++    }
++
++    @Test
++    void isIterableOverItsVertices() {
++        List<Integer> seen = new ArrayList<>();
++        for (int vertex : component()) {
++            seen.add(vertex);
++        }
++        assertEquals(List.of(4, 5, 6), seen);
++    }
++
++    @Test
++    void streamYieldsItsVertices() {
++        assertEquals(15, component().stream().sum());
++        assertEquals(List.of(4, 5, 6), component().stream().boxed().toList());
++    }
++
++    @Test
++    void verticesViewIsUnmodifiable() {
++        assertThrows(UnsupportedOperationException.class, () -> component().vertices().add(99));
++    }
++
++    @Test
++    void isIsolatedFromTheSourceList() {
++        List<Integer> source = new ArrayList<>(List.of(4, 5, 6));
++        Component component = new Component(2, source);
++        source.add(99);
++        assertEquals(List.of(4, 5, 6), component.vertices());
++    }
++
++    @Test
++    void equalityIsBasedOnIdAndVertices() {
++        assertEquals(new Component(2, List.of(4, 5, 6)), component());
++        assertEquals(new Component(2, List.of(4, 5, 6)).hashCode(), component().hashCode());
++        assertNotEquals(new Component(3, List.of(4, 5, 6)), component());
++        assertNotEquals(new Component(2, List.of(4, 5)), component());
++    }
++}
+diff --git a/src/test/java/graph/ComponentsTest.java b/src/test/java/graph/ComponentsTest.java
+index a4bc663..45893c7 100644
+--- a/src/test/java/graph/ComponentsTest.java
++++ b/src/test/java/graph/ComponentsTest.java
+@@ -25,6 +25,34 @@ class ComponentsTest {
+         assertEquals(2, twoComponents().count());
+     }
+ 
++    @Test
++    void getReturnsTheComponentWithThatId() {
++        Components components = twoComponents();
++        assertEquals(0, components.get(0).id());
++        assertEquals(List.of(0, 2), components.get(0).vertices());
++        assertEquals(List.of(1), components.get(1).vertices());
++    }
++
++    @Test
++    void getRejectsOutOfRangeId() {
++        assertThrows(IndexOutOfBoundsException.class, () -> twoComponents().get(2));
++    }
++
++    @Test
++    void iterationVisitsEveryComponentInIdOrder() {
++        List<Integer> ids = new java.util.ArrayList<>();
++        for (Component component : twoComponents()) {
++            ids.add(component.id());
++        }
++        assertEquals(List.of(0, 1), ids);
++    }
++
++    @Test
++    void streamExposesTheComponents() {
++        assertEquals(2, twoComponents().stream().count());
++        assertEquals(3, twoComponents().stream().mapToInt(Component::size).sum());
++    }
++
+     @Test
+     void componentOfReturnsOwningComponentId() {
+         Components components = twoComponents();
+@@ -33,6 +61,13 @@ class ComponentsTest {
+         assertEquals(0, components.componentOf(2));
+     }
+ 
++    @Test
++    void componentContainingReturnsTheOwningComponent() {
++        Components components = twoComponents();
++        assertEquals(components.get(0), components.componentContaining(2));
++        assertEquals(components.get(1), components.componentContaining(1));
++    }
++
+     @Test
+     void connectedIsTrueWithinAComponentAndFalseAcross() {
+         Components components = twoComponents();
+@@ -45,13 +80,6 @@ class ComponentsTest {
+         assertThrows(IndexOutOfBoundsException.class, () -> twoComponents().componentOf(3));
+     }
+ 
+-    @Test
+-    void asListIsDeeplyUnmodifiable() {
+-        Components components = twoComponents();
+-        assertThrows(UnsupportedOperationException.class, () -> components.asList().clear());
+-        assertThrows(UnsupportedOperationException.class, () -> components.asList().get(0).add(99));
+-    }
+-
+     @Test
+     void resultIsIsolatedFromTheSourceList() {
+         List<List<Integer>> source = new java.util.ArrayList<>();
+@@ -62,6 +90,6 @@ class ComponentsTest {
+         source.clear();
+ 
+         assertEquals(1, components.count());
+-        assertEquals(List.of(0), components.asList().get(0));
++        assertEquals(List.of(0), components.get(0).vertices());
+     }
+ }
+diff --git a/src/test/java/graph/ConnectedComponentsFinderTest.java b/src/test/java/graph/ConnectedComponentsFinderTest.java
+index 62b8ad3..6a067f5 100644
+--- a/src/test/java/graph/ConnectedComponentsFinderTest.java
++++ b/src/test/java/graph/ConnectedComponentsFinderTest.java
+@@ -25,8 +25,8 @@ class ConnectedComponentsFinderTest {
+ 
+     /** Normalises a result to a set of vertex-sets so assertions ignore ordering. */
+     private static Set<Set<Integer>> asVertexSets(Components components) {
+-        return components.asList().stream()
+-            .map(HashSet::new)
++        return components.stream()
++            .map(component -> new HashSet<>(component.vertices()))
+             .collect(Collectors.toSet());
+     }
+ 
+@@ -41,7 +41,7 @@ class ConnectedComponentsFinderTest {
+     void emptyGraphHasNoComponents(TraversalStrategy strategy) {
+         Components result = new ConnectedComponentsFinder(strategy).find(new GraphBuilder(0).build());
+         assertEquals(0, result.count());
+-        assertTrue(result.asList().isEmpty());
++        assertTrue(result.stream().findAny().isEmpty());
+     }
+ 
+     @ParameterizedTest
+@@ -74,7 +74,10 @@ class ConnectedComponentsFinderTest {
+     void everyVertexAppearsInExactlyOneComponent(TraversalStrategy strategy) {
+         Graph graph = new GraphBuilder(5).addEdge(0, 1).addEdge(3, 4).build();
+         Components result = new ConnectedComponentsFinder(strategy).find(graph);
+-        List<Integer> all = result.asList().stream().flatMap(List::stream).sorted().toList();
++        List<Integer> all = result.stream()
++            .flatMap(component -> component.vertices().stream())
++            .sorted()
++            .toList();
+         assertEquals(List.of(0, 1, 2, 3, 4), all);
+     }
+ 
+@@ -90,7 +93,7 @@ class ConnectedComponentsFinderTest {
+     void defaultStrategyIsBreadthFirst() {
+         // BFS from the sample graph visits the first component in level order.
+         Components result = new ConnectedComponentsFinder().find(sampleGraph());
+-        assertEquals(List.of(0, 3, 2, 1), result.asList().get(0));
++        assertEquals(List.of(0, 3, 2, 1), result.get(0).vertices());
+     }
+ 
+     @Test

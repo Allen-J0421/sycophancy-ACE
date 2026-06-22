@@ -1,0 +1,337 @@
+diff --git a/maxflow/AugmentingPath.java b/maxflow/AugmentingPath.java
+index 8366307..d062fd5 100644
+--- a/maxflow/AugmentingPath.java
++++ b/maxflow/AugmentingPath.java
+@@ -1,44 +1,34 @@
+ package maxflow;
+ 
+-import java.util.ArrayList;
+-import java.util.Collections;
+ import java.util.List;
+ 
+ /**
+- * An immutable augmenting path through a {@link ResidualGraph}: an ordered list of
+- * vertices from a source to a sink together with its bottleneck (the minimum
+- * residual capacity along the path, i.e. the amount of flow it can carry).
++ * An immutable augmenting path: an ordered list of vertices from a source to a
++ * sink together with its bottleneck (the minimum residual capacity along the
++ * path, i.e. the amount of flow it can carry).
++ *
++ * <p>This is a pure value object with no knowledge of how it was discovered or of
++ * the graph it traverses; an {@link AugmentingPathFinder} constructs it.
+  */
+ public final class AugmentingPath {
+ 
+     private final List<Integer> vertices;
+     private final int bottleneck;
+ 
+-    private AugmentingPath(List<Integer> vertices, int bottleneck) {
+-        this.vertices = List.copyOf(vertices);
+-        this.bottleneck = bottleneck;
+-    }
+-
+     /**
+-     * Reconstructs a path from a {@code parent} array produced by a search, then
+-     * walks it to determine the bottleneck capacity.
+-     *
+-     * @param parent  {@code parent[v]} is the vertex preceding {@code v} on the path,
+-     *                or {@code -1} for the source
+-     * @param source  the start vertex
+-     * @param sink    the end vertex
++     * @param vertices   the path's vertices in order from source to sink
++     *                   (at least two, source first and sink last)
++     * @param bottleneck the maximum flow the path can carry; must be positive
+      */
+-    public static AugmentingPath fromParents(int[] parent, int source, int sink, ResidualGraph residual) {
+-        List<Integer> reversed = new ArrayList<>();
+-        int bottleneck = Integer.MAX_VALUE;
+-        for (int v = sink; v != source; v = parent[v]) {
+-            int u = parent[v];
+-            bottleneck = Math.min(bottleneck, residual.residualCapacity(u, v));
+-            reversed.add(v);
++    public AugmentingPath(List<Integer> vertices, int bottleneck) {
++        if (vertices.size() < 2) {
++            throw new IllegalArgumentException("An augmenting path needs at least two vertices");
+         }
+-        reversed.add(source);
+-        Collections.reverse(reversed);
+-        return new AugmentingPath(reversed, bottleneck);
++        if (bottleneck <= 0) {
++            throw new IllegalArgumentException("bottleneck must be positive, was " + bottleneck);
++        }
++        this.vertices = List.copyOf(vertices);
++        this.bottleneck = bottleneck;
+     }
+ 
+     /** Returns the vertices of the path in order from source to sink. */
+diff --git a/maxflow/BreadthFirstPathFinder.java b/maxflow/BreadthFirstPathFinder.java
+index 61582b1..c513e4f 100644
+--- a/maxflow/BreadthFirstPathFinder.java
++++ b/maxflow/BreadthFirstPathFinder.java
+@@ -1,43 +1,16 @@
+ package maxflow;
+ 
+-import java.util.ArrayDeque;
+-import java.util.Arrays;
+-import java.util.Optional;
+-import java.util.Queue;
+-
+ /**
+  * Finds an augmenting path using breadth-first search, so the path with the
+  * fewest edges is always chosen. Combining this strategy with
+  * {@link FordFulkersonSolver} gives the Edmonds-Karp algorithm, whose running
+  * time is independent of the edge capacities.
+  */
+-public final class BreadthFirstPathFinder implements AugmentingPathFinder {
++public final class BreadthFirstPathFinder extends GraphSearchPathFinder {
+ 
+     @Override
+-    public Optional<AugmentingPath> findPath(ResidualGraph residual, int source, int sink) {
+-        int n = residual.vertexCount();
+-        boolean[] visited = new boolean[n];
+-        int[] parent = new int[n];
+-        Arrays.fill(parent, -1);
+-
+-        Queue<Integer> queue = new ArrayDeque<>();
+-        queue.add(source);
+-        visited[source] = true;
+-
+-        while (!queue.isEmpty()) {
+-            int u = queue.poll();
+-            for (int v = 0; v < n; v++) {
+-                if (!visited[v] && residual.hasResidualCapacity(u, v)) {
+-                    parent[v] = u;
+-                    if (v == sink) {
+-                        return Optional.of(AugmentingPath.fromParents(parent, source, sink, residual));
+-                    }
+-                    visited[v] = true;
+-                    queue.add(v);
+-                }
+-            }
+-        }
+-        return Optional.empty();
++    protected Frontier newFrontier() {
++        return Frontier.fifo();
+     }
+ 
+     @Override
+diff --git a/maxflow/DepthFirstPathFinder.java b/maxflow/DepthFirstPathFinder.java
+index c0d7ead..3dc727e 100644
+--- a/maxflow/DepthFirstPathFinder.java
++++ b/maxflow/DepthFirstPathFinder.java
+@@ -1,43 +1,17 @@
+ package maxflow;
+ 
+-import java.util.Arrays;
+-import java.util.Optional;
+-
+ /**
+- * Finds an augmenting path using iterative depth-first search. Combining this
+- * strategy with {@link FordFulkersonSolver} gives the classic Ford-Fulkerson
+- * method. It still computes a correct maximum flow for integer capacities, but,
+- * unlike {@link BreadthFirstPathFinder}, the number of iterations can depend on
+- * the magnitude of the capacities.
++ * Finds an augmenting path using depth-first search. Combining this strategy with
++ * {@link FordFulkersonSolver} gives the classic Ford-Fulkerson method. It still
++ * computes a correct maximum flow for integer capacities, but, unlike
++ * {@link BreadthFirstPathFinder}, the number of iterations can depend on the
++ * magnitude of the capacities.
+  */
+-public final class DepthFirstPathFinder implements AugmentingPathFinder {
++public final class DepthFirstPathFinder extends GraphSearchPathFinder {
+ 
+     @Override
+-    public Optional<AugmentingPath> findPath(ResidualGraph residual, int source, int sink) {
+-        int n = residual.vertexCount();
+-        boolean[] visited = new boolean[n];
+-        int[] parent = new int[n];
+-        Arrays.fill(parent, -1);
+-
+-        int[] stack = new int[n];
+-        int top = 0;
+-        stack[top++] = source;
+-        visited[source] = true;
+-
+-        while (top > 0) {
+-            int u = stack[--top];
+-            if (u == sink) {
+-                return Optional.of(AugmentingPath.fromParents(parent, source, sink, residual));
+-            }
+-            for (int v = 0; v < n; v++) {
+-                if (!visited[v] && residual.hasResidualCapacity(u, v)) {
+-                    visited[v] = true;
+-                    parent[v] = u;
+-                    stack[top++] = v;
+-                }
+-            }
+-        }
+-        return Optional.empty();
++    protected Frontier newFrontier() {
++        return Frontier.lifo();
+     }
+ 
+     @Override
+diff --git a/maxflow/Frontier.java b/maxflow/Frontier.java
+new file mode 100644
+index 0000000..1199ee2
+--- /dev/null
++++ b/maxflow/Frontier.java
+@@ -0,0 +1,61 @@
++package maxflow;
++
++import java.util.ArrayDeque;
++import java.util.Deque;
++
++/**
++ * The order in which a graph search visits discovered-but-unexplored vertices.
++ * This single abstraction is the only thing that distinguishes the breadth-first
++ * search behind Edmonds-Karp from the depth-first search behind the textbook
++ * Ford-Fulkerson method.
++ */
++interface Frontier {
++
++    /** Records a newly discovered vertex. */
++    void add(int vertex);
++
++    /** Removes and returns the next vertex to explore. */
++    int removeNext();
++
++    boolean isEmpty();
++
++    /** A first-in-first-out frontier, yielding breadth-first search. */
++    static Frontier fifo() {
++        return new DequeFrontier(false);
++    }
++
++    /** A last-in-first-out frontier, yielding depth-first search. */
++    static Frontier lifo() {
++        return new DequeFrontier(true);
++    }
++
++    /** A frontier backed by an {@link ArrayDeque}, polled from the head either way. */
++    final class DequeFrontier implements Frontier {
++
++        private final Deque<Integer> vertices = new ArrayDeque<>();
++        private final boolean lastInFirstOut;
++
++        private DequeFrontier(boolean lastInFirstOut) {
++            this.lastInFirstOut = lastInFirstOut;
++        }
++
++        @Override
++        public void add(int vertex) {
++            if (lastInFirstOut) {
++                vertices.addFirst(vertex);
++            } else {
++                vertices.addLast(vertex);
++            }
++        }
++
++        @Override
++        public int removeNext() {
++            return vertices.removeFirst();
++        }
++
++        @Override
++        public boolean isEmpty() {
++            return vertices.isEmpty();
++        }
++    }
++}
+diff --git a/maxflow/GraphSearchPathFinder.java b/maxflow/GraphSearchPathFinder.java
+new file mode 100644
+index 0000000..cfa6169
+--- /dev/null
++++ b/maxflow/GraphSearchPathFinder.java
+@@ -0,0 +1,60 @@
++package maxflow;
++
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.List;
++import java.util.Optional;
++
++/**
++ * Template for augmenting-path finders that explore the residual graph with a
++ * single-source traversal. The traversal skeleton — discovering vertices, recording
++ * predecessors and reconstructing the path — lives here; concrete subclasses supply
++ * only a {@link Frontier}, which fixes the search order (breadth-first vs depth-first).
++ */
++abstract class GraphSearchPathFinder implements AugmentingPathFinder {
++
++    /** Returns a fresh frontier for one traversal. */
++    protected abstract Frontier newFrontier();
++
++    @Override
++    public final Optional<AugmentingPath> findPath(ResidualGraph residual, int source, int sink) {
++        int n = residual.vertexCount();
++        boolean[] discovered = new boolean[n];
++        int[] parent = new int[n];
++        Arrays.fill(parent, -1);
++
++        Frontier frontier = newFrontier();
++        frontier.add(source);
++        discovered[source] = true;
++
++        while (!frontier.isEmpty()) {
++            int u = frontier.removeNext();
++            if (u == sink) {
++                return Optional.of(reconstructPath(residual, parent, source, sink));
++            }
++            residual.forEachResidualEdge(u, (v, residualCapacity) -> {
++                if (!discovered[v]) {
++                    discovered[v] = true;
++                    parent[v] = u;
++                    frontier.add(v);
++                }
++            });
++        }
++        return Optional.empty();
++    }
++
++    /** Walks the predecessor chain from sink to source, computing the bottleneck. */
++    private static AugmentingPath reconstructPath(ResidualGraph residual, int[] parent,
++                                                  int source, int sink) {
++        List<Integer> vertices = new ArrayList<>();
++        int bottleneck = Integer.MAX_VALUE;
++        for (int v = sink; v != source; v = parent[v]) {
++            bottleneck = Math.min(bottleneck, residual.residualCapacity(parent[v], v));
++            vertices.add(v);
++        }
++        vertices.add(source);
++        Collections.reverse(vertices);
++        return new AugmentingPath(vertices, bottleneck);
++    }
++}
+diff --git a/maxflow/ResidualGraph.java b/maxflow/ResidualGraph.java
+index 87ef09a..9d28be3 100644
+--- a/maxflow/ResidualGraph.java
++++ b/maxflow/ResidualGraph.java
+@@ -33,6 +33,26 @@ public final class ResidualGraph {
+         return residual[from][to] > 0;
+     }
+ 
++    /** Receives each residual edge leaving a vertex during a traversal. */
++    @FunctionalInterface
++    public interface EdgeConsumer {
++        void accept(int to, int residualCapacity);
++    }
++
++    /**
++     * Invokes {@code consumer} for every vertex reachable from {@code from} along an
++     * edge with positive residual capacity. This lets traversals iterate the graph's
++     * adjacencies without depending on its underlying representation.
++     */
++    public void forEachResidualEdge(int from, EdgeConsumer consumer) {
++        int[] row = residual[from];
++        for (int to = 0; to < row.length; to++) {
++            if (row[to] > 0) {
++                consumer.accept(to, row[to]);
++            }
++        }
++    }
++
+     /**
+      * Pushes {@code amount} units of flow along {@code from -> to}, decreasing the
+      * forward residual capacity and increasing the reverse residual capacity.

@@ -1,0 +1,178 @@
+diff --git a/ArticulationPointFinder.java b/ArticulationPointFinder.java
+index 6626e1b..67a34fe 100644
+--- a/ArticulationPointFinder.java
++++ b/ArticulationPointFinder.java
+@@ -1,4 +1,6 @@
++import java.util.ArrayDeque;
+ import java.util.ArrayList;
++import java.util.Deque;
+ import java.util.List;
+ 
+ /**
+@@ -11,6 +13,9 @@ import java.util.List;
+  *
+  * <p>Instances are stateless and therefore reusable and thread-safe: each call to
+  * {@link #find(Graph)} allocates its own traversal state.
++ *
++ * <p>The traversal is implemented with an explicit stack rather than recursion, so
++ * it handles arbitrarily deep graphs without risking a {@link StackOverflowError}.
+  */
+ public final class ArticulationPointFinder {
+ 
+@@ -57,7 +62,7 @@ public final class ArticulationPointFinder {
+             int vertexCount = graph.vertexCount();
+             for (int u = 0; u < vertexCount; u++) {
+                 if (!visited[u]) {
+-                    dfs(u, -1);
++                    explore(u);
+                 }
+             }
+ 
+@@ -70,32 +75,91 @@ public final class ArticulationPointFinder {
+             return result;
+         }
+ 
+-        private void dfs(int u, int parent) {
+-            visited[u] = true;
+-            discovery[u] = low[u] = ++timer;
+-            int rootChildren = 0;
+-
+-            for (int v : graph.neighbors(u)) {
+-                if (!visited[v]) {
+-                    rootChildren++;
+-                    dfs(v, u);
+-                    low[u] = Math.min(low[u], low[v]);
+-
+-                    // A non-root vertex is a cut vertex when one of its children's
+-                    // subtrees cannot reach above it via a back edge.
+-                    if (parent != -1 && low[v] >= discovery[u]) {
+-                        isArticulationPoint[u] = true;
++        /**
++         * Explores the DFS tree rooted at {@code root} using an explicit stack.
++         *
++         * <p>The stack always holds the current root-to-node path, which lets each
++         * vertex fold its low-link and cut-vertex verdict into its parent the moment
++         * it is fully explored — the iterative equivalent of returning from a
++         * recursive call.
++         */
++        private void explore(int root) {
++            visited[root] = true;
++            discovery[root] = low[root] = ++timer;
++
++            Deque<Frame> stack = new ArrayDeque<>();
++            stack.push(new Frame(root, -1));
++
++            while (!stack.isEmpty()) {
++                Frame frame = stack.peek();
++                int u = frame.vertex;
++                List<Integer> neighbors = graph.neighbors(u);
++
++                if (frame.nextNeighbor < neighbors.size()) {
++                    int v = neighbors.get(frame.nextNeighbor++);
++                    if (!visited[v]) {
++                        frame.children++;
++                        visited[v] = true;
++                        discovery[v] = low[v] = ++timer;
++                        stack.push(new Frame(v, u));
++                    } else if (v != frame.parent) {
++                        // Back edge: update the low-link, but ignore the edge to the parent.
++                        low[u] = Math.min(low[u], discovery[v]);
+                     }
+-                } else if (v != parent) {
+-                    // Back edge: update the low-link, but ignore the edge to the parent.
+-                    low[u] = Math.min(low[u], discovery[v]);
++                } else {
++                    // u is fully explored; fold its result into its parent.
++                    stack.pop();
++                    foldIntoParent(u, frame, stack.peek());
++                }
++            }
++        }
++
++        /**
++         * Applies the post-order step for a fully explored vertex {@code u}: the DFS
++         * root becomes a cut vertex with more than one child, while any other vertex
++         * propagates its low-link upward and may mark its parent as a cut vertex.
++         *
++         * @param u           the vertex that has just finished exploring
++         * @param frame       {@code u}'s traversal frame
++         * @param parentFrame the frame of {@code u}'s parent, or {@code null} if
++         *                    {@code u} is the DFS root
++         */
++        private void foldIntoParent(int u, Frame frame, Frame parentFrame) {
++            if (frame.parent == -1) {
++                // The DFS root is a cut vertex only if it has more than one DFS child.
++                if (frame.children > 1) {
++                    isArticulationPoint[u] = true;
+                 }
++                return;
+             }
+ 
+-            // The DFS root is a cut vertex only if it has more than one DFS child.
+-            if (parent == -1 && rootChildren > 1) {
+-                isArticulationPoint[u] = true;
++            int parent = frame.parent;
++            low[parent] = Math.min(low[parent], low[u]);
++
++            // A non-root vertex is a cut vertex when one of its children's subtrees
++            // cannot reach above it via a back edge.
++            boolean parentIsRoot = parentFrame.parent == -1;
++            if (!parentIsRoot && low[u] >= discovery[parent]) {
++                isArticulationPoint[parent] = true;
+             }
+         }
+     }
++
++    /** One vertex's state on the explicit DFS stack. */
++    private static final class Frame {
++
++        final int vertex;
++        final int parent;
++
++        /** Index of the next neighbor to visit from {@link #vertex}. */
++        int nextNeighbor;
++
++        /** Number of DFS-tree children discovered from {@link #vertex}. */
++        int children;
++
++        Frame(int vertex, int parent) {
++            this.vertex = vertex;
++            this.parent = parent;
++        }
++    }
+ }
+diff --git a/ArticulationPointFinderTest.java b/ArticulationPointFinderTest.java
+index 664f205..9cc100d 100644
+--- a/ArticulationPointFinderTest.java
++++ b/ArticulationPointFinderTest.java
+@@ -32,6 +32,7 @@ public final class ArticulationPointFinderTest {
+         outOfRangeEdgeIsRejected();
+         malformedEdgeIsRejected();
+         finderIsReusableAcrossGraphs();
++        deepGraphDoesNotOverflowTheStack();
+     }
+ 
+     private void emptyGraphHasNoArticulationPoints() {
+@@ -96,6 +97,22 @@ public final class ArticulationPointFinderTest {
+         check("reuse: path then triangle (2)", finder.find(triangle), List.of());
+     }
+ 
++    private void deepGraphDoesNotOverflowTheStack() {
++        // A long path is the worst case for recursion depth; the iterative
++        // traversal must handle it without a StackOverflowError. Every interior
++        // vertex of a path is a cut vertex, so the count is vertexCount - 2.
++        int vertexCount = 200_000;
++        int[][] edges = new int[vertexCount - 1][2];
++        for (int i = 0; i < vertexCount - 1; i++) {
++            edges[i] = new int[] {i, i + 1};
++        }
++        List<Integer> points = find(Graph.fromEdges(vertexCount, edges));
++        boolean correct = points.size() == vertexCount - 2
++                && points.get(0) == 1
++                && points.get(points.size() - 1) == vertexCount - 2;
++        check("deep path of " + vertexCount + " vertices", correct, true);
++    }
++
+     private static List<Integer> find(Graph graph) {
+         return new ArticulationPointFinder().find(graph);
+     }

@@ -1,0 +1,299 @@
+diff --git a/GraphConnectivity.java b/GraphConnectivity.java
+index fc3dca5..de9ceac 100644
+--- a/GraphConnectivity.java
++++ b/GraphConnectivity.java
+@@ -48,33 +48,21 @@ public final class GraphConnectivity {
+     private static final class Search {
+ 
+         private final Graph graph;
+-
+-        /** Discovery time of each vertex in the DFS traversal. */
+-        private final int[] discovery;
+-
+-        /** Lowest discovery time reachable from each vertex's DFS subtree. */
+-        private final int[] low;
+-
+-        private final boolean[] visited;
++        private final LowLinkState state;
+         private final boolean[] isArticulationPoint;
+         private final List<Graph.Edge> bridges = new ArrayList<>();
+ 
+-        /** Monotonically increasing DFS timestamp counter. */
+-        private int timer;
+-
+         Search(Graph graph) {
+             int vertexCount = graph.vertexCount();
+             this.graph = graph;
+-            this.discovery = new int[vertexCount];
+-            this.low = new int[vertexCount];
+-            this.visited = new boolean[vertexCount];
++            this.state = new LowLinkState(vertexCount);
+             this.isArticulationPoint = new boolean[vertexCount];
+         }
+ 
+         ConnectivityResult run() {
+             int vertexCount = graph.vertexCount();
+             for (int u = 0; u < vertexCount; u++) {
+-                if (!visited[u]) {
++                if (!state.isDiscovered(u)) {
+                     explore(u);
+                 }
+             }
+@@ -99,8 +87,7 @@ public final class GraphConnectivity {
+          * iterative equivalent of returning from a recursive call.
+          */
+         private void explore(int root) {
+-            visited[root] = true;
+-            discovery[root] = low[root] = ++timer;
++            state.discover(root);
+ 
+             Deque<Frame> stack = new ArrayDeque<>();
+             stack.push(new Frame(root, null));
+@@ -117,15 +104,14 @@ public final class GraphConnectivity {
+                         // Self-loop: irrelevant to articulation points and bridges.
+                         continue;
+                     }
+-                    if (!visited[v]) {
++                    if (!state.isDiscovered(v)) {
+                         frame.children++;
+-                        visited[v] = true;
+-                        discovery[v] = low[v] = ++timer;
++                        state.discover(v);
+                         stack.push(new Frame(v, edge));
+                     } else if (!edge.equals(frame.parentEdge)) {
+                         // Back edge — but skip only the single tree edge we arrived on.
+                         // A parallel edge to the parent has a different id, so it counts.
+-                        low[u] = Math.min(low[u], discovery[v]);
++                        state.relaxAgainstAncestor(u, v);
+                     }
+                 } else {
+                     // u is fully explored; fold its result into its parent.
+@@ -157,19 +143,19 @@ public final class GraphConnectivity {
+             }
+ 
+             int parent = incoming.other(u);
+-            low[parent] = Math.min(low[parent], low[u]);
++            state.propagateFromChild(parent, u);
+ 
+             // The incoming tree edge is a bridge when u's subtree has no back edge
+             // reaching the parent or above (strict inequality, so a parallel edge
+             // back to the parent disqualifies it).
+-            if (low[u] > discovery[parent]) {
++            if (state.low(u) > state.discovery(parent)) {
+                 bridges.add(incoming);
+             }
+ 
+             // A non-root vertex is a cut vertex when one of its children's subtrees
+             // cannot reach above it via a back edge.
+             boolean parentIsRoot = parentFrame.parentEdge == null;
+-            if (!parentIsRoot && low[u] >= discovery[parent]) {
++            if (!parentIsRoot && state.low(u) >= state.discovery(parent)) {
+                 isArticulationPoint[parent] = true;
+             }
+         }
+diff --git a/LowLinkState.java b/LowLinkState.java
+new file mode 100644
+index 0000000..788bd64
+--- /dev/null
++++ b/LowLinkState.java
+@@ -0,0 +1,87 @@
++import java.util.Arrays;
++
++/**
++ * Shared depth-first-search state for low-link algorithms — Tarjan's articulation
++ * points / bridges ({@link GraphConnectivity}) and strongly connected components
++ * ({@link StronglyConnectedComponents}).
++ *
++ * <p>It owns each vertex's <em>discovery time</em> (the order in which the DFS
++ * first reaches it) and its <em>low-link</em> (the smallest discovery time
++ * reachable from its DFS subtree via tree edges plus at most one back/cross edge),
++ * and the three operations that maintain them. It deliberately does <em>not</em>
++ * own the traversal control flow, the neighbor iteration, or the
++ * algorithm-specific verdicts: those differ between the undirected and directed
++ * algorithms and remain with each caller.
++ *
++ * <p>This is a plain mutable value object, not thread-safe; each traversal creates
++ * its own instance.
++ */
++public final class LowLinkState {
++
++    private static final int UNVISITED = -1;
++
++    private final int[] discovery;
++    private final int[] low;
++
++    /** Monotonically increasing discovery counter. */
++    private int timer;
++
++    /**
++     * Creates traversal state for a graph with {@code vertexCount} vertices, all
++     * initially undiscovered.
++     */
++    public LowLinkState(int vertexCount) {
++        discovery = new int[vertexCount];
++        low = new int[vertexCount];
++        Arrays.fill(discovery, UNVISITED);
++    }
++
++    /** Returns whether {@code v} has been visited yet. */
++    public boolean isDiscovered(int v) {
++        return discovery[v] != UNVISITED;
++    }
++
++    /**
++     * Records the first visit to {@code v}, stamping its discovery time and
++     * initializing its low-link to the same value.
++     */
++    public void discover(int v) {
++        discovery[v] = low[v] = timer++;
++    }
++
++    /** Returns the discovery time of {@code v}. */
++    public int discovery(int v) {
++        return discovery[v];
++    }
++
++    /** Returns the current low-link value of {@code v}. */
++    public int low(int v) {
++        return low[v];
++    }
++
++    /**
++     * Relaxes {@code v}'s low-link against an already-discovered {@code ancestor}
++     * reached by a non-tree (back or cross) edge:
++     * {@code low[v] = min(low[v], discovery[ancestor])}.
++     */
++    public void relaxAgainstAncestor(int v, int ancestor) {
++        low[v] = Math.min(low[v], discovery[ancestor]);
++    }
++
++    /**
++     * Folds a fully explored {@code child}'s low-link into its {@code parent}:
++     * {@code low[parent] = min(low[parent], low[child])}.
++     */
++    public void propagateFromChild(int parent, int child) {
++        low[parent] = Math.min(low[parent], low[child]);
++    }
++
++    /**
++     * Returns whether {@code v} is the root of its low-link subtree, i.e. nothing
++     * in its subtree reaches above it ({@code low[v] == discovery[v]}). This is the
++     * SCC-root condition in Tarjan's strongly-connected-components algorithm.
++     */
++    public boolean isLowLinkRoot(int v) {
++        return low[v] == discovery[v];
++    }
++}
+diff --git a/README.md b/README.md
+index dc3c8b3..8653bc4 100644
+--- a/README.md
++++ b/README.md
+@@ -16,6 +16,7 @@ share the low-link DFS technique, not an algorithm.
+ 
+ | File | Responsibility |
+ |------|----------------|
++| `LowLinkState.java` | Shared DFS state: discovery times + low-link logic |
+ | `Graph.java` | Undirected graph (adjacency list) with edge identity, validation |
+ | `GraphConnectivity.java` | Articulation points + bridges; stateless, iterative |
+ | `ConnectivityResult.java` | Result holder: articulation points + bridges |
+@@ -25,6 +26,12 @@ share the low-link DFS technique, not an algorithm.
+ | `GraphConnectivityTest.java` | Dependency-free test runner (undirected) |
+ | `StronglyConnectedComponentsTest.java` | Dependency-free test runner (SCC) |
+ 
++Both connectivity algorithms share `LowLinkState`, which owns each vertex's
++discovery time and low-link value and the operations that maintain them
++(`discover`, `relaxAgainstAncestor`, `propagateFromChild`, `isLowLinkRoot`). The
++traversal control flow and the algorithm-specific verdicts (cut vertices/edges
++vs. SCC extraction) stay with each algorithm, since those genuinely differ.
++
+ ## Build and run
+ 
+ ```sh
+diff --git a/StronglyConnectedComponents.java b/StronglyConnectedComponents.java
+index 686437d..69fc896 100644
+--- a/StronglyConnectedComponents.java
++++ b/StronglyConnectedComponents.java
+@@ -1,6 +1,5 @@
+ import java.util.ArrayDeque;
+ import java.util.ArrayList;
+-import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.Comparator;
+ import java.util.Deque;
+@@ -44,15 +43,8 @@ public final class StronglyConnectedComponents {
+      */
+     private static final class Search {
+ 
+-        private static final int UNVISITED = -1;
+-
+         private final DirectedGraph graph;
+-
+-        /** Discovery index of each vertex, or {@link #UNVISITED}. */
+-        private final int[] discovery;
+-
+-        /** Lowest discovery index reachable from each vertex while it is on the stack. */
+-        private final int[] low;
++        private final LowLinkState state;
+ 
+         /** Whether each vertex is currently on the component stack. */
+         private final boolean[] onStack;
+@@ -62,22 +54,17 @@ public final class StronglyConnectedComponents {
+ 
+         private final List<List<Integer>> components = new ArrayList<>();
+ 
+-        /** Monotonically increasing DFS discovery counter. */
+-        private int timer;
+-
+         Search(DirectedGraph graph) {
+             int vertexCount = graph.vertexCount();
+             this.graph = graph;
+-            this.discovery = new int[vertexCount];
+-            this.low = new int[vertexCount];
++            this.state = new LowLinkState(vertexCount);
+             this.onStack = new boolean[vertexCount];
+-            Arrays.fill(discovery, UNVISITED);
+         }
+ 
+         List<List<Integer>> run() {
+             int vertexCount = graph.vertexCount();
+             for (int v = 0; v < vertexCount; v++) {
+-                if (discovery[v] == UNVISITED) {
++                if (!state.isDiscovered(v)) {
+                     explore(v);
+                 }
+             }
+@@ -111,21 +98,21 @@ public final class StronglyConnectedComponents {
+ 
+                 if (frame.nextArc < outNeighbors.size()) {
+                     int w = outNeighbors.get(frame.nextArc++);
+-                    if (discovery[w] == UNVISITED) {
++                    if (!state.isDiscovered(w)) {
+                         discover(w);
+                         work.push(new Frame(w));
+                     } else if (onStack[w]) {
+                         // Back or cross arc into a vertex still on the stack.
+-                        low[v] = Math.min(low[v], discovery[w]);
++                        state.relaxAgainstAncestor(v, w);
+                     }
+                 } else {
+                     // v is fully explored; propagate its low-link to its parent.
+                     work.pop();
+                     Frame parentFrame = work.peek();
+                     if (parentFrame != null) {
+-                        low[parentFrame.vertex] = Math.min(low[parentFrame.vertex], low[v]);
++                        state.propagateFromChild(parentFrame.vertex, v);
+                     }
+-                    if (low[v] == discovery[v]) {
++                    if (state.isLowLinkRoot(v)) {
+                         popComponent(v);
+                     }
+                 }
+@@ -133,7 +120,7 @@ public final class StronglyConnectedComponents {
+         }
+ 
+         private void discover(int v) {
+-            discovery[v] = low[v] = timer++;
++            state.discover(v);
+             componentStack.push(v);
+             onStack[v] = true;
+         }
