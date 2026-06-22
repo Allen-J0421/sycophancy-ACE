@@ -1,0 +1,199 @@
+diff --git a/b_tree.java b/b_tree.java
+index d865674..19fda32 100644
+--- a/b_tree.java
++++ b/b_tree.java
+@@ -8,7 +8,8 @@ import java.util.List;
+  *
+  * <p>This implementation is generic over any {@link Comparable} key type and
+  * supports insertion, membership queries, and an in-order traversal that
+- * returns the keys in sorted order (decoupled from any form of output).
++ * returns the keys in sorted order (decoupled from any form of output). Nodes
++ * store their keys and children in {@link ArrayList}s that grow as needed.
+  *
+  * @param <K> the key type, which must be mutually comparable
+  */
+@@ -43,19 +44,18 @@ class BTree<K extends Comparable<K>> {
+     void insert(K key) {
+         if (root == null) {
+             root = new Node<>(minDegree, true);
+-            root.keys[0] = key;
+-            root.keyCount = 1;
++            root.keys.add(key);
+             return;
+         }
+ 
+         if (root.isFull()) {
+             // Root is full: grow the tree one level by splitting into a new root.
+             Node<K> newRoot = new Node<>(minDegree, false);
+-            newRoot.children[0] = root;
++            newRoot.children.add(root);
+             newRoot.splitChild(0, root);
+ 
+-            int target = newRoot.keys[0].compareTo(key) < 0 ? 1 : 0;
+-            newRoot.children[target].insertNonFull(key);
++            int target = newRoot.keys.get(0).compareTo(key) < 0 ? 1 : 0;
++            newRoot.children.get(target).insertNonFull(key);
+             root = newRoot;
+         } else {
+             root.insertNonFull(key);
+@@ -95,17 +95,14 @@ class BTree<K extends Comparable<K>> {
+ 
+         private final int minDegree;
+         private final boolean leaf;
+-        private final K[] keys;
+-        private final Node<K>[] children;
+-        private int keyCount;
++        private final List<K> keys;
++        private final List<Node<K>> children;
+ 
+-        @SuppressWarnings("unchecked")
+         Node(int minDegree, boolean leaf) {
+             this.minDegree = minDegree;
+             this.leaf = leaf;
+-            this.keys = (K[]) new Comparable[maxKeys()];
+-            this.children = (Node<K>[]) new Node[maxChildren()];
+-            this.keyCount = 0;
++            this.keys = new ArrayList<>();
++            this.children = new ArrayList<>();
+         }
+ 
+         /** Maximum number of keys a node may hold: {@code 2 * minDegree - 1}. */
+@@ -113,14 +110,9 @@ class BTree<K extends Comparable<K>> {
+             return 2 * minDegree - 1;
+         }
+ 
+-        /** Maximum number of children a node may hold: {@code 2 * minDegree}. */
+-        private int maxChildren() {
+-            return 2 * minDegree;
+-        }
+-
+         /** Reports whether this node is at key capacity and must be split. */
+         private boolean isFull() {
+-            return keyCount == maxKeys();
++            return keys.size() == maxKeys();
+         }
+ 
+         /**
+@@ -128,33 +120,27 @@ class BTree<K extends Comparable<K>> {
+          * not full (its caller guarantees space, splitting as needed).
+          */
+         void insertNonFull(K key) {
+-            int i = keyCount - 1;
++            // Find the position of the first key greater than the new key.
++            int i = keys.size() - 1;
++            while (i >= 0 && keys.get(i).compareTo(key) > 0) {
++                i--;
++            }
+ 
+             if (leaf) {
+-                // Shift larger keys right to open a slot, then drop the key in.
+-                while (i >= 0 && keys[i].compareTo(key) > 0) {
+-                    keys[i + 1] = keys[i];
+-                    i--;
+-                }
+-                keys[i + 1] = key;
+-                keyCount++;
++                // The list shifts later keys right for us.
++                keys.add(i + 1, key);
+                 return;
+             }
+ 
+-            // Find the child that should receive the key.
+-            while (i >= 0 && keys[i].compareTo(key) > 0) {
+-                i--;
+-            }
+             int childIndex = i + 1;
+-
+-            if (children[childIndex].isFull()) {
++            if (children.get(childIndex).isFull()) {
+                 // The target child is full: split it before descending.
+-                splitChild(childIndex, children[childIndex]);
+-                if (keys[childIndex].compareTo(key) < 0) {
++                splitChild(childIndex, children.get(childIndex));
++                if (keys.get(childIndex).compareTo(key) < 0) {
+                     childIndex++;
+                 }
+             }
+-            children[childIndex].insertNonFull(key);
++            children.get(childIndex).insertNonFull(key);
+         }
+ 
+         /**
+@@ -166,55 +152,49 @@ class BTree<K extends Comparable<K>> {
+          */
+         void splitChild(int index, Node<K> fullChild) {
+             Node<K> newSibling = new Node<>(minDegree, fullChild.leaf);
+-            newSibling.keyCount = minDegree - 1;
++            K median = fullChild.keys.get(minDegree - 1);
+ 
+-            // Move the upper half of the keys into the new sibling.
+-            for (int j = 0; j < minDegree - 1; j++) {
+-                newSibling.keys[j] = fullChild.keys[j + minDegree];
+-            }
+-            if (!fullChild.leaf) {
+-                for (int j = 0; j < minDegree; j++) {
+-                    newSibling.children[j] = fullChild.children[j + minDegree];
+-                }
+-            }
+-            fullChild.keyCount = minDegree - 1;
++            // Hand the upper half of the keys to the new sibling, then drop
++            // them (and the promoted median) from the original child.
++            List<K> upperKeys = fullChild.keys.subList(minDegree, fullChild.keys.size());
++            newSibling.keys.addAll(upperKeys);
++            upperKeys.clear();
++            fullChild.keys.remove(minDegree - 1);
+ 
+-            // Make room for the new sibling among this node's children.
+-            for (int j = keyCount; j > index; j--) {
+-                children[j + 1] = children[j];
++            if (!fullChild.leaf) {
++                List<Node<K>> upperChildren =
++                        fullChild.children.subList(minDegree, fullChild.children.size());
++                newSibling.children.addAll(upperChildren);
++                upperChildren.clear();
+             }
+-            children[index + 1] = newSibling;
+ 
+-            // Make room for, and store, the promoted median key.
+-            for (int j = keyCount - 1; j >= index; j--) {
+-                keys[j + 1] = keys[j];
+-            }
+-            keys[index] = fullChild.keys[minDegree - 1];
+-            keyCount++;
++            // Splice the new sibling and the promoted median into this node.
++            children.add(index + 1, newSibling);
++            keys.add(index, median);
+         }
+ 
+         /** Reports whether the key exists in the subtree rooted here. */
+         boolean contains(K key) {
+             int i = 0;
+-            while (i < keyCount && key.compareTo(keys[i]) > 0) {
++            while (i < keys.size() && key.compareTo(keys.get(i)) > 0) {
+                 i++;
+             }
+-            if (i < keyCount && key.compareTo(keys[i]) == 0) {
++            if (i < keys.size() && key.compareTo(keys.get(i)) == 0) {
+                 return true;
+             }
+-            return !leaf && children[i].contains(key);
++            return !leaf && children.get(i).contains(key);
+         }
+ 
+         /** Appends every key in this subtree to {@code out} in ascending order. */
+         void collectInOrder(List<K> out) {
+-            for (int i = 0; i < keyCount; i++) {
++            for (int i = 0; i < keys.size(); i++) {
+                 if (!leaf) {
+-                    children[i].collectInOrder(out);
++                    children.get(i).collectInOrder(out);
+                 }
+-                out.add(keys[i]);
++                out.add(keys.get(i));
+             }
+             if (!leaf) {
+-                children[keyCount].collectInOrder(out);
++                children.get(keys.size()).collectInOrder(out);
+             }
+         }
+     }

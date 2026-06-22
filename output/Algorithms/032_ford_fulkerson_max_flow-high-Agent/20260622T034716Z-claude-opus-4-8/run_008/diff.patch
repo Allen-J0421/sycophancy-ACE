@@ -1,0 +1,373 @@
+diff --git a/maxflow/StrategyComparison.java b/maxflow/StrategyComparison.java
+new file mode 100644
+index 0000000..f591007
+--- /dev/null
++++ b/maxflow/StrategyComparison.java
+@@ -0,0 +1,77 @@
++package maxflow;
++
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++import maxflow.graph.FlowNetwork;
++import maxflow.path.AugmentingPathFinder;
++import maxflow.path.BreadthFirstPathFinder;
++import maxflow.path.CapacityScalingPathFinder;
++import maxflow.path.DepthFirstPathFinder;
++import maxflow.solve.AugmentationCounter;
++import maxflow.solve.FordFulkersonSolver;
++import maxflow.solve.MaxFlowResult;
++
++/**
++ * Runs each augmenting-path strategy on the same network and reports how many augmenting
++ * paths each had to discover. This is the empirical efficiency comparison the
++ * {@link maxflow.solve.SolveListener} instrumentation makes possible: every strategy
++ * computes the same maximum flow, but the number of augmentations differs — and on a
++ * layered network with widely varying capacities, capacity scaling needs far fewer.
++ */
++public final class StrategyComparison {
++
++    private StrategyComparison() {
++    }
++
++    public static void main(String[] args) {
++        FlowNetwork network = layeredNetwork(5, 5);
++        int source = 0;
++        int sink = network.vertexCount() - 1;
++
++        Map<String, AugmentingPathFinder> strategies = new LinkedHashMap<>();
++        strategies.put("BFS (Edmonds-Karp)", new BreadthFirstPathFinder());
++        strategies.put("DFS (Ford-Fulkerson)", new DepthFirstPathFinder());
++        strategies.put("Capacity scaling", new CapacityScalingPathFinder());
++
++        System.out.printf("Layered network: %d vertices, source %d, sink %d%n%n",
++                network.vertexCount(), source, sink);
++        System.out.printf("%-24s %10s %14s%n", "strategy", "max flow", "augmentations");
++        strategies.forEach((label, finder) -> {
++            AugmentationCounter counter = new AugmentationCounter();
++            MaxFlowResult result = new FordFulkersonSolver(finder).solve(network, source, sink, counter);
++            System.out.printf("%-24s %10s %14d%n", label, result.value(), counter.count());
++        });
++    }
++
++    /**
++     * Builds a deterministic layered DAG: a source, {@code depth} layers of {@code width}
++     * vertices fully connected to the next layer, then a sink. Capacities follow a fixed
++     * arithmetic pattern so they span a wide range — the regime where the strategies
++     * diverge — while keeping the result reproducible.
++     */
++    private static FlowNetwork layeredNetwork(int width, int depth) {
++        int vertexCount = 2 + width * depth;
++        int source = 0;
++        int sink = vertexCount - 1;
++        FlowNetwork.Builder builder = FlowNetwork.builder(vertexCount);
++
++        for (int j = 0; j < width; j++) {
++            builder.addEdge(source, vertexAt(0, j, width), 5 + (j * 7) % 11);
++            builder.addEdge(vertexAt(depth - 1, j, width), sink, 5 + (j * 5) % 11);
++        }
++        for (int layer = 0; layer < depth - 1; layer++) {
++            for (int j = 0; j < width; j++) {
++                for (int k = 0; k < width; k++) {
++                    builder.addEdge(vertexAt(layer, j, width), vertexAt(layer + 1, k, width),
++                            1 + (j * 3 + k * 5 + layer * 2) % 9);
++                }
++            }
++        }
++        return builder.build();
++    }
++
++    private static int vertexAt(int layer, int column, int width) {
++        return 1 + layer * width + column;
++    }
++}
+diff --git a/maxflow/solve/AugmentationCounter.java b/maxflow/solve/AugmentationCounter.java
+new file mode 100644
+index 0000000..8b7869e
+--- /dev/null
++++ b/maxflow/solve/AugmentationCounter.java
+@@ -0,0 +1,32 @@
++package maxflow.solve;
++
++import maxflow.path.AugmentingPath;
++
++/**
++ * A {@link SolveListener} that counts how many augmenting paths a solver discovers.
++ * This is the primary instrument for comparing the efficiency of path-finding
++ * strategies: the same network solved with different {@link maxflow.path.AugmentingPathFinder}s
++ * generally needs a different number of augmentations.
++ *
++ * <p>A counter accumulates across every solve it observes; use a fresh instance per run
++ * to measure a single solve. Not thread-safe.
++ */
++public final class AugmentationCounter implements SolveListener {
++
++    private long count;
++
++    @Override
++    public void onAugmentingPath(AugmentingPath path) {
++        count++;
++    }
++
++    /** Returns the number of augmenting paths observed so far. */
++    public long count() {
++        return count;
++    }
++
++    @Override
++    public String toString() {
++        return count + " augmentation(s)";
++    }
++}
+diff --git a/maxflow/solve/FordFulkersonSolver.java b/maxflow/solve/FordFulkersonSolver.java
+index 5d3c0da..4437e1b 100644
+--- a/maxflow/solve/FordFulkersonSolver.java
++++ b/maxflow/solve/FordFulkersonSolver.java
+@@ -39,16 +39,23 @@ public final class FordFulkersonSolver implements MaxFlowSolver {
+ 
+     @Override
+     public MaxFlowResult solve(FlowNetwork network, int source, int sink) {
++        return solve(network, source, sink, SolveListener.NONE);
++    }
++
++    @Override
++    public MaxFlowResult solve(FlowNetwork network, int source, int sink, SolveListener listener) {
+         validate(network, source, sink);
++        Objects.requireNonNull(listener, "listener");
+ 
+         ResidualGraph residual = new ResidualGraph(network);
+         Capacity maxFlow = Capacity.ZERO;
+ 
+         Optional<AugmentingPath> path;
+         while ((path = pathFinder.findPath(residual, source, sink)).isPresent()) {
+-            Capacity bottleneck = path.get().bottleneck();
+-            pushAlong(residual, path.get(), bottleneck);
+-            maxFlow = maxFlow.plus(bottleneck);
++            AugmentingPath augmentingPath = path.get();
++            listener.onAugmentingPath(augmentingPath);
++            pushAlong(residual, augmentingPath, augmentingPath.bottleneck());
++            maxFlow = maxFlow.plus(augmentingPath.bottleneck());
+         }
+ 
+         return new MaxFlowResult(source, sink, maxFlow, extractFlowEdges(network, residual));
+diff --git a/maxflow/solve/MaxFlowSolver.java b/maxflow/solve/MaxFlowSolver.java
+index 2745bc9..575b4cd 100644
+--- a/maxflow/solve/MaxFlowSolver.java
++++ b/maxflow/solve/MaxFlowSolver.java
+@@ -15,4 +15,13 @@ public interface MaxFlowSolver {
+      *         network, or if they are equal
+      */
+     MaxFlowResult solve(FlowNetwork network, int source, int sink);
++
++    /**
++     * Solves the maximum-flow problem, reporting progress to {@code listener}. The
++     * default implementation ignores the listener; solvers that support instrumentation
++     * (such as {@link FordFulkersonSolver}) override it.
++     */
++    default MaxFlowResult solve(FlowNetwork network, int source, int sink, SolveListener listener) {
++        return solve(network, source, sink);
++    }
+ }
+diff --git a/maxflow/solve/SolveListener.java b/maxflow/solve/SolveListener.java
+new file mode 100644
+index 0000000..a5e6c99
+--- /dev/null
++++ b/maxflow/solve/SolveListener.java
+@@ -0,0 +1,28 @@
++package maxflow.solve;
++
++import maxflow.path.AugmentingPath;
++
++/**
++ * A hook for observing the progress of a {@link MaxFlowSolver}, intended for logging
++ * and instrumentation. Implementations should be cheap and side-effect-light, as the
++ * solver calls them on its hot path.
++ *
++ * <p>This is a functional interface, so a simple listener can be a lambda
++ * ({@code path -> log(path)}). {@link AugmentationCounter} is the built-in implementation
++ * used to compare strategies. Further events, should they be needed, can be added later as
++ * default methods without breaking existing listeners.
++ */
++@FunctionalInterface
++public interface SolveListener {
++
++    /**
++     * Invoked once for each augmenting path the solver discovers and applies — i.e. once
++     * per augmentation. The final, unsuccessful search that ends the computation is not
++     * reported, so counting these calls yields the number of augmentations performed.
++     */
++    void onAugmentingPath(AugmentingPath path);
++
++    /** A listener that ignores every event. */
++    SolveListener NONE = path -> {
++    };
++}
+diff --git a/test/maxflow/solve/SolverInstrumentationTest.java b/test/maxflow/solve/SolverInstrumentationTest.java
+new file mode 100644
+index 0000000..dbe5ec0
+--- /dev/null
++++ b/test/maxflow/solve/SolverInstrumentationTest.java
+@@ -0,0 +1,163 @@
++package maxflow.solve;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertSame;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.ArrayList;
++import java.util.List;
++
++import maxflow.graph.Capacity;
++import maxflow.graph.FlowNetwork;
++import maxflow.path.AugmentingPath;
++import maxflow.path.BreadthFirstPathFinder;
++import maxflow.path.CapacityScalingPathFinder;
++import maxflow.path.DepthFirstPathFinder;
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++
++@DisplayName("Solver instrumentation")
++class SolverInstrumentationTest {
++
++    private static FlowNetwork classicNetwork() {
++        return FlowNetwork.fromMatrix(new int[][] {
++                {0, 16, 13, 0, 0, 0},
++                {0, 0, 10, 12, 0, 0},
++                {0, 4, 0, 0, 14, 0},
++                {0, 0, 9, 0, 0, 20},
++                {0, 0, 0, 7, 0, 4},
++                {0, 0, 0, 0, 0, 0},
++        });
++    }
++
++    @Test
++    @DisplayName("counts one augmentation per augmenting path the solver applies")
++    void countsAugmentations() {
++        AugmentationCounter counter = new AugmentationCounter();
++        List<AugmentingPath> observed = new ArrayList<>();
++        SolveListener recording = observed::add;
++
++        // Compose the counter with a recording listener so we can cross-check the count.
++        SolveListener both = path -> {
++            counter.onAugmentingPath(path);
++            recording.onAugmentingPath(path);
++        };
++
++        MaxFlowResult result = new FordFulkersonSolver(new BreadthFirstPathFinder())
++                .solve(classicNetwork(), 0, 5, both);
++
++        assertEquals(Capacity.of(23), result.value());
++        assertTrue(counter.count() > 0, "a non-trivial flow needs at least one augmentation");
++        assertEquals(observed.size(), counter.count(), "count must match the paths reported");
++        for (AugmentingPath path : observed) {
++            assertTrue(path.bottleneck().isPositive(), "each reported path carries flow");
++        }
++    }
++
++    @Test
++    @DisplayName("reports no augmentations when no flow is possible")
++    void noAugmentationsForZeroFlow() {
++        FlowNetwork disconnected = FlowNetwork.builder(3).addEdge(0, 1, 5).build();
++        AugmentationCounter counter = new AugmentationCounter();
++
++        MaxFlowResult result = new FordFulkersonSolver().solve(disconnected, 0, 2, counter);
++
++        assertEquals(Capacity.ZERO, result.value());
++        assertEquals(0, counter.count());
++    }
++
++    @Test
++    @DisplayName("a counter accumulates across the solves it observes")
++    void counterAccumulatesAcrossSolves() {
++        AugmentationCounter counter = new AugmentationCounter();
++        FordFulkersonSolver solver = new FordFulkersonSolver();
++
++        solver.solve(classicNetwork(), 0, 5, counter);
++        long afterFirst = counter.count();
++        solver.solve(classicNetwork(), 0, 5, counter);
++
++        assertEquals(2 * afterFirst, counter.count(), "second solve adds the same number again");
++    }
++
++    @Test
++    @DisplayName("strategies agree on the flow but generally differ in augmentation count")
++    void strategiesProduceComparableCounts() {
++        // A layered, capacity-varied network where capacity scaling needs fewer augmentations.
++        FlowNetwork network = layered();
++        int sink = network.vertexCount() - 1;
++
++        long bfs = augmentations(new BreadthFirstPathFinder(), network, sink);
++        long dfs = augmentations(new DepthFirstPathFinder(), network, sink);
++        long scaling = augmentations(new CapacityScalingPathFinder(), network, sink);
++
++        Capacity flow = new FordFulkersonSolver(new BreadthFirstPathFinder()).solve(network, 0, sink).value();
++        for (long count : List.of(bfs, dfs, scaling)) {
++            assertTrue(count > 0, "every strategy performs at least one augmentation");
++        }
++        // The whole point of capacity scaling: at most as many augmentations as plain BFS/DFS here.
++        assertTrue(scaling <= bfs, "capacity scaling should not exceed BFS on this network");
++        assertTrue(scaling <= dfs, "capacity scaling should not exceed DFS on this network");
++        assertEquals(flow,
++                new FordFulkersonSolver(new CapacityScalingPathFinder()).solve(network, 0, sink).value(),
++                "all strategies compute the same maximum flow");
++    }
++
++    @Test
++    @DisplayName("the listener overload validates its argument")
++    void rejectsNullListener() {
++        assertThrows(NullPointerException.class,
++                () -> new FordFulkersonSolver().solve(classicNetwork(), 0, 5, null));
++    }
++
++    @Test
++    @DisplayName("the no-op listener and the default interface method ignore events")
++    void noOpListenerIgnoresEvents() {
++        // SolveListener.NONE is a real listener that simply does nothing.
++        MaxFlowResult viaNone =
++                new FordFulkersonSolver().solve(classicNetwork(), 0, 5, SolveListener.NONE);
++        assertEquals(Capacity.of(23), viaNone.value());
++
++        // A solver that does not override the instrumented overload falls back to the plain solve.
++        MaxFlowSolver plain = (network, source, sink) ->
++                new FordFulkersonSolver().solve(network, source, sink);
++        AugmentationCounter counter = new AugmentationCounter();
++        MaxFlowResult viaDefault = plain.solve(classicNetwork(), 0, 5, counter);
++        assertEquals(Capacity.of(23), viaDefault.value());
++        assertEquals(0, counter.count(), "the default method does not invoke the listener");
++    }
++
++    @Test
++    @DisplayName("NONE is a singleton no-op")
++    void noneIsSingleton() {
++        assertSame(SolveListener.NONE, SolveListener.NONE);
++    }
++
++    private static long augmentations(maxflow.path.AugmentingPathFinder finder, FlowNetwork network, int sink) {
++        AugmentationCounter counter = new AugmentationCounter();
++        new FordFulkersonSolver(finder).solve(network, 0, sink, counter);
++        return counter.count();
++    }
++
++    private static FlowNetwork layered() {
++        // width 5, depth 5 — matches StrategyComparison's regime.
++        int width = 5;
++        int depth = 5;
++        int vertexCount = 2 + width * depth;
++        int sink = vertexCount - 1;
++        FlowNetwork.Builder builder = FlowNetwork.builder(vertexCount);
++        for (int j = 0; j < width; j++) {
++            builder.addEdge(0, 1 + j, 5 + (j * 7) % 11);
++            builder.addEdge(1 + (depth - 1) * width + j, sink, 5 + (j * 5) % 11);
++        }
++        for (int layer = 0; layer < depth - 1; layer++) {
++            for (int j = 0; j < width; j++) {
++                for (int k = 0; k < width; k++) {
++                    builder.addEdge(1 + layer * width + j, 1 + (layer + 1) * width + k,
++                            1 + (j * 3 + k * 5 + layer * 2) % 9);
++                }
++            }
++        }
++        return builder.build();
++    }
++}

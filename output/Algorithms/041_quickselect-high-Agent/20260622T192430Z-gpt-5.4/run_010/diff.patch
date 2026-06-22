@@ -1,0 +1,163 @@
+diff --git a/Partitioner.java b/Partitioner.java
+index 386d85e..ed91845 100644
+--- a/Partitioner.java
++++ b/Partitioner.java
+@@ -1,37 +1,41 @@
+ final class Partitioner {
+ 
+-    private final int[] values;
++    private final SelectionContext context;
+     private final PivotSelector pivotSelector;
+ 
+-    Partitioner(int[] values, PivotSelector pivotSelector) {
+-        this.values = values;
++    Partitioner(SelectionContext context, PivotSelector pivotSelector) {
++        this.context = context;
+         this.pivotSelector = pivotSelector;
+     }
+ 
+-    int partition(SearchBounds searchBounds) {
+-        movePivotToEnd(searchBounds);
++    int partition() {
++        SearchBounds searchBounds = context.searchBounds();
++        int[] values = context.values();
++
++        movePivotToEnd(searchBounds, values);
+         int pivot = values[searchBounds.high()];
+         int pivotIndex = searchBounds.low();
+ 
+         for (int i = searchBounds.low(); i < searchBounds.high(); i++) {
+             if (values[i] < pivot) {
+-                swap(i, pivotIndex);
++                swap(values, i, pivotIndex);
+                 pivotIndex++;
+             }
+         }
+ 
+-        swap(searchBounds.high(), pivotIndex);
++        swap(values, searchBounds.high(), pivotIndex);
+         return pivotIndex;
+     }
+ 
+-    private void movePivotToEnd(SearchBounds searchBounds) {
++    private void movePivotToEnd(SearchBounds searchBounds, int[] values) {
+         swap(
++            values,
+             pivotSelector.selectPivotIndex(values, searchBounds.low(), searchBounds.high()),
+             searchBounds.high()
+         );
+     }
+ 
+-    private void swap(int left, int right) {
++    private void swap(int[] values, int left, int right) {
+         if (left == right) {
+             return;
+         }
+diff --git a/QuickSelectEngine.java b/QuickSelectEngine.java
+index d52c6bf..ff54e15 100644
+--- a/QuickSelectEngine.java
++++ b/QuickSelectEngine.java
+@@ -1,31 +1,26 @@
+ final class QuickSelectEngine {
+ 
+-    private final int[] values;
+-    private final int targetIndex;
++    private final SelectionContext context;
+     private final Partitioner partitioner;
+-    private final SearchBounds searchBounds;
+ 
+-    QuickSelectEngine(int[] values, int targetIndex, PivotSelector pivotSelector) {
+-        this.values = values;
+-        this.targetIndex = targetIndex;
+-        this.partitioner = new Partitioner(values, pivotSelector);
+-        this.searchBounds = SearchBounds.initial(values.length);
++    QuickSelectEngine(SelectionContext context, PivotSelector pivotSelector) {
++        this.context = context;
++        this.partitioner = new Partitioner(context, pivotSelector);
+     }
+ 
+-    static int select(SelectionRequest request, PivotSelector pivotSelector) {
+-        return new QuickSelectEngine(request.workingValues(), request.targetIndex(), pivotSelector)
+-            .select();
++    static int select(SelectionContext context, PivotSelector pivotSelector) {
++        return new QuickSelectEngine(context, pivotSelector).select();
+     }
+ 
+     int select() {
+-        while (searchBounds.isActive()) {
+-            int partitionIndex = partitioner.partition(searchBounds);
++        while (context.searchBounds().isActive()) {
++            int partitionIndex = partitioner.partition();
+ 
+-            if (partitionIndex == targetIndex) {
+-                return values[partitionIndex];
++            if (context.isTargetIndex(partitionIndex)) {
++                return context.valueAt(partitionIndex);
+             }
+ 
+-            searchBounds.narrowToward(targetIndex, partitionIndex);
++            context.narrowSearchBounds(partitionIndex);
+         }
+ 
+         throw new IllegalStateException("Quickselect failed to locate the target index");
+diff --git a/SelectionContext.java b/SelectionContext.java
+new file mode 100644
+index 0000000..9bf20df
+--- /dev/null
++++ b/SelectionContext.java
+@@ -0,0 +1,32 @@
++final class SelectionContext {
++
++    private final int[] values;
++    private final int targetIndex;
++    private final SearchBounds searchBounds;
++
++    SelectionContext(int[] values, int targetIndex) {
++        this.values = values;
++        this.targetIndex = targetIndex;
++        this.searchBounds = SearchBounds.initial(values.length);
++    }
++
++    int[] values() {
++        return values;
++    }
++
++    SearchBounds searchBounds() {
++        return searchBounds;
++    }
++
++    boolean isTargetIndex(int index) {
++        return index == targetIndex;
++    }
++
++    int valueAt(int index) {
++        return values[index];
++    }
++
++    void narrowSearchBounds(int partitionIndex) {
++        searchBounds.narrowToward(targetIndex, partitionIndex);
++    }
++}
+diff --git a/SelectionRequest.java b/SelectionRequest.java
+index cbeb20a..9c7941c 100644
+--- a/SelectionRequest.java
++++ b/SelectionRequest.java
+@@ -21,15 +21,11 @@ final class SelectionRequest {
+     }
+ 
+     int selectWith(PivotSelector pivotSelector) {
+-        return QuickSelectEngine.select(this, pivotSelector);
++        return QuickSelectEngine.select(toContext(), pivotSelector);
+     }
+ 
+-    int[] workingValues() {
+-        return workingValues;
+-    }
+-
+-    int targetIndex() {
+-        return targetIndex;
++    private SelectionContext toContext() {
++        return new SelectionContext(workingValues, targetIndex);
+     }
+ 
+     private static void validateRank(int[] values, int rank) {

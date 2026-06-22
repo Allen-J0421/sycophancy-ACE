@@ -1,0 +1,208 @@
+diff --git a/maxflow/path/CapacityScalingPathFinder.java b/maxflow/path/CapacityScalingPathFinder.java
+new file mode 100644
+index 0000000..e43532d
+--- /dev/null
++++ b/maxflow/path/CapacityScalingPathFinder.java
+@@ -0,0 +1,59 @@
++package maxflow.path;
++
++import java.util.Optional;
++
++import maxflow.graph.ResidualGraph;
++
++/**
++ * Finds augmenting paths by capacity scaling: it prefers paths made of high-residual
++ * edges, which lets each augmentation move a lot of flow and keeps the number of
++ * augmentations low on networks whose capacities span a wide range.
++ *
++ * <p>For a threshold {@code Δ} that steps down through the powers of two, the finder
++ * looks for a source→sink path using only edges whose residual capacity is at least
++ * {@code Δ}. It returns a path from the highest {@code Δ} band that still connects the
++ * two — so the path's bottleneck is at least {@code Δ} — and only falls back to thinner
++ * edges once the fat ones are exhausted. At {@code Δ == 1} the admitted sub-graph is the
++ * full residual graph, so the finder reports no path exactly when none exists.
++ *
++ * <p>Unlike the textbook formulation, which carries {@code Δ} as mutable state that
++ * decreases monotonically across the whole computation, this finder is stateless: it
++ * re-derives the starting {@code Δ} on each call. That keeps it thread-safe and freely
++ * reusable like the other strategies, at the cost of re-scanning the upper bands — a
++ * minor constant factor, not a change in the paths chosen.
++ */
++public final class CapacityScalingPathFinder implements AugmentingPathFinder {
++
++    @Override
++    public Optional<AugmentingPath> findPath(ResidualGraph residual, int source, int sink) {
++        for (int threshold = Integer.highestOneBit(maxResidualCapacity(residual));
++                threshold >= 1; threshold >>= 1) {
++            int delta = threshold;
++            Optional<AugmentingPath> path =
++                    GraphSearchPathFinder.search(residual, source, sink, Frontier.fifo(),
++                            residualCapacity -> residualCapacity >= delta);
++            if (path.isPresent()) {
++                return path;
++            }
++        }
++        return Optional.empty();
++    }
++
++    /** Returns the largest residual capacity of any edge, or zero if there are none. */
++    private static int maxResidualCapacity(ResidualGraph residual) {
++        int[] max = {0};
++        for (int v = 0; v < residual.vertexCount(); v++) {
++            residual.forEachResidualEdge(v, (to, residualCapacity) -> {
++                if (residualCapacity > max[0]) {
++                    max[0] = residualCapacity;
++                }
++            });
++        }
++        return max[0];
++    }
++
++    @Override
++    public String name() {
++        return "capacity-scaling";
++    }
++}
+diff --git a/maxflow/path/GraphSearchPathFinder.java b/maxflow/path/GraphSearchPathFinder.java
+index b5908f5..d27f440 100644
+--- a/maxflow/path/GraphSearchPathFinder.java
++++ b/maxflow/path/GraphSearchPathFinder.java
+@@ -8,6 +8,7 @@ import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.List;
+ import java.util.Optional;
++import java.util.function.IntPredicate;
+ 
+ /**
+  * Template for augmenting-path finders that explore the residual graph with a
+@@ -22,12 +23,22 @@ abstract class GraphSearchPathFinder implements AugmentingPathFinder {
+ 
+     @Override
+     public final Optional<AugmentingPath> findPath(ResidualGraph residual, int source, int sink) {
++        return search(residual, source, sink, newFrontier(), residualCapacity -> true);
++    }
++
++    /**
++     * Runs one single-source traversal, following only residual edges whose capacity
++     * is {@code admit}ted. Shared by the breadth-/depth-first finders (which admit every
++     * positive-residual edge) and by {@link CapacityScalingPathFinder} (which admits only
++     * edges meeting the current scaling threshold).
++     */
++    static Optional<AugmentingPath> search(ResidualGraph residual, int source, int sink,
++                                           Frontier frontier, IntPredicate admit) {
+         int n = residual.vertexCount();
+         boolean[] discovered = new boolean[n];
+         int[] parent = new int[n];
+         Arrays.fill(parent, -1);
+ 
+-        Frontier frontier = newFrontier();
+         frontier.add(source);
+         discovered[source] = true;
+ 
+@@ -37,7 +48,7 @@ abstract class GraphSearchPathFinder implements AugmentingPathFinder {
+                 return Optional.of(reconstructPath(residual, parent, source, sink));
+             }
+             residual.forEachResidualEdge(u, (v, residualCapacity) -> {
+-                if (!discovered[v]) {
++                if (!discovered[v] && admit.test(residualCapacity)) {
+                     discovered[v] = true;
+                     parent[v] = u;
+                     frontier.add(v);
+diff --git a/test/maxflow/path/CapacityScalingPathFinderTest.java b/test/maxflow/path/CapacityScalingPathFinderTest.java
+new file mode 100644
+index 0000000..829039e
+--- /dev/null
++++ b/test/maxflow/path/CapacityScalingPathFinderTest.java
+@@ -0,0 +1,70 @@
++package maxflow.path;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.List;
++
++import maxflow.graph.Capacity;
++import maxflow.graph.FlowNetwork;
++import maxflow.graph.ResidualGraph;
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++
++@DisplayName("CapacityScalingPathFinder")
++class CapacityScalingPathFinderTest {
++
++    private final CapacityScalingPathFinder finder = new CapacityScalingPathFinder();
++
++    @Test
++    @DisplayName("prefers the high-capacity path when several routes exist")
++    void prefersHighCapacityPath() {
++        // A fat route 0->1->3 (capacity 100) competes with a thin 0->2->3 (capacity 1).
++        FlowNetwork network = FlowNetwork.fromMatrix(new int[][] {
++                {0, 100, 1, 0},
++                {0, 0, 0, 100},
++                {0, 0, 0, 1},
++                {0, 0, 0, 0},
++        });
++
++        AugmentingPath path = finder.findPath(new ResidualGraph(network), 0, 3).orElseThrow();
++
++        assertEquals(List.of(0, 1, 3), path.vertices(), "should route through the fat edges");
++        assertEquals(Capacity.of(100), path.bottleneck());
++    }
++
++    @Test
++    @DisplayName("falls back to thinner edges once the fat ones are exhausted")
++    void fallsBackToThinEdges() {
++        // The only route is thin; capacity scaling must still find it after Δ shrinks.
++        FlowNetwork network = FlowNetwork.builder(3)
++                .addEdge(0, 1, 1)
++                .addEdge(1, 2, 1)
++                .build();
++
++        AugmentingPath path = finder.findPath(new ResidualGraph(network), 0, 2).orElseThrow();
++
++        assertEquals(List.of(0, 1, 2), path.vertices());
++        assertEquals(Capacity.of(1), path.bottleneck());
++    }
++
++    @Test
++    @DisplayName("returns empty when the sink is unreachable")
++    void emptyWhenUnreachable() {
++        FlowNetwork network = FlowNetwork.builder(3).addEdge(0, 1, 5).build();
++        assertTrue(finder.findPath(new ResidualGraph(network), 0, 2).isEmpty());
++    }
++
++    @Test
++    @DisplayName("returns empty for a saturated (no residual) graph")
++    void emptyWhenSaturated() {
++        FlowNetwork network = FlowNetwork.builder(2).build();
++        assertTrue(finder.findPath(new ResidualGraph(network), 0, 1).isEmpty());
++    }
++
++    @Test
++    @DisplayName("exposes a human-readable strategy name")
++    void exposesName() {
++        assertEquals("capacity-scaling", finder.name());
++    }
++}
+diff --git a/test/maxflow/solve/FordFulkersonSolverTest.java b/test/maxflow/solve/FordFulkersonSolverTest.java
+index 58aab9c..d34272f 100644
+--- a/test/maxflow/solve/FordFulkersonSolverTest.java
++++ b/test/maxflow/solve/FordFulkersonSolverTest.java
+@@ -11,6 +11,7 @@ import maxflow.graph.Capacity;
+ import maxflow.graph.Edge;
+ import maxflow.graph.FlowNetwork;
+ import maxflow.path.BreadthFirstPathFinder;
++import maxflow.path.CapacityScalingPathFinder;
+ import maxflow.path.DepthFirstPathFinder;
+ import org.junit.jupiter.api.DisplayName;
+ import org.junit.jupiter.api.Test;
+@@ -33,7 +34,8 @@ class FordFulkersonSolverTest {
+     private static List<MaxFlowSolver> strategies() {
+         return List.of(
+                 new FordFulkersonSolver(new BreadthFirstPathFinder()),
+-                new FordFulkersonSolver(new DepthFirstPathFinder()));
++                new FordFulkersonSolver(new DepthFirstPathFinder()),
++                new FordFulkersonSolver(new CapacityScalingPathFinder()));
+     }
+ 
+     @Test

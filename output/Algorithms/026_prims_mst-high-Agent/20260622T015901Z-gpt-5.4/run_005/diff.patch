@@ -1,0 +1,190 @@
+diff --git a/MstResult.java b/MstResult.java
+index f8c458c..60b55c3 100644
+--- a/MstResult.java
++++ b/MstResult.java
+@@ -1,7 +1,19 @@
+ import java.util.List;
+ 
+-record MstResult(List<Edge> edges) {
++record MstResult(List<Edge> edges, int totalWeight) {
+     MstResult {
+         edges = List.copyOf(edges);
+     }
++
++    static MstResult fromEdges(List<Edge> edges) {
++        return new MstResult(edges, calculateTotalWeight(edges));
++    }
++
++    private static int calculateTotalWeight(List<Edge> edges) {
++        int totalWeight = 0;
++        for (Edge edge : edges) {
++            totalWeight += edge.weight();
++        }
++        return totalWeight;
++    }
+ }
+diff --git a/PrimVertexState.java b/PrimVertexState.java
+new file mode 100644
+index 0000000..7101796
+--- /dev/null
++++ b/PrimVertexState.java
+@@ -0,0 +1,65 @@
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++
++final class PrimVertexState {
++    private static final int NO_PARENT = -1;
++
++    private final int[] parentByVertex;
++    private final int[] bestWeightByVertex;
++    private final boolean[] includedVertices;
++
++    PrimVertexState(int vertexCount, int startVertex) {
++        parentByVertex = new int[vertexCount];
++        bestWeightByVertex = new int[vertexCount];
++        includedVertices = new boolean[vertexCount];
++
++        Arrays.fill(parentByVertex, NO_PARENT);
++        Arrays.fill(bestWeightByVertex, Integer.MAX_VALUE);
++        bestWeightByVertex[startVertex] = 0;
++    }
++
++    int nextVertexToInclude() {
++        int lightestWeight = Integer.MAX_VALUE;
++        int selectedVertex = -1;
++
++        for (int vertex = 0; vertex < includedVertices.length; vertex++) {
++            if (!includedVertices[vertex] && bestWeightByVertex[vertex] < lightestWeight) {
++                lightestWeight = bestWeightByVertex[vertex];
++                selectedVertex = vertex;
++            }
++        }
++
++        return selectedVertex;
++    }
++
++    void include(int vertex) {
++        includedVertices[vertex] = true;
++    }
++
++    boolean isIncluded(int vertex) {
++        return includedVertices[vertex];
++    }
++
++    void considerEdge(int fromVertex, int toVertex, int weight) {
++        if (weight < bestWeightByVertex[toVertex]) {
++            parentByVertex[toVertex] = fromVertex;
++            bestWeightByVertex[toVertex] = weight;
++        }
++    }
++
++    MstResult buildResult() {
++        List<Edge> edges = new ArrayList<>();
++
++        for (int vertex = 1; vertex < parentByVertex.length; vertex++) {
++            int parentVertex = parentByVertex[vertex];
++            if (parentVertex == NO_PARENT) {
++                throw new IllegalStateException("Graph must be connected.");
++            }
++
++            edges.add(new Edge(parentVertex, vertex, bestWeightByVertex[vertex]));
++        }
++
++        return MstResult.fromEdges(edges);
++    }
++}
+diff --git a/PrimsMinimumSpanningTree.java b/PrimsMinimumSpanningTree.java
+index 42b73d3..c2425d7 100644
+--- a/PrimsMinimumSpanningTree.java
++++ b/PrimsMinimumSpanningTree.java
+@@ -1,78 +1,31 @@
+-import java.util.ArrayList;
+-import java.util.Arrays;
+-import java.util.List;
+-
+ final class PrimsMinimumSpanningTree implements MinimumSpanningTreeAlgorithm {
++    private static final int START_VERTEX = 0;
++
+     @Override
+     public MstResult compute(Graph graph) {
+-        int vertexCount = graph.vertexCount();
+-        int[] parentByVertex = new int[vertexCount];
+-        int[] bestWeightByVertex = new int[vertexCount];
+-        boolean[] includedInTree = new boolean[vertexCount];
+-
+-        Arrays.fill(parentByVertex, -1);
+-        Arrays.fill(bestWeightByVertex, Integer.MAX_VALUE);
+-        bestWeightByVertex[0] = 0;
++        PrimVertexState vertexState = new PrimVertexState(graph.vertexCount(), START_VERTEX);
+ 
+-        for (int visitedVertices = 0; visitedVertices < vertexCount; visitedVertices++) {
+-            int currentVertex = selectNextVertex(bestWeightByVertex, includedInTree);
++        for (int visitedVertices = 0; visitedVertices < graph.vertexCount(); visitedVertices++) {
++            int currentVertex = vertexState.nextVertexToInclude();
+             if (currentVertex == -1) {
+                 throw new IllegalStateException("Graph must be connected.");
+             }
+ 
+-            includedInTree[currentVertex] = true;
+-            relaxAdjacentVertices(graph, currentVertex, parentByVertex, bestWeightByVertex, includedInTree);
+-        }
+-
+-        return buildResult(parentByVertex, bestWeightByVertex);
+-    }
+-
+-    private static int selectNextVertex(int[] bestWeightByVertex, boolean[] includedInTree) {
+-        int lightestWeight = Integer.MAX_VALUE;
+-        int selectedVertex = -1;
+-
+-        for (int vertex = 0; vertex < includedInTree.length; vertex++) {
+-            if (!includedInTree[vertex] && bestWeightByVertex[vertex] < lightestWeight) {
+-                lightestWeight = bestWeightByVertex[vertex];
+-                selectedVertex = vertex;
+-            }
++            vertexState.include(currentVertex);
++            relaxAdjacentVertices(graph, currentVertex, vertexState);
+         }
+ 
+-        return selectedVertex;
++        return vertexState.buildResult();
+     }
+ 
+-    private static void relaxAdjacentVertices(
+-            Graph graph,
+-            int currentVertex,
+-            int[] parentByVertex,
+-            int[] bestWeightByVertex,
+-            boolean[] includedInTree) {
++    private static void relaxAdjacentVertices(Graph graph, int currentVertex, PrimVertexState vertexState) {
+         for (Neighbor neighbor : graph.neighborsOf(currentVertex)) {
+             int candidateVertex = neighbor.vertex();
+-            if (includedInTree[candidateVertex]) {
++            if (vertexState.isIncluded(candidateVertex)) {
+                 continue;
+             }
+ 
+-            int candidateWeight = neighbor.weight();
+-            if (candidateWeight < bestWeightByVertex[candidateVertex]) {
+-                parentByVertex[candidateVertex] = currentVertex;
+-                bestWeightByVertex[candidateVertex] = candidateWeight;
+-            }
++            vertexState.considerEdge(currentVertex, candidateVertex, neighbor.weight());
+         }
+     }
+-
+-    private static MstResult buildResult(int[] parentByVertex, int[] bestWeightByVertex) {
+-        List<Edge> edges = new ArrayList<>();
+-
+-        for (int vertex = 1; vertex < parentByVertex.length; vertex++) {
+-            int parentVertex = parentByVertex[vertex];
+-            if (parentVertex == -1) {
+-                throw new IllegalStateException("Graph must be connected.");
+-            }
+-
+-            edges.add(new Edge(parentVertex, vertex, bestWeightByVertex[vertex]));
+-        }
+-
+-        return new MstResult(edges);
+-    }
+ }

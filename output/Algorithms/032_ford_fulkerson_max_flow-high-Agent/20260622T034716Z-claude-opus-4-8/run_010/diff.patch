@@ -1,0 +1,474 @@
+diff --git a/maxflow/FordFulkersonDemo.java b/maxflow/FordFulkersonDemo.java
+index 1e7e449..fcd2ad6 100644
+--- a/maxflow/FordFulkersonDemo.java
++++ b/maxflow/FordFulkersonDemo.java
+@@ -3,6 +3,7 @@ package maxflow;
+ import maxflow.graph.Edge;
+ import maxflow.graph.FlowNetwork;
+ import maxflow.solve.FordFulkersonSolver;
++import maxflow.solve.MaxFlowProblem;
+ import maxflow.solve.MaxFlowResult;
+ import maxflow.solve.MaxFlowSolver;
+ import maxflow.solve.MinCut;
+@@ -27,11 +28,10 @@ public final class FordFulkersonDemo {
+                 { 0, 0, 0, 0, 0, 0 },
+         });
+ 
+-        int source = 0;
+-        int sink = 5;
++        MaxFlowProblem problem = new MaxFlowProblem(network, 0, 5);
+ 
+         MaxFlowSolver solver = new FordFulkersonSolver();
+-        MaxFlowResult result = solver.solve(network, source, sink);
++        MaxFlowResult result = solver.solve(problem);
+ 
+         System.out.println("The maximum possible flow is " + result.value());
+         System.out.println("Flow per edge:");
+diff --git a/maxflow/StrategyComparison.java b/maxflow/StrategyComparison.java
+index f591007..ebcc194 100644
+--- a/maxflow/StrategyComparison.java
++++ b/maxflow/StrategyComparison.java
+@@ -10,6 +10,7 @@ import maxflow.path.CapacityScalingPathFinder;
+ import maxflow.path.DepthFirstPathFinder;
+ import maxflow.solve.AugmentationCounter;
+ import maxflow.solve.FordFulkersonSolver;
++import maxflow.solve.MaxFlowProblem;
+ import maxflow.solve.MaxFlowResult;
+ 
+ /**
+@@ -26,8 +27,7 @@ public final class StrategyComparison {
+ 
+     public static void main(String[] args) {
+         FlowNetwork network = layeredNetwork(5, 5);
+-        int source = 0;
+-        int sink = network.vertexCount() - 1;
++        MaxFlowProblem problem = new MaxFlowProblem(network, 0, network.vertexCount() - 1);
+ 
+         Map<String, AugmentingPathFinder> strategies = new LinkedHashMap<>();
+         strategies.put("BFS (Edmonds-Karp)", new BreadthFirstPathFinder());
+@@ -35,11 +35,11 @@ public final class StrategyComparison {
+         strategies.put("Capacity scaling", new CapacityScalingPathFinder());
+ 
+         System.out.printf("Layered network: %d vertices, source %d, sink %d%n%n",
+-                network.vertexCount(), source, sink);
++                network.vertexCount(), problem.source(), problem.sink());
+         System.out.printf("%-24s %10s %14s%n", "strategy", "max flow", "augmentations");
+         strategies.forEach((label, finder) -> {
+             AugmentationCounter counter = new AugmentationCounter();
+-            MaxFlowResult result = new FordFulkersonSolver(finder).solve(network, source, sink, counter);
++            MaxFlowResult result = new FordFulkersonSolver(finder).solve(problem, counter);
+             System.out.printf("%-24s %10s %14d%n", label, result.value(), counter.count());
+         });
+     }
+diff --git a/maxflow/solve/FordFulkersonSolver.java b/maxflow/solve/FordFulkersonSolver.java
+index 4437e1b..e3b810f 100644
+--- a/maxflow/solve/FordFulkersonSolver.java
++++ b/maxflow/solve/FordFulkersonSolver.java
+@@ -38,15 +38,19 @@ public final class FordFulkersonSolver implements MaxFlowSolver {
+     }
+ 
+     @Override
+-    public MaxFlowResult solve(FlowNetwork network, int source, int sink) {
+-        return solve(network, source, sink, SolveListener.NONE);
++    public MaxFlowResult solve(MaxFlowProblem problem) {
++        return solve(problem, SolveListener.NONE);
+     }
+ 
+     @Override
+-    public MaxFlowResult solve(FlowNetwork network, int source, int sink, SolveListener listener) {
+-        validate(network, source, sink);
++    public MaxFlowResult solve(MaxFlowProblem problem, SolveListener listener) {
++        Objects.requireNonNull(problem, "problem");
+         Objects.requireNonNull(listener, "listener");
+ 
++        FlowNetwork network = problem.network();
++        int source = problem.source();
++        int sink = problem.sink();
++
+         ResidualGraph residual = new ResidualGraph(network);
+         Capacity maxFlow = Capacity.ZERO;
+ 
+@@ -84,16 +88,4 @@ public final class FordFulkersonSolver implements MaxFlowSolver {
+             residual.pushFlow(vertices.get(i), vertices.get(i + 1), amount);
+         }
+     }
+-
+-    private static void validate(FlowNetwork network, int source, int sink) {
+-        if (!network.isVertex(source)) {
+-            throw new IllegalArgumentException("source " + source + " is not a vertex of the network");
+-        }
+-        if (!network.isVertex(sink)) {
+-            throw new IllegalArgumentException("sink " + sink + " is not a vertex of the network");
+-        }
+-        if (source == sink) {
+-            throw new IllegalArgumentException("source and sink must differ (both " + source + ")");
+-        }
+-    }
+ }
+diff --git a/maxflow/solve/MaxFlowProblem.java b/maxflow/solve/MaxFlowProblem.java
+new file mode 100644
+index 0000000..d2b1549
+--- /dev/null
++++ b/maxflow/solve/MaxFlowProblem.java
+@@ -0,0 +1,37 @@
++package maxflow.solve;
++
++import java.util.Objects;
++
++import maxflow.graph.FlowNetwork;
++
++/**
++ * An immutable maximum-flow problem instance: the {@link FlowNetwork} to solve, together
++ * with the chosen source and sink. Bundling these into one value object gives a
++ * {@link MaxFlowSolver} a single, self-validating input, and keeps the <em>query</em>
++ * (which two vertices) cleanly separate from the <em>network</em> (which a problem reuses
++ * but never modifies, and which can be posed for any source/sink pair).
++ *
++ * <p>The source and sink are checked against the network when the problem is constructed,
++ * so a solver receives an already-valid input and never has to re-validate it.
++ */
++public record MaxFlowProblem(FlowNetwork network, int source, int sink) {
++
++    public MaxFlowProblem {
++        Objects.requireNonNull(network, "network");
++        if (!network.isVertex(source)) {
++            throw new IllegalArgumentException("source " + source + " is not a vertex of the network");
++        }
++        if (!network.isVertex(sink)) {
++            throw new IllegalArgumentException("sink " + sink + " is not a vertex of the network");
++        }
++        if (source == sink) {
++            throw new IllegalArgumentException("source and sink must differ (both " + source + ")");
++        }
++    }
++
++    @Override
++    public String toString() {
++        return "max-flow problem: source " + source + " -> sink " + sink
++                + " over " + network.vertexCount() + " vertices";
++    }
++}
+diff --git a/maxflow/solve/MaxFlowSolver.java b/maxflow/solve/MaxFlowSolver.java
+index 575b4cd..d0f94ed 100644
+--- a/maxflow/solve/MaxFlowSolver.java
++++ b/maxflow/solve/MaxFlowSolver.java
+@@ -1,27 +1,19 @@
+ package maxflow.solve;
+ 
+-import maxflow.graph.FlowNetwork;
+-
+ /**
+- * Computes the maximum flow from a source vertex to a sink vertex in a
+- * {@link FlowNetwork}.
++ * Computes the maximum flow for a {@link MaxFlowProblem}.
+  */
+ public interface MaxFlowSolver {
+ 
+-    /**
+-     * Solves the maximum-flow problem.
+-     *
+-     * @throws IllegalArgumentException if the source or sink is not a vertex of the
+-     *         network, or if they are equal
+-     */
+-    MaxFlowResult solve(FlowNetwork network, int source, int sink);
++    /** Solves the given maximum-flow problem. */
++    MaxFlowResult solve(MaxFlowProblem problem);
+ 
+     /**
+-     * Solves the maximum-flow problem, reporting progress to {@code listener}. The
+-     * default implementation ignores the listener; solvers that support instrumentation
+-     * (such as {@link FordFulkersonSolver}) override it.
++     * Solves the problem, reporting progress to {@code listener}. The default
++     * implementation ignores the listener; solvers that support instrumentation (such as
++     * {@link FordFulkersonSolver}) override it.
+      */
+-    default MaxFlowResult solve(FlowNetwork network, int source, int sink, SolveListener listener) {
+-        return solve(network, source, sink);
++    default MaxFlowResult solve(MaxFlowProblem problem, SolveListener listener) {
++        return solve(problem);
+     }
+ }
+diff --git a/test/maxflow/solve/FordFulkersonSolverTest.java b/test/maxflow/solve/FordFulkersonSolverTest.java
+index d34272f..2adf73a 100644
+--- a/test/maxflow/solve/FordFulkersonSolverTest.java
++++ b/test/maxflow/solve/FordFulkersonSolverTest.java
+@@ -38,18 +38,22 @@ class FordFulkersonSolverTest {
+                 new FordFulkersonSolver(new CapacityScalingPathFinder()));
+     }
+ 
++    private static MaxFlowResult solve(MaxFlowSolver solver, FlowNetwork network, int source, int sink) {
++        return solver.solve(new MaxFlowProblem(network, source, sink));
++    }
++
+     @Test
+     @DisplayName("computes the textbook maximum flow of 23, regardless of strategy")
+     void classicMaxFlow() {
+         for (MaxFlowSolver solver : strategies()) {
+-            assertEquals(Capacity.of(23), solver.solve(classicNetwork(), 0, 5).value());
++            assertEquals(Capacity.of(23), solve(solver, classicNetwork(), 0, 5).value());
+         }
+     }
+ 
+     @Test
+     @DisplayName("records the source and sink it was solved for")
+     void recordsSourceAndSink() {
+-        MaxFlowResult result = new FordFulkersonSolver().solve(classicNetwork(), 0, 5);
++        MaxFlowResult result = solve(new FordFulkersonSolver(), classicNetwork(), 0, 5);
+         assertEquals(0, result.source());
+         assertEquals(5, result.sink());
+     }
+@@ -60,7 +64,7 @@ class FordFulkersonSolverTest {
+         int source = 0;
+         int sink = 5;
+         for (MaxFlowSolver solver : strategies()) {
+-            MaxFlowResult result = solver.solve(classicNetwork(), source, sink);
++            MaxFlowResult result = solve(solver, classicNetwork(), source, sink);
+             int[] net = new int[6]; // outflow - inflow per vertex
+             for (Edge edge : result.flowEdges()) {
+                 net[edge.from()] += edge.value().units();
+@@ -78,7 +82,7 @@ class FordFulkersonSolverTest {
+     @DisplayName("every reported edge carries a positive flow within its capacity")
+     void flowEdgesRespectCapacity() {
+         FlowNetwork network = classicNetwork();
+-        MaxFlowResult result = new FordFulkersonSolver().solve(network, 0, 5);
++        MaxFlowResult result = solve(new FordFulkersonSolver(), network, 0, 5);
+         for (Edge edge : result.flowEdges()) {
+             assertTrue(edge.value().isPositive(), "flow is positive on " + edge);
+             assertTrue(edge.value().compareTo(network.capacity(edge.from(), edge.to())) <= 0,
+@@ -96,7 +100,7 @@ class FordFulkersonSolverTest {
+                 {0, 0, 0, 0},
+         });
+         for (MaxFlowSolver solver : strategies()) {
+-            assertEquals(Capacity.of(5), solver.solve(network, 0, 3).value());
++            assertEquals(Capacity.of(5), solve(solver, network, 0, 3).value());
+         }
+     }
+ 
+@@ -104,7 +108,7 @@ class FordFulkersonSolverTest {
+     @DisplayName("returns zero flow when the sink is disconnected from the source")
+     void disconnectedHasZeroFlow() {
+         FlowNetwork network = FlowNetwork.builder(3).addEdge(0, 1, 5).build();
+-        MaxFlowResult result = new FordFulkersonSolver().solve(network, 0, 2);
++        MaxFlowResult result = solve(new FordFulkersonSolver(), network, 0, 2);
+         assertEquals(Capacity.ZERO, result.value());
+         assertTrue(result.flowEdges().isEmpty());
+     }
+@@ -113,17 +117,13 @@ class FordFulkersonSolverTest {
+     @DisplayName("saturates a single direct edge")
+     void singleEdge() {
+         FlowNetwork network = FlowNetwork.builder(2).addEdge(0, 1, 7).build();
+-        assertEquals(Capacity.of(7), new FordFulkersonSolver().solve(network, 0, 1).value());
++        assertEquals(Capacity.of(7), solve(new FordFulkersonSolver(), network, 0, 1).value());
+     }
+ 
+     @Test
+-    @DisplayName("rejects an invalid source, sink, or equal endpoints")
+-    void rejectsInvalidEndpoints() {
+-        FlowNetwork network = classicNetwork();
+-        MaxFlowSolver solver = new FordFulkersonSolver();
+-        assertThrows(IllegalArgumentException.class, () -> solver.solve(network, -1, 5));
+-        assertThrows(IllegalArgumentException.class, () -> solver.solve(network, 0, 6));
+-        assertThrows(IllegalArgumentException.class, () -> solver.solve(network, 3, 3));
++    @DisplayName("rejects a null problem")
++    void rejectsNullProblem() {
++        assertThrows(NullPointerException.class, () -> new FordFulkersonSolver().solve(null));
+     }
+ 
+     @Test
+diff --git a/test/maxflow/solve/MaxFlowProblemTest.java b/test/maxflow/solve/MaxFlowProblemTest.java
+new file mode 100644
+index 0000000..b0d0ff5
+--- /dev/null
++++ b/test/maxflow/solve/MaxFlowProblemTest.java
+@@ -0,0 +1,58 @@
++package maxflow.solve;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertSame;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import maxflow.graph.FlowNetwork;
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++
++@DisplayName("MaxFlowProblem")
++class MaxFlowProblemTest {
++
++    private static FlowNetwork network() {
++        return FlowNetwork.builder(6).addEdge(0, 5, 1).build();
++    }
++
++    @Test
++    @DisplayName("exposes the network, source and sink")
++    void exposesComponents() {
++        FlowNetwork network = network();
++        MaxFlowProblem problem = new MaxFlowProblem(network, 0, 5);
++        assertSame(network, problem.network());
++        assertEquals(0, problem.source());
++        assertEquals(5, problem.sink());
++    }
++
++    @Test
++    @DisplayName("rejects a null network")
++    void rejectsNullNetwork() {
++        assertThrows(NullPointerException.class, () -> new MaxFlowProblem(null, 0, 1));
++    }
++
++    @Test
++    @DisplayName("rejects a source that is not a vertex of the network")
++    void rejectsOutOfRangeSource() {
++        assertThrows(IllegalArgumentException.class, () -> new MaxFlowProblem(network(), -1, 5));
++    }
++
++    @Test
++    @DisplayName("rejects a sink that is not a vertex of the network")
++    void rejectsOutOfRangeSink() {
++        assertThrows(IllegalArgumentException.class, () -> new MaxFlowProblem(network(), 0, 6));
++    }
++
++    @Test
++    @DisplayName("rejects equal source and sink")
++    void rejectsEqualEndpoints() {
++        assertThrows(IllegalArgumentException.class, () -> new MaxFlowProblem(network(), 3, 3));
++    }
++
++    @Test
++    @DisplayName("renders a readable description")
++    void toStringIsReadable() {
++        assertEquals("max-flow problem: source 0 -> sink 5 over 6 vertices",
++                new MaxFlowProblem(network(), 0, 5).toString());
++    }
++}
+diff --git a/test/maxflow/solve/MinCutTest.java b/test/maxflow/solve/MinCutTest.java
+index 73d0930..f8a6f5f 100644
+--- a/test/maxflow/solve/MinCutTest.java
++++ b/test/maxflow/solve/MinCutTest.java
+@@ -32,7 +32,7 @@ class MinCutTest {
+     }
+ 
+     private static MinCut cutOf(FlowNetwork network, int source, int sink) {
+-        return MinCut.of(network, new FordFulkersonSolver().solve(network, source, sink));
++        return MinCut.of(network, new FordFulkersonSolver().solve(new MaxFlowProblem(network, source, sink)));
+     }
+ 
+     @Test
+@@ -54,7 +54,7 @@ class MinCutTest {
+         FlowNetwork network = classicNetwork();
+         for (AugmentingPathFinder finder : java.util.List.of(
+                 new BreadthFirstPathFinder(), new DepthFirstPathFinder(), new CapacityScalingPathFinder())) {
+-            MaxFlowResult result = new FordFulkersonSolver(finder).solve(network, 0, 5);
++            MaxFlowResult result = new FordFulkersonSolver(finder).solve(new MaxFlowProblem(network, 0, 5));
+             MinCut cut = MinCut.of(network, result);
+             assertEquals(result.value(), cut.capacity(), finder.name());
+         }
+@@ -87,7 +87,7 @@ class MinCutTest {
+     @DisplayName("every cut edge crosses S->T, is saturated, and the capacities sum to the cut")
+     void cutEdgesCrossAndSaturate() {
+         FlowNetwork network = classicNetwork();
+-        MaxFlowResult result = new FordFulkersonSolver().solve(network, 0, 5);
++        MaxFlowResult result = new FordFulkersonSolver().solve(new MaxFlowProblem(network, 0, 5));
+         MinCut cut = MinCut.of(network, result);
+ 
+         Set<Edge> flows = new HashSet<>(result.flowEdges());
+@@ -132,7 +132,7 @@ class MinCutTest {
+     @DisplayName("rejects null arguments")
+     void rejectsNulls() {
+         FlowNetwork network = classicNetwork();
+-        MaxFlowResult result = new FordFulkersonSolver().solve(network, 0, 5);
++        MaxFlowResult result = new FordFulkersonSolver().solve(new MaxFlowProblem(network, 0, 5));
+         assertThrows(NullPointerException.class, () -> MinCut.of(null, result));
+         assertThrows(NullPointerException.class, () -> MinCut.of(network, null));
+     }
+diff --git a/test/maxflow/solve/SolverInstrumentationTest.java b/test/maxflow/solve/SolverInstrumentationTest.java
+index dbe5ec0..e542b99 100644
+--- a/test/maxflow/solve/SolverInstrumentationTest.java
++++ b/test/maxflow/solve/SolverInstrumentationTest.java
+@@ -45,7 +45,7 @@ class SolverInstrumentationTest {
+         };
+ 
+         MaxFlowResult result = new FordFulkersonSolver(new BreadthFirstPathFinder())
+-                .solve(classicNetwork(), 0, 5, both);
++                .solve(new MaxFlowProblem(classicNetwork(), 0, 5), both);
+ 
+         assertEquals(Capacity.of(23), result.value());
+         assertTrue(counter.count() > 0, "a non-trivial flow needs at least one augmentation");
+@@ -61,7 +61,7 @@ class SolverInstrumentationTest {
+         FlowNetwork disconnected = FlowNetwork.builder(3).addEdge(0, 1, 5).build();
+         AugmentationCounter counter = new AugmentationCounter();
+ 
+-        MaxFlowResult result = new FordFulkersonSolver().solve(disconnected, 0, 2, counter);
++        MaxFlowResult result = new FordFulkersonSolver().solve(new MaxFlowProblem(disconnected, 0, 2), counter);
+ 
+         assertEquals(Capacity.ZERO, result.value());
+         assertEquals(0, counter.count());
+@@ -72,10 +72,11 @@ class SolverInstrumentationTest {
+     void counterAccumulatesAcrossSolves() {
+         AugmentationCounter counter = new AugmentationCounter();
+         FordFulkersonSolver solver = new FordFulkersonSolver();
++        MaxFlowProblem problem = new MaxFlowProblem(classicNetwork(), 0, 5);
+ 
+-        solver.solve(classicNetwork(), 0, 5, counter);
++        solver.solve(problem, counter);
+         long afterFirst = counter.count();
+-        solver.solve(classicNetwork(), 0, 5, counter);
++        solver.solve(problem, counter);
+ 
+         assertEquals(2 * afterFirst, counter.count(), "second solve adds the same number again");
+     }
+@@ -91,7 +92,8 @@ class SolverInstrumentationTest {
+         long dfs = augmentations(new DepthFirstPathFinder(), network, sink);
+         long scaling = augmentations(new CapacityScalingPathFinder(), network, sink);
+ 
+-        Capacity flow = new FordFulkersonSolver(new BreadthFirstPathFinder()).solve(network, 0, sink).value();
++        MaxFlowProblem problem = new MaxFlowProblem(network, 0, sink);
++        Capacity flow = new FordFulkersonSolver(new BreadthFirstPathFinder()).solve(problem).value();
+         for (long count : List.of(bfs, dfs, scaling)) {
+             assertTrue(count > 0, "every strategy performs at least one augmentation");
+         }
+@@ -99,7 +101,7 @@ class SolverInstrumentationTest {
+         assertTrue(scaling <= bfs, "capacity scaling should not exceed BFS on this network");
+         assertTrue(scaling <= dfs, "capacity scaling should not exceed DFS on this network");
+         assertEquals(flow,
+-                new FordFulkersonSolver(new CapacityScalingPathFinder()).solve(network, 0, sink).value(),
++                new FordFulkersonSolver(new CapacityScalingPathFinder()).solve(problem).value(),
+                 "all strategies compute the same maximum flow");
+     }
+ 
+@@ -107,22 +109,22 @@ class SolverInstrumentationTest {
+     @DisplayName("the listener overload validates its argument")
+     void rejectsNullListener() {
+         assertThrows(NullPointerException.class,
+-                () -> new FordFulkersonSolver().solve(classicNetwork(), 0, 5, null));
++                () -> new FordFulkersonSolver().solve(new MaxFlowProblem(classicNetwork(), 0, 5), null));
+     }
+ 
+     @Test
+     @DisplayName("the no-op listener and the default interface method ignore events")
+     void noOpListenerIgnoresEvents() {
++        MaxFlowProblem problem = new MaxFlowProblem(classicNetwork(), 0, 5);
++
+         // SolveListener.NONE is a real listener that simply does nothing.
+-        MaxFlowResult viaNone =
+-                new FordFulkersonSolver().solve(classicNetwork(), 0, 5, SolveListener.NONE);
++        MaxFlowResult viaNone = new FordFulkersonSolver().solve(problem, SolveListener.NONE);
+         assertEquals(Capacity.of(23), viaNone.value());
+ 
+         // A solver that does not override the instrumented overload falls back to the plain solve.
+-        MaxFlowSolver plain = (network, source, sink) ->
+-                new FordFulkersonSolver().solve(network, source, sink);
++        MaxFlowSolver plain = p -> new FordFulkersonSolver().solve(p);
+         AugmentationCounter counter = new AugmentationCounter();
+-        MaxFlowResult viaDefault = plain.solve(classicNetwork(), 0, 5, counter);
++        MaxFlowResult viaDefault = plain.solve(problem, counter);
+         assertEquals(Capacity.of(23), viaDefault.value());
+         assertEquals(0, counter.count(), "the default method does not invoke the listener");
+     }
+@@ -135,7 +137,7 @@ class SolverInstrumentationTest {
+ 
+     private static long augmentations(maxflow.path.AugmentingPathFinder finder, FlowNetwork network, int sink) {
+         AugmentationCounter counter = new AugmentationCounter();
+-        new FordFulkersonSolver(finder).solve(network, 0, sink, counter);
++        new FordFulkersonSolver(finder).solve(new MaxFlowProblem(network, 0, sink), counter);
+         return counter.count();
+     }
+ 

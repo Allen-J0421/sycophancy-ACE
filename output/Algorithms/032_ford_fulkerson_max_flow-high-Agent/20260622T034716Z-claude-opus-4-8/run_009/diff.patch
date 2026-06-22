@@ -1,0 +1,307 @@
+diff --git a/maxflow/FordFulkersonDemo.java b/maxflow/FordFulkersonDemo.java
+index 145cf8e..1e7e449 100644
+--- a/maxflow/FordFulkersonDemo.java
++++ b/maxflow/FordFulkersonDemo.java
+@@ -5,6 +5,7 @@ import maxflow.graph.FlowNetwork;
+ import maxflow.solve.FordFulkersonSolver;
+ import maxflow.solve.MaxFlowResult;
+ import maxflow.solve.MaxFlowSolver;
++import maxflow.solve.MinCut;
+ 
+ /**
+  * Demonstrates the {@code maxflow} library on the classic six-vertex network,
+@@ -37,5 +38,11 @@ public final class FordFulkersonDemo {
+         for (Edge edge : result.flowEdges()) {
+             System.out.println("  " + edge);
+         }
++
++        MinCut cut = MinCut.of(network, result);
++        System.out.println("Minimum cut (capacity " + cut.capacity() + "):");
++        System.out.println("  source side: " + cut.sourceSide());
++        System.out.println("  sink side:   " + cut.sinkSide());
++        System.out.println("  cut edges:   " + cut.cutEdges());
+     }
+ }
+diff --git a/maxflow/solve/MinCut.java b/maxflow/solve/MinCut.java
+new file mode 100644
+index 0000000..d18981f
+--- /dev/null
++++ b/maxflow/solve/MinCut.java
+@@ -0,0 +1,123 @@
++package maxflow.solve;
++
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.Deque;
++import java.util.LinkedHashSet;
++import java.util.List;
++import java.util.Objects;
++import java.util.Set;
++
++import maxflow.graph.Capacity;
++import maxflow.graph.Edge;
++import maxflow.graph.FlowNetwork;
++import maxflow.graph.ResidualGraph;
++
++/**
++ * The minimum cut induced by a maximum flow, by the max-flow min-cut theorem.
++ *
++ * <p>Once a flow is maximal, no augmenting path remains, so flooding the residual graph
++ * from the source reaches a set of vertices {@code S} that excludes the sink. {@code S} is
++ * the <em>source side</em> and its complement {@code T} the <em>sink side</em>; the
++ * original edges that run from {@code S} to {@code T} are the cut, and their capacities sum
++ * to the value of the maximum flow.
++ *
++ * <p>A {@code MinCut} is derived purely from a {@link FlowNetwork} and the
++ * {@link MaxFlowResult} of solving it: replaying the result's per-edge flows reconstructs
++ * the residual graph at maximum flow, from which the partition is read.
++ */
++public final class MinCut {
++
++    private final Set<Integer> sourceSide;
++    private final Set<Integer> sinkSide;
++    private final List<Edge> cutEdges;
++    private final Capacity capacity;
++
++    private MinCut(Set<Integer> sourceSide, Set<Integer> sinkSide, List<Edge> cutEdges, Capacity capacity) {
++        this.sourceSide = sourceSide;
++        this.sinkSide = sinkSide;
++        this.cutEdges = cutEdges;
++        this.capacity = capacity;
++    }
++
++    /**
++     * Computes the minimum cut of {@code network} given the {@code result} of computing its
++     * maximum flow. The result must be the maximum flow of the given network.
++     */
++    public static MinCut of(FlowNetwork network, MaxFlowResult result) {
++        Objects.requireNonNull(network, "network");
++        Objects.requireNonNull(result, "result");
++
++        ResidualGraph residual = new ResidualGraph(network);
++        for (Edge flow : result.flowEdges()) {
++            residual.pushFlow(flow.from(), flow.to(), flow.value());
++        }
++
++        boolean[] reachable = reachableFrom(result.source(), residual);
++
++        Set<Integer> sourceSide = new LinkedHashSet<>();
++        Set<Integer> sinkSide = new LinkedHashSet<>();
++        for (int v = 0; v < network.vertexCount(); v++) {
++            (reachable[v] ? sourceSide : sinkSide).add(v);
++        }
++
++        List<Edge> cutEdges = new ArrayList<>();
++        Capacity capacity = Capacity.ZERO;
++        for (Edge edge : network.edges()) {
++            if (reachable[edge.from()] && !reachable[edge.to()]) {
++                cutEdges.add(edge);
++                capacity = capacity.plus(edge.value());
++            }
++        }
++
++        return new MinCut(
++                Collections.unmodifiableSet(sourceSide),
++                Collections.unmodifiableSet(sinkSide),
++                List.copyOf(cutEdges),
++                capacity);
++    }
++
++    /** Floods the residual graph from {@code source} over edges with positive residual capacity. */
++    private static boolean[] reachableFrom(int source, ResidualGraph residual) {
++        boolean[] reachable = new boolean[residual.vertexCount()];
++        Deque<Integer> queue = new ArrayDeque<>();
++        queue.add(source);
++        reachable[source] = true;
++        while (!queue.isEmpty()) {
++            int u = queue.poll();
++            residual.forEachResidualEdge(u, (v, residualCapacity) -> {
++                if (!reachable[v]) {
++                    reachable[v] = true;
++                    queue.add(v);
++                }
++            });
++        }
++        return reachable;
++    }
++
++    /** Returns the source-side partition {@code S}: vertices still reachable from the source. */
++    public Set<Integer> sourceSide() {
++        return sourceSide;
++    }
++
++    /** Returns the sink-side partition {@code T}: vertices separated from the source. */
++    public Set<Integer> sinkSide() {
++        return sinkSide;
++    }
++
++    /** Returns the original edges crossing from the source side to the sink side. */
++    public List<Edge> cutEdges() {
++        return cutEdges;
++    }
++
++    /** Returns the total capacity of the cut, which equals the maximum flow value. */
++    public Capacity capacity() {
++        return capacity;
++    }
++
++    @Override
++    public String toString() {
++        return "MinCut " + sourceSide + " | " + sinkSide + " (capacity " + capacity + ")";
++    }
++}
+diff --git a/test/maxflow/solve/MinCutTest.java b/test/maxflow/solve/MinCutTest.java
+new file mode 100644
+index 0000000..73d0930
+--- /dev/null
++++ b/test/maxflow/solve/MinCutTest.java
+@@ -0,0 +1,148 @@
++package maxflow.solve;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.HashSet;
++import java.util.Set;
++
++import maxflow.graph.Capacity;
++import maxflow.graph.Edge;
++import maxflow.graph.FlowNetwork;
++import maxflow.path.AugmentingPathFinder;
++import maxflow.path.BreadthFirstPathFinder;
++import maxflow.path.CapacityScalingPathFinder;
++import maxflow.path.DepthFirstPathFinder;
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++
++@DisplayName("MinCut")
++class MinCutTest {
++
++    private static FlowNetwork classicNetwork() {
++        return FlowNetwork.fromMatrix(new int[][] {
++                {0, 16, 13, 0, 0, 0},
++                {0, 0, 10, 12, 0, 0},
++                {0, 4, 0, 0, 14, 0},
++                {0, 0, 9, 0, 0, 20},
++                {0, 0, 0, 7, 0, 4},
++                {0, 0, 0, 0, 0, 0},
++        });
++    }
++
++    private static MinCut cutOf(FlowNetwork network, int source, int sink) {
++        return MinCut.of(network, new FordFulkersonSolver().solve(network, source, sink));
++    }
++
++    @Test
++    @DisplayName("identifies the textbook partition of the classic network")
++    void classicPartition() {
++        FlowNetwork network = classicNetwork();
++        MinCut cut = cutOf(network, 0, 5);
++
++        assertEquals(Set.of(0, 1, 2, 4), cut.sourceSide());
++        assertEquals(Set.of(3, 5), cut.sinkSide());
++        assertEquals(Capacity.of(23), cut.capacity());
++        assertEquals(Set.of(new Edge(1, 3, 12), new Edge(4, 3, 7), new Edge(4, 5, 4)),
++                new HashSet<>(cut.cutEdges()));
++    }
++
++    @Test
++    @DisplayName("cut capacity equals the maximum flow value, for every strategy")
++    void capacityEqualsMaxFlow() {
++        FlowNetwork network = classicNetwork();
++        for (AugmentingPathFinder finder : java.util.List.of(
++                new BreadthFirstPathFinder(), new DepthFirstPathFinder(), new CapacityScalingPathFinder())) {
++            MaxFlowResult result = new FordFulkersonSolver(finder).solve(network, 0, 5);
++            MinCut cut = MinCut.of(network, result);
++            assertEquals(result.value(), cut.capacity(), finder.name());
++        }
++    }
++
++    @Test
++    @DisplayName("the two sides partition the vertices: disjoint and covering")
++    void sidesPartitionVertices() {
++        FlowNetwork network = classicNetwork();
++        MinCut cut = cutOf(network, 0, 5);
++
++        Set<Integer> union = new HashSet<>(cut.sourceSide());
++        union.addAll(cut.sinkSide());
++        assertEquals(network.vertexCount(), union.size(), "every vertex is on exactly one side");
++
++        Set<Integer> overlap = new HashSet<>(cut.sourceSide());
++        overlap.retainAll(cut.sinkSide());
++        assertTrue(overlap.isEmpty(), "the sides do not overlap");
++    }
++
++    @Test
++    @DisplayName("the source is on the source side and the sink on the sink side")
++    void sourceAndSinkLandOnExpectedSides() {
++        MinCut cut = cutOf(classicNetwork(), 0, 5);
++        assertTrue(cut.sourceSide().contains(0));
++        assertTrue(cut.sinkSide().contains(5));
++    }
++
++    @Test
++    @DisplayName("every cut edge crosses S->T, is saturated, and the capacities sum to the cut")
++    void cutEdgesCrossAndSaturate() {
++        FlowNetwork network = classicNetwork();
++        MaxFlowResult result = new FordFulkersonSolver().solve(network, 0, 5);
++        MinCut cut = MinCut.of(network, result);
++
++        Set<Edge> flows = new HashSet<>(result.flowEdges());
++        Capacity summed = Capacity.ZERO;
++        for (Edge edge : cut.cutEdges()) {
++            assertTrue(cut.sourceSide().contains(edge.from()), edge + " leaves the source side");
++            assertTrue(cut.sinkSide().contains(edge.to()), edge + " enters the sink side");
++            assertTrue(flows.contains(new Edge(edge.from(), edge.to(), edge.value().units())),
++                    edge + " must be saturated (flow equals capacity)");
++            summed = summed.plus(edge.value());
++        }
++        assertEquals(cut.capacity(), summed, "cut-edge capacities sum to the cut capacity");
++    }
++
++    @Test
++    @DisplayName("a disconnected sink yields a zero-capacity cut with no crossing edges")
++    void disconnectedNetwork() {
++        FlowNetwork network = FlowNetwork.builder(3).addEdge(0, 1, 5).build();
++        MinCut cut = cutOf(network, 0, 2);
++
++        assertEquals(Capacity.ZERO, cut.capacity());
++        assertTrue(cut.sinkSide().contains(2));
++        assertTrue(cut.cutEdges().isEmpty());
++    }
++
++    @Test
++    @DisplayName("identifies the single bottleneck edge in a chain")
++    void bottleneckChain() {
++        FlowNetwork network = FlowNetwork.builder(3)
++                .addEdge(0, 1, 3)
++                .addEdge(1, 2, 1)
++                .build();
++        MinCut cut = cutOf(network, 0, 2);
++
++        assertEquals(Set.of(0, 1), cut.sourceSide());
++        assertEquals(Set.of(2), cut.sinkSide());
++        assertEquals(java.util.List.of(new Edge(1, 2, 1)), cut.cutEdges());
++        assertEquals(Capacity.of(1), cut.capacity());
++    }
++
++    @Test
++    @DisplayName("rejects null arguments")
++    void rejectsNulls() {
++        FlowNetwork network = classicNetwork();
++        MaxFlowResult result = new FordFulkersonSolver().solve(network, 0, 5);
++        assertThrows(NullPointerException.class, () -> MinCut.of(null, result));
++        assertThrows(NullPointerException.class, () -> MinCut.of(network, null));
++    }
++
++    @Test
++    @DisplayName("exposes immutable partitions and cut edges")
++    void immutableViews() {
++        MinCut cut = cutOf(classicNetwork(), 0, 5);
++        assertThrows(UnsupportedOperationException.class, () -> cut.sourceSide().add(99));
++        assertThrows(UnsupportedOperationException.class, () -> cut.sinkSide().add(99));
++        assertThrows(UnsupportedOperationException.class, () -> cut.cutEdges().add(new Edge(0, 1, 1)));
++    }
++}

@@ -1,0 +1,828 @@
+diff --git a/maxflow/graph/Capacity.java b/maxflow/graph/Capacity.java
+new file mode 100644
+index 0000000..6b2da38
+--- /dev/null
++++ b/maxflow/graph/Capacity.java
+@@ -0,0 +1,55 @@
++package maxflow.graph;
++
++/**
++ * A non-negative edge weight in a flow network — a capacity or an amount of flow.
++ *
++ * <p>Wrapping the raw {@code int} gives the quantity a name, a single home for its
++ * domain rule (non-negativity), and arithmetic that reads like the problem
++ * ({@link #min}, {@link #plus}), while keeping it from being confused with a vertex
++ * index. {@link #INFINITE} is the identity for {@link #min} — used when reducing a
++ * path to its bottleneck — and is not meant to take part in arithmetic.
++ */
++public record Capacity(int units) implements Comparable<Capacity> {
++
++    /** No capacity. */
++    public static final Capacity ZERO = new Capacity(0);
++
++    /** An unbounded capacity, usable only as the identity of {@link #min}. */
++    public static final Capacity INFINITE = new Capacity(Integer.MAX_VALUE);
++
++    public Capacity {
++        if (units < 0) {
++            throw new IllegalArgumentException("capacity must be non-negative, was " + units);
++        }
++    }
++
++    /** Returns a capacity of {@code units}. */
++    public static Capacity of(int units) {
++        return new Capacity(units);
++    }
++
++    /** Returns true if this capacity can carry flow. */
++    public boolean isPositive() {
++        return units > 0;
++    }
++
++    /** Returns the smaller of this and {@code other}. */
++    public Capacity min(Capacity other) {
++        return units <= other.units ? this : other;
++    }
++
++    /** Returns the sum of this and {@code other}. */
++    public Capacity plus(Capacity other) {
++        return new Capacity(Math.addExact(units, other.units));
++    }
++
++    @Override
++    public int compareTo(Capacity other) {
++        return Integer.compare(units, other.units);
++    }
++
++    @Override
++    public String toString() {
++        return this == INFINITE ? "∞" : Integer.toString(units);
++    }
++}
+diff --git a/maxflow/graph/Edge.java b/maxflow/graph/Edge.java
+index 225035b..3b8ae9c 100644
+--- a/maxflow/graph/Edge.java
++++ b/maxflow/graph/Edge.java
+@@ -1,5 +1,7 @@
+ package maxflow.graph;
+ 
++import java.util.Objects;
++
+ /**
+  * A directed, weighted edge {@code from -> to}. This single type is reused across
+  * the library wherever a (tail, head, weight) triple is needed: in a
+@@ -7,12 +9,12 @@ package maxflow.graph;
+  * a max-flow result it is the <em>flow</em> routed along that edge. The meaning is
+  * fixed by context; the structure and validation are shared.
+  *
+- * <p>Endpoints must be distinct, non-negative vertex identifiers and the value must
+- * be non-negative. An {@code Edge} does not know how many vertices exist, so callers
+- * that have a vertex count (such as {@link FlowNetwork.Builder}) additionally check
+- * the upper bound.
++ * <p>Endpoints must be distinct, non-negative vertex identifiers. The weight is a
++ * {@link Capacity}, which carries the non-negativity rule. An {@code Edge} does not
++ * know how many vertices exist, so callers that have a vertex count (such as
++ * {@link FlowNetwork.Builder}) additionally check the upper bound.
+  */
+-public record Edge(int from, int to, int value) {
++public record Edge(int from, int to, Capacity value) {
+ 
+     public Edge {
+         if (from < 0) {
+@@ -24,16 +26,24 @@ public record Edge(int from, int to, int value) {
+         if (from == to) {
+             throw new IllegalArgumentException("Self-loops are not allowed at vertex " + from);
+         }
+-        if (value < 0) {
+-            throw new IllegalArgumentException("value must be non-negative, was " + value);
+-        }
++        Objects.requireNonNull(value, "value");
+     }
+ 
+-    /** Returns a copy of this edge with a different value but the same endpoints. */
+-    public Edge withValue(int newValue) {
++    /** Convenience constructor that wraps a raw weight in a {@link Capacity}. */
++    public Edge(int from, int to, int value) {
++        this(from, to, Capacity.of(value));
++    }
++
++    /** Returns a copy of this edge with a different weight but the same endpoints. */
++    public Edge withValue(Capacity newValue) {
+         return new Edge(from, to, newValue);
+     }
+ 
++    /** Returns a copy of this edge with a different raw weight but the same endpoints. */
++    public Edge withValue(int newValue) {
++        return new Edge(from, to, Capacity.of(newValue));
++    }
++
+     @Override
+     public String toString() {
+         return from + " -> " + to + ": " + value;
+diff --git a/maxflow/graph/FlowNetwork.java b/maxflow/graph/FlowNetwork.java
+index 9bd56c1..8120f49 100644
+--- a/maxflow/graph/FlowNetwork.java
++++ b/maxflow/graph/FlowNetwork.java
+@@ -28,9 +28,9 @@ public final class FlowNetwork {
+         return capacity.length;
+     }
+ 
+-    /** Returns the capacity of the directed edge {@code from -> to} (0 if absent). */
+-    public int capacity(int from, int to) {
+-        return capacity[from][to];
++    /** Returns the capacity of the directed edge {@code from -> to} (zero if absent). */
++    public Capacity capacity(int from, int to) {
++        return Capacity.of(capacity[from][to]);
+     }
+ 
+     /** Returns true if {@code vertex} is a valid vertex identifier. */
+@@ -127,7 +127,7 @@ public final class FlowNetwork {
+         public Builder addEdge(Edge edge) {
+             requireVertex(edge.from(), "from");
+             requireVertex(edge.to(), "to");
+-            this.capacity[edge.from()][edge.to()] = edge.value();
++            this.capacity[edge.from()][edge.to()] = edge.value().units();
+             return this;
+         }
+ 
+diff --git a/maxflow/graph/ResidualGraph.java b/maxflow/graph/ResidualGraph.java
+index 11f42a6..b9a60e1 100644
+--- a/maxflow/graph/ResidualGraph.java
++++ b/maxflow/graph/ResidualGraph.java
+@@ -24,8 +24,8 @@ public final class ResidualGraph {
+     }
+ 
+     /** Returns the remaining residual capacity of the edge {@code from -> to}. */
+-    public int residualCapacity(int from, int to) {
+-        return residual[from][to];
++    public Capacity residualCapacity(int from, int to) {
++        return Capacity.of(residual[from][to]);
+     }
+ 
+     /** Returns true if more flow can currently be pushed along {@code from -> to}. */
+@@ -33,7 +33,11 @@ public final class ResidualGraph {
+         return residual[from][to] > 0;
+     }
+ 
+-    /** Receives each residual edge leaving a vertex during a traversal. */
++    /**
++     * Receives each residual edge leaving a vertex during a traversal. The residual
++     * capacity is passed as a raw {@code int} rather than a {@link Capacity}: this
++     * callback fires in the inner loop of every search, so it stays allocation-free.
++     */
+     @FunctionalInterface
+     public interface EdgeConsumer {
+         void accept(int to, int residualCapacity);
+@@ -54,22 +58,24 @@ public final class ResidualGraph {
+     }
+ 
+     /**
+-     * Pushes {@code amount} units of flow along {@code from -> to}, decreasing the
+-     * forward residual capacity and increasing the reverse residual capacity.
++     * Pushes {@code amount} of flow along {@code from -> to}, decreasing the forward
++     * residual capacity and increasing the reverse residual capacity.
+      *
+-     * @throws IllegalArgumentException if {@code amount} exceeds the residual capacity
++     * @throws IllegalArgumentException if {@code amount} is zero, or exceeds the
++     *         residual capacity
+      */
+-    public void pushFlow(int from, int to, int amount) {
+-        if (amount <= 0) {
++    public void pushFlow(int from, int to, Capacity amount) {
++        if (!amount.isPositive()) {
+             throw new IllegalArgumentException("Flow amount must be positive, was " + amount);
+         }
+-        if (amount > residual[from][to]) {
++        int units = amount.units();
++        if (units > residual[from][to]) {
+             throw new IllegalArgumentException(
+-                    "Cannot push " + amount + " units along " + from + " -> " + to
++                    "Cannot push " + amount + " along " + from + " -> " + to
+                             + "; residual capacity is " + residual[from][to]);
+         }
+-        residual[from][to] -= amount;
+-        residual[to][from] += amount;
++        residual[from][to] -= units;
++        residual[to][from] += units;
+     }
+ 
+     /**
+@@ -77,7 +83,7 @@ public final class ResidualGraph {
+      * i.e. {@code capacity - residualCapacity}, clamped at zero so reverse residual
+      * edges are not reported as negative flow.
+      */
+-    public int flowOn(int from, int to) {
+-        return Math.max(0, network.capacity(from, to) - residual[from][to]);
++    public Capacity flowOn(int from, int to) {
++        return Capacity.of(Math.max(0, network.capacity(from, to).units() - residual[from][to]));
+     }
+ }
+diff --git a/maxflow/path/AugmentingPath.java b/maxflow/path/AugmentingPath.java
+index 757b5f3..a577cd4 100644
+--- a/maxflow/path/AugmentingPath.java
++++ b/maxflow/path/AugmentingPath.java
+@@ -1,6 +1,9 @@
+ package maxflow.path;
+ 
+ import java.util.List;
++import java.util.Objects;
++
++import maxflow.graph.Capacity;
+ 
+ /**
+  * An immutable augmenting path: an ordered list of vertices from a source to a
+@@ -13,18 +16,19 @@ import java.util.List;
+ public final class AugmentingPath {
+ 
+     private final List<Integer> vertices;
+-    private final int bottleneck;
++    private final Capacity bottleneck;
+ 
+     /**
+      * @param vertices   the path's vertices in order from source to sink
+      *                   (at least two, source first and sink last)
+      * @param bottleneck the maximum flow the path can carry; must be positive
+      */
+-    public AugmentingPath(List<Integer> vertices, int bottleneck) {
++    public AugmentingPath(List<Integer> vertices, Capacity bottleneck) {
+         if (vertices.size() < 2) {
+             throw new IllegalArgumentException("An augmenting path needs at least two vertices");
+         }
+-        if (bottleneck <= 0) {
++        Objects.requireNonNull(bottleneck, "bottleneck");
++        if (!bottleneck.isPositive()) {
+             throw new IllegalArgumentException("bottleneck must be positive, was " + bottleneck);
+         }
+         this.vertices = List.copyOf(vertices);
+@@ -37,7 +41,7 @@ public final class AugmentingPath {
+     }
+ 
+     /** Returns the maximum amount of flow that can be pushed along this path. */
+-    public int bottleneck() {
++    public Capacity bottleneck() {
+         return bottleneck;
+     }
+ 
+diff --git a/maxflow/path/GraphSearchPathFinder.java b/maxflow/path/GraphSearchPathFinder.java
+index 3d29e00..b5908f5 100644
+--- a/maxflow/path/GraphSearchPathFinder.java
++++ b/maxflow/path/GraphSearchPathFinder.java
+@@ -1,5 +1,6 @@
+ package maxflow.path;
+ 
++import maxflow.graph.Capacity;
+ import maxflow.graph.ResidualGraph;
+ 
+ import java.util.ArrayList;
+@@ -50,9 +51,9 @@ abstract class GraphSearchPathFinder implements AugmentingPathFinder {
+     private static AugmentingPath reconstructPath(ResidualGraph residual, int[] parent,
+                                                   int source, int sink) {
+         List<Integer> vertices = new ArrayList<>();
+-        int bottleneck = Integer.MAX_VALUE;
++        Capacity bottleneck = Capacity.INFINITE;
+         for (int v = sink; v != source; v = parent[v]) {
+-            bottleneck = Math.min(bottleneck, residual.residualCapacity(parent[v], v));
++            bottleneck = bottleneck.min(residual.residualCapacity(parent[v], v));
+             vertices.add(v);
+         }
+         vertices.add(source);
+diff --git a/maxflow/solve/FordFulkersonSolver.java b/maxflow/solve/FordFulkersonSolver.java
+index 4c3567e..5d3c0da 100644
+--- a/maxflow/solve/FordFulkersonSolver.java
++++ b/maxflow/solve/FordFulkersonSolver.java
+@@ -1,5 +1,6 @@
+ package maxflow.solve;
+ 
++import maxflow.graph.Capacity;
+ import maxflow.graph.Edge;
+ import maxflow.graph.FlowNetwork;
+ import maxflow.graph.ResidualGraph;
+@@ -41,13 +42,13 @@ public final class FordFulkersonSolver implements MaxFlowSolver {
+         validate(network, source, sink);
+ 
+         ResidualGraph residual = new ResidualGraph(network);
+-        int maxFlow = 0;
++        Capacity maxFlow = Capacity.ZERO;
+ 
+         Optional<AugmentingPath> path;
+         while ((path = pathFinder.findPath(residual, source, sink)).isPresent()) {
+-            int bottleneck = path.get().bottleneck();
++            Capacity bottleneck = path.get().bottleneck();
+             pushAlong(residual, path.get(), bottleneck);
+-            maxFlow += bottleneck;
++            maxFlow = maxFlow.plus(bottleneck);
+         }
+ 
+         return new MaxFlowResult(source, sink, maxFlow, extractFlowEdges(network, residual));
+@@ -57,8 +58,8 @@ public final class FordFulkersonSolver implements MaxFlowSolver {
+     private static List<Edge> extractFlowEdges(FlowNetwork network, ResidualGraph residual) {
+         List<Edge> flowEdges = new ArrayList<>();
+         for (Edge capacityEdge : network.edges()) {
+-            int flow = residual.flowOn(capacityEdge.from(), capacityEdge.to());
+-            if (flow > 0) {
++            Capacity flow = residual.flowOn(capacityEdge.from(), capacityEdge.to());
++            if (flow.isPositive()) {
+                 flowEdges.add(capacityEdge.withValue(flow));
+             }
+         }
+@@ -70,7 +71,7 @@ public final class FordFulkersonSolver implements MaxFlowSolver {
+         return pathFinder;
+     }
+ 
+-    private static void pushAlong(ResidualGraph residual, AugmentingPath path, int amount) {
++    private static void pushAlong(ResidualGraph residual, AugmentingPath path, Capacity amount) {
+         var vertices = path.vertices();
+         for (int i = 0; i + 1 < vertices.size(); i++) {
+             residual.pushFlow(vertices.get(i), vertices.get(i + 1), amount);
+diff --git a/maxflow/solve/MaxFlowResult.java b/maxflow/solve/MaxFlowResult.java
+index 565e521..ce33523 100644
+--- a/maxflow/solve/MaxFlowResult.java
++++ b/maxflow/solve/MaxFlowResult.java
+@@ -1,7 +1,9 @@
+ package maxflow.solve;
+ 
+ import java.util.List;
++import java.util.Objects;
+ 
++import maxflow.graph.Capacity;
+ import maxflow.graph.Edge;
+ 
+ /**
+@@ -16,27 +18,24 @@ public final class MaxFlowResult {
+ 
+     private final int source;
+     private final int sink;
+-    private final int value;
++    private final Capacity value;
+     private final List<Edge> edges;
+ 
+     /**
+      * @param source the source vertex the flow was computed for
+      * @param sink   the sink vertex the flow was computed for
+-     * @param value  the total flow value (must be non-negative)
++     * @param value  the total flow value
+      * @param edges  the edges carrying positive flow (each value is its flow)
+      */
+-    public MaxFlowResult(int source, int sink, int value, List<Edge> edges) {
+-        if (value < 0) {
+-            throw new IllegalArgumentException("flow value must be non-negative, was " + value);
+-        }
++    public MaxFlowResult(int source, int sink, Capacity value, List<Edge> edges) {
+         this.source = source;
+         this.sink = sink;
+-        this.value = value;
++        this.value = Objects.requireNonNull(value, "value");
+         this.edges = List.copyOf(edges);
+     }
+ 
+     /** Returns the maximum flow value from source to sink. */
+-    public int value() {
++    public Capacity value() {
+         return value;
+     }
+ 
+diff --git a/test/maxflow/graph/CapacityTest.java b/test/maxflow/graph/CapacityTest.java
+new file mode 100644
+index 0000000..2b5e398
+--- /dev/null
++++ b/test/maxflow/graph/CapacityTest.java
+@@ -0,0 +1,76 @@
++package maxflow.graph;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++
++@DisplayName("Capacity")
++class CapacityTest {
++
++    @Test
++    @DisplayName("exposes its raw units")
++    void exposesUnits() {
++        assertEquals(7, Capacity.of(7).units());
++        assertEquals(0, Capacity.ZERO.units());
++    }
++
++    @Test
++    @DisplayName("rejects a negative quantity")
++    void rejectsNegative() {
++        assertThrows(IllegalArgumentException.class, () -> Capacity.of(-1));
++    }
++
++    @Test
++    @DisplayName("isPositive distinguishes zero from carrying capacity")
++    void isPositive() {
++        assertTrue(Capacity.of(1).isPositive());
++        assertFalse(Capacity.ZERO.isPositive());
++    }
++
++    @Test
++    @DisplayName("min returns the smaller quantity")
++    void min() {
++        assertEquals(Capacity.of(3), Capacity.of(3).min(Capacity.of(5)));
++        assertEquals(Capacity.of(3), Capacity.of(5).min(Capacity.of(3)));
++    }
++
++    @Test
++    @DisplayName("INFINITE is the identity of min")
++    void infiniteIsMinIdentity() {
++        assertEquals(Capacity.of(42), Capacity.INFINITE.min(Capacity.of(42)));
++        assertEquals(Capacity.of(42), Capacity.of(42).min(Capacity.INFINITE));
++    }
++
++    @Test
++    @DisplayName("plus adds two quantities")
++    void plus() {
++        assertEquals(Capacity.of(8), Capacity.of(3).plus(Capacity.of(5)));
++        assertEquals(Capacity.of(5), Capacity.ZERO.plus(Capacity.of(5)));
++    }
++
++    @Test
++    @DisplayName("plus overflowing int throws rather than wrapping")
++    void plusOverflowThrows() {
++        assertThrows(ArithmeticException.class,
++                () -> Capacity.of(Integer.MAX_VALUE).plus(Capacity.of(1)));
++    }
++
++    @Test
++    @DisplayName("orders by magnitude")
++    void ordersByMagnitude() {
++        assertTrue(Capacity.of(3).compareTo(Capacity.of(5)) < 0);
++        assertTrue(Capacity.of(5).compareTo(Capacity.of(3)) > 0);
++        assertEquals(0, Capacity.of(4).compareTo(Capacity.of(4)));
++    }
++
++    @Test
++    @DisplayName("renders the number, and infinity as a symbol")
++    void rendering() {
++        assertEquals("16", Capacity.of(16).toString());
++        assertEquals("∞", Capacity.INFINITE.toString());
++    }
++}
+diff --git a/test/maxflow/graph/EdgeTest.java b/test/maxflow/graph/EdgeTest.java
+index 48cfd03..e1d5a3f 100644
+--- a/test/maxflow/graph/EdgeTest.java
++++ b/test/maxflow/graph/EdgeTest.java
+@@ -15,7 +15,7 @@ class EdgeTest {
+         Edge edge = new Edge(0, 3, 16);
+         assertEquals(0, edge.from());
+         assertEquals(3, edge.to());
+-        assertEquals(16, edge.value());
++        assertEquals(Capacity.of(16), edge.value());
+     }
+ 
+     @Test
+@@ -43,7 +43,7 @@ class EdgeTest {
+         Edge capacity = new Edge(1, 2, 10);
+         Edge flow = capacity.withValue(4);
+         assertEquals(new Edge(1, 2, 4), flow);
+-        assertEquals(10, capacity.value(), "the original edge is unchanged");
++        assertEquals(Capacity.of(10), capacity.value(), "the original edge is unchanged");
+     }
+ 
+     @Test
+diff --git a/test/maxflow/graph/FlowNetworkTest.java b/test/maxflow/graph/FlowNetworkTest.java
+index 4d02f2e..bbd80ae 100644
+--- a/test/maxflow/graph/FlowNetworkTest.java
++++ b/test/maxflow/graph/FlowNetworkTest.java
+@@ -27,16 +27,16 @@ class FlowNetworkTest {
+                     .addEdge(1, 2, 10)
+                     .build();
+ 
+-            assertEquals(16, network.capacity(0, 1));
+-            assertEquals(10, network.capacity(1, 2));
++            assertEquals(Capacity.of(16), network.capacity(0, 1));
++            assertEquals(Capacity.of(10), network.capacity(1, 2));
+         }
+ 
+         @Test
+         @DisplayName("reports zero capacity for absent edges")
+         void absentEdgeHasZeroCapacity() {
+             FlowNetwork network = FlowNetwork.builder(3).addEdge(0, 1, 5).build();
+-            assertEquals(0, network.capacity(0, 2));
+-            assertEquals(0, network.capacity(2, 0));
++            assertEquals(Capacity.ZERO, network.capacity(0, 2));
++            assertEquals(Capacity.ZERO, network.capacity(2, 0));
+         }
+ 
+         @Test
+@@ -46,7 +46,7 @@ class FlowNetworkTest {
+                     .addEdge(0, 1, 5)
+                     .addEdge(0, 1, 9)
+                     .build();
+-            assertEquals(9, network.capacity(0, 1));
++            assertEquals(Capacity.of(9), network.capacity(0, 1));
+         }
+ 
+         @Test
+@@ -84,7 +84,7 @@ class FlowNetworkTest {
+             FlowNetwork.Builder builder = FlowNetwork.builder(2).addEdge(0, 1, 5);
+             FlowNetwork first = builder.build();
+             builder.addEdge(0, 1, 99);
+-            assertEquals(5, first.capacity(0, 1), "earlier network must not see later edits");
++            assertEquals(Capacity.of(5), first.capacity(0, 1), "earlier network must not see later edits");
+         }
+ 
+         @Test
+@@ -94,8 +94,8 @@ class FlowNetworkTest {
+                     .addEdge(new Edge(0, 1, 16))
+                     .addEdge(new Edge(1, 2, 10))
+                     .build();
+-            assertEquals(16, network.capacity(0, 1));
+-            assertEquals(10, network.capacity(1, 2));
++            assertEquals(Capacity.of(16), network.capacity(0, 1));
++            assertEquals(Capacity.of(10), network.capacity(1, 2));
+         }
+ 
+         @Test
+@@ -144,9 +144,9 @@ class FlowNetworkTest {
+             };
+             FlowNetwork network = FlowNetwork.fromMatrix(matrix);
+             assertEquals(3, network.vertexCount());
+-            assertEquals(16, network.capacity(0, 1));
+-            assertEquals(13, network.capacity(0, 2));
+-            assertEquals(10, network.capacity(1, 2));
++            assertEquals(Capacity.of(16), network.capacity(0, 1));
++            assertEquals(Capacity.of(13), network.capacity(0, 2));
++            assertEquals(Capacity.of(10), network.capacity(1, 2));
+         }
+ 
+         @Test
+@@ -191,7 +191,7 @@ class FlowNetworkTest {
+             FlowNetwork network = FlowNetwork.builder(2).addEdge(0, 1, 7).build();
+             int[][] copy = network.toMatrix();
+             copy[0][1] = 123;
+-            assertEquals(7, network.capacity(0, 1), "mutating the copy must not affect the network");
++            assertEquals(Capacity.of(7), network.capacity(0, 1), "mutating the copy must not affect the network");
+             assertArrayEquals(new int[] {0, 7}, network.toMatrix()[0]);
+         }
+     }
+diff --git a/test/maxflow/graph/ResidualGraphTest.java b/test/maxflow/graph/ResidualGraphTest.java
+index 5cc8cbc..f234d64 100644
+--- a/test/maxflow/graph/ResidualGraphTest.java
++++ b/test/maxflow/graph/ResidualGraphTest.java
+@@ -25,9 +25,9 @@ class ResidualGraphTest {
+     @DisplayName("starts with residual capacity equal to network capacity")
+     void initialResidualMatchesCapacity() {
+         ResidualGraph residual = new ResidualGraph(sample());
+-        assertEquals(5, residual.residualCapacity(0, 1));
+-        assertEquals(3, residual.residualCapacity(1, 2));
+-        assertEquals(0, residual.residualCapacity(0, 2));
++        assertEquals(Capacity.of(5), residual.residualCapacity(0, 1));
++        assertEquals(Capacity.of(3), residual.residualCapacity(1, 2));
++        assertEquals(Capacity.ZERO, residual.residualCapacity(0, 2));
+         assertEquals(3, residual.vertexCount());
+     }
+ 
+@@ -43,33 +43,32 @@ class ResidualGraphTest {
+     @DisplayName("pushing flow moves capacity from the forward to the reverse edge")
+     void pushFlowUpdatesBothDirections() {
+         ResidualGraph residual = new ResidualGraph(sample());
+-        residual.pushFlow(0, 1, 2);
+-        assertEquals(3, residual.residualCapacity(0, 1), "forward decreases");
+-        assertEquals(2, residual.residualCapacity(1, 0), "reverse increases");
++        residual.pushFlow(0, 1, Capacity.of(2));
++        assertEquals(Capacity.of(3), residual.residualCapacity(0, 1), "forward decreases");
++        assertEquals(Capacity.of(2), residual.residualCapacity(1, 0), "reverse increases");
+     }
+ 
+     @Test
+     @DisplayName("flowOn reports net forward flow and clamps reverse edges to zero")
+     void flowOnReportsNetFlow() {
+         ResidualGraph residual = new ResidualGraph(sample());
+-        residual.pushFlow(0, 1, 2);
+-        assertEquals(2, residual.flowOn(0, 1));
+-        assertEquals(0, residual.flowOn(1, 0), "reverse residual is not reported as negative flow");
++        residual.pushFlow(0, 1, Capacity.of(2));
++        assertEquals(Capacity.of(2), residual.flowOn(0, 1));
++        assertEquals(Capacity.ZERO, residual.flowOn(1, 0), "reverse residual is not reported as negative flow");
+     }
+ 
+     @Test
+-    @DisplayName("rejects a non-positive flow amount")
+-    void rejectsNonPositiveAmount() {
++    @DisplayName("rejects a zero flow amount")
++    void rejectsZeroAmount() {
+         ResidualGraph residual = new ResidualGraph(sample());
+-        assertThrows(IllegalArgumentException.class, () -> residual.pushFlow(0, 1, 0));
+-        assertThrows(IllegalArgumentException.class, () -> residual.pushFlow(0, 1, -1));
++        assertThrows(IllegalArgumentException.class, () -> residual.pushFlow(0, 1, Capacity.ZERO));
+     }
+ 
+     @Test
+     @DisplayName("rejects pushing more than the residual capacity")
+     void rejectsOverCapacity() {
+         ResidualGraph residual = new ResidualGraph(sample());
+-        assertThrows(IllegalArgumentException.class, () -> residual.pushFlow(0, 1, 6));
++        assertThrows(IllegalArgumentException.class, () -> residual.pushFlow(0, 1, Capacity.of(6)));
+     }
+ 
+     @Test
+@@ -81,7 +80,7 @@ class ResidualGraphTest {
+         assertEquals(List.of("1:5"), visited);
+ 
+         // After pushing flow, the reverse edge becomes traversable.
+-        residual.pushFlow(0, 1, 2);
++        residual.pushFlow(0, 1, Capacity.of(2));
+         List<String> fromOne = new ArrayList<>();
+         residual.forEachResidualEdge(1, (to, cap) -> fromOne.add(to + ":" + cap));
+         assertTrue(fromOne.contains("0:2"), "reverse edge 1->0 should now have residual capacity");
+diff --git a/test/maxflow/path/AugmentingPathTest.java b/test/maxflow/path/AugmentingPathTest.java
+index 34cffed..3f34338 100644
+--- a/test/maxflow/path/AugmentingPathTest.java
++++ b/test/maxflow/path/AugmentingPathTest.java
+@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
+ 
+ import java.util.List;
+ 
++import maxflow.graph.Capacity;
+ import org.junit.jupiter.api.DisplayName;
+ import org.junit.jupiter.api.Test;
+ 
+@@ -14,34 +15,36 @@ class AugmentingPathTest {
+     @Test
+     @DisplayName("exposes its vertices and bottleneck")
+     void exposesState() {
+-        AugmentingPath path = new AugmentingPath(List.of(0, 2, 5), 7);
++        AugmentingPath path = new AugmentingPath(List.of(0, 2, 5), Capacity.of(7));
+         assertEquals(List.of(0, 2, 5), path.vertices());
+-        assertEquals(7, path.bottleneck());
++        assertEquals(Capacity.of(7), path.bottleneck());
+     }
+ 
+     @Test
+     @DisplayName("rejects a path with fewer than two vertices")
+     void rejectsTooShort() {
+-        assertThrows(IllegalArgumentException.class, () -> new AugmentingPath(List.of(0), 5));
++        assertThrows(IllegalArgumentException.class,
++                () -> new AugmentingPath(List.of(0), Capacity.of(5)));
+     }
+ 
+     @Test
+     @DisplayName("rejects a non-positive bottleneck")
+     void rejectsNonPositiveBottleneck() {
+-        assertThrows(IllegalArgumentException.class, () -> new AugmentingPath(List.of(0, 1), 0));
+-        assertThrows(IllegalArgumentException.class, () -> new AugmentingPath(List.of(0, 1), -3));
++        assertThrows(IllegalArgumentException.class,
++                () -> new AugmentingPath(List.of(0, 1), Capacity.ZERO));
+     }
+ 
+     @Test
+     @DisplayName("holds an immutable copy of its vertices")
+     void verticesAreImmutable() {
+-        AugmentingPath path = new AugmentingPath(List.of(0, 1), 4);
++        AugmentingPath path = new AugmentingPath(List.of(0, 1), Capacity.of(4));
+         assertThrows(UnsupportedOperationException.class, () -> path.vertices().add(9));
+     }
+ 
+     @Test
+     @DisplayName("renders a readable description")
+     void toStringIsReadable() {
+-        assertEquals("0 -> 1 -> 2 (bottleneck 4)", new AugmentingPath(List.of(0, 1, 2), 4).toString());
++        assertEquals("0 -> 1 -> 2 (bottleneck 4)",
++                new AugmentingPath(List.of(0, 1, 2), Capacity.of(4)).toString());
+     }
+ }
+diff --git a/test/maxflow/path/PathFinderTest.java b/test/maxflow/path/PathFinderTest.java
+index 92ce2fe..636824e 100644
+--- a/test/maxflow/path/PathFinderTest.java
++++ b/test/maxflow/path/PathFinderTest.java
+@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
+ import java.util.List;
+ import java.util.Optional;
+ 
++import maxflow.graph.Capacity;
+ import maxflow.graph.FlowNetwork;
+ import maxflow.graph.ResidualGraph;
+ import org.junit.jupiter.api.DisplayName;
+@@ -31,7 +32,7 @@ class PathFinderTest {
+ 
+         assertTrue(found.isPresent());
+         assertEquals(List.of(0, 1, 2), found.get().vertices());
+-        assertEquals(3, found.get().bottleneck(), "bottleneck is the smaller of 5 and 3");
++        assertEquals(Capacity.of(3), found.get().bottleneck(), "bottleneck is the smaller of 5 and 3");
+     }
+ 
+     @Test
+diff --git a/test/maxflow/solve/FordFulkersonSolverTest.java b/test/maxflow/solve/FordFulkersonSolverTest.java
+index 760f73a..58aab9c 100644
+--- a/test/maxflow/solve/FordFulkersonSolverTest.java
++++ b/test/maxflow/solve/FordFulkersonSolverTest.java
+@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
+ 
+ import java.util.List;
+ 
++import maxflow.graph.Capacity;
+ import maxflow.graph.Edge;
+ import maxflow.graph.FlowNetwork;
+ import maxflow.path.BreadthFirstPathFinder;
+@@ -39,7 +40,7 @@ class FordFulkersonSolverTest {
+     @DisplayName("computes the textbook maximum flow of 23, regardless of strategy")
+     void classicMaxFlow() {
+         for (MaxFlowSolver solver : strategies()) {
+-            assertEquals(23, solver.solve(classicNetwork(), 0, 5).value());
++            assertEquals(Capacity.of(23), solver.solve(classicNetwork(), 0, 5).value());
+         }
+     }
+ 
+@@ -60,11 +61,12 @@ class FordFulkersonSolverTest {
+             MaxFlowResult result = solver.solve(classicNetwork(), source, sink);
+             int[] net = new int[6]; // outflow - inflow per vertex
+             for (Edge edge : result.flowEdges()) {
+-                net[edge.from()] += edge.value();
+-                net[edge.to()] -= edge.value();
++                net[edge.from()] += edge.value().units();
++                net[edge.to()] -= edge.value().units();
+             }
++            int total = result.value().units();
+             for (int v = 0; v < net.length; v++) {
+-                int expected = v == source ? result.value() : v == sink ? -result.value() : 0;
++                int expected = v == source ? total : v == sink ? -total : 0;
+                 assertEquals(expected, net[v], "conservation at vertex " + v);
+             }
+         }
+@@ -76,8 +78,8 @@ class FordFulkersonSolverTest {
+         FlowNetwork network = classicNetwork();
+         MaxFlowResult result = new FordFulkersonSolver().solve(network, 0, 5);
+         for (Edge edge : result.flowEdges()) {
+-            assertTrue(edge.value() > 0, "flow is positive on " + edge);
+-            assertTrue(edge.value() <= network.capacity(edge.from(), edge.to()),
++            assertTrue(edge.value().isPositive(), "flow is positive on " + edge);
++            assertTrue(edge.value().compareTo(network.capacity(edge.from(), edge.to())) <= 0,
+                     "flow within capacity on " + edge);
+         }
+     }
+@@ -92,7 +94,7 @@ class FordFulkersonSolverTest {
+                 {0, 0, 0, 0},
+         });
+         for (MaxFlowSolver solver : strategies()) {
+-            assertEquals(5, solver.solve(network, 0, 3).value());
++            assertEquals(Capacity.of(5), solver.solve(network, 0, 3).value());
+         }
+     }
+ 
+@@ -101,7 +103,7 @@ class FordFulkersonSolverTest {
+     void disconnectedHasZeroFlow() {
+         FlowNetwork network = FlowNetwork.builder(3).addEdge(0, 1, 5).build();
+         MaxFlowResult result = new FordFulkersonSolver().solve(network, 0, 2);
+-        assertEquals(0, result.value());
++        assertEquals(Capacity.ZERO, result.value());
+         assertTrue(result.flowEdges().isEmpty());
+     }
+ 
+@@ -109,7 +111,7 @@ class FordFulkersonSolverTest {
+     @DisplayName("saturates a single direct edge")
+     void singleEdge() {
+         FlowNetwork network = FlowNetwork.builder(2).addEdge(0, 1, 7).build();
+-        assertEquals(7, new FordFulkersonSolver().solve(network, 0, 1).value());
++        assertEquals(Capacity.of(7), new FordFulkersonSolver().solve(network, 0, 1).value());
+     }
+ 
+     @Test
+diff --git a/test/maxflow/solve/MaxFlowResultTest.java b/test/maxflow/solve/MaxFlowResultTest.java
+index 72b1ac5..14304c9 100644
+--- a/test/maxflow/solve/MaxFlowResultTest.java
++++ b/test/maxflow/solve/MaxFlowResultTest.java
+@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
+ 
+ import java.util.List;
+ 
++import maxflow.graph.Capacity;
+ import maxflow.graph.Edge;
+ import org.junit.jupiter.api.DisplayName;
+ import org.junit.jupiter.api.Test;
+@@ -16,24 +17,24 @@ class MaxFlowResultTest {
+     @DisplayName("exposes value, source, sink and flow edges")
+     void exposesState() {
+         List<Edge> edges = List.of(new Edge(0, 1, 7));
+-        MaxFlowResult result = new MaxFlowResult(0, 5, 7, edges);
++        MaxFlowResult result = new MaxFlowResult(0, 5, Capacity.of(7), edges);
+ 
+-        assertEquals(7, result.value());
++        assertEquals(Capacity.of(7), result.value());
+         assertEquals(0, result.source());
+         assertEquals(5, result.sink());
+         assertEquals(edges, result.flowEdges());
+     }
+ 
+     @Test
+-    @DisplayName("rejects a negative flow value")
+-    void rejectsNegativeValue() {
+-        assertThrows(IllegalArgumentException.class, () -> new MaxFlowResult(0, 1, -1, List.of()));
++    @DisplayName("rejects a null flow value")
++    void rejectsNullValue() {
++        assertThrows(NullPointerException.class, () -> new MaxFlowResult(0, 1, null, List.of()));
+     }
+ 
+     @Test
+     @DisplayName("holds an immutable copy of its flow edges")
+     void flowEdgesAreImmutable() {
+-        MaxFlowResult result = new MaxFlowResult(0, 1, 0, List.of());
++        MaxFlowResult result = new MaxFlowResult(0, 1, Capacity.ZERO, List.of());
+         assertThrows(UnsupportedOperationException.class,
+                 () -> result.flowEdges().add(new Edge(0, 1, 1)));
+     }

@@ -1,0 +1,580 @@
+diff --git a/rbtree/Color.java b/rbtree/Color.java
+new file mode 100644
+index 0000000..5035811
+--- /dev/null
++++ b/rbtree/Color.java
+@@ -0,0 +1,12 @@
++package rbtree;
++
++/**
++ * The color of a {@link Node} in a red-black tree.
++ *
++ * <p>Replaces the original {@code char} sentinels ({@code 'R'} / {@code 'B'}),
++ * which allowed any character to be assigned and gave no compile-time safety.
++ */
++public enum Color {
++    RED,
++    BLACK
++}
+diff --git a/rbtree/Main.java b/rbtree/Main.java
+new file mode 100644
+index 0000000..e393ae6
+--- /dev/null
++++ b/rbtree/Main.java
+@@ -0,0 +1,24 @@
++package rbtree;
++
++/**
++ * Demonstration driver: inserts a fixed sequence of values, printing the
++ * in-order traversal after each insertion and the tree shape at the end.
++ */
++public final class Main {
++
++    private Main() {
++    }
++
++    public static void main(String[] args) {
++        RedBlackTree tree = new RedBlackTree();
++        int[] values = {1, 4, 6, 3, 5, 7, 8, 2, 9};
++
++        for (int value : values) {
++            tree.insert(value);
++            System.out.println();
++            tree.inorderTraversal();
++        }
++
++        tree.printTree();
++    }
++}
+diff --git a/rbtree/Node.java b/rbtree/Node.java
+new file mode 100644
+index 0000000..9894c45
+--- /dev/null
++++ b/rbtree/Node.java
+@@ -0,0 +1,25 @@
++package rbtree;
++
++/**
++ * A single node in a {@link RedBlackTree}.
++ *
++ * <p>Fields are package-private: they are shared mutable state owned by the
++ * tree algorithm and the {@link TreePrinter}, both of which live in this
++ * package. Nodes are created {@link Color#RED} by default, matching the
++ * standard red-black insertion rule (a freshly inserted node is always red).
++ */
++class Node {
++    int data;
++    Node left;
++    Node right;
++    Node parent;
++    Color color;
++
++    Node(int data) {
++        this.data = data;
++        this.left = null;
++        this.right = null;
++        this.parent = null;
++        this.color = Color.RED;
++    }
++}
+diff --git a/rbtree/RedBlackTree.java b/rbtree/RedBlackTree.java
+new file mode 100644
+index 0000000..aa4c783
+--- /dev/null
++++ b/rbtree/RedBlackTree.java
+@@ -0,0 +1,206 @@
++package rbtree;
++
++/**
++ * A red-black tree supporting ordered integer insertion.
++ *
++ * <p>This is a faithful refactoring of the original single-file implementation.
++ * The insertion algorithm is unchanged in behavior; the cleanups are structural:
++ *
++ * <ul>
++ *   <li>Color is modeled with the {@link Color} enum instead of {@code char}
++ *       sentinels.</li>
++ *   <li>The four parallel boolean flags ({@code ll}, {@code rr}, {@code lr},
++ *       {@code rl}) that signaled which rotation a parent frame must perform are
++ *       collapsed into a single {@link RotationCase} field. At most one of the
++ *       original flags was ever set, so a single-valued enum captures the same
++ *       state without the risk of inconsistent combinations.</li>
++ *   <li>The monolithic {@code insertHelp} is split into focused helpers:
++ *       {@link #applyPendingRotation(Node)} performs a rotation requested by the
++ *       child frame, and {@link #fixRedConflict(Node)} resolves a red-red
++ *       violation by either recoloring or scheduling a rotation.</li>
++ *   <li>Pretty-printing and in-order traversal output are delegated to
++ *       {@link TreePrinter}.</li>
++ * </ul>
++ */
++public class RedBlackTree {
++
++    /**
++     * The rotation a parent recursion frame must apply to rebalance after an
++     * insertion. Set by {@link #fixRedConflict(Node)} on one frame and consumed
++     * by {@link #applyPendingRotation(Node)} on the next frame up.
++     */
++    private enum RotationCase {
++        NONE,
++        /** Single left rotation (was the {@code ll} flag). */
++        LEFT,
++        /** Single right rotation (was the {@code rr} flag). */
++        RIGHT,
++        /** Right-then-left double rotation (was the {@code rl} flag). */
++        RIGHT_LEFT,
++        /** Left-then-right double rotation (was the {@code lr} flag). */
++        LEFT_RIGHT
++    }
++
++    private Node root;
++    private RotationCase pendingRotation = RotationCase.NONE;
++
++    public RedBlackTree() {
++        this.root = null;
++    }
++
++    /** Inserts a value, keeping the tree balanced and the root black. */
++    public void insert(int data) {
++        if (root == null) {
++            root = new Node(data);
++            root.color = Color.BLACK;
++        } else {
++            root = insertHelp(root, data);
++        }
++    }
++
++    /** Prints the values in ascending order, space-separated. */
++    public void inorderTraversal() {
++        TreePrinter.inorder(root);
++    }
++
++    /** Prints a sideways, indented view of the tree structure. */
++    public void printTree() {
++        TreePrinter.print(root);
++    }
++
++    private Node rotateLeft(Node node) {
++        Node pivot = node.right;
++        Node orphan = pivot.left;
++        pivot.left = node;
++        node.right = orphan;
++        node.parent = pivot;
++        if (orphan != null) {
++            orphan.parent = node;
++        }
++        return pivot;
++    }
++
++    private Node rotateRight(Node node) {
++        Node pivot = node.left;
++        Node orphan = pivot.right;
++        pivot.right = node;
++        node.left = orphan;
++        node.parent = pivot;
++        if (orphan != null) {
++            orphan.parent = node;
++        }
++        return pivot;
++    }
++
++    /**
++     * Recursively inserts {@code data} under {@code node}, returning the
++     * (possibly new) subtree root. On the way back up it applies any rotation
++     * requested by the child frame and detects red-red violations.
++     */
++    private Node insertHelp(Node node, int data) {
++        if (node == null) {
++            return new Node(data);
++        }
++
++        boolean redConflict = false;
++        if (data < node.data) {
++            node.left = insertHelp(node.left, data);
++            node.left.parent = node;
++            if (node != root && node.color == Color.RED && node.left.color == Color.RED) {
++                redConflict = true;
++            }
++        } else {
++            node.right = insertHelp(node.right, data);
++            node.right.parent = node;
++            if (node != root && node.color == Color.RED && node.right.color == Color.RED) {
++                redConflict = true;
++            }
++        }
++
++        node = applyPendingRotation(node);
++
++        if (redConflict) {
++            node = fixRedConflict(node);
++        }
++        return node;
++    }
++
++    /**
++     * Applies the rotation, if any, that a child frame scheduled on this subtree
++     * root, recoloring the rotated nodes as the original algorithm did. Clears
++     * the pending request afterwards.
++     */
++    private Node applyPendingRotation(Node node) {
++        switch (pendingRotation) {
++            case LEFT:
++                node = rotateLeft(node);
++                node.color = Color.BLACK;
++                node.left.color = Color.RED;
++                break;
++            case RIGHT:
++                node = rotateRight(node);
++                node.color = Color.BLACK;
++                node.right.color = Color.RED;
++                break;
++            case RIGHT_LEFT:
++                node.right = rotateRight(node.right);
++                node.right.parent = node;
++                node = rotateLeft(node);
++                node.color = Color.BLACK;
++                node.left.color = Color.RED;
++                break;
++            case LEFT_RIGHT:
++                node.left = rotateLeft(node.left);
++                node.left.parent = node;
++                node = rotateRight(node);
++                node.color = Color.BLACK;
++                node.right.color = Color.RED;
++                break;
++            case NONE:
++                break;
++        }
++        pendingRotation = RotationCase.NONE;
++        return node;
++    }
++
++    /**
++     * Resolves a red-red violation at {@code node}. Depending on the color of
++     * the uncle, this either recolors locally or schedules a rotation on the
++     * grandparent frame via {@link #pendingRotation}.
++     */
++    private Node fixRedConflict(Node node) {
++        Node parent = node.parent;
++        if (parent.right == node) {
++            Node uncle = parent.left;
++            if (uncle == null || uncle.color == Color.BLACK) {
++                if (node.left != null && node.left.color == Color.RED) {
++                    pendingRotation = RotationCase.RIGHT_LEFT;
++                } else if (node.right != null && node.right.color == Color.RED) {
++                    pendingRotation = RotationCase.LEFT;
++                }
++            } else {
++                uncle.color = Color.BLACK;
++                node.color = Color.BLACK;
++                if (parent != root) {
++                    parent.color = Color.RED;
++                }
++            }
++        } else {
++            Node uncle = parent.right;
++            if (uncle == null || uncle.color == Color.BLACK) {
++                if (node.left != null && node.left.color == Color.RED) {
++                    pendingRotation = RotationCase.RIGHT;
++                } else if (node.right != null && node.right.color == Color.RED) {
++                    pendingRotation = RotationCase.LEFT_RIGHT;
++                }
++            } else {
++                uncle.color = Color.BLACK;
++                node.color = Color.BLACK;
++                if (parent != root) {
++                    parent.color = Color.RED;
++                }
++            }
++        }
++        return node;
++    }
++}
+diff --git a/rbtree/TreePrinter.java b/rbtree/TreePrinter.java
+new file mode 100644
+index 0000000..c4c4b4a
+--- /dev/null
++++ b/rbtree/TreePrinter.java
+@@ -0,0 +1,48 @@
++package rbtree;
++
++/**
++ * Rendering of a tree to standard output.
++ *
++ * <p>Separating presentation from the {@link RedBlackTree} keeps the data
++ * structure free of I/O concerns. The output is identical to the original
++ * {@code inorderTraversalHelper} / {@code printTreeHelper} methods.
++ */
++final class TreePrinter {
++
++    /** Horizontal indentation, in spaces, added per level in {@link #print}. */
++    private static final int INDENT = 10;
++
++    private TreePrinter() {
++    }
++
++    /** Prints node values in ascending order, each followed by a space. */
++    static void inorder(Node node) {
++        if (node != null) {
++            inorder(node.left);
++            System.out.printf("%d ", node.data);
++            inorder(node.right);
++        }
++    }
++
++    /** Prints a sideways view of the tree (right subtree on top). */
++    static void print(Node root) {
++        print(root, 0);
++    }
++
++    private static void print(Node node, int space) {
++        if (node == null) {
++            return;
++        }
++        space += INDENT;
++        print(node.right, space);
++
++        System.out.printf("\n");
++        for (int i = INDENT; i < space; i++) {
++            System.out.printf(" ");
++        }
++        System.out.printf("%d", node.data);
++        System.out.printf("\n");
++
++        print(node.left, space);
++    }
++}
+diff --git a/red_black_tree_insertion.java b/red_black_tree_insertion.java
+deleted file mode 100644
+index 95c8465..0000000
+--- a/red_black_tree_insertion.java
++++ /dev/null
+@@ -1,229 +0,0 @@
+-import java.io.*;
+-
+-public class RedBlackTree {
+-    public Node root;
+-    public RedBlackTree()
+-    {
+-        super();
+-        root = null;
+-    }
+-
+-    class Node
+-    {
+-        int data;
+-        Node left;
+-        Node right;
+-        char colour;
+-        Node parent;
+-
+-        Node(int data)
+-        {
+-            super();
+-            this.data = data;
+-            this.left = null;
+-            this.right = null;
+-            this.colour = 'R';
+-            this.parent = null;
+-        }
+-    }
+-
+-    Node rotateLeft(Node node)
+-    {
+-        Node x = node.right;
+-        Node y = x.left;
+-        x.left = node;
+-        node.right = y;
+-        node.parent = x;
+-        if(y!=null)
+-            y.parent = node;
+-        return(x);
+-    }
+-
+-    Node rotateRight(Node node)
+-    {
+-        Node x = node.left;
+-        Node y = x.right;
+-        x.right = node;
+-        node.left = y;
+-        node.parent = x;
+-        if(y!=null)
+-            y.parent = node;
+-        return(x);
+-    }
+-
+-    boolean ll = false;
+-    boolean rr = false;
+-    boolean lr = false;
+-    boolean rl = false;
+-
+-    Node insertHelp(Node root, int data)
+-    {
+-
+-        boolean f=false;
+-
+-        if(root==null)
+-            return(new Node(data));
+-        else if(data<root.data)
+-        {
+-            root.left = insertHelp(root.left, data);
+-            root.left.parent = root;
+-            if(root!=this.root)
+-            {
+-                if(root.colour=='R' && root.left.colour=='R')
+-                    f = true;
+-            }
+-        }
+-        else
+-        {
+-            root.right = insertHelp(root.right,data);
+-            root.right.parent = root;
+-            if(root!=this.root)
+-            {
+-                if(root.colour=='R' && root.right.colour=='R')
+-                    f = true;
+-            }
+-
+-        }
+-
+-        if(this.ll)
+-        {
+-            root = rotateLeft(root);
+-            root.colour = 'B';
+-            root.left.colour = 'R';
+-            this.ll = false;
+-        }
+-        else if(this.rr)
+-        {
+-            root = rotateRight(root);
+-            root.colour = 'B';
+-            root.right.colour = 'R';
+-            this.rr  = false;
+-        }
+-        else if(this.rl)
+-        {
+-            root.right = rotateRight(root.right);
+-            root.right.parent = root;
+-            root = rotateLeft(root);
+-            root.colour = 'B';
+-            root.left.colour = 'R';
+-
+-            this.rl = false;
+-        }
+-        else if(this.lr)
+-        {
+-            root.left = rotateLeft(root.left);
+-            root.left.parent = root;
+-            root = rotateRight(root);
+-            root.colour = 'B';
+-            root.right.colour = 'R';
+-            this.lr = false;
+-        }
+-
+-        if(f)
+-        {
+-            if(root.parent.right == root)
+-            {
+-                if(root.parent.left==null || root.parent.left.colour=='B')
+-                {
+-                    if(root.left!=null && root.left.colour=='R')
+-                        this.rl = true;
+-                    else if(root.right!=null && root.right.colour=='R')
+-                        this.ll = true;
+-                }
+-                else
+-                {
+-                    root.parent.left.colour = 'B';
+-                    root.colour = 'B';
+-                    if(root.parent!=this.root)
+-                        root.parent.colour = 'R';
+-                }
+-            }
+-            else
+-            {
+-                if(root.parent.right==null || root.parent.right.colour=='B')
+-                {
+-                    if(root.left!=null && root.left.colour=='R')
+-                        this.rr = true;
+-                    else if(root.right!=null && root.right.colour=='R')
+-                        this.lr = true;
+-                }
+-                else
+-                {
+-                    root.parent.right.colour = 'B';
+-                    root.colour = 'B';
+-                    if(root.parent!=this.root)
+-                        root.parent.colour = 'R';
+-                }
+-            }
+-            f = false;
+-        }
+-        return(root);
+-    }
+-
+-    public void insert(int data)
+-    {
+-        if(this.root==null)
+-        {
+-            this.root = new Node(data);
+-            this.root.colour = 'B';
+-        }
+-        else
+-            this.root = insertHelp(this.root,data);
+-    }
+-
+-    void inorderTraversalHelper(Node node)
+-    {
+-        if(node!=null)
+-        {
+-            inorderTraversalHelper(node.left);
+-            System.out.printf("%d ", node.data);
+-            inorderTraversalHelper(node.right);
+-        }
+-    }
+-
+-    public void inorderTraversal()
+-    {
+-        inorderTraversalHelper(this.root);
+-    }
+-
+-    void printTreeHelper(Node root, int space)
+-    {
+-        int i;
+-        if(root != null)
+-        {
+-            space = space + 10;
+-            printTreeHelper(root.right, space);
+-
+-            System.out.printf("\n");
+-
+-            for ( i = 10; i < space; i++)
+-            {
+-                System.out.printf(" ");
+-            }
+-
+-            System.out.printf("%d", root.data);
+-            System.out.printf("\n");
+-            printTreeHelper(root.left, space);
+-
+-        }
+-    }
+-
+-    public void printTree()
+-    {
+-        printTreeHelper(this.root, 0);
+-    }
+-    public static void main(String[] args)
+-    {
+-
+-        RedBlackTree t = new RedBlackTree();
+-        int[] arr = {1,4,6,3,5,7,8,2,9};
+-        for(int i=0;i<9;i++)
+-        {
+-            t.insert(arr[i]);
+-            System.out.println();
+-            t.inorderTraversal();
+-        }
+-
+-        t.printTree();
+-    }
+-}
