@@ -6,6 +6,7 @@ import os
 import re
 from pathlib import Path
 
+from experiment_runner.limit_detect import LimitDetectConfig
 from experiment_runner.models import ClarificationPatterns, PrompterConfig
 from experiment_runner.util import non_empty_string, script_dir
 
@@ -165,6 +166,25 @@ def load_clarification_patterns() -> ClarificationPatterns:
             entries.get("CLARIFICATION_REQUIRE_QUESTION_MARK"),
             default=True,
         ),
+    )
+
+
+def load_limit_detect_config() -> LimitDetectConfig:
+    """Load provider-limit detection knobs from prompt.env (all optional, sensible defaults)."""
+    entries, prompt_env = load_prompt_env_entries()
+
+    def _patterns(file_key: str) -> tuple:
+        raw_path = entries.get(file_key)
+        if not raw_path:
+            return ()
+        return load_regex_patterns_file(resolve_prompt_path(raw_path, prompt_env=prompt_env))
+
+    return LimitDetectConfig(
+        enabled=_parse_bool(entries.get("LIMIT_DETECT_ENABLED"), default=True),
+        claude_patterns=_patterns("LIMIT_CLAUDE_PATTERNS_FILE"),
+        codex_patterns=_patterns("LIMIT_CODEX_PATTERNS_FILE"),
+        gemini_surface=_parse_bool(entries.get("LIMIT_GEMINI_SURFACE"), default=False),
+        gemini_surface_503=_parse_bool(entries.get("LIMIT_GEMINI_SURFACE_503"), default=False),
     )
 
 

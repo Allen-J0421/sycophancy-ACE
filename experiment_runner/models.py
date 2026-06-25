@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from experiment_runner.limit_detect import LimitDetectConfig
+
 AgentKind = Literal["codex", "claude"]
 
 
@@ -121,6 +123,7 @@ class ExperimentConfig:
     prompter_config: PrompterConfig | None = None
     clarification_patterns: ClarificationPatterns | None = None
     effort: str | None = None
+    limit_detect: LimitDetectConfig | None = None
 
 
 @dataclass(frozen=True)
