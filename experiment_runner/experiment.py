@@ -15,6 +15,12 @@ from experiment_runner.config import build_coding_agent, build_prompt_source, ep
 from experiment_runner.constants import CSV_COLUMNS, agent_jsonl_filename
 from experiment_runner.git_repo import GitRepository
 from experiment_runner.iteration import run_iteration
+from experiment_runner.limit_detect import (
+    LimitDetectConfig,
+    ProviderLimitError,
+    detect_gemini_limit,
+    detect_limit,
+)
 from experiment_runner.models import ExperimentConfig, IterationResult, PrompterTurnInput, agent_run_ok
 from experiment_runner.prompter import extract_final_agent_message
 from experiment_runner.prompt_source import PromptSource
@@ -32,18 +38,26 @@ class ExperimentRunner:
         git: GitRepository,
         agent: CodingAgent,
         prompt_source: PromptSource,
+        limit_cfg: LimitDetectConfig | None = None,
     ) -> None:
         self.config = config
         self.git = git
         self.agent = agent
         self.prompt_source = prompt_source
+        self.limit_cfg = limit_cfg if limit_cfg is not None else LimitDetectConfig()
 
     @classmethod
     def from_config(cls, config: ExperimentConfig) -> ExperimentRunner:
         git = GitRepository(config.target.root)
         agent = build_coding_agent(config)
         prompt_source = build_prompt_source(config)
-        return cls(config, git=git, agent=agent, prompt_source=prompt_source)
+        return cls(
+            config,
+            git=git,
+            agent=agent,
+            prompt_source=prompt_source,
+            limit_cfg=config.limit_detect,
+        )
 
     def iter_results(self, initial_sha: str) -> Iterator[IterationResult]:
         prev_sha = initial_sha
@@ -74,6 +88,22 @@ class ExperimentRunner:
                 clarification_patterns=patterns,
                 clarification_responder=clarification_responder,
             )
+
+            # Abort before persisting a dead turn: a provider limit (Claude session limit,
+            # Codex spend cap, Gemini quota) otherwise exits cleanly with an empty diff and
+            # the experiment would be recorded as `done`. Raising here means the limited
+            # turn's artifacts are never written; the orchestrator pauses and re-runs fresh.
+            hit = detect_limit(
+                provider=self.config.agent,
+                jsonl_text=result.jsonl_text,
+                diff_patch=result.diff_patch,
+                cfg=self.limit_cfg,
+            )
+            if hit is None and use_prompter:
+                hit = detect_gemini_limit(turn.prompter_jsonl, self.limit_cfg)
+            if hit is not None:
+                raise ProviderLimitError(hit)
+
             prompter_jsonl = turn.prompter_jsonl if use_prompter else ""
             if use_prompter and result.clarification_followup and clarification_prompter_jsonl:
                 prompter_jsonl = clarification_prompter_jsonl[0]

@@ -14,7 +14,12 @@ from experiment_runner.constants import (
     PROMPTER_SUFFIX,
     effort_levels_for_agent,
 )
-from experiment_runner.env import load_clarification_patterns, load_prompter_config, load_prompt
+from experiment_runner.env import (
+    load_clarification_patterns,
+    load_limit_detect_config,
+    load_prompter_config,
+    load_prompt,
+)
 from experiment_runner.git_repo import find_git_root
 from experiment_runner.models import AgentKind, CliArgs, ExperimentConfig, TargetScope
 from experiment_runner.result_paths import artifacts_dir, log_csv_path
@@ -206,6 +211,7 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
     prompt = load_prompt()
     prompter_config = load_prompter_config(fallback_prompt=prompt) if args.prompter else None
     clarification_patterns = load_clarification_patterns()
+    limit_detect = load_limit_detect_config()
     return ExperimentConfig(
         target=target,
         prompt=prompt,
@@ -221,6 +227,7 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
         prompter_config=prompter_config,
         clarification_patterns=clarification_patterns,
         effort=args.effort,
+        limit_detect=limit_detect,
     )
 
 

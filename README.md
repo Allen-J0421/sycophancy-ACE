@@ -155,7 +155,7 @@ Algorithms/<exp>::run_exp::<model>
 Algorithms/<exp>::refdiff
 ```
 
-Each value is `{"status": "done" | "failed", ...}`. On restart, `done` steps are skipped; a `failed` step is recorded and the batch continues, so one bad codebase/model never halts the rest. For `run_exp`, exit `1` (partial — CSV still written) counts as `done`; exit `2` and other nonzero codes are `failed`. Use `--dry-run` to see which steps would run vs. skip. Per-step logs are written under `output/<Category>/<exp>/pipeline-logs/`.
+Each value is `{"status": "done" | "failed" | "blocked", ...}`. On restart, `done` steps are skipped; a `failed` step is recorded and the batch continues, so one bad codebase/model never halts the rest. For `run_exp`, exit `1` (partial — CSV still written) counts as `done`; exit `3` (provider limit) becomes `blocked` — **not** `done`, so it is re-attempted rather than silently skipped (see [Provider-limit auto-pause](#provider-limit-auto-pause--corrupted-branch-cleanup)); exit `2` and other nonzero codes are `failed`. Use `--dry-run` to see which steps would run vs. skip. Per-step logs are written under `output/<Category>/<exp>/pipeline-logs/`.
 
 ### Flags
 
@@ -171,6 +171,32 @@ Each value is `{"status": "done" | "failed", ...}`. On restart, `done` steps are
 | `--no-dep-check` | Skip the upstream-phase guard. |
 | `--no-check` | Skip the pre-flight sanity check. |
 | `--output-root DIR` | Root for the `output/` tree (default `output/`). |
+| `--no-auto-pause` | Disable provider-limit auto-pause (blocked steps are still recorded, not retried). |
+| `--max-wait-minutes N` | Cap on waiting for a provider reset (default `480` / 8h). |
+| `--poll-interval-seconds N` | Sleep granularity while waiting (default `60`). |
+| `--buffer-minutes N` | Extra minutes added after a parsed reset time (default `2`). |
+| `--fixed-wait-minutes N` | Wait used when a reset time can't be parsed (default `60`). |
+
+### Provider-limit auto-pause & corrupted-branch cleanup
+
+Long batch runs hit provider usage caps — a **Claude session limit**, a **Codex spend cap**, or a **Gemini prompter quota**. These don't crash the CLI: a Claude session-limit reply comes back as a normal `result` line with `is_error:true` / `api_error_status:429` and exits `0`, so without detection the experiment burns its remaining iterations on empty diffs, gets marked `done`, and is never re-run. The pipeline detects this on the **first** dead turn and handles it automatically (on by default):
+
+1. **Abort before persisting** — `run_experiment.py` raises before the dead turn's artifacts are written and exits `3` (the bad iterations never reach disk).
+2. **Pause & skip ahead** — the orchestrator marks the step `blocked`, and while one provider cools down it keeps running `run_exp` steps for **other** providers. When only blocked work remains it sleeps until the parsed reset time (`resets 9:50am (…)`) + `--buffer-minutes`, capped at `--max-wait-minutes`; if the reset time can't be parsed it waits `--fixed-wait-minutes`.
+3. **Re-run fresh** — after reset, the blocked run's partial CSV + artifacts are removed and the experiment is re-run from its baseline commit, so no corrupt data is recorded.
+
+Detection knobs live in `config/prompt.env` (all optional): `LIMIT_DETECT_ENABLED` (default `true`); `LIMIT_GEMINI_SURFACE` / `LIMIT_GEMINI_SURFACE_503` (default `false` — the prompter keeps its silent fixed-prompt fallback unless you opt in); `LIMIT_CLAUDE_PATTERNS_FILE` / `LIMIT_CODEX_PATTERNS_FILE` (extra detection regexes). Orchestrator defaults (`LIMIT_AUTO_PAUSE`, `LIMIT_MAX_WAIT_MINUTES`, `LIMIT_POLL_INTERVAL_SECONDS`, `LIMIT_BUFFER_MINUTES`, `LIMIT_FIXED_WAIT_MINUTES`, `LIMIT_CLEANUP_DEAD_RUNS`) live there too; the CLI flags above override them.
+
+**Corrupted-branch cleanup is a separate, manual step.** A re-run leaves the discarded run's **experiment branch** behind in the dataset repo (the limited turn was committed `--allow-empty` before detection fired). The pipeline does **not** delete branches; instead it *logs* every discarded/dead run to **`output/corrupted_branches.jsonl`** (provider limits, and wholesale-dead runs where every iteration failed). After a batch finishes, review the log and delete the branches yourself with [`clean_corrupted_branches.py`](clean_corrupted_branches.py):
+
+```bash
+python clean_corrupted_branches.py            # review only — branches + live status, no changes
+python clean_corrupted_branches.py --scan     # also discover corrupt runs still visible in output/
+python clean_corrupted_branches.py --apply    # delete logged branches, flag them cleaned
+python clean_corrupted_branches.py --scan --apply
+```
+
+It only deletes branches matching `<agent>-exp/…` (never the per-codebase baseline branches), detaching the worktree to its baseline first if the branch is checked out, and flags records `cleaned` (kept as an audit trail). `--scan` finds corruption still present in `output/`, recovering the branch from the run's CSV or — when the CSV is already gone — from the dataset repo by the run's unique stamp.
 
 ---
 
@@ -195,7 +221,7 @@ python run_experiment.py <target> <commit> <iterations> --model <model> [--label
 
 **CSV columns:** `run, files_changed, lines_added, lines_deleted, lines_total, duration_s, exit_code, timed_out, commit_sha, commit_message, model, git_branch`
 
-**Exit codes:** `0` all iterations succeeded · `1` at least one failed/timed out (CSV still written) · `2` setup error (bad paths, missing prompt, etc.).
+**Exit codes:** `0` all iterations succeeded · `1` at least one failed/timed out (CSV still written) · `2` setup error (bad paths, missing prompt, etc.) · `3` a provider usage/session limit was hit mid-run (a `.limit_block.json` marker is written; the batch pipeline pauses until reset and re-runs). See [Provider-limit auto-pause](#provider-limit-auto-pause--corrupted-branch-cleanup).
 
 #### Gemini prompter mode (`--prompter`)
 
@@ -360,11 +386,12 @@ Older runs may have CSV only; the chart still works, but diff/response panels sh
 
 ```
 run_experiment.py      Phase 1 CLI (library in experiment_runner/)
-experiment_runner/     Phase 1 library: coding-agent loop, git, prompter
+experiment_runner/     Phase 1 library: coding-agent loop, git, prompter, limit detection
 run_refdiff.py         Phase 2: RefDiff batch (Java / JavaScript)
 compute_signals.py     Phase 3: sycophancy signals S1–S6
-run_pipeline.py        Batch orchestrator over pipeline_plan.json
+run_pipeline.py        Batch orchestrator over pipeline_plan.json (provider-limit auto-pause)
 check_plan.py          Pre-flight sanity check for pipeline_plan.json
+clean_corrupted_branches.py  Manual review/cleanup of corrupted experiment branches
 pipeline_plan.json     Editable batch planner
 environment.yml        Conda env (sycophancy-sandbox): pinned Python deps
 refdiff-runner/        Gradle app (RefDiff 2.0.0 from Maven Central)
@@ -373,7 +400,7 @@ config/                AGENT_FIXED_PROMPT, prompter system prompt, clarification
 .env                   GEMINI_API_KEY, PROMPTER_MODEL (--prompter) — stays at root
 dashboard/             build.py (Phase 4), build_index.py, app.js, template.html, style.css
 result/                Single-experiment output (manual phase scripts)
-output/                Batch-pipeline output (.pipeline_state.json, Algorithms/, RealWorld/)
+output/                Batch-pipeline output (.pipeline_state.json, corrupted_branches.jsonl, Algorithms/, RealWorld/)
 plot_lines.py          Line-change PNGs (pipeline phase after run_exp)
 plot_refdiff.py        Optional RefDiff stacked-bar PNGs
 plot_signals.py        Optional signal bar charts + binary-flag matrix PNGs
@@ -412,4 +439,4 @@ Folders with CSV logs but no `dashboard.html` appear on the landing page as "Das
   git checkout -                    # previous branch
   git branch -D codex-exp/<name>    # delete experiment branch
   ```
-  If the harness created `.git` inside a non-repo target, remove that directory to drop the repo.
+  If the harness created `.git` inside a non-repo target, remove that directory to drop the repo. For **batch runs**, corrupted/discarded experiment branches are logged to `output/corrupted_branches.jsonl`; clean them in bulk after the batch with [`clean_corrupted_branches.py`](clean_corrupted_branches.py) (see [Provider-limit auto-pause](#provider-limit-auto-pause--corrupted-branch-cleanup)).

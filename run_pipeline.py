@@ -26,10 +26,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -333,13 +336,309 @@ def run_step(step: Step, *, dry_run: bool) -> tuple[str, str]:
 
     rc = proc.returncode
     detail = f"exit={rc} log={log_path.name}"
-    # run_experiment.py: 0 ok, 1 partial (CSV still written), 2 setup error.
-    # Treat 0 and 1 as "done enough to proceed"; 2 (and other nonzero) as failed.
+    # run_experiment.py: 0 ok, 1 partial (CSV still written), 2 setup error,
+    # 3 provider-limit-blocked (a usage/session limit was hit; a .limit_block.json marker
+    # was written). Treat 0/1 as done; 3 as "blocked" (not done → re-attempted, never
+    # silently skipped); 2 and other nonzero as failed.
     if step.phase == "run_exp":
-        status = "done" if rc in (0, 1) else "failed"
+        if rc == 3:
+            status = "blocked"
+        elif rc in (0, 1):
+            status = "done"
+        else:
+            status = "failed"
     else:
         status = "done" if rc == 0 else "failed"
     return (status, detail)
+
+
+# ---------------------------------------------------------------------------
+# Provider-limit auto-pause (run_exp scheduling)
+# ---------------------------------------------------------------------------
+
+_MARKER_FILENAME = ".limit_block.json"
+
+
+@dataclass
+class PauseConfig:
+    """Orchestrator-side auto-pause settings (env/prompt.env defaults, CLI overrides)."""
+
+    auto_pause: bool = True
+    max_wait_min: int = 480
+    poll_s: int = 60
+    buffer_min: int = 2
+    fixed_wait_min: int = 60
+    cleanup: bool = True
+    max_attempts: int = 5
+
+    @property
+    def max_wait_s(self) -> int:
+        return self.max_wait_min * 60
+
+
+def _read_prompt_env() -> dict[str, str]:
+    """Minimal prompt.env reader (stdlib only) so the orchestrator avoids importing the
+    heavy experiment_runner chain. Live env vars take precedence per key."""
+    values: dict[str, str] = {}
+    candidates = (
+        Path.cwd() / "prompt.env",
+        _SCRIPT_DIR / "config" / "prompt.env",
+        _SCRIPT_DIR / "prompt.env",
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            val = val.strip().strip('"').strip("'").strip()
+            if key and val and key not in values:
+                values[key] = val
+        break
+    return values
+
+
+def _env_value(key: str, prompt_env: dict[str, str]) -> str | None:
+    live = os.environ.get(key)
+    if live and live.strip():
+        return live.strip()
+    return prompt_env.get(key)
+
+
+def _env_bool(key: str, prompt_env: dict[str, str], *, default: bool) -> bool:
+    raw = _env_value(key, prompt_env)
+    if raw is None:
+        return default
+    norm = raw.strip().lower()
+    if norm in {"1", "true", "yes", "on"}:
+        return True
+    if norm in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _env_int(key: str, prompt_env: dict[str, str], *, default: int) -> int:
+    raw = _env_value(key, prompt_env)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def build_pause_config(args: argparse.Namespace) -> PauseConfig:
+    pe = _read_prompt_env()
+    auto_pause = _env_bool("LIMIT_AUTO_PAUSE", pe, default=True)
+    if getattr(args, "no_auto_pause", False):
+        auto_pause = False
+    return PauseConfig(
+        auto_pause=auto_pause,
+        max_wait_min=args.max_wait_minutes
+        if args.max_wait_minutes is not None
+        else _env_int("LIMIT_MAX_WAIT_MINUTES", pe, default=480),
+        poll_s=args.poll_interval_seconds
+        if args.poll_interval_seconds is not None
+        else _env_int("LIMIT_POLL_INTERVAL_SECONDS", pe, default=60),
+        buffer_min=args.buffer_minutes
+        if args.buffer_minutes is not None
+        else _env_int("LIMIT_BUFFER_MINUTES", pe, default=2),
+        fixed_wait_min=args.fixed_wait_minutes
+        if args.fixed_wait_minutes is not None
+        else _env_int("LIMIT_FIXED_WAIT_MINUTES", pe, default=60),
+        cleanup=_env_bool("LIMIT_CLEANUP_DEAD_RUNS", pe, default=True),
+    )
+
+
+def step_providers(step: Step) -> set[str]:
+    """Providers a run_exp step depends on: its coding-agent CLI plus Gemini in prompter mode."""
+    provs = {_agent_for_model(step.model)} if step.model else set()
+    if step.task.prompter:
+        provs.add("gemini")
+    return provs
+
+
+def marker_path_for(task: Task) -> Path:
+    return task.output_base / task.exp_folder / _MARKER_FILENAME
+
+
+def read_limit_marker(task: Task) -> dict | None:
+    path = marker_path_for(task)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def clear_limit_marker(task: Task) -> None:
+    path = marker_path_for(task)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def clean_dead_run(marker: dict, *, cleanup: bool) -> None:
+    """Delete the blocked run's partial CSV + artifacts dir so a fresh re-run starts clean
+    and no zombie experiment is picked up by downstream globs."""
+    if not cleanup:
+        return
+    for key in ("partial_csv", "artifacts_dir"):
+        raw = marker.get(key)
+        if not raw:
+            continue
+        path = Path(raw)
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+                eprint(f"  [cleanup] removed {path}")
+            elif path.is_file():
+                path.unlink()
+                eprint(f"  [cleanup] removed {path}")
+        except OSError as exc:
+            eprint(f"  [cleanup] could not remove {path}: {exc}")
+
+
+def _block_until(marker: dict | None, cfg: PauseConfig) -> datetime:
+    """When to retry: parsed reset + buffer, else now + fixed fallback wait."""
+    reset_iso = (marker or {}).get("reset_dt_iso")
+    if reset_iso:
+        try:
+            dt = datetime.fromisoformat(reset_iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt + timedelta(minutes=cfg.buffer_min)
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc) + timedelta(minutes=cfg.fixed_wait_min)
+
+
+def _sleep_until(target: datetime, *, poll_s: int) -> None:
+    while True:
+        now = datetime.now(timezone.utc)
+        remaining = (target - now).total_seconds()
+        if remaining <= 0:
+            return
+        chunk = min(poll_s, remaining)
+        eprint(f"  [pause] sleeping {int(remaining // 60)}m{int(remaining % 60):02d}s "
+               f"until {target.isoformat()} …")
+        time.sleep(chunk)
+
+
+def schedule_run_exp(
+    run_exp_steps: list[Step],
+    state: State,
+    args: argparse.Namespace,
+    counts: dict[str, int],
+    cfg: PauseConfig,
+) -> None:
+    """Run all run_exp steps with provider-aware scheduling: while one provider is blocked,
+    keep running steps for other providers; when only blocked work remains, sleep until the
+    earliest reset (capped), then retry. Blocked runs are cleaned up and re-run fresh."""
+    # Initial selection mirrors the simple loop (run_exp has no upstream dep).
+    pending: list[Step] = []
+    for step in run_exp_steps:
+        prior = state.status(step.key)
+        if args.retry_failed:
+            if prior not in ("failed", "blocked"):
+                counts["skipped"] += 1
+                continue
+        elif not args.force and prior == "done":
+            counts["skipped"] += 1
+            continue
+        pending.append(step)
+
+    blocked_until: dict[str, datetime] = {}
+    attempts: dict[str, int] = {}
+
+    while pending:
+        now = datetime.now(timezone.utc)
+        for prov in [p for p, until in blocked_until.items() if until <= now]:
+            del blocked_until[prov]
+
+        runnable = next(
+            (s for s in pending if not (step_providers(s) & blocked_until.keys())),
+            None,
+        )
+        if runnable is None:
+            relevant = set().union(*(step_providers(s) for s in pending))
+            blocks = [blocked_until[p] for p in relevant if p in blocked_until]
+            if not blocks:
+                break  # safety: nothing runnable and nothing blocked — avoid spin
+            earliest = min(blocks)
+            wait_s = (earliest - now).total_seconds()
+            if wait_s > cfg.max_wait_s:
+                eprint(f"  [pause] earliest reset {earliest.isoformat()} exceeds max wait "
+                       f"{cfg.max_wait_min}min — leaving {len(pending)} run_exp step(s) blocked.")
+                counts["blocked"] += len(pending)
+                pending.clear()
+                break
+            eprint(f"  [pause] all remaining run_exp providers cooling down "
+                   f"({sorted(relevant & blocked_until.keys())}); waiting for {earliest.isoformat()}.")
+            _sleep_until(earliest, poll_s=cfg.poll_s)
+            continue
+
+        pending.remove(runnable)
+        status, detail = run_step(runnable, dry_run=False)
+        if status == "blocked":
+            marker = read_limit_marker(runnable.task)
+            provider = (marker or {}).get("provider") or (_agent_for_model(runnable.model) if runnable.model else "?")
+            until = _block_until(marker, cfg)
+            blocked_until[provider] = max(blocked_until.get(provider, until), until)
+            attempts[runnable.key] = attempts.get(runnable.key, 0) + 1
+            if marker is not None:
+                clean_dead_run(marker, cleanup=cfg.cleanup)
+                clear_limit_marker(runnable.task)
+            state.set(runnable.key, "blocked", detail)
+            if attempts[runnable.key] >= cfg.max_attempts:
+                eprint(f"  [give-up] {runnable.key} hit a limit {attempts[runnable.key]}x — leaving blocked.")
+                counts["blocked"] += 1
+            else:
+                eprint(f"  [blocked] {runnable.key} — {provider} limit; retry after "
+                       f"{blocked_until[provider].isoformat()} (attempt {attempts[runnable.key]}).")
+                pending.append(runnable)
+        else:
+            state.set(runnable.key, status, detail)
+            counts[status if status in counts else "skipped"] += 1
+            if status == "failed":
+                eprint(f"  [FAILED] {runnable.key} ({detail}) — continuing")
+
+
+def attempt_step(
+    step: Step,
+    state: State,
+    args: argparse.Namespace,
+    counts: dict[str, int],
+) -> None:
+    """Single-step selection + dep-guard + run (used for dry-run, downstream phases, and the
+    no-auto-pause path). Mirrors the original main-loop body."""
+    prior = state.status(step.key)
+    if not args.dry_run:
+        if args.retry_failed:
+            if prior not in ("failed", "blocked"):
+                counts["skipped"] += 1
+                return
+        elif not args.force and prior == "done":
+            counts["skipped"] += 1
+            return
+
+    if not args.dry_run and not args.no_dep_check and not upstream_satisfied(step, state):
+        up = PHASE_UPSTREAM.get(step.phase)
+        eprint(f"  [skip] {step.key} — upstream '{up}' not done (use --no-dep-check to override)")
+        counts["skipped"] += 1
+        return
+
+    status, detail = run_step(step, dry_run=args.dry_run)
+    if not args.dry_run:
+        state.set(step.key, status, detail)
+    counts[status if status in counts else "skipped"] += 1
+    if status == "failed":
+        eprint(f"  [FAILED] {step.key} ({detail}) — continuing")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -365,6 +664,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip the pre-flight sanity check.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print the ordered command plan; do not execute.")
+    parser.add_argument(
+        "--no-auto-pause", action="store_true",
+        help="Disable provider-limit auto-pause (run_exp scheduling). Blocked steps are still "
+             "recorded as 'blocked' (not 'done'), but the pipeline does not wait/retry them.",
+    )
+    parser.add_argument("--max-wait-minutes", type=int, default=None,
+                        help="Cap on how long to wait for a provider reset (default 480 / 8h).")
+    parser.add_argument("--poll-interval-seconds", type=int, default=None,
+                        help="Sleep granularity while waiting for a reset (default 60).")
+    parser.add_argument("--buffer-minutes", type=int, default=None,
+                        help="Extra minutes added after a parsed reset time (default 2).")
+    parser.add_argument("--fixed-wait-minutes", type=int, default=None,
+                        help="Wait used when a reset time can't be parsed (default 60).")
     args = parser.parse_args(argv)
 
     output_root = args.output_root.resolve()
@@ -426,41 +738,28 @@ def main(argv: list[str] | None = None) -> int:
     if phases_filter:
         eprint(f"[plan] phase filter: {sorted(phases_filter)}")
 
-    counts = {"done": 0, "failed": 0, "skipped": 0}
-    for step in ordered_steps:
-        prior = state.status(step.key)
+    pause_cfg = build_pause_config(args)
+    counts = {"done": 0, "failed": 0, "skipped": 0, "blocked": 0}
 
-        # Selection of which steps to (re-)run:
-        #   --retry-failed : only previously-failed steps.
-        #   --force        : everything, regardless of prior state.
-        #   default        : skip steps already done; (re)attempt pending/failed.
-        if not args.dry_run:
-            if args.retry_failed:
-                if prior != "failed":
-                    counts["skipped"] += 1
-                    continue
-            elif not args.force and prior == "done":
-                counts["skipped"] += 1
-                continue
+    run_exp_steps = [s for s in ordered_steps if s.phase == "run_exp"]
+    other_steps = [s for s in ordered_steps if s.phase != "run_exp"]
+    use_scheduler = pause_cfg.auto_pause and not args.dry_run and bool(run_exp_steps)
 
-        # In dry-run we show the full command plan, so skip the dep guard
-        # (no steps are ever marked done during a dry-run).
-        if not args.dry_run and not args.no_dep_check and not upstream_satisfied(step, state):
-            up = PHASE_UPSTREAM.get(step.phase)
-            eprint(f"  [skip] {step.key} — upstream '{up}' not done (use --no-dep-check to override)")
-            counts["skipped"] += 1
-            continue
-
-        status, detail = run_step(step, dry_run=args.dry_run)
-        if not args.dry_run:
-            state.set(step.key, status, detail)
-        counts[status if status in counts else "skipped"] += 1
-        if status == "failed":
-            eprint(f"  [FAILED] {step.key} ({detail}) — continuing")
+    if use_scheduler:
+        eprint("[plan] provider-limit auto-pause: ON "
+               f"(max wait {pause_cfg.max_wait_min}min, buffer {pause_cfg.buffer_min}min)")
+        schedule_run_exp(run_exp_steps, state, args, counts, pause_cfg)
+        for step in other_steps:
+            attempt_step(step, state, args, counts)
+    else:
+        if not pause_cfg.auto_pause and run_exp_steps and not args.dry_run:
+            eprint("[plan] provider-limit auto-pause: OFF (--no-auto-pause)")
+        for step in ordered_steps:
+            attempt_step(step, state, args, counts)
 
     eprint(
-        f"[done] done={counts['done']} failed={counts['failed']} skipped={counts['skipped']} "
-        f"| state: {state.path}"
+        f"[done] done={counts['done']} failed={counts['failed']} "
+        f"blocked={counts['blocked']} skipped={counts['skipped']} | state: {state.path}"
     )
     return 1 if counts["failed"] else 0
 
