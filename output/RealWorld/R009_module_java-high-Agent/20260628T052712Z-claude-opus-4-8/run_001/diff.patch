@@ -1,0 +1,631 @@
+diff --git a/Animal.java b/Animal.java
+index 5b1d7b330..d77ebe883 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -14,6 +14,8 @@ public abstract class Animal extends Actor
+     private double foodLevel;
+     private boolean isGirl;
+     private boolean isHealthy;
++    // What this animal eats, mapped to the food value each prey provides.
++    private final HashMap<Actor, Integer> food = new HashMap<>();
+     //the number of steps an animal takes when infected.
+     private int infectedStepCounter;
+     //how many steps animal needs to wait before it can breed again.
+@@ -37,12 +39,41 @@ public abstract class Animal extends Actor
+     }
+ 
+     /**
+-     * Make this animal act - that is: make it do
+-     * whatever it wants/needs to do.
++     * Make this animal act - that is: make it do whatever it wants/needs to do.
++     * All animals share the same daily routine: they grow a little, and during
++     * the day they age, get hungrier, and (if still alive) try to breed and move.
++     * Species-specific behaviour is supplied through {@link #getStepGrowthLevel()}
++     * and the food/breeding hooks.
+      * @param newAnimals A list to receive newly born animals.
+      * @param simulator The simulator.
+      */
+     public void act(List<Actor> newAnimals, Simulator simulator){
++        setGrowthLevel(getStepGrowthLevel());
++        if(simulator.isDay()){
++            incrementAge(simulator.getSteps());
++            incrementHunger();
++            if(isActive()) {
++                giveBirth(newAnimals);
++                move(simulator);
++            }
++        }else{
++            //space for potential night activities
++        }
++    }
++
++    /**
++     * How much this species grows during a single step. Added to the animal's
++     * growth level on every act.
++     * @return The per-step growth increment.
++     */
++    abstract protected double getStepGrowthLevel();
++
++    /**
++     * Try to find food in the current weather and move there; failing that, move
++     * to a free adjacent location, or die of overcrowding if none is available.
++     * @param simulator The simulator.
++     */
++    protected void move(Simulator simulator){
+         Location newLocation = null;
+         switch(simulator.getWeather()){
+             case SUNNY:
+@@ -58,7 +89,7 @@ public abstract class Animal extends Actor
+                 findFood(getRandom().nextDouble());
+                 break;
+         }
+-        if(newLocation == null) { 
++        if(newLocation == null) {
+             // No food found - try to move to a free location.
+             newLocation = getField().freeAdjacentLocation(getLocation());
+         }
+@@ -103,19 +134,7 @@ public abstract class Animal extends Actor
+         int births = breed();
+         for(int b = 0; b < births && free.size() > 0; b++) {
+             Location loc = free.remove(0);
+-            Animal young = getAnimal();
+-            Animal baby = null;
+-            if(young instanceof Gazelle){
+-                baby = new Gazelle(false, field, loc);
+-            }else if(young instanceof Jaguar){
+-                baby = new Jaguar(false, field, loc);
+-            }else if(young instanceof Cheetah){
+-                baby = new Cheetah(false, field, loc);
+-            }else if(young instanceof Lion){
+-                baby = new Lion(false, field, loc);
+-            }else if(young instanceof Zebra){
+-                baby = new Zebra(false, field, loc);
+-            }
++            Animal baby = reproduce(field, loc);
+             if(!getHealth()){
+                 baby.setUnhealthy(); //setting the baby to be unhealthy if the parent is unhealthy.
+             }
+@@ -148,7 +167,7 @@ public abstract class Animal extends Actor
+         Field field = getField();
+         List<Location> adjacent = field.adjacentLocations(getLocation());
+         Iterator<Location> it = adjacent.iterator();
+-        Animal currentAnimal = getAnimal();
++        Animal currentAnimal = this;
+         while(it.hasNext()) {
+             Location where = it.next();
+             Object animal = field.getObjectAt(where);
+@@ -179,10 +198,14 @@ public abstract class Animal extends Actor
+     abstract protected int getMaxLitterSize();
+ 
+     /**
+-     * Returns the current animal occupying the location.
+-     * @return the current animal.
++     * Create a new-born of this animal's own species at the given location.
++     * Each concrete species supplies its own offspring, removing the need to
++     * branch on the runtime type when giving birth.
++     * @param field The field the offspring is born into.
++     * @param location The location of the offspring.
++     * @return A new-born animal of the same species.
+      */
+-    abstract protected Animal getAnimal();
++    abstract protected Animal reproduce(Field field, Location location);
+ 
+     /**
+      * Returns the animal's current food level.
+@@ -257,7 +280,21 @@ public abstract class Animal extends Actor
+      * Returns the HashMap which contains what prey the animal eats and the amount of food each prey gives.
+      * @return The HashMap which contains the Actor and an Integer.
+      */
+-    abstract protected HashMap<Actor, Integer> getFood();
++    protected HashMap<Actor, Integer> getFood(){
++        return food;
++    }
++
++    /**
++     * Register a prey species this animal feeds on. The prey instance acts as a
++     * prototype keyed by its class; it is removed from the field immediately as
++     * it only exists to describe the diet.
++     * @param prey A prototype instance of the prey species.
++     * @param foodValue The food value eating this prey provides.
++     */
++    protected void registerPrey(Actor prey, int foodValue){
++        food.put(prey, foodValue);
++        prey.setDead();
++    }
+ 
+     /**
+      * Uses a random generator to assign if the animal is female or not.
+diff --git a/Cheetah.java b/Cheetah.java
+index 44898ba87..f6b1a25dd 100644
+--- a/Cheetah.java
++++ b/Cheetah.java
+@@ -1,7 +1,3 @@
+-import java.util.List;
+-import java.util.Iterator;
+-import java.util.Random;
+-import java.util.HashMap;
+ /**
+  * A simple model of a Cheetah.
+  * Cheetahs age, move, eat zebras, breed and die.
+@@ -33,8 +29,6 @@ public class Cheetah extends Predator
+     private static final double RAINY_FINDING_FOOD_PROBABILITY = 0.8;
+     private static final double FOGGY_FINDING_FOOD_PROBABILITY = 0.7;
+ 
+-    // Individual characteristics (instance fields).
+-    private HashMap<Actor, Integer> food;
+     /**
+      * Create a Cheetah. A Cheetah can be created as a new born (age zero
+      * and not hungry) or with a random age and food level.
+@@ -54,32 +48,16 @@ public class Cheetah extends Predator
+             setAge(0);
+             setFoodLevel(ZEBRA_FOOD_VALUE);
+         }
+-        food = new HashMap<>();
+         setGrowthLevel(getAge()/102.0);
+         addFood(field);
+     }
+ 
+     /**
+-     * This is what the Cheetah does most of the time: it hunts for
+-     * zebras. In the process, it might breed, die of hunger,
+-     * die of infection or die of old age.
+-     * 
+-     * @param newCheetahs A list to return newly born Cheetahs.
+-     * @param simulator The simulator.
++     * How much a cheetah grows during a single step.
++     * @return The cheetah's per-step growth increment.
+      */
+-    public void act(List<Actor> newCheetahs, Simulator simulator)
+-    {
+-        setGrowthLevel(0.012);
+-        if(simulator.isDay()){
+-            incrementAge(simulator.getSteps());
+-            incrementHunger();
+-            if(isActive()) {
+-                giveBirth(newCheetahs);  
+-                super.act(newCheetahs,simulator);
+-            }
+-        }else{
+-            //space for potential night activities
+-        }
++    protected double getStepGrowthLevel(){
++        return 0.012;
+     }
+ 
+     /**
+@@ -99,11 +77,11 @@ public class Cheetah extends Predator
+     }
+ 
+     /**
+-     * Returns the current cheetah occupying the location.
+-     * @return the current cheetah.
++     * Create a new-born cheetah at the given location.
++     * @return A new-born cheetah.
+      */
+-    protected Animal getAnimal(){
+-        return this;
++    protected Animal reproduce(Field field, Location location){
++        return new Cheetah(false, field, location);
+     }
+ 
+     /**
+@@ -128,21 +106,8 @@ public class Cheetah extends Predator
+      */
+     private void addFood(Field field){
+         Location tempLocation = new Location(0,0);
+-        Zebra zebra = new Zebra(true,field,tempLocation );
+-        food.put(zebra, ZEBRA_FOOD_VALUE);
+-        zebra.setDead();
+-        //Location tempLocation = new Location(0,0);
+-        Gazelle gazelle = new Gazelle(true,field,tempLocation );
+-        food.put(gazelle, GAZELLE_FOOD_VALUE);
+-        gazelle.setDead();
+-    }
+-
+-    /**
+-     * Returns the HashMap which contains what food the cheetah eats and the amount of food each prey gives.
+-     * @return The HashMap which contains the Actor and an Integer.
+-     */   
+-    protected HashMap<Actor, Integer> getFood(){
+-        return food;
++        registerPrey(new Zebra(true, field, tempLocation), ZEBRA_FOOD_VALUE);
++        registerPrey(new Gazelle(true, field, tempLocation), GAZELLE_FOOD_VALUE);
+     }
+ 
+     /**
+diff --git a/Gazelle.java b/Gazelle.java
+index 6310a5d39..0cb938e1c 100644
+--- a/Gazelle.java
++++ b/Gazelle.java
+@@ -1,8 +1,3 @@
+-import java.util.List;
+-import java.util.Random;
+-import java.util.Iterator;
+-import java.util.HashMap;
+-
+ /**
+  * A simple model of a Gazelle.
+  * Gazelles age, move,eat grass, breed, and die.
+@@ -33,8 +28,6 @@ public class Gazelle extends Animal
+     private static final double RAINY_FINDING_FOOD_PROBABILITY = 1;
+     private static final double FOGGY_FINDING_FOOD_PROBABILITY = 1;
+ 
+-    // Individual characteristics (instance fields).
+-    private HashMap<Actor, Integer> food;
+     /**
+      * Create a new Gazelle. A Gazelle may be created with age
+      * zero (a new born) or with a random age.
+@@ -52,32 +45,16 @@ public class Gazelle extends Animal
+             setAge(getRandom().nextInt(MAX_AGE));
+             setFoodLevel(getRandom().nextInt(GRASS_FOOD_VALUE));
+         }
+-        food = new HashMap<>();
+         setGrowthLevel(getAge()/75.0);
+         addFood(field);
+     }
+ 
+     /**
+-     * This is what the Gazelle does most of the time: it finds
+-     * grass to eat. In the process, it might breed, die of hunger,
+-     * die of disease or die of old age.
+-     * 
+-     * @param newGazelles A list to return newly born Gazelles.
+-     * @param simulator The simulator.
++     * How much a gazelle grows during a single step.
++     * @return The gazelle's per-step growth increment.
+      */
+-    public void act(List<Actor> newGazelles, Simulator simulator)
+-    {
+-        setGrowthLevel(0.012);
+-        if(simulator.isDay()){
+-            incrementAge(simulator.getSteps());
+-            incrementHunger();
+-            if(isActive()) {
+-                giveBirth(newGazelles);  
+-                super.act(newGazelles,simulator);
+-            }
+-        }else{
+-            //space for potential night activities
+-        }
++    protected double getStepGrowthLevel(){
++        return 0.012;
+     }
+ 
+     /**
+@@ -113,11 +90,11 @@ public class Gazelle extends Animal
+     }
+ 
+     /**
+-     * Returns the current gazelle occupying the location.
+-     * @return the current gazelle.
++     * Create a new-born gazelle at the given location.
++     * @return A new-born gazelle.
+      */
+-    protected Animal getAnimal(){
+-        return this;
++    protected Animal reproduce(Field field, Location location){
++        return new Gazelle(false, field, location);
+     }
+ 
+     /**
+@@ -126,17 +103,7 @@ public class Gazelle extends Animal
+      */
+     private void addFood(Field field){
+         Location tempLocation = new Location(0,0);
+-        Plants grass = new Grass(true,field,tempLocation );
+-        food.put(grass, GRASS_FOOD_VALUE);
+-        grass.setDead();
+-    }
+-
+-    /**
+-     * Returns the HashMap which contains what food the gazelle eats and the amount of food each plant gives.
+-     * @return The HashMap which contains the Actor and an Integer.
+-     */
+-    protected HashMap<Actor, Integer> getFood(){
+-        return food;
++        registerPrey(new Grass(true, field, tempLocation), GRASS_FOOD_VALUE);
+     }
+ 
+     /**
+diff --git a/Jaguar.java b/Jaguar.java
+index 0d890ce98..0a96f376d 100644
+--- a/Jaguar.java
++++ b/Jaguar.java
+@@ -1,8 +1,4 @@
+ 
+-import java.util.Random;
+-import java.util.HashMap;
+-import java.util.List;
+-
+ /**
+  * A simple model of a Jaguar.
+  * Jaguars age, move, eat gazelle, and die.
+@@ -32,8 +28,6 @@ public class Jaguar extends Predator
+     private static final double RAINY_FINDING_FOOD_PROBABILITY = 0.7;
+     private static final double FOGGY_FINDING_FOOD_PROBABILITY = 0.4;
+ 
+-    // Individual characteristics (instance fields).
+-    private HashMap<Actor, Integer> food;
+     /**
+      * Create a Jaguar. A Jaguar can be created as a new born (age zero
+      * and not hungry) or with a random age and food level.
+@@ -53,32 +47,16 @@ public class Jaguar extends Predator
+             setAge( 0);
+             setFoodLevel(GAZELLE_FOOD_VALUE);
+         }
+-        food = new HashMap<>();
+         setGrowthLevel(getAge()/89.0);
+         addFood(field);
+     }
+ 
+     /**
+-     * This is what the Jaguar does most of the time: it finds
+-     * gazelle to eat. In the process, it might breed, die of hunger,
+-     * die of disease or die of old age.
+-     * 
+-     * @param newJaguars A list to return newly born Jaguars.
+-     * @param simulator The simulator.
++     * How much a jaguar grows during a single step.
++     * @return The jaguar's per-step growth increment.
+      */
+-    public void act(List<Actor> newJaguars, Simulator simulator)
+-    {
+-        setGrowthLevel(0.013);
+-        if(simulator.isDay()){
+-            incrementAge(simulator.getSteps());
+-            incrementHunger();
+-            if(isActive()) {
+-                giveBirth(newJaguars);  
+-                super.act(newJaguars,simulator);
+-            }
+-        }else{
+-            //space for potential night activities
+-        }
++    protected double getStepGrowthLevel(){
++        return 0.013;
+     }
+ 
+     /**
+@@ -98,11 +76,11 @@ public class Jaguar extends Predator
+     }
+ 
+     /**
+-     * Returns the current jaguar occupying the location.
+-     * @return the current jaguar.
++     * Create a new-born jaguar at the given location.
++     * @return A new-born jaguar.
+      */
+-    protected Animal getAnimal(){
+-        return this;
++    protected Animal reproduce(Field field, Location location){
++        return new Jaguar(false, field, location);
+     }
+ 
+     /**
+@@ -127,17 +105,7 @@ public class Jaguar extends Predator
+      */
+     private void addFood(Field field){
+         Location tempLocation = new Location(0,0);
+-        Gazelle gazelle = new Gazelle(true,field,tempLocation );
+-        food.put(gazelle, GAZELLE_FOOD_VALUE);
+-        gazelle.setDead();
+-    }
+-
+-    /**
+-     * Returns the HashMap which contains what food the jaguar eats and the amount of food each gazelle gives.
+-     * @return The HashMap which contains the Actor and an Integer.
+-     */
+-    protected HashMap<Actor, Integer> getFood(){
+-        return food;
++        registerPrey(new Gazelle(true, field, tempLocation), GAZELLE_FOOD_VALUE);
+     }
+ 
+     /**
+diff --git a/Lion.java b/Lion.java
+index 38eef3973..2ab2a1e29 100644
+--- a/Lion.java
++++ b/Lion.java
+@@ -1,7 +1,3 @@
+-import java.util.List;
+-import java.util.Iterator;
+-import java.util.Random;
+-import java.util.HashMap;
+ 
+ /**
+  * A simple model of a Lion.
+@@ -36,8 +32,6 @@ public class Lion extends Predator
+     private static final double RAINY_FINDING_FOOD_PROBABILITY = 0.9;
+     private static final double FOGGY_FINDING_FOOD_PROBABILITY = 0.8;
+ 
+-    // Individual characteristics (instance fields).
+-    private HashMap<Actor, Integer> food;
+     /**
+      * Create a Lion. A Lion can be created as a new born (age zero
+      * and not hungry) or with a random age and food level.
+@@ -57,32 +51,16 @@ public class Lion extends Predator
+             setAge( 0);
+             setFoodLevel(PREY_CHEETAH_FOOD_VALUE);
+         }
+-        food = new HashMap<>();
+         setGrowthLevel(getAge()/100.0);
+         addFood(field);
+     }
+ 
+     /**
+-     * This is what the Lion does most of the time: it hunts for
+-     * gazelle & cheetahs. In the process, it might breed, die of hunger,
+-     * die of disease or die of old age.
+-     * 
+-     * @param newLions A list to return newly born Lions.
+-     * @param simulator The simulator.
++     * How much a lion grows during a single step.
++     * @return The lion's per-step growth increment.
+      */
+-    public void act(List<Actor> newLions,Simulator simulator)
+-    {
+-        setGrowthLevel(0.01);
+-        if(simulator.isDay()){
+-            incrementAge(simulator.getSteps());
+-            incrementHunger();
+-            if(isActive()) {
+-                giveBirth(newLions);  
+-                super.act(newLions,simulator);
+-            }
+-        }else{
+-            //space for potential night activities
+-        }
++    protected double getStepGrowthLevel(){
++        return 0.01;
+     }
+ 
+     /**
+@@ -102,11 +80,11 @@ public class Lion extends Predator
+     }
+ 
+     /**
+-     * Returns the current lion occupying the location.
+-     * @return the current lion.
++     * Create a new-born lion at the given location.
++     * @return A new-born lion.
+      */
+-    protected Animal getAnimal(){
+-        return this;
++    protected Animal reproduce(Field field, Location location){
++        return new Lion(false, field, location);
+     }
+ 
+     /**
+@@ -131,20 +109,8 @@ public class Lion extends Predator
+      */
+     private void addFood(Field field){
+         Location tempLocation = new Location(0,0);
+-        Gazelle gazelle = new Gazelle(true,field,tempLocation );
+-        food.put(gazelle, PREY_GAZELLE_FOOD_VALUE);
+-        gazelle.setDead();
+-        Cheetah cheetah = new Cheetah(true,field,tempLocation );
+-        food.put(cheetah, PREY_CHEETAH_FOOD_VALUE);
+-        cheetah.setDead();
+-    }
+-
+-    /**
+-     * Returns the HashMap which contains what food the lion eats and the amount of food each prey gives.
+-     * @return The HashMap which contains the Actor and an Integer.
+-     */   
+-    protected HashMap<Actor, Integer> getFood(){
+-        return food;
++        registerPrey(new Gazelle(true, field, tempLocation), PREY_GAZELLE_FOOD_VALUE);
++        registerPrey(new Cheetah(true, field, tempLocation), PREY_CHEETAH_FOOD_VALUE);
+     }
+ 
+     /**
+diff --git a/Zebra.java b/Zebra.java
+index b28ebcf34..78d5bde7c 100644
+--- a/Zebra.java
++++ b/Zebra.java
+@@ -1,9 +1,4 @@
+ 
+-import java.util.List;
+-import java.util.Random;
+-import java.util.Iterator;
+-import java.util.HashMap;
+-
+ /**
+  * A simple model of a Zebra.
+  * Zebras age, move, eat grass, breed, and die.
+@@ -33,8 +28,6 @@ public class Zebra extends Animal
+     private static final double RAINY_FINDING_FOOD_PROBABILITY = 1;
+     private static final double FOGGY_FINDING_FOOD_PROBABILITY = 1;
+ 
+-    // Individual characteristics (instance fields).
+-    private HashMap<Actor, Integer> food;
+     /**
+      * Create a new Zebra. A Zebra may be created with age
+      * zero (a new born) or with a random age.
+@@ -52,32 +45,16 @@ public class Zebra extends Animal
+             setAge(getRandom().nextInt(MAX_AGE));
+             setFoodLevel(getRandom().nextInt(GRASS_FOOD_VALUE));
+         }
+-        food = new HashMap<>();
+         setGrowthLevel(getAge()/67.0);
+         addFood( field);
+     }
+ 
+     /**
+-     * This is what the Zebra does most of the time: it finds
+-     * grass to eat. In the process, it might breed, die of hunger,
+-     * die of disease or die of old age.
+-     * 
+-     * @param newZebras A list to return newly born Zebras.
+-     * @param simulator The simulator.
++     * How much a zebra grows during a single step.
++     * @return The zebra's per-step growth increment.
+      */
+-    public void act(List<Actor> newZebra, Simulator simulator)
+-    {
+-        setGrowthLevel(0.015);
+-        if(simulator.isDay()){
+-            incrementAge(simulator.getSteps());
+-            incrementHunger();
+-            if(isActive()) {
+-                giveBirth(newZebra); 
+-                super.act(newZebra,simulator);
+-            }
+-        }else{
+-            //space for potential night activities
+-        }
++    protected double getStepGrowthLevel(){
++        return 0.015;
+     }
+ 
+     /**
+@@ -113,11 +90,11 @@ public class Zebra extends Animal
+     }
+ 
+     /**
+-     * Returns the current zebra occupying the location.
+-     * @return The current zebra.
++     * Create a new-born zebra at the given location.
++     * @return A new-born zebra.
+      */
+-    protected Animal getAnimal(){
+-        return this;
++    protected Animal reproduce(Field field, Location location){
++        return new Zebra(false, field, location);
+     }
+ 
+     /**
+@@ -126,17 +103,7 @@ public class Zebra extends Animal
+      */
+     private void addFood(Field field){
+         Location tempLocation = new Location(0,0);
+-        Plants grass = new Grass(true,field,tempLocation );
+-        food.put(grass, GRASS_FOOD_VALUE);
+-        grass.setDead();
+-    }
+-
+-    /**
+-     * Returns the HashMap which contains what food the zebra eats and the amount of food each plant gives.
+-     * @return The HashMap which contains the Actor and an Integer.
+-     */
+-    protected HashMap<Actor, Integer> getFood(){
+-        return food;
++        registerPrey(new Grass(true, field, tempLocation), GRASS_FOOD_VALUE);
+     }
+ 
+     /**
+diff --git a/_verify/run.sh b/_verify/run.sh
+new file mode 100755
+index 000000000..bda843d13
+--- /dev/null
++++ b/_verify/run.sh
+@@ -0,0 +1,10 @@
++#!/bin/bash
++# Compile current sources + golden-hash Harness, run, print fingerprint.
++# Baseline: STEPS=300 FINGERPRINT=7020744191255501704
++set -e
++cd "$(dirname "$0")/.."
++rm -rf _verify/out
++mkdir -p _verify/out
++javac -d _verify/out *.java
++cp _verify/build/Harness.class _verify/out/
++java -cp _verify/out Harness "${1:-300}"

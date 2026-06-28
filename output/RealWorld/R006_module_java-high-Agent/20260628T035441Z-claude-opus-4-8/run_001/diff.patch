@@ -1,0 +1,455 @@
+diff --git a/Animal.java b/Animal.java
+index 8955c96..4c4d018 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -86,12 +86,102 @@ public abstract class Animal implements Actor
+     /**
+      * Make this animal act - that is: make it do
+      * whatever it wants/needs to do.
+-     * 
++     *
++     * This is a template method capturing the life cycle every animal shares
++     * during a step: it ages, gets hungrier, attempts to breed, then either
++     * moves towards food / a free cell or dies from overcrowding. Species
++     * customise the steps through the hooks below rather than reimplementing
++     * the whole skeleton.
++     *
+      * @param newAnimals A list to receive newly born animals.
+      * @param weather The current weather
+      * @param dayState The different state of the day
+      */
+-    abstract public void act(List<Actor> newAnimals, Weather weather, DayState dayState);
++    public final void act(List<Actor> newAnimals, Weather weather, DayState dayState)
++    {
++        // Some animals (e.g. diurnal predators) do not act at night.
++        if(!actsAtNight() && dayState == DayState.NIGHT) {
++            return;
++        }
++        incrementAge(getMaxAge());
++        incrementHunger();
++        if(!isAlive()) {
++            return;
++        }
++        meet(newAnimals, getMaxLitterSize(), getBreedingProbability(weather), getBreedingAge());
++        Location newLocation = seekFood();
++        if(newLocation != null) {
++            onFoodFound();
++        }
++        else {
++            // No food found - try to move to a free location.
++            newLocation = getField().freeAdjacentLocation(getLocation());
++        }
++        // See if it was possible to move.
++        if(newLocation != null) {
++            setLocation(newLocation);
++        }
++        else {
++            // Overcrowding.
++            setDead();
++        }
++    }
++
++    /*///////////////////////////////////////////////////////////////
++                            TEMPLATE METHOD HOOKS
++    //////////////////////////////////////////////////////////////*/
++
++    /**
++     * Look for and consume food in an adjacent location, returning the
++     * location moved into to feed. Carnivores and herbivores supply their own
++     * search by overriding this hook.
++     *
++     * @return the location fed at, or null if no food was found.
++     */
++    protected abstract Location seekFood();
++
++    /**
++     * @return the maximum age this species can reach before dying.
++     */
++    protected abstract int getMaxAge();
++
++    /**
++     * @return the minimum age at which this species can start breeding.
++     */
++    protected abstract int getBreedingAge();
++
++    /**
++     * @return the maximum number of offspring produced in a single litter.
++     */
++    protected abstract int getMaxLitterSize();
++
++    /**
++     * Breeding likelihood, possibly adjusted for the current weather.
++     *
++     * @param weather The current weather.
++     * @return the probability of breeding this step.
++     */
++    protected abstract double getBreedingProbability(Weather weather);
++
++    /**
++     * Whether this animal is active during the night. Defaults to true;
++     * nocturnally-inactive species override this to return false.
++     *
++     * @return true if the animal acts at night.
++     */
++    protected boolean actsAtNight()
++    {
++        return true;
++    }
++
++    /**
++     * Hook invoked after {@link #seekFood()} successfully located and consumed
++     * food. Defaults to doing nothing; species that need to react (e.g. to
++     * record statistics) override it.
++     */
++    protected void onFoodFound()
++    {
++    }
+     
+     /**
+      * Returns the amount by which the hungerlevel would increment by if the animal were to be eaten.
+diff --git a/Bear.java b/Bear.java
+index 52f01ef..ede20f8 100644
+--- a/Bear.java
++++ b/Bear.java
+@@ -50,42 +50,29 @@ public class Bear extends CarnivoreAnimal
+                             ANIMAL BEHAVIOUR LOGIC
+     //////////////////////////////////////////////////////////////*/
+     
++    @Override protected int getMaxAge() { return MAX_AGE; }
++
++    @Override protected int getBreedingAge() { return BREEDING_AGE; }
++
++    @Override protected int getMaxLitterSize() { return MAX_LITTER_SIZE; }
++
++    @Override protected List<Class<? extends Animal>> getPreyDiet() { return PREY_DIET; }
++
++    // Bears hibernate, so they do not act at night.
++    @Override protected boolean actsAtNight() { return false; }
++
+     /**
+-     * Method in charge of the bear's action's during a step. During a step
+-     * a bear will age, increase in hunger, seek to mate as well as look for food.
+-     * 
+-     * @param newBears the new bears to be born in case the sheep succesfully mates.
++     * Bears breed less readily while hibernating through the snow.
+      */
+-    public void act(List<Actor> newBears, Weather weather, DayState dayState)
++    @Override
++    protected double getBreedingProbability(Weather weather)
+     {
+-        // Bear will not act at night.
+-        if(dayState == DayState.NIGHT) {
+-                return;
+-        }
+-        incrementAge(MAX_AGE);
+-        incrementHunger();
+-        if(isAlive()) {
+-            if(weather == Weather.SNOW) {
+-                meet(newBears, MAX_LITTER_SIZE,HIBERNATION_BREEDING_FACTOR * BREEDING_PROBABILITY, BREEDING_AGE);
+-            } else {
+-                meet(newBears, MAX_LITTER_SIZE, BREEDING_PROBABILITY, BREEDING_AGE);
+-            }       
+-            Location newLocation = findFood(PREY_DIET);
+-            if(newLocation == null) { 
+-                // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            // See if it was possible to move.
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {  
+-                // Overcrowding.
+-                setDead();
+-            }
++        if(weather == Weather.SNOW) {
++            return HIBERNATION_BREEDING_FACTOR * BREEDING_PROBABILITY;
+         }
++        return BREEDING_PROBABILITY;
+     }
+-    
++
+     /**
+      * Returns the amount by which the hungerlevel would increment by if the animal were to be eaten.
+      * 
+diff --git a/CarnivoreAnimal.java b/CarnivoreAnimal.java
+index fb931c6..f99643e 100644
+--- a/CarnivoreAnimal.java
++++ b/CarnivoreAnimal.java
+@@ -45,7 +45,7 @@ public abstract class CarnivoreAnimal extends Animal
+      * @return the location traveled to in order to access the food.
+      */
+     public Location findFood(List<Class<? extends Animal>> preys)
+-    {   
++    {
+         Field field = getField();
+         List<Location> adjacent = field.adjacentLocations(getLocation());
+         Iterator<Location> it = adjacent.iterator();
+@@ -57,13 +57,29 @@ public abstract class CarnivoreAnimal extends Animal
+                 if(preys.contains(animal.getClass())) {
+                     if(animal.isAlive()) {
+                         animal.setDead();
+-                        
++
+                         this.foodLevel = animal.getFeedingValue();
+                         return where;
+                     }
+                 }
+             }
+         }
+-        return null; 
++        return null;
++    }
++
++    /**
++     * @return the set of animal types this carnivore preys upon.
++     */
++    protected abstract List<Class<? extends Animal>> getPreyDiet();
++
++    /**
++     * Carnivores feed by hunting the animals in their prey diet.
++     *
++     * @return the location moved into to feed, or null if no prey was found.
++     */
++    @Override
++    protected Location seekFood()
++    {
++        return findFood(getPreyDiet());
+     }
+ }
+diff --git a/CarnivoreFox.java b/CarnivoreFox.java
+index 794a44d..0e20abb 100644
+--- a/CarnivoreFox.java
++++ b/CarnivoreFox.java
+@@ -50,41 +50,22 @@ public class CarnivoreFox extends CarnivoreAnimal
+                             ANIMAL BEHAVIOUR LOGIC
+     //////////////////////////////////////////////////////////////*/
+     
+-    /**
+-     * Method in charge of the fox's action's during a step. During a step
+-     * a fox will age, increase in hunger, seek to mate as well as look for food.
+-     * 
+-     * @param newFoxes the new sheeps to be born in case the sheep succesfully mates.
+-     */
+-    public void act(List<Actor> newFoxes, Weather weather, DayState dayState)
+-    {
+-        // Fox will not act at night.
+-        if(dayState == DayState.NIGHT) {
+-            return;
+-        }
+-        incrementAge(MAX_AGE);
+-        incrementHunger();
+-        if(isAlive()) {
+-            meet(newFoxes, MAX_LITTER_SIZE, BREEDING_PROBABILITY, BREEDING_AGE);          
+-            Location newLocation = findFood(PREY_DIET);
+-            if(newLocation != null) {
+-                FOUND_FOOD++;
+-            }
+-            if(newLocation == null) { 
+-                // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            // See if it was possible to move.
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                // Overcrowding.
+-                setDead();
+-            }
+-        }
+-    }
+-    
++    @Override protected int getMaxAge() { return MAX_AGE; }
++
++    @Override protected int getBreedingAge() { return BREEDING_AGE; }
++
++    @Override protected int getMaxLitterSize() { return MAX_LITTER_SIZE; }
++
++    @Override protected double getBreedingProbability(Weather weather) { return BREEDING_PROBABILITY; }
++
++    @Override protected List<Class<? extends Animal>> getPreyDiet() { return PREY_DIET; }
++
++    // Foxes are diurnal hunters and do not act at night.
++    @Override protected boolean actsAtNight() { return false; }
++
++    // Track how often foxes successfully find food.
++    @Override protected void onFoodFound() { FOUND_FOOD++; }
++
+     /**
+      * Returns the amount by which the hungerlevel would increment by if the animal were to be eaten
+      * @return the feeding value
+diff --git a/HerbivoreAnimal.java b/HerbivoreAnimal.java
+index 4e3657a..72e614b 100644
+--- a/HerbivoreAnimal.java
++++ b/HerbivoreAnimal.java
+@@ -53,4 +53,20 @@ public abstract class HerbivoreAnimal extends Animal
+         }
+         return null;
+     }
++
++    /**
++     * @return the set of plant types this herbivore grazes on.
++     */
++    protected abstract List<Class<? extends Plant>> getTargetPlants();
++
++    /**
++     * Herbivores feed by grazing on the plants in their target diet.
++     *
++     * @return the location moved into to feed, or null if no plant was found.
++     */
++    @Override
++    protected Location seekFood()
++    {
++        return findFood(getTargetPlants());
++    }
+ }
+diff --git a/Reindeer.java b/Reindeer.java
+index a2526b6..8164787 100644
+--- a/Reindeer.java
++++ b/Reindeer.java
+@@ -41,35 +41,16 @@ public class Reindeer extends HerbivoreAnimal
+                             ANIMAL BEHAVIOUR LOGIC
+     //////////////////////////////////////////////////////////////*/   
+     
+-    /**
+-     * Method in charge of the reindeer's action's during a step. During a step,
+-     * a reindeer will age, increase in hunger, seek to mate as well as look for food.
+-     * 
+-     * @param newReindeers the new reeindeers to be born in case the reindeer succesfully mates
+-     */
+-    public void act(List<Actor> newReindeers, Weather weather, DayState dayState) 
+-    {
+-        incrementAge(MAX_AGE);
+-        incrementHunger();
+-        if(!isAlive()) {
+-            return;
+-        }
+-        meet(newReindeers, MAX_LITTER_SIZE, BREEDING_PROBABILITY, BREEDING_AGE);
+-        Location newLocation = findFood(TARGET_PLANTS);
+-        if(newLocation == null) { 
+-            // No food found - try to move to a free location.
+-            newLocation = getField().freeAdjacentLocation(getLocation());
+-        }
+-        // See if it was possible to move.
+-        if(newLocation != null) {
+-            setLocation(newLocation);
+-        }
+-        else {
+-            // Overcrowding.
+-            setDead();
+-        }   
+-    }
+-    
++    @Override protected int getMaxAge() { return MAX_AGE; }
++
++    @Override protected int getBreedingAge() { return BREEDING_AGE; }
++
++    @Override protected int getMaxLitterSize() { return MAX_LITTER_SIZE; }
++
++    @Override protected double getBreedingProbability(Weather weather) { return BREEDING_PROBABILITY; }
++
++    @Override protected List<Class<? extends Plant>> getTargetPlants() { return TARGET_PLANTS; }
++
+     /**
+      * Returns the amount by which the hungerlevel would increment by if the animal were to be eaten
+      * @return the feeding value
+diff --git a/Sheep.java b/Sheep.java
+index fce9494..2726b1f 100644
+--- a/Sheep.java
++++ b/Sheep.java
+@@ -42,35 +42,16 @@ public class Sheep extends HerbivoreAnimal
+                             ANIMAL BEHAVIOUR LOGIC
+     //////////////////////////////////////////////////////////////*/
+     
+-    /**
+-     * Method in charge of the sheep's action's during a step. During a step,
+-     * a sheep will age, increase in hunger, seek to mate as well as look for food.
+-     * 
+-     * @param newSheeps the new sheeps to be born in case the sheep succesfully mates.
+-     */
+-    public void act(List<Actor> newSheeps, Weather weather, DayState dayState) 
+-    {
+-        incrementAge(MAX_AGE);
+-        incrementHunger();
+-        if(!isAlive()) {
+-            return;
+-        }
+-        meet(newSheeps, MAX_LITTER_SIZE, BREEDING_PROBABILITY, BREEDING_AGE);
+-        Location newLocation = findFood(TARGET_PLANTS);
+-        if(newLocation == null) { 
+-            // No food found - try to move to a free location.
+-            newLocation = getField().freeAdjacentLocation(getLocation());
+-        }
+-        // See if it was possible to move.
+-        if(newLocation != null) {
+-            setLocation(newLocation);
+-        }
+-        else {
+-            // Overcrowding.     
+-            setDead();
+-        }
+-    }
+-    
++    @Override protected int getMaxAge() { return MAX_AGE; }
++
++    @Override protected int getBreedingAge() { return BREEDING_AGE; }
++
++    @Override protected int getMaxLitterSize() { return MAX_LITTER_SIZE; }
++
++    @Override protected double getBreedingProbability(Weather weather) { return BREEDING_PROBABILITY; }
++
++    @Override protected List<Class<? extends Plant>> getTargetPlants() { return TARGET_PLANTS; }
++
+     /**
+      * Returns the amount by which the hungerlevel would increment by if the animal were to be eaten
+      * @return the feeding value
+diff --git a/Wolverine.java b/Wolverine.java
+index 4d07168..69247d7 100644
+--- a/Wolverine.java
++++ b/Wolverine.java
+@@ -50,34 +50,16 @@ public class Wolverine extends CarnivoreAnimal
+                             ANIMAL BEHAVIOUR LOGIC
+     //////////////////////////////////////////////////////////////*/
+     
+-    /**
+-     * Method in charge of the wolverine's action's during a step. During a step,
+-     * a wolverine will age, increase in hunger, seek to mate as well as look for food.
+-     * 
+-     * @param newWolverines the new sheeps to be born in case the sheep succesfully mates.
+-     */
+-    public void act(List<Actor> newWolverines, Weather weather, DayState dayState)
+-    {
+-        incrementAge(MAX_AGE);
+-        incrementHunger();
+-        if(isAlive()) {
+-            meet(newWolverines, MAX_LITTER_SIZE, BREEDING_PROBABILITY, BREEDING_AGE);          
+-            Location newLocation = findFood(PREY_DIET);
+-            if(newLocation == null) { 
+-                // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            // See if it was possible to move.
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                // Overcrowding.
+-                setDead();
+-            }
+-        }
+-    }
+-    
++    @Override protected int getMaxAge() { return MAX_AGE; }
++
++    @Override protected int getBreedingAge() { return BREEDING_AGE; }
++
++    @Override protected int getMaxLitterSize() { return MAX_LITTER_SIZE; }
++
++    @Override protected double getBreedingProbability(Weather weather) { return BREEDING_PROBABILITY; }
++
++    @Override protected List<Class<? extends Animal>> getPreyDiet() { return PREY_DIET; }
++
+     /**
+      * Returns the amount by which the hungerlevel would increment by if the animal were to be eaten
+      * @return the feeding value
