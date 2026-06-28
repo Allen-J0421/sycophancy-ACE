@@ -1,0 +1,296 @@
+diff --git a/Disease.java b/Disease.java
+index fe1e9c2..7de500e 100644
+--- a/Disease.java
++++ b/Disease.java
+@@ -57,17 +57,10 @@ public abstract class Disease implements Actor
+             Actor infected = it.next();
+             newInfections.addAll(spread(infected));
+             if (affected.get(infected) == duration) {
+-                // After certain number of days, infected individual 
+-                // dies (animal)/ is cured (water)
++                // After the full duration the infection runs its course:
++                // organisms die, water sources are cured (handled per type).
+                 it.remove();
+-                if (infected instanceof Organism) {
+-                    Organism organism = (Organism) infected;
+-                    organism.setDead();
+-                    }
+-                else {
+-                    WaterSources water = (WaterSources) infected;
+-                    water.notInfected();
+-                }
++                ((FieldOccupant) infected).expireInfection();
+             }
+             else {
+                 // Increases the number of days an individual has been infected by 1
+@@ -76,17 +69,9 @@ public abstract class Disease implements Actor
+             }
+         }
+         for (Actor infectee: newInfections) {
+-            // adds any newly infected individuals to the list and sets days infected to 0
+-            if (infectee instanceof Organism) {
+-                Organism organism = (Organism) infectee;
+-                organism.setInfected();
+-                affected.put(organism, 0);  
+-            }
+-            else if (infectee instanceof WaterSources)  {
+-                WaterSources water = (WaterSources) infectee;
+-                water.setInfected();
+-                affected.put(water, 0);  
+-            }
++            // mark each newly infected occupant and start its infection clock
++            ((FieldOccupant) infectee).setInfected();
++            affected.put(infectee, 0);
+         }
+     }
+     
+@@ -99,17 +84,11 @@ public abstract class Disease implements Actor
+     public ArrayList<Actor> spread(Actor actor) {
+         ArrayList<Actor> newlyInfected = new ArrayList<>();
+         List<Location> adjacent = null;
+-        // looks at surrounding individuals and chance of infecting them if possible
+-        try {
+-            Organism organism = (Organism) actor;
+-            if (organism.isAlive()) {
+-                adjacent = field.adjacentLocations(organism.getLocation());
+-            }
+-        } catch (Exception e) {
+-            WaterSources water = (WaterSources) actor;
+-            if (!water.isEmpty()) {
+-                adjacent = field.adjacentLocations(water.getLocation());
+-            }
++        // Only an active carrier (a living organism / a non-empty water
++        // source) can spread the disease to its neighbours.
++        FieldOccupant carrier = (FieldOccupant) actor;
++        if (carrier.isActive()) {
++            adjacent = field.adjacentLocations(carrier.getLocation());
+         }
+         if(adjacent != null) {
+             Iterator<Location> it = adjacent.iterator();
+@@ -118,14 +97,7 @@ public abstract class Disease implements Actor
+                 Object thing = field.getObjectAt(where);
+                 if (thing != null && affectedSpecies.contains(thing.getClass().getName())) {
+                     if (rand.nextDouble() < infectiousness) {
+-                        if (thing instanceof Organism) {
+-                            Organism infectee = (Organism) thing;
+-                            newlyInfected.add(infectee);
+-                        }
+-                        else if (thing instanceof WaterSources) {
+-                            WaterSources infectee = (WaterSources) thing;
+-                            newlyInfected.add(infectee);
+-                        }
++                        newlyInfected.add((Actor) thing);
+                     }
+                 }
+             }
+diff --git a/FieldOccupant.java b/FieldOccupant.java
+index 73f7836..5c0bd19 100644
+--- a/FieldOccupant.java
++++ b/FieldOccupant.java
+@@ -2,8 +2,8 @@
+  * Base class for anything that occupies a single cell of a Field.
+  *
+  * Centralises the field + location bookkeeping - placing, moving and
+- * clearing - that was previously duplicated, verbatim, by both Organism
+- * and WaterSources.
++ * clearing - and the disease-infection state that were previously
++ * duplicated, verbatim, by both Organism and WaterSources.
+  *
+  * @version 2022.03.01
+  */
+@@ -13,6 +13,8 @@ public abstract class FieldOccupant
+     private Field field;
+     // This occupant's position within the field.
+     private Location location;
++    // Whether this occupant is currently infected with a disease.
++    private boolean infected;
+ 
+     /**
+      * Place a new occupant into the given field at the given location.
+@@ -73,4 +75,41 @@ public abstract class FieldOccupant
+         }
+         return false;
+     }
++
++    /**
++     * Mark this occupant as infected with a disease.
++     */
++    protected void setInfected()
++    {
++        infected = true;
++    }
++
++    /**
++     * Clear this occupant's infection.
++     */
++    protected void notInfected()
++    {
++        infected = false;
++    }
++
++    /**
++     * @return Whether this occupant is currently infected with a disease.
++     */
++    protected boolean isInfected()
++    {
++        return infected;
++    }
++
++    /**
++     * React to an infection that has run its full course. The behaviour is
++     * type-specific: an organism dies, whereas a water source is cured.
++     */
++    protected abstract void expireInfection();
++
++    /**
++     * @return Whether this occupant is still an active participant in the
++     *         simulation (a living organism / a non-empty water source) and
++     *         can therefore still carry and spread a disease.
++     */
++    protected abstract boolean isActive();
+ }
+diff --git a/Organism.java b/Organism.java
+index 234e387..06452b4 100644
+--- a/Organism.java
++++ b/Organism.java
+@@ -16,8 +16,6 @@ public abstract class Organism extends FieldOccupant implements Actor
+     private boolean alive;
+     // The water level of the organism
+     private int waterLevel;
+-    // Whether the organism is infected with a disease or not.
+-    private boolean infected;
+     // The organism's age
+     private int age;
+ 
+@@ -163,23 +161,17 @@ public abstract class Organism extends FieldOccupant implements Actor
+     }
+     
+     /**
+-     * Infects the organism with a disease
++     * When an organism's infection runs its course, the organism dies.
+      */
+-    protected void setInfected() {
+-        infected = true;
++    protected void expireInfection() {
++        setDead();
+     }
+-    
+-    /** 
+-     * Infection does not last forever in water, removes disease
+-     */
+-    protected void notInfected() {
+-        infected = false;
+-    }
+-    
++
+     /**
+-     * @return Whether the organism is infected with a disease
++     * @return Whether this organism is still alive, and so can carry and
++     *         spread a disease.
+      */
+-    protected boolean isInfected(){
+-        return infected;
++    protected boolean isActive() {
++        return isAlive();
+     }
+ }
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 8f4ec77..cb9c511 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -117,16 +117,10 @@ public class SimulatorView extends JFrame
+                 // If there is something in the grid space, draw it with correct colour
+                 if(thing!= null) {
+                     fieldView.drawMark(col, row, getColor(thing.getClass()));
+-                    // Check whether it is an organism and if it is infected
+-                    if (thing instanceof Organism) {
+-                        Organism organism = (Organism) thing;
+-                        if (organism.isInfected()) {
+-                            fieldView.markDisease(col, row, Color.black);
+-                        }
+-                    }
+-                    else if (thing instanceof WaterSources) {
+-                        WaterSources water = (WaterSources) thing;
+-                        if (water.isInfected()) {
++                    // Anything on the grid is a FieldOccupant; mark it if infected.
++                    if (thing instanceof FieldOccupant) {
++                        FieldOccupant occupant = (FieldOccupant) thing;
++                        if (occupant.isInfected()) {
+                             fieldView.markDisease(col, row, Color.black);
+                         }
+                     }
+diff --git a/WaterSources.java b/WaterSources.java
+index 7a9a316..648ee9f 100644
+--- a/WaterSources.java
++++ b/WaterSources.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.ArrayList;
+ 
+ /**
+  *  A class representing shared characteristics of water sources.
+@@ -12,10 +11,6 @@ public abstract class WaterSources extends FieldOccupant implements Actor
+     private boolean isEmpty;
+     // The volume of the water source, increases whenever it rains and decreases when water is drunk or taken from it.
+     private int volumeLevel;
+-    // Whether the water source is infected with a disease or not.
+-    private boolean infected;
+-    // A list of what diseases the water is infected by.
+-    private List diseases;
+ 
+     /**
+      * Create a new water source at location in field.
+@@ -30,7 +25,6 @@ public abstract class WaterSources extends FieldOccupant implements Actor
+             setVolume(10);
+         }
+         isEmpty = false;
+-        diseases = new ArrayList<>();
+     }
+ 
+     /**
+@@ -44,34 +38,27 @@ public abstract class WaterSources extends FieldOccupant implements Actor
+     }
+ 
+     /**
+-     * Infects the water source with a disease
+-     * (to spread to animals that drink from it)
++     * When a water source's infection runs its course it is cured, since
++     * infection does not last forever in water.
+      */
+-    protected void setInfected() {
+-        infected = true;
+-    }
+-
+-    /** 
+-     * Infection does not last forever in water, removes disease after
+-     * a certain duration
+-     */
+-    protected void notInfected() {
+-        infected = false;
++    protected void expireInfection() {
++        notInfected();
+     }
+ 
+     /**
+-     * @return Whether the water source is infected with a disease or not.
++     * @return Whether this water source still holds water, and so can carry
++     *         and spread a disease.
+      */
+-    protected boolean isInfected(){
+-        return infected;
++    protected boolean isActive() {
++        return !isEmpty();
+     }
+ 
+-    /** 
++    /**
+      * @return Whether there is water in the water source or not
+      */
+-    public boolean isEmpty() 
++    public boolean isEmpty()
+     {
+-        return isEmpty;    
++        return isEmpty;
+     }
+ 
+     /**

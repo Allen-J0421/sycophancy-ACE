@@ -1,0 +1,175 @@
+diff --git a/EntityFactory.java b/EntityFactory.java
+index 03402bc..012582d 100644
+--- a/EntityFactory.java
++++ b/EntityFactory.java
+@@ -1,13 +1,16 @@
+ import java.awt.Color;
+-import java.util.Arrays;
++import java.io.IOException;
++import java.io.InputStream;
++import java.lang.reflect.Constructor;
++import java.util.ArrayList;
+ import java.util.List;
++import java.util.Properties;
+ import java.util.Random;
+-import java.util.function.BiFunction;
+ 
+ /**
+- * Central factory that owns all per-species configuration:
+- * creation probability, display colour, and constructor reference.
+- * Eliminates Simulator's explicit knowledge of concrete entity types.
++ * Central factory that loads per-species configuration from entities.properties
++ * at runtime. Simulator and EntityFactory remain free of concrete entity class
++ * references; all type knowledge lives in the external config file.
+  */
+ public class EntityFactory {
+ 
+@@ -15,31 +18,74 @@ public class EntityFactory {
+         final double probability;
+         final Class<?> entityClass;
+         final Color color;
+-        final BiFunction<Field, Location, LivingEntity> creator;
++        // Animals expose (boolean randomAge, Field, Location); plants expose (Field, Location).
++        private final Constructor<?> ctor;
++        private final boolean isAnimal;
+ 
+-        EntityConfig(double probability, Class<?> entityClass, Color color,
+-                     BiFunction<Field, Location, LivingEntity> creator) {
++        EntityConfig(double probability, Class<?> entityClass, Color color)
++                throws ReflectiveOperationException {
+             this.probability = probability;
+             this.entityClass = entityClass;
+             this.color = color;
+-            this.creator = creator;
++            Constructor<?> animalCtor = null;
++            try {
++                animalCtor = entityClass.getDeclaredConstructor(
++                        boolean.class, Field.class, Location.class);
++            } catch (NoSuchMethodException ignored) {}
++            if (animalCtor != null) {
++                this.ctor = animalCtor;
++                this.isAnimal = true;
++            } else {
++                this.ctor = entityClass.getDeclaredConstructor(Field.class, Location.class);
++                this.isAnimal = false;
++            }
++        }
++
++        LivingEntity create(Field field, Location location)
++                throws ReflectiveOperationException {
++            if (isAnimal) {
++                return (LivingEntity) ctor.newInstance(true, field, location);
++            }
++            return (LivingEntity) ctor.newInstance(field, location);
+         }
+     }
+ 
+-    // Order must match the original populate() else-if chain to preserve RNG call sequence.
+-    private static final List<EntityConfig> CONFIGS = Arrays.asList(
+-        new EntityConfig(0.09, Dingo.class,  Color.ORANGE, (f, l) -> new Dingo(true, f, l)),
+-        new EntityConfig(0.13, Ant.class,    Color.GRAY,   (f, l) -> new Ant(true, f, l)),
+-        new EntityConfig(0.12, Snake.class,  Color.BLACK,  (f, l) -> new Snake(true, f, l)),
+-        new EntityConfig(0.11, Rat.class,    Color.PINK,   (f, l) -> new Rat(true, f, l)),
+-        new EntityConfig(0.12, Eagle.class,  Color.RED,    (f, l) -> new Eagle(true, f, l)),
+-        new EntityConfig(0.08, Emu.class,    Color.YELLOW, (f, l) -> new Emu(true, f, l)),
+-        new EntityConfig(0.34, Acacia.class, Color.GREEN,  (f, l) -> new Acacia(f, l)),
+-        new EntityConfig(0.36, Grass.class,  Color.CYAN,   (f, l) -> new Grass(f, l))
+-    );
++    private final List<EntityConfig> configs;
++
++    public EntityFactory() {
++        configs = loadConfigs();
++    }
++
++    private static List<EntityConfig> loadConfigs() {
++        Properties props = new Properties();
++        try (InputStream in = EntityFactory.class.getResourceAsStream("entities.properties")) {
++            if (in == null) {
++                throw new RuntimeException("entities.properties not found on classpath");
++            }
++            props.load(in);
++        } catch (IOException e) {
++            throw new RuntimeException("Failed to load entities.properties", e);
++        }
++
++        int count = Integer.parseInt(props.getProperty("entity.count").trim());
++        List<EntityConfig> result = new ArrayList<>();
++        for (int i = 0; i < count; i++) {
++            String name = props.getProperty("entity." + i).trim();
++            double prob = Double.parseDouble(props.getProperty(name + ".probability").trim());
++            String colorName = props.getProperty(name + ".color").trim();
++            try {
++                Class<?> cls = Class.forName(name);
++                Color color = (Color) Color.class.getField(colorName).get(null);
++                result.add(new EntityConfig(prob, cls, color));
++            } catch (ReflectiveOperationException e) {
++                throw new RuntimeException("Failed to configure entity: " + name, e);
++            }
++        }
++        return result;
++    }
+ 
+     public void registerColors(SimulationObserver observer) {
+-        for (EntityConfig cfg : CONFIGS) {
++        for (EntityConfig cfg : configs) {
+             observer.onColorRegistered(cfg.entityClass, cfg.color);
+         }
+     }
+@@ -50,9 +96,14 @@ public class EntityFactory {
+         for (int row = 0; row < field.getDepth(); row++) {
+             for (int col = 0; col < field.getWidth(); col++) {
+                 Location location = new Location(row, col);
+-                for (EntityConfig cfg : CONFIGS) {
++                for (EntityConfig cfg : configs) {
+                     if (rand.nextDouble() <= cfg.probability) {
+-                        entities.add(cfg.creator.apply(field, location));
++                        try {
++                            entities.add(cfg.create(field, location));
++                        } catch (ReflectiveOperationException e) {
++                            throw new RuntimeException(
++                                    "Failed to create entity: " + cfg.entityClass.getSimpleName(), e);
++                        }
+                         break;
+                     }
+                 }
+diff --git a/entities.properties b/entities.properties
+new file mode 100644
+index 0000000..72a93a0
+--- /dev/null
++++ b/entities.properties
+@@ -0,0 +1,35 @@
++# Entity creation order — must match the original else-if chain to preserve RNG sequence.
++entity.count=8
++entity.0=Dingo
++entity.1=Ant
++entity.2=Snake
++entity.3=Rat
++entity.4=Eagle
++entity.5=Emu
++entity.6=Acacia
++entity.7=Grass
++
++# Per-entity configuration.
++Dingo.probability=0.09
++Dingo.color=ORANGE
++
++Ant.probability=0.13
++Ant.color=GRAY
++
++Snake.probability=0.12
++Snake.color=BLACK
++
++Rat.probability=0.11
++Rat.color=PINK
++
++Eagle.probability=0.12
++Eagle.color=RED
++
++Emu.probability=0.08
++Emu.color=YELLOW
++
++Acacia.probability=0.34
++Acacia.color=GREEN
++
++Grass.probability=0.36
++Grass.color=CYAN

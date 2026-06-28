@@ -1,0 +1,1620 @@
+diff --git a/Animal.java b/Animal.java
+index dfe2ab6..d1d1f3b 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -7,7 +7,12 @@ import java.util.HashSet;
+ /**
+  * A class representing shared characteristics of all animals within the simultion.
+  * Animals will find food, have a gender and be able to become infected.
+- * 
++ *
++ * Concrete subclasses supply their fixed species characteristics through a single
++ * {@link AnimalTraits} instance (see {@link #getTraits()}); the common life cycle,
++ * accessors, breeding, feeding and infection behavior all live here so they are
++ * defined exactly once.
++ *
+  * @version 2022.03.02
+  */
+ public abstract class Animal extends Organism
+@@ -20,17 +25,17 @@ public abstract class Animal extends Organism
+     private int currentHealth;
+     // Whether the animal is infected
+     private boolean isInfected;
+-    
++
+     /**
+      * Create a new animal at location in field.
+-     * 
++     *
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+     public Animal(boolean randomAge, Field field, Location location)
+     {
+         super(randomAge, field, location);
+-        
++
+         if (randomAge) {
+             currentHealth = getRand().nextInt(getMaxHealth());
+         }
+@@ -40,82 +45,186 @@ public abstract class Animal extends Organism
+         else {
+             isMale = false;
+         }
+-        
++
+         isInfected = false;
+     }
+-    
++
+     // Abstract methods
+-    
++
++    /**
++     * Return the fixed, species-level characteristics for this animal. Each
++     * concrete subclass returns its own shared (static) AnimalTraits instance.
++     *
++     * @return the traits describing this animal's species.
++     */
++    abstract protected AnimalTraits getTraits();
++
++    // Trait-backed accessors (shared by every subclass)
++
++    /**
++     * Return whether the animal is diurnal.
++     *
++     * @return boolean True if the animal is diurnal, false if nocturnal
++     */
++    protected boolean getIsDiurnal() { return getTraits().isDiurnal(); }
++
+     /**
+-     * Abstract method that returns the max health of the animal
+-     * 
++     * Return the breeding age of the animal.
++     *
++     * @return the animal's breeding age
++     */
++    protected int getBreedingAge() { return getTraits().getBreedingAge(); }
++
++    /**
++     * Return the max age of the animal.
++     *
++     * @return the animal's max age
++     */
++    protected int getMaxAge() { return getTraits().getMaxAge(); }
++
++    /**
++     * Return the breeding probability of the animal.
++     *
++     * @return the animal's breeding probability
++     */
++    protected double getBreedingProbability() { return getTraits().getBreedingProbability(); }
++
++    /**
++     * Return the max litter size of the animal.
++     *
++     * @return the animal's max litter size
++     */
++    protected int getMaxLitterSize() { return getTraits().getMaxLitterSize(); }
++
++    /**
++     * Return the max health of the animal.
++     *
+      * @return the animal's max health
+      */
+-    abstract protected int getMaxHealth();
+-    
++    protected int getMaxHealth() { return getTraits().getMaxHealth(); }
++
+     /**
+-     * Abstract method to return whether the target object is of a specific subclass of animal
+-     * 
+-     * @param target The object being compared
+-     * @return boolean True if target is of type of a specific animal subclass
++     * Return the set of class types that this animal is allowed to eat.
++     *
++     * @return HashSet<Class> of class types that this animal can eat.
+      */
+-    abstract protected boolean getAnimalClass(Object thing);
+-    
++    protected HashSet<Class> getFoodSources() { return getTraits().getFoodSources(); }
++
+     /**
+-     * Abstract method to return the list of food sources of a specific subclass of animal
+-     * 
+-     * @return ArrayList<Class> of class types that a subclass of animal is allowed to eat.
++     * Return the set of class types that this animal is allowed to kill.
++     *
++     * @return HashSet<Class> of class types that this animal can kill.
+      */
+-    abstract protected HashSet<Class> getFoodSources();
+-    
++    protected HashSet<Class> getKillable() { return getTraits().getKillable(); }
++
+     /**
+-     * Abstract method to return the list of killable classes of a specific subclass of animal
+-     * 
+-     * @return ArrayList<Class> of class types that a subclass of animal is allowed to kill.
++     * Returns whether the target object is the same species as this animal.
++     *
++     * @param thing The object being compared
++     * @return boolean True if thing is of this animal's exact class
+      */
+-    abstract protected HashSet<Class> getKillable();
++    protected boolean getAnimalClass(Object thing)
++    {
++        return thing != null && thing.getClass() == getClass();
++    }
++
+     // Accessor and mutator methods
+-    
++
+     /**
+      * Returns whether the animal is male
+-     * 
++     *
+      * @boolean True if the animal is male, false if animal is female
+      */
+     protected boolean getGender()
+     {
+         return isMale;
+     }
+-    
++
+     /**
+      * Return the current health of the animal
+-     * 
++     *
+      * @return int of the animal's current health
+      */
+     protected int getCurrentHealth() {
+         return currentHealth;
+     }
+-    
++
+     /**
+      * Return whether the animal is infected
+-     * 
++     *
+      * @return True if the animal is infected, false if not
+      */
+     protected boolean getIsInfected() {
+         return isInfected;
+     }
+-    
++
+     /**
+      * Sets the animal to infected state
+      */
+     protected void infect() {
+         isInfected = true;
+     }
+-    
++
+     // Functional methods
+-    
++
++    /**
++     * Make this animal act for one step of the simulation: it ages, gets hungrier,
++     * possibly suffers from and spreads any infection, breeds and then moves towards
++     * food (dying of overcrowding if it cannot move). The infection hooks are no-ops
++     * by default and are overridden by infectable animals.
++     *
++     * @param newAnimals A list to receive newly born animals.
++     */
++    public void act(List<Organism> newAnimals)
++    {
++        incrementAge();
++        incrementHealth();
++        if (isAlive()) {
++            applyIllness();
++        }
++        if (isAlive()) {
++            attemptSpreadDisease();
++            giveBirth(newAnimals);
++            moveOrDie();
++        }
++    }
++
++    /**
++     * Move towards a source of food if one is adjacent, otherwise move to any free
++     * adjacent location. If the animal cannot move at all it dies of overcrowding.
++     */
++    protected void moveOrDie()
++    {
++        Location newLocation = findFood();
++        if (newLocation == null) {
++            // No food found - try to move to a free location.
++            newLocation = getField().freeAdjacentLocation(getLocation());
++        }
++        if (newLocation != null) {
++            setLocation(newLocation);
++        }
++        else {
++            // Overcrowding.
++            setDead();
++        }
++    }
++
++    /**
++     * Hook applied while the animal is alive, before it acts, allowing infected
++     * animals to suffer the effects of illness. Does nothing for healthy species.
++     */
++    protected void applyIllness() { }
++
++    /**
++     * Hook applied while the animal is alive, before it breeds, allowing infectious
++     * animals to spread disease to their neighbours. Does nothing for non-infectious
++     * species.
++     */
++    protected void attemptSpreadDisease() { }
++
+     /**
+      * Checks if the animal can breed
+-     * 
++     *
+      * @return true if the animal can breed
+      */
+     protected boolean canBreed()
+@@ -138,7 +247,7 @@ public abstract class Animal extends Organism
+         }
+         return false;
+     }
+-    
++
+     /**
+      * A method that will make the animal object search the adjacent squares around it,
+      * then find and eat an eligible food source.
+@@ -163,7 +272,7 @@ public abstract class Animal extends Organism
+         }
+         return null;
+     }
+-    
++
+     /**
+      * Decrease this animal's. This could result in the animal's death by hunger.
+      */
+diff --git a/AnimalTraits.java b/AnimalTraits.java
+new file mode 100644
+index 0000000..b2ee71e
+--- /dev/null
++++ b/AnimalTraits.java
+@@ -0,0 +1,142 @@
++import java.util.HashSet;
++
++/**
++ * An immutable bundle of the fixed, species-level characteristics shared by
++ * every individual of an Animal subclass: its breeding parameters, lifespan,
++ * health, activity period and its diet/kill lists.
++ *
++ * Each Animal subclass declares a single static AnimalTraits instance and hands
++ * it to the Animal base class, which reads all of its species constants through
++ * it. This replaces the block of per-class constants and trivial accessor
++ * methods that used to be copy-pasted into every subclass.
++ *
++ * @version 2022.03.02
++ */
++public class AnimalTraits
++{
++    // The age at which the animal can start to breed.
++    private final int breedingAge;
++    // The age to which the animal can live.
++    private final int maxAge;
++    // The likelihood of the animal breeding.
++    private final double breedingProbability;
++    // The maximum number of births.
++    private final int maxLitterSize;
++    // The max health of the animal.
++    private final int maxHealth;
++    // Whether the animal is diurnal (true) or nocturnal (false).
++    private final boolean diurnal;
++    // The classes this animal will eat.
++    private final HashSet<Class> foodSources;
++    // The classes this animal will kill.
++    private final HashSet<Class> killable;
++
++    private AnimalTraits(Builder builder)
++    {
++        this.breedingAge = builder.breedingAge;
++        this.maxAge = builder.maxAge;
++        this.breedingProbability = builder.breedingProbability;
++        this.maxLitterSize = builder.maxLitterSize;
++        this.maxHealth = builder.maxHealth;
++        this.diurnal = builder.diurnal;
++        this.foodSources = builder.foodSources;
++        this.killable = builder.killable;
++    }
++
++    protected int getBreedingAge() { return breedingAge; }
++
++    protected int getMaxAge() { return maxAge; }
++
++    protected double getBreedingProbability() { return breedingProbability; }
++
++    protected int getMaxLitterSize() { return maxLitterSize; }
++
++    protected int getMaxHealth() { return maxHealth; }
++
++    protected boolean isDiurnal() { return diurnal; }
++
++    protected HashSet<Class> getFoodSources() { return foodSources; }
++
++    protected HashSet<Class> getKillable() { return killable; }
++
++    /**
++     * A fluent builder so a subclass can declare its traits readably in one
++     * place, e.g.
++     * <pre>
++     *   new AnimalTraits.Builder()
++     *       .breedingAge(15).maxAge(70).breedingProbability(0.125)
++     *       .maxLitterSize(4).maxHealth(40).diurnal(true)
++     *       .foodSources(Monkey.class)
++     *       .killable(Monkey.class, Plant.class)
++     *       .build();
++     * </pre>
++     */
++    public static class Builder
++    {
++        private int breedingAge;
++        private int maxAge;
++        private double breedingProbability;
++        private int maxLitterSize;
++        private int maxHealth;
++        private boolean diurnal;
++        private final HashSet<Class> foodSources = new HashSet<>();
++        private final HashSet<Class> killable = new HashSet<>();
++
++        public Builder breedingAge(int breedingAge)
++        {
++            this.breedingAge = breedingAge;
++            return this;
++        }
++
++        public Builder maxAge(int maxAge)
++        {
++            this.maxAge = maxAge;
++            return this;
++        }
++
++        public Builder breedingProbability(double breedingProbability)
++        {
++            this.breedingProbability = breedingProbability;
++            return this;
++        }
++
++        public Builder maxLitterSize(int maxLitterSize)
++        {
++            this.maxLitterSize = maxLitterSize;
++            return this;
++        }
++
++        public Builder maxHealth(int maxHealth)
++        {
++            this.maxHealth = maxHealth;
++            return this;
++        }
++
++        public Builder diurnal(boolean diurnal)
++        {
++            this.diurnal = diurnal;
++            return this;
++        }
++
++        public Builder foodSources(Class... classes)
++        {
++            for (Class c : classes) {
++                foodSources.add(c);
++            }
++            return this;
++        }
++
++        public Builder killable(Class... classes)
++        {
++            for (Class c : classes) {
++                killable.add(c);
++            }
++            return this;
++        }
++
++        public AnimalTraits build()
++        {
++            return new AnimalTraits(this);
++        }
++    }
++}
+diff --git a/Bear.java b/Bear.java
+index 4dc88bf..c55ad37 100644
+--- a/Bear.java
++++ b/Bear.java
+@@ -1,45 +1,29 @@
+-import java.util.List;
+-import java.util.Iterator;
+-import java.util.Random;
+-import java.util.ArrayList;
+-import java.util.HashSet;
+-
+ /**
+  * A model of a bear. Bears will eat monkeys,
+  * but will kill monkeys and plants.
+  * They will move and look for food and age at every step of the simulation,
+  * and die when they reach their max age or have gone too long without food.
+- * 
++ *
+  * @version 2022.03.02
+  */
+-public class Bear extends Animal implements Infectable
++public class Bear extends InfectableAnimal
+ {
+-    // Characteristics shared by all bears (class variables).
+-    
+-    // The age at which a bear can start to breed.
+-    private static final int BREEDING_AGE = 15;
+-    // The age to which a bear can live.
+-    private static final int MAX_AGE = 70;
+-    // The likelihood of a bear breeding.
+-    private static final double BREEDING_PROBABILITY = 0.125;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 4;
+-    // The max health of a bear
+-    private static final int MAX_HEALTH = 40;
+-    // Whether the animal is diurnal or nocturnal
+-    private static final boolean IS_DIURNAL = true;
+-    
+-    // Individual characteristics (instance fields).
+-    
+-    // The food a bear will eat.
+-    private static HashSet<Class> foodSources;
+-    // The classes a bear will kill
+-    private static HashSet<Class> killable;
++    // Characteristics shared by all bears.
++    private static final AnimalTraits TRAITS = new AnimalTraits.Builder()
++            .breedingAge(15)
++            .maxAge(70)
++            .breedingProbability(0.125)
++            .maxLitterSize(4)
++            .maxHealth(40)
++            .diurnal(true)
++            .foodSources(Monkey.class)
++            .killable(Monkey.class, Plant.class)
++            .build();
+ 
+     /**
+      * Create a bear. A bear can be created as a new born (age zero
+      * and not hungry) or with a random age and food level.
+-     * 
++     *
+      * @param randomAge If true, the bear will have random age and hunger level.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+@@ -47,177 +31,23 @@ public class Bear extends Animal implements Infectable
+     public Bear(boolean randomAge, Field field, Location location)
+     {
+         super(randomAge, field, location);
+-        foodSources = new HashSet<>();
+-        foodSources.add(Monkey.class);
+-        
+-        killable = new HashSet<>();
+-        killable.add(Monkey.class);
+-        killable.add(Plant.class);
+-    }
+-    
+-    // Accessor and mutator methods
+-    
+-    // Accessor and mutator methods
+-    /**
+-     * Return whether the bear is diurnal
+-     * 
+-     * @return boolean True if the bea is diurnal, false if nocturnal
+-     */
+-    protected boolean getIsDiurnal() {
+-        return IS_DIURNAL;
+-    }
+-    
+-    /**
+-     * Returns breeding age of a bear
+-     * 
+-     * @return int of the bear's breeding age.
+-     */
+-    protected int getBreedingAge()
+-    {
+-        return BREEDING_AGE;
+-    }
+-    
+-    /**
+-     * Returns max age of a bear
+-     * 
+-     * @return int of the bear's max age.
+-     */
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
+-    }
+-    
+-    /**
+-     * Returns breeding probability of a bear
+-     * 
+-     * @return double of the bear's breeding probability
+-     */
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+     }
+-    
+-    /**
+-     * Returns max litter size of a bear
+-     * 
+-     * @return int of the bear's max litter size
+-     */
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-    
+-    /**
+-     * Returns whether the target animal is of instance Bear
+-     * 
+-     * @param target A target object that we want to check is of type Bear
+-     * @return boolean True if target is of type Bear
+-     */
+-    protected boolean getAnimalClass(Object target)
+-    {
+-        return target instanceof Bear;
+-    }
+-    
+-    /**
+-     * Returns the ArrayList of allowed food for a bear to eat
+-     * 
+-     * @return ArrayList<Class> of subclasses that a bear can eat
+-     */
+-    protected HashSet<Class> getFoodSources() {
+-        return foodSources;
+-    }
+-    
+-    /**
+-     * Returns the HashSet of allowed classes for a bear to kill
+-     * 
+-     * @return HashSet<Class> of subclasses that a bear can kill
+-     */
+-    protected HashSet<Class> getKillable() {
+-        return killable;
+-    }
+-    
+-    /**
+-     * Return the max health of the animal
+-     * 
+-     * @return the animal's max health
+-     */
+-    protected int getMaxHealth()
+-    {
+-        return MAX_HEALTH;
+-    }
+-    
+-    // Functional methods
+-    
++
+     /**
+-     * This is what the bear does most of the time: it hunts for
+-     * monkeys. In the process, it might breed, die of hunger,
+-     * or die of old age.
+-     * @param field The field currently occupied.
+-     * @param newMonkeyes A list to return newly born bears.
++     * @return the fixed species characteristics shared by all bears.
+      */
+-    public void act(List<Organism> newBears)
++    protected AnimalTraits getTraits()
+     {
+-        incrementAge();
+-        incrementHealth();
+-        if (isAlive()) {
+-            illness();
+-        }
+-        if(isAlive()) {
+-            spreadDisease();
+-            giveBirth(newBears);
+-            // Move towards a source of food if found.
+-            Location newLocation = findFood();
+-            if(newLocation == null) { 
+-                // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            // See if it was possible to move.
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                // Overcrowding.
+-                setDead();
+-            }
+-        }
+-    }
+-    
+-    /**
+-     * Decides whether this animal will infect another eligible animal.
+-     */
+-    public void spreadDisease() {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object object = field.getObjectAt(where);
+-            if (object != null) {
+-                Organism organism = (Organism) object;
+-                if (organism instanceof Infectable && organism.isAlive() && getRand().nextDouble() <= SPREAD_PROBABILITY ) {
+-                    Animal target = (Animal) organism;
+-                    target.infect();
+-                }
+-            }
+-        }
++        return TRAITS;
+     }
+-    
++
+     /**
+      * Creates and returns a new bear object
+-     * 
++     *
+      * @return Organism object of subclass bear
+      */
+     protected Organism createNewOrganism(boolean randomAge, Field field, Location location)
+     {
+         return new Bear(randomAge, field, location);
+     }
+-    
+-    /**
+-     * Makes the bear take extra damage if it is infected
+-     */
+-    public void illness() {
+-        if (getIsInfected()) {
+-            incrementHealth();
+-        }
+-    }
+ }
+diff --git a/Hippopotamus.java b/Hippopotamus.java
+index 2dc3db9..5ef4210 100644
+--- a/Hippopotamus.java
++++ b/Hippopotamus.java
+@@ -1,187 +1,49 @@
+-import java.util.List;
+-import java.util.Iterator;
+-import java.util.Random;
+-import java.util.HashSet;
+-
+ /**
+  * A model of a hippopotamus. Hippopotamus will eat monkeys and plants,
+  * but will kill monkeys, plants and bears.
+  * They will move and look for food and age at every step of the simulation,
+  * and die when they reach their max age or have gone too long without food.
+- * 
++ *
+  * @version 2022.03.02
+  */
+ public class Hippopotamus extends Animal
+ {
+-    // Characteristics shared by all foxes (class variables).
+-    
+-    // The age at which a hippopotamus can start to breed.
+-    private static final int BREEDING_AGE = 25;
+-    // The age to which a hippopotamus can live.
+-    private static final int MAX_AGE = 120;
+-    // The likelihood of a hippopotamus breeding.
+-    private static final double BREEDING_PROBABILITY = 0.12;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 3;
+-    // The max health of a hippopotamus
+-    private static final int MAX_HEALTH = 100;
+-    // Whether the animal is diurnal or nocturnal
+-    private static final boolean IS_DIURNAL = true;
+-    
+-    // Individual characteristics (instance fields).
+-    
+-    // The food a hippopotamus will eat.
+-    private HashSet<Class> foodSources;
+-    // The classes a hippopotamus will kill
+-    private static HashSet<Class> killable;
++    // Characteristics shared by all hippopotamuses.
++    private static final AnimalTraits TRAITS = new AnimalTraits.Builder()
++            .breedingAge(25)
++            .maxAge(120)
++            .breedingProbability(0.12)
++            .maxLitterSize(3)
++            .maxHealth(100)
++            .diurnal(true)
++            .foodSources(Monkey.class, Plant.class)
++            .killable(Monkey.class, Plant.class, Bear.class)
++            .build();
+ 
+     /**
+-     * Create a fox. A fox can be created as a new born (age zero
++     * Create a hippopotamus. A hippopotamus can be created as a new born (age zero
+      * and not hungry) or with a random age and food level.
+-     * 
+-     * @param randomAge If true, the fox will have random age and hunger level.
++     *
++     * @param randomAge If true, the hippopotamus will have random age and hunger level.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+     public Hippopotamus(boolean randomAge, Field field, Location location)
+     {
+         super(randomAge, field, location);
+-        foodSources = new HashSet<>();
+-        foodSources.add(Monkey.class);
+-        foodSources.add(Plant.class);
+-        
+-        killable = new HashSet<>();
+-        killable.add(Monkey.class);
+-        killable.add(Plant.class);
+-        killable.add(Bear.class);
+-    }
+-    
+-    // Accessor and mutator methods
+-    
+-    // Accessor and mutator methods
+-    /**
+-     * Return whether the hippopotamus is diurnal
+-     * 
+-     * @return boolean True if the bea is diurnal, false if nocturnal
+-     */
+-    protected boolean getIsDiurnal() {
+-        return IS_DIURNAL;
+-    }
+-    
+-    /**
+-     * Returns breeding age of a hippopotamus
+-     * 
+-     * @return int of the hippopotamus's breeding age.
+-     */
+-    protected int getBreedingAge()
+-    {
+-        return BREEDING_AGE;
+     }
+-    
+-    /**
+-     * Returns max age of a hippopotamus
+-     * 
+-     * @return int of the hippopotamus's max age.
+-     */
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
+-    }
+-    
+-    /**
+-     * Returns breeding probability of a hippopotamus
+-     * 
+-     * @return double of the hippopotamus's breeding probability
+-     */
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Returns max litter size of a hippopotamus
+-     * 
+-     * @return int of the hippopotamus's max litter size
+-     */
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-    
+-    /**
+-     * Returns whether the target animal is of instance Hippopotamus
+-     * 
+-     * @param target A target object that we want to check is of type Hippopotamus
+-     * @return boolean True if target is of type Hippopotamus
+-     */
+-    protected boolean getAnimalClass(Object target)
+-    {
+-        return target instanceof Hippopotamus;
+-    }
+-    
+-    /**
+-     * Returns the HashSet of allowed food for a hippopotamus to eat
+-     * 
+-     * @return HashSet<Class> of subclasses that a hippopotamus can eat
+-     */
+-    protected HashSet<Class> getFoodSources() {
+-        return foodSources;
+-    }
+-    
+-    /**
+-     * Returns the HashSet of allowed classes for a hippo to kill
+-     * 
+-     * @return HashSet<Class> of subclasses that a hippopotamus can kill
+-     */
+-    protected HashSet<Class> getKillable() {
+-        return killable;
+-    }
+-    
+-    /**
+-     * Return the max health of the animal
+-     * 
+-     * @return the animal's max health
+-     */
+-    protected int getMaxHealth()
+-    {
+-        return MAX_HEALTH;
+-    }
+-    
+-    // Functional methods
+-    
++
+     /**
+-     * This is what the fox does most of the time: it hunts for
+-     * monkeys. In the process, it might breed, die of hunger,
+-     * or die of old age.
+-     * @param field The field currently occupied.
+-     * @param newMonkeyes A list to return newly born foxes.
++     * @return the fixed species characteristics shared by all hippopotamuses.
+      */
+-    public void act(List<Organism> newHippopotamuss)
++    protected AnimalTraits getTraits()
+     {
+-        incrementAge();
+-        incrementHealth();
+-        if(isAlive()) {
+-            giveBirth(newHippopotamuss);
+-            // Move towards a source of food if found.
+-            Location newLocation = findFood();
+-            if(newLocation == null) { 
+-                // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            // See if it was possible to move.
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                // Overcrowding.
+-                setDead();
+-            }
+-        }
++        return TRAITS;
+     }
+-    
++
+     /**
+      * Creates and returns a new hippopotamus object
+-     * 
++     *
+      * @return Organism object of subclass hippopotamus
+      */
+     protected Organism createNewOrganism(boolean randomAge, Field field, Location location)
+diff --git a/InfectableAnimal.java b/InfectableAnimal.java
+new file mode 100644
+index 0000000..3cecdba
+--- /dev/null
++++ b/InfectableAnimal.java
+@@ -0,0 +1,75 @@
++import java.util.List;
++
++/**
++ * An animal that can catch and spread a disease. This intermediate class holds
++ * the infection behavior (suffering illness and infecting neighbours) that was
++ * previously copy-pasted into each infectable animal, and wires it into the
++ * standard life cycle defined in {@link Animal#act}.
++ *
++ * Concrete infectable animals (e.g. Bear, Sloth) extend this class instead of
++ * {@link Animal} directly.
++ *
++ * @version 2022.03.02
++ */
++public abstract class InfectableAnimal extends Animal implements Infectable
++{
++    /**
++     * Create a new infectable animal at location in field.
++     *
++     * @param randomAge If true, the animal will have a random age and health.
++     * @param field The field currently occupied.
++     * @param location The location within the field.
++     */
++    public InfectableAnimal(boolean randomAge, Field field, Location location)
++    {
++        super(randomAge, field, location);
++    }
++
++    /**
++     * While alive, an infectable animal suffers the effects of illness each step.
++     */
++    @Override
++    protected void applyIllness()
++    {
++        illness();
++    }
++
++    /**
++     * While alive, an infectable animal may spread disease to its neighbours.
++     */
++    @Override
++    protected void attemptSpreadDisease()
++    {
++        spreadDisease();
++    }
++
++    /**
++     * Makes the animal take extra damage if it is infected.
++     */
++    public void illness()
++    {
++        if (getIsInfected()) {
++            incrementHealth();
++        }
++    }
++
++    /**
++     * Decides whether this animal will infect another eligible (infectable) animal
++     * in an adjacent location.
++     */
++    public void spreadDisease()
++    {
++        Field field = getField();
++        List<Location> adjacent = field.adjacentLocations(getLocation());
++        for (Location where : adjacent) {
++            Object object = field.getObjectAt(where);
++            if (object != null) {
++                Organism organism = (Organism) object;
++                if (organism instanceof Infectable && organism.isAlive() && getRand().nextDouble() <= SPREAD_PROBABILITY) {
++                    Animal target = (Animal) organism;
++                    target.infect();
++                }
++            }
++        }
++    }
++}
+diff --git a/Leopard.java b/Leopard.java
+index abe016e..f201e65 100644
+--- a/Leopard.java
++++ b/Leopard.java
+@@ -1,185 +1,49 @@
+-import java.util.List;
+-import java.util.Iterator;
+-import java.util.Random;
+-import java.util.HashSet;
+-
+ /**
+  * A model of a leopard. Leopards will eat sloths,
+  * but will kill sloths and plants.
+  * They will move and look for food, age at every step of the simulation,
+  * and die when they reach their max age or have gone too long without food.
+- * 
++ *
+  * @version 2022.03.02
+  */
+ public class Leopard extends Animal
+ {
+-    // Characteristics shared by all beares (class variables).
+-    
+-    // The age at which a leopard can start to breed.
+-    private static final int BREEDING_AGE = 15;
+-    // The age to which a leopard can live.
+-    private static final int MAX_AGE = 55;
+-    // The likelihood of a leopard breeding.
+-    private static final double BREEDING_PROBABILITY = 0.145;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 4;
+-    // The max health of a leopard
+-    private static final int MAX_HEALTH = 40;
+-    // Whether the animal is diurnal or nocturnal
+-    private static final boolean IS_DIURNAL = false;
+-    
+-    // Individual characteristics (instance fields).
+-    
+-    // The food a leopard will eat.
+-    private static HashSet<Class> foodSources;
+-    // The classes a leopard will kill
+-    private static HashSet<Class> killable;
++    // Characteristics shared by all leopards.
++    private static final AnimalTraits TRAITS = new AnimalTraits.Builder()
++            .breedingAge(15)
++            .maxAge(55)
++            .breedingProbability(0.145)
++            .maxLitterSize(4)
++            .maxHealth(40)
++            .diurnal(false)
++            .foodSources(Sloth.class)
++            .killable(Sloth.class, Plant.class)
++            .build();
+ 
+     /**
+-     * Create a bear. A bear can be created as a new born (age zero
++     * Create a leopard. A leopard can be created as a new born (age zero
+      * and not hungry) or with a random age and food level.
+-     * 
+-     * @param randomAge If true, the bear will have random age and hunger level.
++     *
++     * @param randomAge If true, the leopard will have random age and hunger level.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+     public Leopard(boolean randomAge, Field field, Location location)
+     {
+         super(randomAge, field, location);
+-        foodSources = new HashSet<>();
+-        foodSources.add(Sloth.class);
+-        
+-        killable = new HashSet<>();
+-        killable.add(Sloth.class);
+-        killable.add(Plant.class);
+-    }
+-    
+-    // Accessor and mutator methods
+-    
+-    // Accessor and mutator methods
+-    /**
+-     * Return whether the leopard is diurnal
+-     * 
+-     * @return boolean True if the bea is diurnal, false if nocturnal
+-     */
+-    protected boolean getIsDiurnal() {
+-        return IS_DIURNAL;
+-    }
+-    
+-    /**
+-     * Returns breeding age of a leopard
+-     * 
+-     * @return int of the leopard's breeding age.
+-     */
+-    protected int getBreedingAge()
+-    {
+-        return BREEDING_AGE;
+     }
+-    
+-    /**
+-     * Returns max age of a leopard
+-     * 
+-     * @return int of the leopard's max age.
+-     */
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
+-    }
+-    
+-    /**
+-     * Returns breeding probability of a leopard
+-     * 
+-     * @return double of the leopard's breeding probability
+-     */
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Returns max litter size of a leopard
+-     * 
+-     * @return int of the leopard's max litter size
+-     */
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-    
+-    /**
+-     * Returns whether the target animal is of instance Leopard
+-     * 
+-     * @param target A target object that we want to check is of type Leopard
+-     * @return boolean True if target is of type Leopard
+-     */
+-    protected boolean getAnimalClass(Object target)
+-    {
+-        return target instanceof Leopard;
+-    }
+-    
+-    /**
+-     * Returns the HashSet of allowed food for a leopard to eat
+-     * 
+-     * @return HashSet<Class> of subclasses that a leopard can eat
+-     */
+-    protected HashSet<Class> getFoodSources() {
+-        return foodSources;
+-    }
+-    
+-    /**
+-     * Returns the HashSet of allowed classes for a leopard to kill
+-     * 
+-     * @return HashSet<Class> of subclasses that a leopard can kill
+-     */
+-    protected HashSet<Class> getKillable() {
+-        return killable;
+-    }
+-    
+-    /**
+-     * Return the max health of the animal
+-     * 
+-     * @return the animal's max health
+-     */
+-    protected int getMaxHealth()
+-    {
+-        return MAX_HEALTH;
+-    }
+-    
+-    // Functional methods
+-    
++
+     /**
+-     * This is what the bear does most of the time: it hunts for
+-     * monkeys. In the process, it might breed, die of hunger,
+-     * or die of old age.
+-     * @param field The field currently occupied.
+-     * @param newMonkeyes A list to return newly born bears.
++     * @return the fixed species characteristics shared by all leopards.
+      */
+-    public void act(List<Organism> newLeopards)
++    protected AnimalTraits getTraits()
+     {
+-        incrementAge();
+-        incrementHealth();
+-        if(isAlive()) {
+-            giveBirth(newLeopards);
+-            // Move towards a source of food if found.
+-            Location newLocation = findFood();
+-            if(newLocation == null) { 
+-                // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            // See if it was possible to move.
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                // Overcrowding.
+-                setDead();
+-            }
+-        }
++        return TRAITS;
+     }
+-    
++
+     /**
+      * Creates and returns a new leopard object
+-     * 
++     *
+      * @return Organism object of subclass leopard
+      */
+     protected Organism createNewOrganism(boolean randomAge, Field field, Location location)
+diff --git a/Monkey.java b/Monkey.java
+index a8b23d3..5a3af95 100644
+--- a/Monkey.java
++++ b/Monkey.java
+@@ -1,42 +1,28 @@
+-import java.util.List;
+-import java.util.Random;
+-import java.util.HashSet;
+-import java.util.Iterator;
+-
+ /**
+  * A model of a monkey. Monkeys will eat plants.
+  * They will move and look for food and age at every step of the simulation,
+  * and die when they reach their max age or have gone too long without food.
+- * 
++ *
+  * @version 2022.03.02
+  */
+ public class Monkey extends Animal
+ {
+-    // Characteristics shared by all monkeys (class variables).
+-
+-    // The age at which a monkey can start to breed.
+-    private static final int BREEDING_AGE = 4;
+-    // The age to which a monkey can live.
+-    private static final int MAX_AGE = 40;
+-    // The likelihood of a monkey breeding.
+-    private static final double BREEDING_PROBABILITY = 0.17;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 5;
+-    // The max health of a monkey
+-    private static final int MAX_HEALTH = 10;
+-    // Whether the animal is diurnal or nocturnal
+-    private static final boolean IS_DIURNAL = true;
+-    
+-    // Individual characteristics (instance fields).
+-    // The food a monkey will eat.
+-    private static HashSet<Class> foodSources;
+-    // The classes a monkey will kill
+-    private static HashSet<Class> killable;
++    // Characteristics shared by all monkeys.
++    private static final AnimalTraits TRAITS = new AnimalTraits.Builder()
++            .breedingAge(4)
++            .maxAge(40)
++            .breedingProbability(0.17)
++            .maxLitterSize(5)
++            .maxHealth(10)
++            .diurnal(true)
++            .foodSources(Plant.class)
++            .killable(Plant.class)
++            .build();
+ 
+     /**
+      * Create a new monkey. A monkey may be created with age
+      * zero (a new born) or with a random age.
+-     * 
++     *
+      * @param randomAge If true, the monkey will have a random age.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+@@ -44,136 +30,19 @@ public class Monkey extends Animal
+     public Monkey(boolean randomAge, Field field, Location location)
+     {
+         super(randomAge, field, location);
+-        foodSources = new HashSet<>();
+-        foodSources.add(Plant.class);
+-        
+-        killable = new HashSet<>();
+-        killable.add(Plant.class);
+-    }
+-    
+-    // Accessor and mutator methods
+-    /**
+-     * Return whether the monkey is diurnal
+-     * 
+-     * @return boolean True if the monkey is diurnal, false if nocturnal
+-     */
+-    protected boolean getIsDiurnal() {
+-        return IS_DIURNAL;
+     }
+-    
+-    /**
+-     * Return the breeding age of the monkey
+-     * 
+-     * @return the monkey's breeding age
+-     */
+-    protected int getBreedingAge()
+-    {
+-        return BREEDING_AGE;
+-    }
+-    
+-    /**
+-     * Return the max age of the monkey
+-     * 
+-     * @return the monkey's max age
+-     */
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
+-    }
+-    
+-    /**
+-     * Return the breeding probability of the monkey
+-     * 
+-     * @return the monkey's breeding probability
+-     */
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Return the max litter size of the monkey
+-     * 
+-     * @return the monkey's max litter size
+-     */
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-    
+-    /**
+-     * Return the max health of the monkey
+-     * 
+-     * @return the monkey's max health
+-     */
+-    protected int getMaxHealth()
+-    {
+-        return MAX_HEALTH;
+-    }
+-    
+-    /**
+-     * Returns whether the target animal is of instance Monkey
+-     * 
+-     * @param target A target object that we want to check is of type Monkey
+-     * @return boolean True if target is of type Monkey
+-     */
+-    protected boolean getAnimalClass(Object target)
+-    {
+-        return target instanceof Monkey;
+-    }
+-    
+-    /**
+-     * Returns the HashSet of allowed food for a monkey to eat
+-     * 
+-     * @return HashSet<Class> of subclasses that a Monkey can eat
+-     */
+-    protected HashSet<Class> getFoodSources() {
+-        return foodSources;
+-    }
+-    
+-    /**
+-     * Returns the HashSet of allowed classes for a monkey to kill
+-     * 
+-     * @return HashSet<Class> of subclasses that a Monkey can kill
+-     */
+-    protected HashSet<Class> getKillable() {
+-        return killable;
+-    }
+-    
+-    
+-    // Functional methods
+-    
++
+     /**
+-     * This is what the monkey does most of the time - it runs 
+-     * around. Sometimes it will breed or die of old age.
+-     * @param newmonkeys A list to return newly born monkeys.
++     * @return the fixed species characteristics shared by all monkeys.
+      */
+-    public void act(List<Organism> newmonkeys)
++    protected AnimalTraits getTraits()
+     {
+-        incrementAge();
+-        incrementHealth();
+-        if(isAlive()) {
+-            giveBirth(newmonkeys);            
+-            // Try to move into a free location.
+-            Location newLocation = findFood();
+-            if(newLocation == null) { 
+-                // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                // Overcrowding.
+-                setDead();
+-            }
+-        }
++        return TRAITS;
+     }
+-    
++
+     /**
+      * Creates a new Animal object for a newborn monkey
+-     * 
++     *
+      * @return an Animal object for a newborn monkey
+      */
+     protected Animal createNewOrganism(boolean randomAge, Field field, Location location)
+diff --git a/Sloth.java b/Sloth.java
+index 17a5d8e..5983055 100644
+--- a/Sloth.java
++++ b/Sloth.java
+@@ -1,42 +1,28 @@
+-import java.util.List;
+-import java.util.Random;
+-import java.util.HashSet;
+-import java.util.Iterator;
+-
+ /**
+  * A model of a Sloth. Sloths will eat plants.
+  * They will move and look for food and age at every step of the simulation,
+  * and die when they reach their max age or have gone too long without food.
+- * 
++ *
+  * @version 2022.03.02
+  */
+-public class Sloth extends Animal implements Infectable
++public class Sloth extends InfectableAnimal
+ {
+-    // Characteristics shared by all sloths (class variables).
+-
+-    // The age at which a sloth can start to breed.
+-    private static final int BREEDING_AGE = 5;
+-    // The age to which a sloth can live.
+-    private static final int MAX_AGE = 30;
+-    // The likelihood of a sloth breeding.
+-    private static final double BREEDING_PROBABILITY = 0.17;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 4;
+-    // The max health of a sloth
+-    private static final int MAX_HEALTH = 8;
+-    // Whether the animal is diurnal or nocturnal
+-    private static final boolean IS_DIURNAL = true;
+-    
+-    // Individual characteristics (instance fields).
+-    // The food a sloth will eat.
+-    private static HashSet<Class> foodSources;
+-    // The classes a bear will kill
+-    private static HashSet<Class> killable;
++    // Characteristics shared by all sloths.
++    private static final AnimalTraits TRAITS = new AnimalTraits.Builder()
++            .breedingAge(5)
++            .maxAge(30)
++            .breedingProbability(0.17)
++            .maxLitterSize(4)
++            .maxHealth(8)
++            .diurnal(true)
++            .foodSources(Plant.class)
++            .killable(Plant.class)
++            .build();
+ 
+     /**
+      * Create a new sloth. A sloth may be created with age
+      * zero (a new born) or with a random age.
+-     * 
++     *
+      * @param randomAge If true, the sloth will have a random age.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+@@ -44,172 +30,23 @@ public class Sloth extends Animal implements Infectable
+     public Sloth(boolean randomAge, Field field, Location location)
+     {
+         super(randomAge, field, location);
+-        foodSources = new HashSet<>();
+-        foodSources.add(Plant.class);
+-        
+-        killable = new HashSet<>();
+-        killable.add(Plant.class);
+-    }
+-    
+-    // Accessor and mutator methods
+-    /**
+-     * Return whether the sloth is diurnal
+-     * 
+-     * @return boolean True if the sloth is diurnal, false if nocturnal
+-     */
+-    protected boolean getIsDiurnal() {
+-        return IS_DIURNAL;
+-    }
+-    
+-    /**
+-     * Return the breeding age of the sloth
+-     * 
+-     * @return the sloth's breeding age
+-     */
+-    protected int getBreedingAge()
+-    {
+-        return BREEDING_AGE;
+-    }
+-    
+-    /**
+-     * Return the max age of the sloth
+-     * 
+-     * @return the sloth's max age
+-     */
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
+-    }
+-    
+-    /**
+-     * Return the breeding probability of the sloth
+-     * 
+-     * @return the sloth's breeding probability
+-     */
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+     }
+-    
+-    /**
+-     * Return the max litter size of the sloth
+-     * 
+-     * @return the sloth's max litter size
+-     */
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-    
+-    /**
+-     * Return the max health of the sloth
+-     * 
+-     * @return the sloth's max health
+-     */
+-    protected int getMaxHealth()
+-    {
+-        return MAX_HEALTH;
+-    }
+-    
+-    /**
+-     * Returns whether the target animal is of instance Sloth
+-     * 
+-     * @param target A target object that we want to check is of type Sloth
+-     * @return boolean True if target is of type Sloth
+-     */
+-    protected boolean getAnimalClass(Object target)
+-    {
+-        return target instanceof Sloth;
+-    }
+-    
+-    /**
+-     * Returns the HashSet of allowed food for a sloth to eat
+-     * 
+-     * @return HashSet<Class> of subclasses that a Sloth can eat
+-     */
+-    protected HashSet<Class> getFoodSources() {
+-        return foodSources;
+-    }
+-    
+-    /**
+-     * Returns the HashSet of allowed classes for a sloth to eat
+-     * 
+-     * @return HashSet<Class> of subclasses that a sloth can kill
+-     */
+-    protected HashSet<Class> getKillable() {
+-        return killable;
+-    }
+-    
+-    // Functional methods
+-    
++
+     /**
+-     * This is what the sloth does most of the time - it runs 
+-     * around. Sometimes it will breed or die of old age.
+-     * @param newsloths A list to return newly born sloths.
++     * @return the fixed species characteristics shared by all sloths.
+      */
+-    public void act(List<Organism> newsloths)
++    protected AnimalTraits getTraits()
+     {
+-        incrementAge();
+-        incrementHealth();
+-        if (isAlive()) {
+-            illness();
+-        }
+-        if(isAlive()) {
+-            spreadDisease();
+-            giveBirth(newsloths);            
+-            // Try to move into a free location.
+-            Location newLocation = findFood();
+-            if(newLocation == null) { 
+-                // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                // Overcrowding.
+-                setDead();
+-            }
+-        }
+-    }
+-    
+-    /**
+-     * Decides whether this animal will infect another eligible animal.
+-     */
+-    public void spreadDisease() {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object object = field.getObjectAt(where);
+-            if (object != null) {
+-                Organism organism = (Organism) object;
+-                if (organism instanceof Infectable && organism.isAlive() && getRand().nextDouble() <= SPREAD_PROBABILITY ) {
+-                    Animal target = (Animal) organism;
+-                    target.infect();
+-                }
+-            }
+-        }
++        return TRAITS;
+     }
+-    
++
+     /**
+      * Creates a new Animal object for a newborn sloth
+-     * 
++     *
+      * @return an Animal object for a newborn sloth
+      */
+     protected Animal createNewOrganism(boolean randomAge, Field field, Location location)
+     {
+         return new Sloth(randomAge, field, location);
+     }
+-    
+-    /**
+-     * Makes the sloth take extra damage if it is infected
+-     */
+-    public void illness() {
+-        if (getIsInfected()) {
+-            incrementHealth();
+-        }
+-    }
+ }

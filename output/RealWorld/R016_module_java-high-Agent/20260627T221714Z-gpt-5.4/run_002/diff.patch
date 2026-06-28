@@ -1,0 +1,229 @@
+diff --git a/FieldStats.java b/FieldStats.java
+index a5259ed..f21681f 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -1,4 +1,4 @@
+-import java.awt.Color;
++import java.util.Collection;
+ import java.util.HashMap;
+ 
+ /**
+@@ -24,30 +24,6 @@ public class FieldStats
+         countsValid = true;
+     }
+ 
+-    /**
+-     * Get details of what is in the field.
+-     * @param field The field to get details for.
+-     * @return A string describing what is in the field.
+-     */
+-    public String getPopulationDetails(Field field)
+-    {
+-        StringBuffer buffer = new StringBuffer();
+-        if(!countsValid) {
+-            generateCounts(field);
+-        }
+-        int totalCount = 0;
+-        for(Class key : counters.keySet()) {
+-            Counter info = counters.get(key);
+-            totalCount += info.getCount();
+-            buffer.append(info.getName());
+-            buffer.append(": ");
+-            buffer.append(info.getCount());
+-            buffer.append(' ');
+-        }
+-        buffer.append(" Total: " + totalCount);
+-        return buffer.toString();
+-    }
+-    
+     /**
+      * Invalidate the current set of statistics; reset all 
+      * counts to zero.
+@@ -85,53 +61,18 @@ public class FieldStats
+     }
+ 
+     /**
+-     * Determine whether the simulation is still viable.
+-     * I.e., should it continue to run.
+-     * @field The field to generate the stats for.
+-     * @return true If there is more than one species alive.
++     * @return Whether the current counts are in sync with the field.
+      */
+-    public boolean isViable(Field field)
++    public boolean isValid()
+     {
+-        // How many counts are non-zero.
+-        int nonZero = 0;
+-        if(!countsValid) {
+-            generateCounts(field);
+-        }
+-        for(Class key : counters.keySet()) {
+-            Counter info = counters.get(key);
+-            if(info.getCount() > 0) {
+-                nonZero++;
+-            }
+-        }
+-        return nonZero > 1;
++        return countsValid;
+     }
+-    
++
+     /**
+-     * Generate counts of the number of organisms and water sources there are.
+-     * These are not kept up to date as objects
+-     * are placed in the field, but only when a request
+-     * is made for the information.
+-     * @param field The field to generate the stats for.
++     * @return All currently known counters.
+      */
+-    private void generateCounts(Field field)
++    public Collection<Counter> getCounters()
+     {
+-        reset();
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
+-                Object organism = field.getObjectAt(row, col);
+-                Object waterSource = field.getObjectAt(row, col);
+-                Object plants = field.getObjectAt(row, col);
+-                if(organism != null) {
+-                    incrementCount(organism.getClass());
+-                }
+-                if(waterSource != null) {
+-                    incrementCount(waterSource.getClass());
+-                }
+-                if(plants != null) {
+-                    incrementCount(plants.getClass());
+-                }
+-            }
+-        }
+-        countsValid = true;
++        return counters.values();
+     }
+ }
+diff --git a/SimulationDemographics.java b/SimulationDemographics.java
+new file mode 100644
+index 0000000..18ddbd1
+--- /dev/null
++++ b/SimulationDemographics.java
+@@ -0,0 +1,83 @@
++/**
++ * Generates population and viability information for the simulation.
++ */
++public class SimulationDemographics
++{
++    private final FieldStats stats;
++
++    /**
++     * Create a demographics manager backed by the provided counters.
++     */
++    public SimulationDemographics(FieldStats stats)
++    {
++        this.stats = stats;
++    }
++
++    /**
++     * Get details of what is in the field.
++     * @param field The field to get details for.
++     * @return A string describing what is in the field.
++     */
++    public String getPopulationDetails(Field field)
++    {
++        StringBuffer buffer = new StringBuffer();
++        ensureCounts(field);
++
++        int totalCount = 0;
++        for(Counter info : stats.getCounters()) {
++            totalCount += info.getCount();
++            buffer.append(info.getName());
++            buffer.append(": ");
++            buffer.append(info.getCount());
++            buffer.append(' ');
++        }
++        buffer.append(" Total: " + totalCount);
++        return buffer.toString();
++    }
++
++    /**
++     * Determine whether the simulation is still viable.
++     * I.e., should it continue to run.
++     * @param field The field to generate the stats for.
++     * @return true If there is more than one species alive.
++     */
++    public boolean isViable(Field field)
++    {
++        int nonZero = 0;
++        ensureCounts(field);
++
++        for(Counter info : stats.getCounters()) {
++            if(info.getCount() > 0) {
++                nonZero++;
++            }
++        }
++        return nonZero > 1;
++    }
++
++    /**
++     * Regenerate counts when the cached values are stale.
++     */
++    private void ensureCounts(Field field)
++    {
++        if(!stats.isValid()) {
++            generateCounts(field);
++        }
++    }
++
++    /**
++     * Generate counts of the number of populated field locations.
++     */
++    private void generateCounts(Field field)
++    {
++        stats.reset();
++        for(int row = 0; row < field.getDepth(); row++) {
++            for(int col = 0; col < field.getWidth(); col++) {
++                Object occupant = field.getObjectAt(row, col);
++                if(occupant != null) {
++                    stats.incrementCount(occupant.getClass());
++                }
++            }
++        }
++        stats.countFinished();
++    }
++}
+diff --git a/SimulatorView.java b/SimulatorView.java
+index ac82538..076d201 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -33,6 +33,7 @@ public class SimulatorView extends JFrame
+     private Map<Class, Color> colors;
+     // A statistics object computing and storing simulation information
+     private FieldStats stats;
++    private SimulationDemographics demographics;
+     private Simulator simulator;
+ 
+     /**
+@@ -45,6 +46,7 @@ public class SimulatorView extends JFrame
+         this.simulator = simulator;   
+ 
+         stats = new FieldStats();
++        demographics = new SimulationDemographics(stats);
+         colors = new LinkedHashMap<>();
+ 
+         setTitle("Savannah Simulation");
+@@ -139,7 +141,7 @@ public class SimulatorView extends JFrame
+         }
+         stats.countFinished();
+ 
+-        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(field));
++        population.setText(POPULATION_PREFIX + demographics.getPopulationDetails(field));
+         fieldView.repaint();
+     }
+ 
+@@ -149,7 +151,7 @@ public class SimulatorView extends JFrame
+      */
+     public boolean isViable(Field field)
+     {
+-        return stats.isViable(field);
++        return demographics.isViable(field);
+     }
+ 
+     /**

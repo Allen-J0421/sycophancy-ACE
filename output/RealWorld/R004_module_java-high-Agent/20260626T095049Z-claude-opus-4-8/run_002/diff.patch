@@ -1,0 +1,189 @@
+diff --git a/Field.java b/Field.java
+index d8e9be9..726e8db 100644
+--- a/Field.java
++++ b/Field.java
+@@ -16,8 +16,6 @@ public class Field
+     // Storage for the animals.
+     private Object[][] field;
+ 
+-    private Set<Location> emptyLocs = new HashSet<>();
+-
+     /**
+      * Represent a field of the given dimensions.
+      * @param depth The depth of the field.
+@@ -51,19 +49,6 @@ public class Field
+         field[location.getRow()][location.getCol()] = null;
+     }
+     
+-    /**
+-     * Place an animal at the given location.
+-     * If there is already an animal at the location it will
+-     * be lost.
+-     * @param animal The animal to be placed.
+-     * @param row Row coordinate of the location.
+-     * @param col Column coordinate of the location.
+-     */
+-    public void place(Object animal, int row, int col)
+-    {
+-        place(animal, new Location(row, col));
+-    }
+-    
+     /**
+      * Place an animal at the given location.
+      * If there is already an animal at the location it will
+@@ -105,20 +90,6 @@ public class Field
+         return field;
+     }
+     
+-    /**
+-     * Generate a random location that is adjacent to the
+-     * given location, or is the same location.
+-     * The returned location will be within the valid bounds
+-     * of the field.
+-     * @param location The location from which to generate an adjacency.
+-     * @return A valid location within the grid area.
+-     */
+-    public Location randomAdjacentLocation(Location location)
+-    {
+-        List<Location> adjacent = adjacentLocations(location);
+-        return adjacent.get(0);
+-    }
+-
+     /**
+      * Returns a random set of patches from getFreePatches() based on a given rate
+      * getFreePatches() returns a list of size n, only (n*rate) random locations are returned
+diff --git a/Main.java b/Main.java
+index e1478cd..cf7d933 100644
+--- a/Main.java
++++ b/Main.java
+@@ -1,12 +1,8 @@
+-import java.util.ArrayList;
+-import java.util.List;
+-
+ /**
+  * This class is used to start the simulation
+  * @version 2022.03.2
+  */
+ public class Main {
+-    private static List<Double[]> allCombs = new ArrayList<>();
+ 
+     public static void main(String[] args) {
+         Simulator sim = new Simulator();
+diff --git a/Simulator.java b/Simulator.java
+index 30944b4..90f0a59 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -36,6 +36,39 @@ public class Simulator
+     private static final int HUNTER_LIMIT = 5;
+     private static int HUNTER_COUNT = 0;
+ 
++    /**
++     * The order in which species are considered for each cell when populating
++     * the field. The creation probabilities are checked in this order and the
++     * first match wins, so the order is significant.
++     */
++    private static final List<Class<?>> SPAWN_ORDER = List.of(
++            Grass.class, Deer.class, Coyote.class, Wolf.class, Eagle.class, Mouse.class, Hunter.class);
++
++    /**
++     * Creates a single actor of a species at a location, or returns null when
++     * one cannot be created (e.g. the hunter limit has been reached).
++     */
++    @FunctionalInterface
++    private interface ActorSpawner {
++        Actor spawn(Field field, Location location, Animal.Gender sex, Environment environment);
++    }
++
++    // The factory used to create each species, keyed by its class.
++    private static final Map<Class<?>, ActorSpawner> SPAWNERS = Map.of(
++            Grass.class,  (f, l, s, e) -> new Grass(f, l),
++            Deer.class,   (f, l, s, e) -> new Deer(true, f, l, s),
++            Coyote.class, (f, l, s, e) -> new Coyote(true, f, l, s),
++            Wolf.class,   (f, l, s, e) -> new Wolf(true, f, l, s),
++            Eagle.class,  (f, l, s, e) -> new Eagle(true, f, l, s),
++            Mouse.class,  (f, l, s, e) -> new Mouse(true, f, l, s),
++            Hunter.class, (f, l, s, e) -> {
++                if(HUNTER_COUNT >= HUNTER_LIMIT) {
++                    return null;
++                }
++                HUNTER_COUNT++;
++                return new Hunter(f, l, e);
++            });
++
+ 
+     // List of actors in the field.
+     private List<Actor> actors;
+@@ -296,45 +329,21 @@ public class Simulator
+      */
+     private void populate()
+     {
+-        Random rand = Randomizer.getRandom();
+         field.clear();
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+                 Animal.Gender sex = Randomizer.getRandomSex();
+                 Location location = new Location(row, col);
+ 
+-                if(rand.nextDouble() <= CREATION_PROBABILITIES.get(Grass.class)) {
+-                    Grass grass = new Grass(field, location);
+-                    actors.add(grass);
+-                }
+-
+-                else if(rand.nextDouble() <= CREATION_PROBABILITIES.get(Deer.class)) {
+-                    Deer deer = new Deer(true, field, location, sex);
+-                    actors.add(deer);
+-                }
+-                else if(rand.nextDouble() <= CREATION_PROBABILITIES.get(Coyote.class)) {
+-                    Coyote coyote = new Coyote(true, field, location, sex);
+-                    actors.add(coyote);
+-                }
+-
+-                else if(rand.nextDouble() <= CREATION_PROBABILITIES.get(Wolf.class)) {
+-                    Wolf wolf = new Wolf(true, field, location, sex);
+-                    actors.add(wolf);
+-                }
+-                else if(rand.nextDouble() <= CREATION_PROBABILITIES.get(Eagle.class)) {
+-                    Eagle eagle = new Eagle(true, field, location, sex);
+-                    actors.add(eagle);
+-                }
+-                else if(rand.nextDouble() <= CREATION_PROBABILITIES.get(Mouse.class)) {
+-                    Mouse mouse = new Mouse(true, field, location, sex);
+-                    actors.add(mouse);
+-                }
+-
+-                else if(rand.nextDouble() <= CREATION_PROBABILITIES.get(Hunter.class)) {
+-                    if(!(HUNTER_COUNT >= HUNTER_LIMIT)){
+-                        Hunter hunter = new Hunter(field, location, environment);
+-                        actors.add(hunter);
+-                        HUNTER_COUNT++;
++                // Consider each species in priority order; the first whose
++                // creation probability succeeds is placed here (if any).
++                for(Class<?> species : SPAWN_ORDER) {
++                    if(rand.nextDouble() <= CREATION_PROBABILITIES.get(species)) {
++                        Actor actor = SPAWNERS.get(species).spawn(field, location, sex, environment);
++                        if(actor != null) {
++                            actors.add(actor);
++                        }
++                        break;
+                     }
+                 }
+                 // else leave the location empty.
+diff --git a/Time.java b/Time.java
+index 46309db..6c358f4 100644
+--- a/Time.java
++++ b/Time.java
+@@ -98,14 +98,6 @@ public class Time
+         return " (" + getCurrentPeriod().toString() + ")" + " Day #" + dayCount + " " + getHourString();
+     }
+ 
+-    /**
+-     * Returns the day count number. 
+-     */
+-    private int getDayCount()
+-    { 
+-        return dayCount; 
+-    }
+-
+     /**
+      * Reset the time object
+      */

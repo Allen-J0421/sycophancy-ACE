@@ -1,0 +1,477 @@
+diff --git a/Counter.java b/Counter.java
+deleted file mode 100644
+index c7f40a5..0000000
+--- a/Counter.java
++++ /dev/null
+@@ -1,59 +0,0 @@
+-import java.awt.Color;
+-
+-/**
+- * Provide a counter for a participant in the simulation.
+- * This includes an identifying string and a count of how
+- * many participants of this type currently exist within 
+- * the simulation.
+- *
+- * @version 2016.02.29
+- */
+-public class Counter
+-{
+-    // A name for this type of simulation participant
+-    private String name;
+-    // How many of this type exist in the simulation.
+-    private int count;
+-
+-    /**
+-     * Provide a name for one of the simulation types.
+-     * @param name  A name, e.g. "Fox".
+-     */
+-    public Counter(String name)
+-    {
+-        this.name = name;
+-        count = 0;
+-    }
+-    
+-    /**
+-     * @return The short description of this type.
+-     */
+-    public String getName()
+-    {
+-        return name;
+-    }
+-
+-    /**
+-     * @return The current count for this type.
+-     */
+-    public int getCount()
+-    {
+-        return count;
+-    }
+-
+-    /**
+-     * Increment the current count by one.
+-     */
+-    public void increment()
+-    {
+-        count++;
+-    }
+-    
+-    /**
+-     * Reset the current count to zero.
+-     */
+-    public void reset()
+-    {
+-        count = 0;
+-    }
+-}
+diff --git a/FieldStats.java b/FieldStats.java
+deleted file mode 100644
+index ae9240a..0000000
+--- a/FieldStats.java
++++ /dev/null
+@@ -1,141 +0,0 @@
+-import java.awt.Color;
+-import java.util.HashMap;
+-
+-/**
+- * This class collects and provides some statistical data on the state 
+- * of a field. It is flexible: it will create and maintain a counter 
+- * for any class of object that is found within the field.
+- * 
+- * @version 2022.03.02
+- */
+-public class FieldStats
+-{
+-    // A shared weather object between the organisms and the simulator
+-    public static final Weather weather = Weather.getWeather();
+-    // Counters for each type of entity (fox, rabbit, etc.) in the simulation.
+-    private HashMap<Class, Counter> counters;
+-    // Whether the counters are currently up to date.
+-    private boolean countsValid;
+-    // The step of the simulation
+-    private int step;
+-
+-    /**
+-     * Construct a FieldStats object.
+-     */
+-    public FieldStats(int steps)
+-    {
+-        // Set up a collection for counters for each type of animal that
+-        // we might find
+-        step = steps;
+-        counters = new HashMap<>();
+-        countsValid = true;
+-    }
+-
+-    /**
+-     * Get details of what is in the field.
+-     * @return A string describing what is in the field.
+-     */
+-    public String getPopulationDetails(Field field)
+-    {
+-        ++step;
+-        StringBuffer buffer = new StringBuffer();
+-        if(!countsValid) {
+-            generateCounts(field);
+-        }
+-        for(Class key : counters.keySet()) {
+-            Counter info = counters.get(key);
+-            buffer.append(info.getName());
+-            buffer.append(": ");
+-            buffer.append(info.getCount());
+-            buffer.append(' ');
+-        }
+-        buffer.append("Weather: " + weather.getCurrentWeather());
+-        buffer.append(" Time: " + getTimeOfDay());
+-        return buffer.toString();
+-    }
+-    
+-    private String getTimeOfDay()
+-    {
+-        if(step % 80<=55)
+-        {
+-            return "Day";
+-        }
+-        return "Night";
+-    }
+-    
+-    /**
+-     * Invalidate the current set of statistics; reset all 
+-     * counts to zero.
+-     */
+-    public void reset()
+-    {
+-        countsValid = false;
+-        for(Class key : counters.keySet()) {
+-            Counter count = counters.get(key);
+-            count.reset();
+-        }
+-    }
+-
+-    /**
+-     * Increment the count for one class of animal.
+-     * @param animalClass The class of animal to increment.
+-     */
+-    public void incrementCount(Class animalClass)
+-    {
+-        Counter count = counters.get(animalClass);
+-        if(count == null) {
+-            // We do not have a counter for this species yet.
+-            // Create one.
+-            count = new Counter(animalClass.getName());
+-            counters.put(animalClass, count);
+-        }
+-        count.increment();
+-    }
+-
+-    /**
+-     * Indicate that an animal count has been completed.
+-     */
+-    public void countFinished()
+-    {
+-        countsValid = true;
+-    }
+-
+-    /**
+-     * Determine whether the simulation is still viable.
+-     * I.e., should it continue to run.
+-     * @return true If there is more than one species alive.
+-     */
+-    public boolean isViable(Field field)
+-    {
+-        // How many counts are non-zero.
+-        int nonZero = 0;
+-        if(!countsValid) {
+-            generateCounts(field);
+-        }
+-        for(Class key : counters.keySet()) {
+-            Counter info = counters.get(key);
+-            if(info.getCount() > 0) {
+-                nonZero++;
+-            }
+-        }
+-        return nonZero > 1;
+-    }
+-    
+-    /**
+-     * Generate counts of the number of foxes and rabbits.
+-     * These are not kept up to date as foxes and rabbits
+-     * are placed in the field, but only when a request
+-     * is made for the information.
+-     * @param field The field to generate the stats for.
+-     */
+-    private void generateCounts(Field field)
+-    {
+-        reset();
+-        field.forEachCell((row, col, animal) -> {
+-            if(animal != null) {
+-                incrementCount(animal.getClass());
+-            }
+-        });
+-        countsValid = true;
+-    }
+-}
+diff --git a/PopulationSnapshot.java b/PopulationSnapshot.java
+new file mode 100644
+index 0000000..87a57f1
+--- /dev/null
++++ b/PopulationSnapshot.java
+@@ -0,0 +1,91 @@
++import java.util.Map;
++import java.util.LinkedHashMap;
++import java.util.Collections;
++
++/**
++ * An immutable snapshot of the simulation's population statistics for a single
++ * step: the step number, the per-species head-count, the current weather and
++ * time of day, and whether the simulation is still viable.
++ *
++ * The {@link Simulator} computes one of these each step from the field and hands
++ * it to the view, which renders it without needing to recompute (or have any
++ * access to) the population statistics itself.
++ *
++ * @version 2022.03.02
++ */
++public final class PopulationSnapshot
++{
++    // The simulation step this snapshot describes.
++    private final int step;
++    // Per-species head-count, in the order species were first encountered.
++    private final Map<Class, Integer> counts;
++    // The weather at this step.
++    private final String weather;
++    // The time of day ("Day" or "Night") at this step.
++    private final String timeOfDay;
++    // Whether more than one species is still alive.
++    private final boolean viable;
++
++    /**
++     * Create a snapshot. The supplied counts are defensively copied so the
++     * snapshot is immutable regardless of what the caller does afterwards.
++     *
++     * @param step The simulation step.
++     * @param counts Per-species head-count.
++     * @param weather The current weather description.
++     * @param timeOfDay The current time of day.
++     * @param viable Whether the simulation is still viable.
++     */
++    public PopulationSnapshot(int step, Map<Class, Integer> counts, String weather, String timeOfDay, boolean viable)
++    {
++        this.step = step;
++        this.counts = Collections.unmodifiableMap(new LinkedHashMap<>(counts));
++        this.weather = weather;
++        this.timeOfDay = timeOfDay;
++        this.viable = viable;
++    }
++
++    /**
++     * @return The simulation step this snapshot describes.
++     */
++    public int getStep()
++    {
++        return step;
++    }
++
++    /**
++     * @return An unmodifiable per-species head-count.
++     */
++    public Map<Class, Integer> getCounts()
++    {
++        return counts;
++    }
++
++    /**
++     * @return true if more than one species is still alive.
++     */
++    public boolean isViable()
++    {
++        return viable;
++    }
++
++    /**
++     * Build the human-readable population details line shown by the view:
++     * each species' count, followed by the weather and time of day.
++     *
++     * @return A string describing the population at this step.
++     */
++    public String getPopulationDetails()
++    {
++        StringBuilder buffer = new StringBuilder();
++        for(Map.Entry<Class, Integer> entry : counts.entrySet()) {
++            buffer.append(entry.getKey().getName());
++            buffer.append(": ");
++            buffer.append(entry.getValue());
++            buffer.append(' ');
++        }
++        buffer.append("Weather: " + weather);
++        buffer.append(" Time: " + timeOfDay);
++        return buffer.toString();
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index 516dab8..f959791 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -2,6 +2,8 @@ import java.util.Random;
+ import java.util.List;
+ import java.util.ArrayList;
+ import java.util.Iterator;
++import java.util.Map;
++import java.util.LinkedHashMap;
+ import java.awt.Color;
+ 
+ /**
+@@ -127,7 +129,7 @@ public class Simulator
+      */
+     public void simulate(int numSteps)
+     {
+-        for(int step = 1; step <= numSteps && view.isViable(field); step++) {
++        for(int step = 1; step <= numSteps && isViable(); step++) {
+             simulateOneStep();
+             //delay(60);   // uncomment this to run more slowly
+         }
+@@ -161,9 +163,9 @@ public class Simulator
+ 
+         // Add the newly born organisms to the main population.
+         organisms.addAll(nursery.getNewborns());
+-        view.showStatus(step, field);
++        view.showStatus(populationSnapshot(), field);
+     }
+-        
++
+     /**
+      * Reset the simulation to a starting position.
+      */
+@@ -173,11 +175,51 @@ public class Simulator
+         organisms.clear();
+         populate();
+         weather.resetWeather();
+-        
++
+         // Show the starting state in the view.
+-        view.showStatus(step, field);
++        view.showStatus(populationSnapshot(), field);
+     }
+-    
++
++    /**
++     * Count the current population of the field, grouped by species, in the order
++     * species are first encountered while scanning the grid.
++     * @return A map from species class to head-count.
++     */
++    private Map<Class, Integer> countPopulation()
++    {
++        Map<Class, Integer> counts = new LinkedHashMap<>();
++        field.forEachCell((row, col, occupant) -> {
++            if(occupant != null) {
++                counts.merge(occupant.getClass(), 1, Integer::sum);
++            }
++        });
++        return counts;
++    }
++
++    /**
++     * Build an immutable snapshot of the current population statistics for the
++     * view to render. This is where the population stats calculation now lives,
++     * rather than in the view.
++     * @return The population snapshot for the current step.
++     */
++    private PopulationSnapshot populationSnapshot()
++    {
++        Map<Class, Integer> counts = countPopulation();
++        boolean viable = counts.size() > 1;
++        String timeOfDay = (step % 80 <= 55) ? "Day" : "Night";
++        return new PopulationSnapshot(step, counts, weather.getCurrentWeather(), timeOfDay, viable);
++    }
++
++    /**
++     * Determine whether the simulation is still viable, i.e. whether more than
++     * one species is still alive.
++     * @return true if the simulation should continue to run.
++     */
++    private boolean isViable()
++    {
++        return countPopulation().size() > 1;
++    }
++
+     /**
+      * Randomly populate the field with foxes and rabbits.
+      */
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 114353b..799cc8c 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -31,9 +31,7 @@ public class SimulatorView extends JFrame
+     
+     // A map for storing colors for participants in the simulation
+     private Map<Class, Color> colors;
+-    // A statistics object computing and storing simulation information
+-    private FieldStats stats;
+-    
++
+     public static final Weather weather = Weather.getWeather();
+ 
+     /**
+@@ -43,7 +41,6 @@ public class SimulatorView extends JFrame
+      */
+     public SimulatorView(int height, int width, int steps)
+     {
+-        stats = new FieldStats(steps);
+         colors = new LinkedHashMap<>();
+         
+         step = steps;
+@@ -140,45 +137,35 @@ public class SimulatorView extends JFrame
+     }
+ 
+     /**
+-     * Show the current status of the field.
+-     * @param step Which iteration step it is.
+-     * @param field The field whose status is to be displayed.
++     * Show the current status of the field. The population statistics are
++     * supplied by the simulator as an immutable snapshot; the view only renders
++     * them and draws the grid.
++     * @param snapshot The population statistics for the current step.
++     * @param field The field whose contents are to be drawn.
+      */
+-    public void showStatus(int step, Field field)
++    public void showStatus(PopulationSnapshot snapshot, Field field)
+     {
+         if(!isVisible()) {
+             setVisible(true);
+         }
+-            
+-        stepLabel.setText(STEP_PREFIX + step);
+-        stats.reset();
+-        
++
++        stepLabel.setText(STEP_PREFIX + snapshot.getStep());
++
+         fieldView.preparePaint();
+ 
+         field.forEachCell((row, col, animal) -> {
+             if(animal != null) {
+-                stats.incrementCount(animal.getClass());
+                 fieldView.drawMark(col, row, getColor(animal.getClass()));
+             }
+             else {
+                 fieldView.drawMark(col, row, EMPTY_COLOR);
+             }
+         });
+-        stats.countFinished();
+ 
+-        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(field));
++        population.setText(POPULATION_PREFIX + snapshot.getPopulationDetails());
+         fieldView.repaint();
+     }
+ 
+-    /**
+-     * Determine whether the simulation should continue to run.
+-     * @return true If there is more than one species alive.
+-     */
+-    public boolean isViable(Field field)
+-    {
+-        return stats.isViable(field);
+-    }
+-    
+     /**
+      * Provide a graphical view of a rectangular field. This is 
+      * a nested class (a class defined inside a class) which

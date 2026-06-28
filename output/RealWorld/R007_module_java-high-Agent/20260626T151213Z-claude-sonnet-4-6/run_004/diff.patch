@@ -1,0 +1,189 @@
+diff --git a/Animal.java b/Animal.java
+index 7ce96ee..945128e 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -73,7 +73,7 @@ public abstract class Animal extends Creature
+         ifCanGrantImmunity(disease, step);
+         incrementAge();
+         incrementHunger();
+-        if(isAlive() && !needSleep(atDayTime)) {
++        if(isAlive() && isAwake(atDayTime)) {
+             giveBirth(newAnimals);
+             Location newLocation = search(disease, step);
+             if(newLocation == null) {
+@@ -154,7 +154,19 @@ public abstract class Animal extends Creature
+     // -----------------------------------------------------------------------
+ 
+     /**
+-     * Make an animal infected while the disease is active.
++     * Force this animal into the infected state, recording when the infection began.
++     * Used by Disease during an outbreak; bypasses the immunity probability check.
++     */
++    protected void infect(int step) {
++        setIsInfected(true);
++        if(infectionStartStep == 0) {
++            infectionStartStep = step;
++        }
++    }
++
++    /**
++     * Probabilistically infect this animal via contact with a diseased neighbour.
++     * Has no effect if the animal is already immune.
+      */
+     protected void makeInfected(Disease disease, int step) {
+         if(!this.getIsImmuned() && Randomizer.getRandom().nextDouble() <= disease.INFECTION_RATE)
+@@ -202,10 +214,12 @@ public abstract class Animal extends Creature
+     }
+ 
+     /**
+-     * Return true if this animal needs to sleep (i.e. it is night-time).
++     * Return true if this animal is awake and able to act.
++     * By default animals are diurnal: awake during the day, asleep at night.
++     * Subclasses can override this for nocturnal behaviour.
+      */
+-    public boolean needSleep(boolean atDayTime) {
+-        return !atDayTime;
++    public boolean isAwake(boolean atDayTime) {
++        return atDayTime;
+     }
+ 
+     public boolean getIsInfected() { return isInfected; }
+diff --git a/Disease.java b/Disease.java
+index c99a059..f1f09bb 100644
+--- a/Disease.java
++++ b/Disease.java
+@@ -45,8 +45,7 @@ public class Disease
+             if(creature instanceof Animal) {
+                 Animal animal = (Animal) creature;
+                 if(Randomizer.getRandom().nextDouble() <= INFECTION_RATE) {
+-                    animal.setIsInfected(true);
+-                    animal.infectionStartStep = step;
++                    animal.infect(step);
+                     setIsSpread(true);
+                 }
+             }
+diff --git a/Field.java b/Field.java
+index 8d746cb..c0f4799 100644
+--- a/Field.java
++++ b/Field.java
+@@ -98,18 +98,6 @@ public class Field
+         return field[row][col];
+     }
+ 
+-    /**
+-     * Generate a random location that is adjacent to the given location, or is the same location.
+-     * The returned location will be within the valid bounds of the field.
+-     * @param location The location from which to generate an adjacency.
+-     * @return A valid location within the grid area.
+-     */
+-    public Location randomAdjacentLocation(Location location)
+-    {
+-        List<Location> adjacent = adjacentLocations(location, 1);
+-        return adjacent.get(0);
+-    }
+-
+     /**
+      * Get a shuffled list of the free adjacent locations.
+      * @param location Get locations adjacent to this.
+diff --git a/Seaweed.java b/Seaweed.java
+index 2c98d4f..a82ee01 100644
+--- a/Seaweed.java
++++ b/Seaweed.java
+@@ -55,26 +55,22 @@ public class Seaweed extends Creature
+      * 
+      * @return the oxygen level the species produced or consumed after action.
+      */
+-    public double act(List<Creature> newSeaweeds, boolean atDayTime, double oxygenLevel, Disease disease,  int step)
++    public double act(List<Creature> newSeaweeds, boolean atDayTime, double oxygenLevel, Disease disease, int step)
+     {
+         incrementAge();
+-        if(oxygenLevel < PLANT_OXYGEN_REQUIRED){
++        if(!isAlive()) return 0;
++
++        if(oxygenLevel < PLANT_OXYGEN_REQUIRED) {
+             setDead();
+             return 0;
+-        }    
+-        
+-       
+-        if(isAlive()){
+-            if(age >= MATURE_AGE)
+-                giveBirth(newSeaweeds);            
+-            }
+-        
+-        
+-        if(atDayTime)
+-            return OXYGEN_GENERATED;
+-        else
+-            return -PLANT_OXYGEN_REQUIRED;
+         }
++
++        if(age >= MATURE_AGE) {
++            giveBirth(newSeaweeds);
++        }
++
++        return atDayTime ? OXYGEN_GENERATED : -PLANT_OXYGEN_REQUIRED;
++    }
+     
+     /**
+      * Increase the age.
+diff --git a/Simulator.java b/Simulator.java
+index 2be6cf8..0a8a982 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -25,7 +25,6 @@ public class Simulator
+ 
+     // Environmental event probabilities.
+     private static final double STORM_HAPPEN_PROBABILITY = 0.14;
+-    private static final double DISEASE_PROBABILITY      = 0.1;
+ 
+     // Parallel arrays that drive populate(): probabilities and matching constructors.
+     private static final double[] SPAWN_PROBABILITIES = {
+@@ -143,10 +142,10 @@ public class Simulator
+         }
+ 
+         if(Randomizer.getRandom().nextDouble() <= STORM_HAPPEN_PROBABILITY) {
+-            weather.underwaterStorm(3);
+-            weather.setStormStart(true);
++            weather.underwaterStorm();
++            weather.setStormActive(true);
+         } else {
+-            weather.setStormStart(false);
++            weather.setStormActive(false);
+         }
+ 
+         oxygenLevel += totalOxygenInvolved;
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 2fd5ff6..f573f5b 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -89,7 +89,7 @@ public class SimulatorView extends JFrame
+         stepLabel.setText(STEP_PREFIX + step);
+         infoLabel.setText("It is: " + (timeOfDay ? "daytime" : "night ")
+                 + "        Oxygen Level: " + (int)(oxygenLevel * 100) + "%"
+-                + "        Storm: " + (weather.getStormStart() ? "exists" : "subsides"));
++                + "        Storm: " + (weather.isStormActive() ? "exists" : "subsides"));
+         diseaseLabel.setText(POPULATION_DIE_OF_DISEASE_PREFIX + Animal.populationDieOfDisease);
+ 
+         stats.reset();
+@@ -108,7 +108,7 @@ public class SimulatorView extends JFrame
+         }
+ 
+         // Storm overlay is applied once after all cells are drawn, not once per cell.
+-        if(weather.getStormStart()) {
++        if(weather.isStormActive()) {
+             drawStormOverlay(field, weather);
+         }
+ 
+@@ -151,7 +151,7 @@ public class SimulatorView extends JFrame
+      */
+     private void drawStormOverlay(Field field, Weather weather)
+     {
+-        for(Location loc : field.adjacentLocationsIncludingSelf(weather.getRandomLocation(), weather.getStormScope())) {
++        for(Location loc : field.adjacentLocationsIncludingSelf(weather.getStormCenter(), Weather.STORM_SCOPE)) {
+             fieldView.drawMark(loc.getCol(), loc.getRow(), STORM_COLOR);
+         }
+     }
+diff --git a/Weather.java b/Weather.java
+index 8f0b0c6..73bf053 100644
+Binary files a/Weather.java and b/Weather.java differ

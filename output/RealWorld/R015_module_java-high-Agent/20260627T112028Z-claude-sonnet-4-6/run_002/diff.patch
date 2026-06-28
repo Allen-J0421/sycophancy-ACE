@@ -1,0 +1,298 @@
+diff --git a/Generator.java b/Generator.java
+index 60beb21..3033595 100644
+--- a/Generator.java
++++ b/Generator.java
+@@ -1,80 +1,57 @@
+ import java.util.ArrayList;
+ import java.util.Random;
+ 
+-
+ /**
+- * Generator generates the players, and disesease for the sim 
+- * 
++ * Generator populates a field with the entities defined in a {@link SimulationConfig}.
++ * Adding a new species requires only updating the config — this class is unchanged.
++ *
+  * @version 6.8.2
+  */
+ class Generator {
+-    private Random rand = Randomizer.getRandom(); // Random number generator required for generating probabilities
++    private final Random rand = Randomizer.getRandom();
+ 
++    /**
++     * Populate a field using the default simulation configuration.
++     * @param field the field to populate
++     * @return list of all created simulatables
++     */
++    public ArrayList<Simulatable> createPlayers(Field field) {
++        return createPlayers(field, SimulationConfig.defaultConfig());
++    }
+ 
+     /**
+-     * Function which creates all the players for a field 
+-     * @param field the field for which all the simulatables will be generated
+-     * @return the list of all simulatable objects
++     * Populate a field using the given configuration.
++     * For each cell the entries are tried in order; the first whose creation
++     * probability is met spawns an entity in that cell (else-if semantics).
++     * @param field  the field to populate
++     * @param config the spawn configuration to use
++     * @return list of all created simulatables
+      */
+-	public ArrayList<Simulatable> createPlayers(Field field) {
+-		
+-		ArrayList<Simulatable> simulatables = new ArrayList<>();
+-		for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
+-                Disease disease = generateDisease(); // Get a disease (could be null) to give the animal 
+-                if(rand.nextDouble() <= Racoon.POPULATION_CONTROLS.getCreationProbability()) {
+-                    Location location = new Location(row, col);
+-                    Racoon racoon = new Racoon(true, field, location);
+-                    racoon.forceDisease(disease);//Give the animal a disease
+-                    simulatables.add(racoon);
+-                } 
+-                else if(rand.nextDouble() <= Hawk.POPULATION_CONTROLS.getCreationProbability()) {
+-                    Location location = new Location(row, col);
+-                    Hawk mouse = new Hawk(true, field, location);
+-                    mouse.forceDisease(disease);
+-                    simulatables.add(mouse);
+-                }
+-                else if(rand.nextDouble() <= Mouse.POPULATION_CONTROLS.getCreationProbability()) {
+-                    Location location = new Location(row, col);
+-                    Mouse mouse = new Mouse(true, field, location);
+-                    mouse.forceDisease(disease);
+-                    simulatables.add(mouse);
+-                }
+-                else if(rand.nextDouble() <= Rat.POPULATION_CONTROLS.getCreationProbability()) {
+-                    Location location = new Location(row, col);
+-                    Rat mouse = new Rat(true, field, location);
+-                    mouse.forceDisease(disease);
+-                    simulatables.add(mouse);
+-                }
+-                else if(rand.nextDouble() <= Squirrel.POPULATION_CONTROLS.getCreationProbability()) {
+-                    Location location = new Location(row, col);
+-                    Squirrel mouse = new Squirrel(true, field, location);
+-                    mouse.forceDisease(disease);
+-                    simulatables.add(mouse);
++    public ArrayList<Simulatable> createPlayers(Field field, SimulationConfig config) {
++        ArrayList<Simulatable> simulatables = new ArrayList<>();
++        for (int row = 0; row < field.getDepth(); row++) {
++            for (int col = 0; col < field.getWidth(); col++) {
++                Disease disease = generateDisease();
++                Location location = new Location(row, col);
++                for (SimulationConfig.Entry entry : config.getEntries()) {
++                    if (rand.nextDouble() <= entry.creationProbability) {
++                        Simulatable s = entry.factory.apply(field, location);
++                        if (s instanceof Animal) {
++                            ((Animal) s).forceDisease(disease);
++                        }
++                        simulatables.add(s);
++                        break;
++                    }
+                 }
+-                else if(rand.nextDouble() <= Grass.CREATION_PROBABILITY) {//Generate the grass objects
+-                    Location location = new Location(row, col);
+-                    Grass mouse = new Grass(field, location);
+-                    simulatables.add(mouse); 
+-                } 
+-
+-                // else leave the location empty.
+             }
+         }
+-
+         return simulatables;
++    }
+ 
+-	}
+-
+-    /** 
+-     * Genreates a disease for an animal 
+-     * @return the generated disease. If no disease, returns null 
+-     */
+     private Disease generateDisease() {
+         if (rand.nextDouble() <= Rabies.CREATION_PROBABILITY) {
+             return new Rabies();
+         }
+         return null;
+     }
+-
+-}
+\ No newline at end of file
++}
+diff --git a/SimulationConfig.java b/SimulationConfig.java
+new file mode 100644
+index 0000000..0848ee4
+--- /dev/null
++++ b/SimulationConfig.java
+@@ -0,0 +1,62 @@
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++import java.util.function.BiFunction;
++
++/**
++ * Describes which species (and non-animal entities) are spawned during field
++ * initialisation, and how to create them.  Each registered entry is tried in
++ * order; the first one whose creation probability is met wins for that cell
++ * (matching the original else-if logic in Generator).
++ *
++ * To add a new species, call {@link #add} with its creation probability and a
++ * factory lambda — no other class needs to change.
++ */
++class SimulationConfig {
++
++    /** One entry in the spawn registry. */
++    static class Entry {
++        final double creationProbability;
++        final BiFunction<Field, Location, Simulatable> factory;
++
++        Entry(double creationProbability, BiFunction<Field, Location, Simulatable> factory) {
++            this.creationProbability = creationProbability;
++            this.factory = factory;
++        }
++    }
++
++    private final List<Entry> entries = new ArrayList<>();
++
++    /**
++     * Register a spawnable entity type.
++     * @param prob    probability that this entity fills a cell (checked only if
++     *                all prior entries in the list were skipped)
++     * @param factory (field, location) -> new instance with randomAge=true
++     * @return this, for chaining
++     */
++    SimulationConfig add(double prob, BiFunction<Field, Location, Simulatable> factory) {
++        entries.add(new Entry(prob, factory));
++        return this;
++    }
++
++    List<Entry> getEntries() {
++        return Collections.unmodifiableList(entries);
++    }
++
++    /** Returns the standard configuration used by the simulation. */
++    static SimulationConfig defaultConfig() {
++        return new SimulationConfig()
++            .add(Racoon.POPULATION_CONTROLS.getCreationProbability(),
++                    (f, loc) -> new Racoon(true, f, loc))
++            .add(Hawk.POPULATION_CONTROLS.getCreationProbability(),
++                    (f, loc) -> new Hawk(true, f, loc))
++            .add(Mouse.POPULATION_CONTROLS.getCreationProbability(),
++                    (f, loc) -> new Mouse(true, f, loc))
++            .add(Rat.POPULATION_CONTROLS.getCreationProbability(),
++                    (f, loc) -> new Rat(true, f, loc))
++            .add(Squirrel.POPULATION_CONTROLS.getCreationProbability(),
++                    (f, loc) -> new Squirrel(true, f, loc))
++            .add(Grass.CREATION_PROBABILITY,
++                    (f, loc) -> new Grass(f, loc));
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index 8367dd2..d60a0e4 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -2,7 +2,6 @@
+ import java.util.List;
+ import java.util.ArrayList;
+ import java.util.Iterator;
+-import java.awt.Color;
+ 
+ /**
+  * A simple predator-prey simulator, based on a rectangular field
+@@ -12,15 +11,8 @@ import java.awt.Color;
+  */
+ public class Simulator
+ {
+-    // Constants representing configuration information for the simulation.
+-    // The default width for the grid.
+     private static final int DEFAULT_WIDTH = 120;
+-    // The default depth of the grid.
+     private static final int DEFAULT_DEPTH = 80;
+-    // The probability that a fox will be created in any given grid position.
+-    // private static final double FOX_CREATION_PROBABILITY = 0.02;
+-    // The probability that a rabbit will be created in any given grid position.
+-    // private static final double RABBIT_CREATION_PROBABILITY = 0.08;  
+ 
+     private SimulatorState state = new SimulatorState();  
+ 
+@@ -37,66 +29,9 @@ public class Simulator
+     private SimulatorView view;
+     
+ 
+-    public static void main(String [] args ) {
++    public static void main(String[] args) {
+         Simulator x = new Simulator();
+-        // List<Double> values = new ArrayList<Double>();
+-        // for(String i : args) {
+-        //     values.add(Double.parseDouble(i));
+-        // }
+-        
+-
+-        //Six values, 5 animals, 30 values in total, 
+-        // int partitionSize = 6;
+-        // List<List<Double>> partitions = new ArrayList<>();
+-
+-        // for (int i=0; i<values.size(); i += partitionSize) {
+-        //     partitions.add(values.subList(i, Math.min(i + partitionSize, values.size())));
+-        // }
+-
+-        // for (int i = 0; i < partitions.size(); i ++) {
+-        //     List<Double> controls = partitions.get(i);
+-        //     PopulationControls newControls = null;
+-        //     if (partitions.get(i).size() == 6) {
+-        //         newControls = new PopulationControls(
+-        //             controls.get(0),
+-        //             controls.get(1),
+-        //             controls.get(2),
+-        //             controls.get(3),
+-        //             controls.get(4),
+-        //             controls.get(5)
+-        //         );
+-        //     }
+-
+-
+-        //     switch (i) {
+-        //     case 0:
+-        //         Fox.POPULATION_CONTROLS = newControls;
+-        //         break;
+-        //     case 1:
+-        //         Rabbit.POPULATION_CONTROLS = newControls;
+-        //         break;
+-        //     case 2:
+-        //         Squirrel.POPULATION_CONTROLS = newControls;
+-        //         break;
+-        //     case 3:
+-        //         Rat.POPULATION_CONTROLS = newControls;
+-        //         break;
+-        //     case 4:
+-        //         Hawk.POPULATION_CONTROLS = newControls;
+-        //         break;
+-        //     default: 
+-        //         System.out.println("outofbounds");
+-
+-        //     }
+-        //     // System.out.println(i);
+-        // }
+-
+-        // System.out.println("Finished INIT");
+-
+-
+-        
+         x.runLongSimulation();
+-
+     }
+ 
+     /**
+@@ -124,11 +59,8 @@ public class Simulator
+         animals = new ArrayList<>();
+         field = new Field(depth, width);
+ 
+-        // Create a view of the state of each location in the field.
+         view = new SimulatorView(depth, width);
+-        // view.setColor(Rabbit.class, Color.ORANGE);
+-        // view.setColor(Fox.class, Color.BLUE);
+-        
++
+         // Setup a valid starting point.
+         reset();
+     }

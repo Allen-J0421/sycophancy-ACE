@@ -1,0 +1,292 @@
+diff --git a/Environment.java b/Environment.java
+index 683cdc0..7b8ac47 100644
+--- a/Environment.java
++++ b/Environment.java
+@@ -6,8 +6,8 @@
+  */
+ 
+ public class Environment {
+-    private Time time;
+-    private Weather weather;
++    private final Time time;
++    private final Weather weather;
+ 
+     /**
+      * Create a new instance of class Environment.
+diff --git a/EnvironmentController.java b/EnvironmentController.java
+new file mode 100644
+index 0000000..f17d744
+--- /dev/null
++++ b/EnvironmentController.java
+@@ -0,0 +1,53 @@
++import java.util.Objects;
++
++/**
++ * Coordinates environment state changes for each simulation step.
++ */
++public class EnvironmentController
++{
++    private final Environment environment;
++
++    public EnvironmentController()
++    {
++        this(new Time(), new Weather());
++    }
++
++    public EnvironmentController(Time time, Weather weather)
++    {
++        environment = new Environment(
++                Objects.requireNonNull(time, "time"),
++                Objects.requireNonNull(weather, "weather"));
++    }
++
++    public Environment getEnvironment()
++    {
++        return environment;
++    }
++
++    public void advance(int simulationStep)
++    {
++        environment.getTime().advanceOneStep();
++        environment.getWeather().updateForStep(simulationStep);
++    }
++
++    public void reset()
++    {
++        environment.getTime().reset();
++        environment.getWeather().reset();
++    }
++
++    public WeatherType getCurrentWeather()
++    {
++        return environment.getWeather().getCurrentWeather();
++    }
++
++    public String getCurrentTimeString()
++    {
++        return environment.getTime().getCurrentTimeString();
++    }
++
++    public boolean isRaining()
++    {
++        return getCurrentWeather() == WeatherType.RAINING;
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index 7ec133f..a48eeeb 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -25,6 +25,8 @@ public class Simulator
+     private int step;
+     // A graphical view of the simulation.
+     private final SimulatorView view;
++    // Controls time progression and weather updates.
++    private final EnvironmentController environmentController;
+     // Environment in the simulation.
+     private final Environment environment;
+     // Factories used to create initial actors in population order.
+@@ -95,7 +97,8 @@ public class Simulator
+         this.config = Objects.requireNonNull(config, "config");
+         actors = new ArrayList<>();
+         field = new Field(config.getDepth(), config.getWidth());
+-        environment = new Environment(new Time(), new Weather());
++        environmentController = new EnvironmentController();
++        environment = environmentController.getEnvironment();
+ 
+         // Create a view of the state of each location in the field.
+         view = new SimulatorView(config.getDepth(), config.getWidth());
+@@ -217,8 +220,7 @@ public class Simulator
+     {
+         if(!playingSimulation){ return; }
+         step++;
+-        environment.getTime().incrementTime();
+-        environment.getWeather().checkWeatherChange(step);
++        environmentController.advance(step);
+ 
+ 
+         // Provide space for newborn animals.
+@@ -254,7 +256,7 @@ public class Simulator
+         actors.addAll(newActors);
+         plantGrassInPatches();
+ 
+-        view.showStatus(step, environment.getWeather().getCurrentWeather().toString(), environment.getTime().getCurrentTimeString(), field);
++        view.showStatus(step, environmentController.getCurrentWeather().toString(), environmentController.getCurrentTimeString(), field);
+     }
+ 
+     /**
+@@ -264,7 +266,7 @@ public class Simulator
+         // new grass is randomly added in patches
+         double grassRate = config.getPopulationRate(Grass.class);
+         for(Location location:field.getRandomFreePatches(grassRate)){
+-            if(rand.nextDouble() <= grassRate && environment.getWeather().getCurrentWeather() == WeatherType.RAINING) {
++            if(rand.nextDouble() <= grassRate && environmentController.isRaining()) {
+                 Grass grass = new Grass(field, location);
+                 actors.add(grass);
+             }
+@@ -279,10 +281,10 @@ public class Simulator
+         step = 0;
+         actors.clear();
+         populate();
+-        environment.getTime().reset();
++        environmentController.reset();
+ 
+         // Show the starting state in the view.
+-        view.showStatus(step,environment.getWeather().getCurrentWeather().toString(), environment.getTime().getCurrentTimeString().toString(), field);
++        view.showStatus(step, environmentController.getCurrentWeather().toString(), environmentController.getCurrentTimeString(), field);
+     }
+ 
+     /**
+diff --git a/Time.java b/Time.java
+index 46309db..b59d3b0 100644
+--- a/Time.java
++++ b/Time.java
+@@ -8,6 +8,10 @@
+ */
+ public class Time 
+ {
++    private static final int HOURS_PER_DAY = 24;
++    private static final int DAY_START_HOUR = 6;
++    private static final int DAY_END_HOUR = 19;
++
+     // to keep track of the flow of time
+     private int stepCount;
+     private int dayCount;
+@@ -30,9 +34,17 @@ public class Time
+      * Calls the method checkDayOrNight()
+      */
+     public void incrementTime()
++    {
++        advanceOneStep();
++    }
++
++    /**
++     * Advances time by one simulation step.
++     */
++    public void advanceOneStep()
+     {
+         stepCount++;
+-        if(stepCount % 24 == 0){
++        if(stepCount % HOURS_PER_DAY == 0){
+             dayCount++;
+         }
+         checkDayOrNight();
+@@ -44,7 +56,7 @@ public class Time
+      */
+     public void checkDayOrNight()
+     {
+-        if (getHour() >= 6 && getHour() <= 19) {
++        if (getHour() >= DAY_START_HOUR && getHour() <= DAY_END_HOUR) {
+             dayOrNight = TimesOfDay.DAY;
+         }
+         else {
+@@ -57,7 +69,7 @@ public class Time
+      */
+     private int getHour() 
+     {
+-        return stepCount % 24; 
++        return stepCount % HOURS_PER_DAY; 
+     }
+ 
+     /**
+diff --git a/Weather.java b/Weather.java
+index 1e761c7..82500d3 100644
+--- a/Weather.java
++++ b/Weather.java
+@@ -1,5 +1,6 @@
++import java.util.Arrays;
++import java.util.List;
+ import java.util.Random;
+-import java.util.*;
+ /**
+  * This class models weather in the simulation. 
+  * It stores information about the current weather. 
+@@ -8,12 +9,13 @@ import java.util.*;
+  */
+ public class Weather
+ {
++    private static final int STATIC_WEATHER_DURATION = 12;
++    private static final int MAX_RANDOM_WEATHER_DURATION = 36;
++
+     private WeatherType currentWeather;
+     private static final Random rand = Randomizer.getRandom();
+-    private int randomInt;
+-    private int duration; // to keep track of when weather changes (every X hours)
+     private boolean randomDuration = false;
+-    private Set<WeatherType> weatherList;
++    private final List<WeatherType> weatherList = Arrays.asList(WeatherType.RAINING, WeatherType.SUNNY, WeatherType.CLOUDY);
+     
+     
+     /**
+@@ -21,18 +23,7 @@ public class Weather
+      */
+     public Weather()
+     {
+-       weatherList = new HashSet<>();
+-       addWeatherList();
+-       currentWeather = WeatherType.SUNNY; 
+-       duration = 0;
+-    }
+-
+-    /**
+-     * Add the types of weather conditions to a HashSet.
+-     */
+-    public void addWeatherList()
+-    {
+-        weatherList = new HashSet<>(Arrays.asList(WeatherType.RAINING, WeatherType.SUNNY, WeatherType.CLOUDY));
++       reset();
+     }
+     
+     /**
+@@ -50,16 +41,17 @@ public class Weather
+      */
+     public void checkWeatherChange(int steps)
+     {
+-        if(randomDuration){
+-            duration = rand.nextInt(36);
+-            if(steps % duration==0){
+-                changeWeather();
+-            }
+-        }
+-        else{
+-            if (steps % 12 == 0){
+-                changeWeather();
+-            }
++        updateForStep(steps);
++    }
++
++    /**
++     * Updates the weather for the given simulation step.
++     */
++    public void updateForStep(int steps)
++    {
++        int duration = getCurrentDuration();
++        if(steps % duration == 0) {
++            changeWeather();
+         }
+     }
+ 
+@@ -78,7 +70,22 @@ public class Weather
+      */
+     public void changeWeather()
+     {
+-        randomInt = rand.nextInt(weatherList.size());
+-        currentWeather = (WeatherType) weatherList.toArray()[randomInt];
++        currentWeather = weatherList.get(rand.nextInt(weatherList.size()));
++    }
++
++    /**
++     * Reset the weather to the default state.
++     */
++    public void reset()
++    {
++        currentWeather = WeatherType.SUNNY;
++    }
++
++    private int getCurrentDuration()
++    {
++        if(randomDuration) {
++            return rand.nextInt(MAX_RANDOM_WEATHER_DURATION) + 1;
++        }
++        return STATIC_WEATHER_DURATION;
+     }
+ }

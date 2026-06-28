@@ -1,0 +1,377 @@
+diff --git a/FieldStats.java b/FieldStats.java
+index 8e28ef9..3ef3afc 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -9,6 +9,7 @@ import java.util.HashMap;
+  */
+ public class FieldStats
+ {
++    private final SpeciesCatalog speciesCatalog;
+     // Counters for each type of entity (fox, rabbit, etc.) in the simulation.
+     private HashMap<Class<? extends Organism>, Counter> counters;
+     // Whether the counters are currently up to date.
+@@ -17,8 +18,9 @@ public class FieldStats
+     /**
+      * Construct a FieldStats object.
+      */
+-    public FieldStats()
++    public FieldStats(SpeciesCatalog speciesCatalog)
+     {
++        this.speciesCatalog = speciesCatalog;
+         // Set up a collection for counters for each type of animal that
+         // we might find
+         counters = new HashMap<>();
+@@ -68,7 +70,7 @@ public class FieldStats
+         if(count == null) {
+             // We do not have a counter for this species yet.
+             // Create one.
+-            count = new Counter(animalClass.getName());
++            count = new Counter(speciesCatalog.getDisplayName(animalClass));
+             counters.put(animalClass, count);
+         }
+         count.increment();
+diff --git a/ForagingAnimal.java b/ForagingAnimal.java
+new file mode 100644
+index 0000000..13f0417
+--- /dev/null
++++ b/ForagingAnimal.java
+@@ -0,0 +1,51 @@
++import java.util.Random;
++
++/**
++ * Shared base class for animals that move by choosing between spreading
++ * disease and seeking food.
++ */
++public abstract class ForagingAnimal extends Animal {
++
++    private static final Random rand = Randomizer.getRandom();
++
++    public ForagingAnimal(AnimalAttributes attributes, boolean randomAge, Field field,
++                          Location location, OrganismFactory offspringFactory) {
++        super(attributes, randomAge, field, location, offspringFactory);
++    }
++
++    protected final boolean diesFromDiseaseThisTurn() {
++        return rand.nextDouble() <= getDeathByDiseaseProbability();
++    }
++
++    protected final Location chooseTargetLocation() {
++        if (rand.nextDouble() <= getDiseaseSpreadProbability()) {
++            return findAnimalToInfect();
++        }
++        return findFood();
++    }
++
++    protected final void moveToTargetOrRemove(Location targetLocation) {
++        Location destination = resolveDestination(targetLocation);
++        if (destination != null) {
++            setLocation(destination);
++        }
++        else {
++            remove();
++        }
++    }
++
++    protected Location resolveDestination(Location targetLocation) {
++        if (shouldUseFallbackLocation(targetLocation)) {
++            return getFallbackLocation();
++        }
++        return targetLocation;
++    }
++
++    protected boolean shouldUseFallbackLocation(Location targetLocation) {
++        return targetLocation == null;
++    }
++
++    protected Location getFallbackLocation() {
++        return getField().freeAdjacentLocation(getLocation());
++    }
++}
+diff --git a/Hunter.java b/Hunter.java
+index d977097..8b9f47d 100644
+--- a/Hunter.java
++++ b/Hunter.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.Random;
+ import java.util.function.Function;
+ import java.util.function.Predicate;
+ 
+@@ -10,9 +9,7 @@ import java.util.function.Predicate;
+  *
+  * @version 2022.03.02
+  */
+-public abstract class Hunter extends Animal {
+-
+-    private static final Random rand = Randomizer.getRandom();
++public abstract class Hunter extends ForagingAnimal {
+ 
+     private final HunterAttributes attributes;
+     private int foodLevel;
+@@ -43,22 +40,12 @@ public abstract class Hunter extends Animal {
+                 return;
+             }
+ 
+-            if (rand.nextDouble() <= getDeathByDiseaseProbability() ) {
++            if (diesFromDiseaseThisTurn()) {
+                 remove();
+                 return;
+             }
+ 
+-            Location newLocation = chooseTargetLocation();
+-            if(newLocation == null) {
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                remove();
+-            }
++            moveToTargetOrRemove(chooseTargetLocation());
+         }
+     }
+ 
+@@ -81,13 +68,6 @@ public abstract class Hunter extends Animal {
+         }
+     }
+ 
+-    private Location chooseTargetLocation() {
+-        if (rand.nextDouble() <= getDiseaseSpreadProbability()) {
+-            return findAnimalToInfect();
+-        }
+-        return findFood();
+-    }
+-
+     protected boolean isRestingTime(TimeOfDay time) {
+         return attributes.getRestingTime() == time;
+     }
+diff --git a/Prey.java b/Prey.java
+index 63d935e..75f017b 100644
+--- a/Prey.java
++++ b/Prey.java
+@@ -8,7 +8,7 @@ import java.util.List;
+  *
+  * @version 2022.03.02
+  */
+-public abstract class Prey extends Animal implements Consumable {
++public abstract class Prey extends ForagingAnimal implements Consumable {
+ 
+     // define fields
+     private static final double DEFAULT_ACTIVENESS = 1;
+@@ -45,23 +45,13 @@ public abstract class Prey extends Animal implements Consumable {
+         if(isAlive()) {
+             giveBirth(newPrey);
+ 
+-            if (rand.nextDouble() <= getDeathByDiseaseProbability() ) {
++            if (diesFromDiseaseThisTurn()) {
+                 remove();
+                 return;
+             }
+ 
+             if (rand.nextDouble() <= getActiveness()){
+-                Location newLocation = chooseTargetLocation();
+-                if ((newLocation == null) || (getFoodValue() > 10)) {
+-                    newLocation = getField().freeAdjacentLocation(getLocation());
+-                }
+-
+-                if(newLocation != null) {
+-                    setLocation(newLocation);
+-                }
+-                else {
+-                    remove();
+-                }
++                moveToTargetOrRemove(chooseTargetLocation());
+             }
+         } else {
+             decayifDead();
+@@ -155,14 +145,12 @@ public abstract class Prey extends Animal implements Consumable {
+         return null;
+     }
+ 
+-    private Location chooseTargetLocation() {
+-        if (rand.nextDouble() <= getDiseaseSpreadProbability()) {
+-            return findAnimalToInfect();
+-        }
+-        return findFood();
+-    }
+-
+     protected double getActivenessFor(TimeOfDay time) {
+         return DEFAULT_ACTIVENESS;
+     }
++
++    @Override
++    protected boolean shouldUseFallbackLocation(Location targetLocation) {
++        return targetLocation == null || getFoodValue() > 10;
++    }
+ }
+diff --git a/Simulator.java b/Simulator.java
+index c0f27c0..e73c749 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -42,14 +42,13 @@ public class Simulator
+             width = DEFAULT_WIDTH;
+         }
+         
++        speciesCatalog = new SpeciesCatalog();
+         field = new Field(depth, width);
+ 
+         // Create a view of the state of each location in the field.
+-        view = new SimulatorView(depth, width);
++        view = new SimulatorView(depth, width, speciesCatalog);
+         simulationState = new SimulationState(WeatherType.SUN, TimeOfDay.SUNRISE);
+-        speciesCatalog = new SpeciesCatalog();
+         population = new OrganismPopulation(new Populator(speciesCatalog));
+-        view.registerSpecies(speciesCatalog);
+ 
+         // Setup a valid starting point
+         reset();
+diff --git a/SimulatorView.java b/SimulatorView.java
+index b4945d7..05d84fe 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -1,7 +1,5 @@
+ import javax.swing.*;
+ import java.awt.*;
+-import java.util.LinkedHashMap;
+-import java.util.Map;
+ 
+ /**
+  * A graphical view of the simulation grid.
+@@ -30,8 +28,7 @@ public class SimulatorView extends JFrame
+     private JLabel stepLabel, population, infoLabel, timeLabel, environmentLabel;
+     private FieldView fieldView;
+     
+-    // A map for storing colors for participants in the simulation
+-    private Map<Class<? extends Organism>, Color> colors;
++    private final SpeciesCatalog speciesCatalog;
+     // A statistics object computing and storing simulation information
+     private FieldStats stats;
+ 
+@@ -40,10 +37,10 @@ public class SimulatorView extends JFrame
+      * @param height The simulation's height.
+      * @param width  The simulation's width.
+      */
+-    public SimulatorView(int height, int width)
++    public SimulatorView(int height, int width, SpeciesCatalog speciesCatalog)
+     {
+-        stats = new FieldStats();
+-        colors = new LinkedHashMap<>();
++        this.speciesCatalog = speciesCatalog;
++        stats = new FieldStats(speciesCatalog);
+ 
+         setTitle("Predator Prey Simulation");
+         stepLabel = new JLabel(STEP_PREFIX, JLabel.CENTER);
+@@ -72,22 +69,6 @@ public class SimulatorView extends JFrame
+         setVisible(true);
+     }
+     
+-    /**
+-     * Define a color to be used for a given class of animal.
+-     * @param animalClass The animal's Class object.
+-     * @param color The color to be used for the given class.
+-     */
+-    public void setColor(Class<? extends Organism> animalClass, Color color)
+-    {
+-        colors.put(animalClass, color);
+-    }
+-
+-    public void registerSpecies(SpeciesCatalog speciesCatalog) {
+-        for (SpeciesDefinition speciesDefinition : speciesCatalog.getDefinitions()) {
+-            setColor(speciesDefinition.getOrganismType(), speciesDefinition.getColor());
+-        }
+-    }
+-
+     /**
+      * Display a short information label at the top of the window.
+      */
+@@ -101,7 +82,7 @@ public class SimulatorView extends JFrame
+      */
+     private Color getColor(Class<? extends Organism> animalClass)
+     {
+-        Color col = colors.get(animalClass);
++        Color col = speciesCatalog.getColor(animalClass);
+         if(col == null) {
+             // no color defined for this class
+             return UNKNOWN_COLOR;
+diff --git a/SpeciesCatalog.java b/SpeciesCatalog.java
+index f409b92..70dbf4a 100644
+--- a/SpeciesCatalog.java
++++ b/SpeciesCatalog.java
+@@ -1,6 +1,8 @@
+ import java.awt.Color;
+ import java.util.Arrays;
++import java.util.LinkedHashMap;
+ import java.util.List;
++import java.util.Map;
+ 
+ /**
+  * Provides the species definitions used by the simulator.
+@@ -11,6 +13,7 @@ public class SpeciesCatalog {
+     private static final double PLANT_CREATION_PROBABILITY = 0.04;
+ 
+     private final List<SpeciesDefinition> definitions;
++    private final Map<Class<? extends Organism>, SpeciesDefinition> definitionsByType;
+ 
+     public SpeciesCatalog() {
+         definitions = Arrays.asList(
+@@ -23,9 +26,27 @@ public class SpeciesCatalog {
+                 new SpeciesDefinition(Cheetah.class, Color.MAGENTA, ANIMAL_CREATION_PROBABILITY, Cheetah::new),
+                 new SpeciesDefinition(PoisonBerry.class, Color.BLACK, PLANT_CREATION_PROBABILITY, PoisonBerry::new)
+         );
++        definitionsByType = new LinkedHashMap<>();
++        for (SpeciesDefinition definition : definitions) {
++            definitionsByType.put(definition.getOrganismType(), definition);
++        }
+     }
+ 
+     public List<SpeciesDefinition> getDefinitions() {
+         return definitions;
+     }
++
++    public SpeciesDefinition findDefinition(Class<? extends Organism> organismType) {
++        return definitionsByType.get(organismType);
++    }
++
++    public String getDisplayName(Class<? extends Organism> organismType) {
++        SpeciesDefinition definition = findDefinition(organismType);
++        return definition != null ? definition.getDisplayName() : organismType.getSimpleName();
++    }
++
++    public Color getColor(Class<? extends Organism> organismType) {
++        SpeciesDefinition definition = findDefinition(organismType);
++        return definition != null ? definition.getColor() : null;
++    }
+ }
+diff --git a/SpeciesDefinition.java b/SpeciesDefinition.java
+index 87e7b79..21e75aa 100644
+--- a/SpeciesDefinition.java
++++ b/SpeciesDefinition.java
+@@ -6,6 +6,7 @@ import java.awt.Color;
+ public class SpeciesDefinition {
+ 
+     private final Class<? extends Organism> organismType;
++    private final String displayName;
+     private final Color color;
+     private final double creationProbability;
+     private final OrganismFactory factory;
+@@ -13,6 +14,7 @@ public class SpeciesDefinition {
+     public SpeciesDefinition(Class<? extends Organism> organismType, Color color,
+                              double creationProbability, OrganismFactory factory) {
+         this.organismType = organismType;
++        this.displayName = organismType.getSimpleName();
+         this.color = color;
+         this.creationProbability = creationProbability;
+         this.factory = factory;
+@@ -26,6 +28,10 @@ public class SpeciesDefinition {
+         return color;
+     }
+ 
++    public String getDisplayName() {
++        return displayName;
++    }
++
+     public double getCreationProbability() {
+         return creationProbability;
+     }

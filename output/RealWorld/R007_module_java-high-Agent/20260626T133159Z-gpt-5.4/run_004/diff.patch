@@ -1,0 +1,780 @@
+diff --git a/Animal.java b/Animal.java
+index 656ebca..fc745d1 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -10,12 +10,12 @@ public abstract class Animal extends Creature
+ {
+     private static final Random RAND = Randomizer.getRandom();
+ 
+-    // sex of an animal, 0 = female and 1 = male
+-    private int sex;
+-
+     // The amount of oxygen an animal need to survive
+     protected static final double ANIMAL_OXYGEN_REQUIRED = 0.0000009;
+ 
++    private AnimalProfile profile;
++    // sex of an animal, 0 = female and 1 = male
++    private int sex;
+     // If the animal is infected by disease.
+     private boolean isInfected;
+     // If the animal is immuned from the diease.
+@@ -31,13 +31,15 @@ public abstract class Animal extends Creature
+     // total population that is die of disease.
+     public static int populationDieOfDisease = 0;
+ 
+-    public Animal(Field field, Location location)
++    public Animal(boolean randomAge, Field field, Location location, AnimalProfile profile)
+     {
+         super(field, location);
++        this.profile = profile;
+         sex = RAND.nextBoolean() ? 1 : 0;
+         isInfected = false;
+         isImmuned = false;
+         infectionStartStep = 0;
++        initializeState(randomAge);
+     }
+ 
+     /**
+@@ -49,23 +51,6 @@ public abstract class Animal extends Creature
+         return sex;
+     }
+ 
+-    /**
+-     * Every animal have different gender. and the implementation of this method is at its subclass.
+-     */
+-    public abstract boolean encounterWithDiffSex();
+-
+-    public abstract Location search(Disease disease, int step);
+-
+-    protected abstract int getMaxAge();
+-
+-    protected abstract double getBreedingProbability();
+-
+-    protected abstract int getMaxLitterSize();
+-
+-    protected abstract boolean canBreed();
+-
+-    protected abstract Animal createYoung(Field field, Location location);
+-
+     /**
+      * identify whether a creature need to sleep
+      *
+@@ -115,31 +100,11 @@ public abstract class Animal extends Creature
+         this.isImmuned = isImmuned;
+     }
+ 
+-    /**
+-     * Set the animal's age and food state.
+-     */
+-    protected void initializeState(boolean randomAge, int maxAge, int foodValue)
+-    {
+-        if(randomAge) {
+-            age = RAND.nextInt(maxAge);
+-            foodLevel = RAND.nextInt(foodValue);
+-        }
+-        else {
+-            age = 0;
+-            foodLevel = foodValue;
+-        }
+-    }
+-
+     protected int getAge()
+     {
+         return age;
+     }
+ 
+-    protected void setFoodLevel(int foodLevel)
+-    {
+-        this.foodLevel = foodLevel;
+-    }
+-
+     /**
+      * Run one simulation step for an animal.
+      *
+@@ -170,47 +135,37 @@ public abstract class Animal extends Creature
+     }
+ 
+     /**
+-     *  Make an animal infected while the disease exists.
+-     *
+-     *  @param disease disease
+-     *  @param step current step.
++     * Make an animal infected while the disease exists.
+      */
+     protected void makeInfected(Disease disease, int step)
+     {
+-        if((!this.getIsImmuned()) && RAND.nextDouble() <= disease.INFECTION_RATE) {
++        if(!getIsImmuned() && RAND.nextDouble() <= disease.INFECTION_RATE) {
+             infect(step);
+         }
+     }
+ 
+     /**
+      * give the animal immunity while condition is met.
+-     * @param disease disease.
+-     * @param step int step.
+      */
+     protected void ifCanGrantImmunity(Disease disease, int step)
+     {
+-        if(getIsInfected() && !getIsImmuned()) {
+-            if(step - infectionStartStep >= disease.NUMBER_OF_STEP_TO_WITHSTAND) {
+-                setIsImmuned(true);
+-                setIsInfected(false);
+-            }
++        if(getIsInfected() && !getIsImmuned()
++           && step - infectionStartStep >= disease.NUMBER_OF_STEP_TO_WITHSTAND) {
++            setIsImmuned(true);
++            setIsInfected(false);
+         }
+     }
+ 
+     /**
+      * set an animal to death if it is die of infection.
+      * Return true if an animal dies of infection
+-     *
+-     * @return true if an animal dies of infection.
+      */
+     protected boolean dieOfInfection(Disease disease)
+     {
+-        if(getIsInfected() && !getIsImmuned()) {
+-            if(RAND.nextDouble() <= disease.MORTALITY_RATE) {
+-                setDead();
+-                populationDieOfDisease++;
+-                return true;
+-            }
++        if(getIsInfected() && !getIsImmuned() && RAND.nextDouble() <= disease.MORTALITY_RATE) {
++            setDead();
++            populationDieOfDisease++;
++            return true;
+         }
+         return false;
+     }
+@@ -227,20 +182,19 @@ public abstract class Animal extends Creature
+     }
+ 
+     /**
+-     * Find whether there is an adjacent animal of the same species but opposite sex.
++     * Decide whether a suitable mate is nearby.
+      */
+-    protected boolean hasDifferentSexNearby(Class<? extends Animal> species, int searchDistance)
++    public boolean encounterWithDiffSex()
+     {
+-        for(Location location : getField().adjacentLocations(getLocation(), searchDistance)) {
+-            Creature nearbyCreature = getField().getCreatureAt(location);
+-            if(species.isInstance(nearbyCreature)) {
+-                Animal nearbyAnimal = species.cast(nearbyCreature);
+-                if(this.getSex() != nearbyAnimal.getSex()) {
+-                    return true;
+-                }
+-            }
+-        }
+-        return false;
++        return hasDifferentSexNearby(profile.getSpeciesClass(), profile.getMateSearchDistance());
++    }
++
++    /**
++     * Search for configured prey around the animal.
++     */
++    public Location search(Disease disease, int step)
++    {
++        return findFood(disease, step, profile.getFoodValue(), profile.getPreyTypes());
+     }
+ 
+     /**
+@@ -249,7 +203,7 @@ public abstract class Animal extends Creature
+     protected void incrementAge()
+     {
+         age++;
+-        if(age > getMaxAge()) {
++        if(age > profile.getMaxAge()) {
+             setDead();
+         }
+     }
+@@ -271,31 +225,62 @@ public abstract class Animal extends Creature
+     protected void giveBirth(List<Creature> newAnimals)
+     {
+         int births = breed();
+-        createAdjacentCreatures(newAnimals, births, this::createYoung);
++        createAdjacentCreatures(newAnimals, births, profile::createYoung);
++    }
++
++    protected boolean canBreed()
++    {
++        boolean reachedBreedingAge = getAge() >= profile.getBreedingAge();
++        return reachedBreedingAge && (!profile.requiresMate() || encounterWithDiffSex());
++    }
++
++    /**
++     * Find whether there is an adjacent animal of the same species but opposite sex.
++     */
++    protected boolean hasDifferentSexNearby(Class<? extends Animal> species, int searchDistance)
++    {
++        for(Location location : getField().adjacentLocations(getLocation(), searchDistance)) {
++            Creature nearbyCreature = getField().getCreatureAt(location);
++            if(species.isInstance(nearbyCreature)) {
++                Animal nearbyAnimal = species.cast(nearbyCreature);
++                if(getSex() != nearbyAnimal.getSex()) {
++                    return true;
++                }
++            }
++        }
++        return false;
+     }
+ 
+     /**
+      * Search for prey around the animal and handle infection spread during the search.
+      */
+-    @SafeVarargs
+     protected final Location findFood(Disease disease, int step, int foodValue,
+-                                      Class<? extends Creature>... preyTypes)
++                                      List<Class<? extends Creature>> preyTypes)
+     {
+         for(Location location : getField().adjacentLocations(getLocation(), 1)) {
+             Creature nearbyCreature = getField().getCreatureAt(location);
+             exposeToInfection(nearbyCreature, disease, step);
+             if(isMatchingPrey(nearbyCreature, preyTypes) && nearbyCreature.isAlive()) {
+                 nearbyCreature.setDead();
+-                setFoodLevel(foodValue);
++                foodLevel = foodValue;
+                 return location;
+             }
+         }
+         return null;
+     }
+ 
+-    /**
+-     * Move to a new location if possible, otherwise die from overcrowding.
+-     */
++    private void initializeState(boolean randomAge)
++    {
++        if(randomAge) {
++            age = RAND.nextInt(profile.getMaxAge());
++            foodLevel = RAND.nextInt(profile.getFoodValue());
++        }
++        else {
++            age = 0;
++            foodLevel = profile.getFoodValue();
++        }
++    }
++
+     private void moveTo(Location preferredLocation)
+     {
+         Location newLocation = preferredLocation;
+@@ -321,8 +306,7 @@ public abstract class Animal extends Creature
+         }
+     }
+ 
+-    @SafeVarargs
+-    private final boolean isMatchingPrey(Creature creature, Class<? extends Creature>... preyTypes)
++    private boolean isMatchingPrey(Creature creature, List<Class<? extends Creature>> preyTypes)
+     {
+         if(creature == null) {
+             return false;
+@@ -337,8 +321,8 @@ public abstract class Animal extends Creature
+ 
+     private int breed()
+     {
+-        if(canBreed() && RAND.nextDouble() <= getBreedingProbability()) {
+-            return RAND.nextInt(getMaxLitterSize()) + 1;
++        if(canBreed() && RAND.nextDouble() <= profile.getBreedingProbability()) {
++            return RAND.nextInt(profile.getMaxLitterSize()) + 1;
+         }
+         return 0;
+     }
+diff --git a/AnimalProfile.java b/AnimalProfile.java
+new file mode 100644
+index 0000000..df93243
+--- /dev/null
++++ b/AnimalProfile.java
+@@ -0,0 +1,94 @@
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.List;
++
++/**
++ * Immutable configuration for an animal species.
++ */
++public class AnimalProfile
++{
++    @FunctionalInterface
++    public interface AnimalFactory
++    {
++        Animal create(Field field, Location location);
++    }
++
++    private Class<? extends Animal> speciesClass;
++    private int maxAge;
++    private int breedingAge;
++    private double breedingProbability;
++    private int maxLitterSize;
++    private int foodValue;
++    private int mateSearchDistance;
++    private boolean requiresMate;
++    private List<Class<? extends Creature>> preyTypes;
++    private AnimalFactory animalFactory;
++
++    @SafeVarargs
++    public AnimalProfile(Class<? extends Animal> speciesClass, int maxAge, int breedingAge,
++                         double breedingProbability, int maxLitterSize, int foodValue,
++                         int mateSearchDistance, boolean requiresMate, AnimalFactory animalFactory,
++                         Class<? extends Creature>... preyTypes)
++    {
++        this.speciesClass = speciesClass;
++        this.maxAge = maxAge;
++        this.breedingAge = breedingAge;
++        this.breedingProbability = breedingProbability;
++        this.maxLitterSize = maxLitterSize;
++        this.foodValue = foodValue;
++        this.mateSearchDistance = mateSearchDistance;
++        this.requiresMate = requiresMate;
++        this.animalFactory = animalFactory;
++        this.preyTypes = Collections.unmodifiableList(Arrays.asList(preyTypes));
++    }
++
++    public Class<? extends Animal> getSpeciesClass()
++    {
++        return speciesClass;
++    }
++
++    public int getMaxAge()
++    {
++        return maxAge;
++    }
++
++    public int getBreedingAge()
++    {
++        return breedingAge;
++    }
++
++    public double getBreedingProbability()
++    {
++        return breedingProbability;
++    }
++
++    public int getMaxLitterSize()
++    {
++        return maxLitterSize;
++    }
++
++    public int getFoodValue()
++    {
++        return foodValue;
++    }
++
++    public int getMateSearchDistance()
++    {
++        return mateSearchDistance;
++    }
++
++    public boolean requiresMate()
++    {
++        return requiresMate;
++    }
++
++    public List<Class<? extends Creature>> getPreyTypes()
++    {
++        return preyTypes;
++    }
++
++    public Animal createYoung(Field field, Location location)
++    {
++        return animalFactory.create(field, location);
++    }
++}
+diff --git a/Cod.java b/Cod.java
+index c214948..95bb601 100644
+--- a/Cod.java
++++ b/Cod.java
+@@ -1,91 +1,19 @@
+ /**
+  * A simple model of a cod.
+- * 
+- * Cods age, move, eat seaweed, consume oxygen, propogate, 
++ *
++ * Cods age, move, eat seaweed, consume oxygen, propagate,
+  * and may get infected by disease and die of that or of weather.
+  *
+  * @version 2022/03/02
+  */
+ public class Cod extends Animal
+ {
+-    // Characteristics shared by all cods (class variables).
+-
+-    // The age at which a cod can start to breed.
+-    private static final int BREEDING_AGE = 6;
+-    // The age to which a cod can live.
+-    private static final int MAX_AGE = 50;
+-    // The likelihood of a cod breeding.
+-    private static final double BREEDING_PROBABILITY = 0.3;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 10;
++    private static final AnimalProfile PROFILE =
++        new AnimalProfile(Cod.class, 50, 6, 0.3, 10, 13, 1, true,
++            (field, location) -> new Cod(false, field, location), Seaweed.class);
+ 
+-    // The food value of a cod. In effect, this is the
+-    // number of steps a cod can go before it has to eat again.
+-    private static final int SEAWEED_FOOD_VALUE = 13;
+-
+-    /**
+-     * Create a new cod. A cod may be created with age
+-     * zero (a new born) or with a random age.
+-     * 
+-     * @param randomAge If true, the cod will have a random age.
+-     * @param field The field currently occupied.
+-     * @param location The location within the field.
+-     */
+     public Cod(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        initializeState(randomAge, MAX_AGE, SEAWEED_FOOD_VALUE);
++        super(randomAge, field, location, PROFILE);
+     }
+-
+-    /**
+-     * A cod can breed if it has reached the breeding age.
+-     * @return true if the cod can breed, false otherwise.
+-     */
+-    protected boolean canBreed()
+-    {
+-        return getAge() >= BREEDING_AGE && encounterWithDiffSex();
+-    }
+-
+-    /**
+-     * Decide whether two cods have different sex.
+-     * @return true if two cods have different sex, false otherwise.
+-     */
+-    public boolean encounterWithDiffSex()
+-    {
+-        return hasDifferentSexNearby(Cod.class, 1);
+-    }
+-
+-    /**
+-     * Look for seaweed adjacent to the current location.
+-     * Only the first live seaweed is eaten., if the nearby animal is 
+-     * infected, then this animal also may be infected.
+-     * @param disease disease.
+-     * @param step int step.
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    public Location search(Disease disease, int step)
+-    {
+-        return findFood(disease, step, SEAWEED_FOOD_VALUE, Seaweed.class);
+-    }
+-
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
+-    }
+-
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+-    }
+-
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-
+-    protected Animal createYoung(Field field, Location location)
+-    {
+-        return new Cod(false, field, location);
+-    }
+-
+ }
+diff --git a/Salmon.java b/Salmon.java
+index be3813d..4afba86 100644
+--- a/Salmon.java
++++ b/Salmon.java
+@@ -1,83 +1,19 @@
+ /**
+  * A simple model of a Salmon.
+- * 
+- * Salmons age, move, eat seaweed, consume oxygen, propogate,
++ *
++ * Salmons age, move, eat seaweed, consume oxygen, propagate,
+  * and may get infected by disease and die of that or of weather.
+  *
+  * @version 2022/03/02
+  */
+ public class Salmon extends Animal
+ {
+-    // Characteristics shared by all salmons (class variables).
+-
+-    // The age at which a salmon can start to breed.
+-    private static final int BREEDING_AGE = 4;
+-    // The age to which a salmon can live.
+-    private static final int MAX_AGE = 50;
+-    // The likelihood of a salmon breeding.
+-    private static final double BREEDING_PROBABILITY = 0.3;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 15;
++    private static final AnimalProfile PROFILE =
++        new AnimalProfile(Salmon.class, 50, 4, 0.3, 15, 13, 2, true,
++            (field, location) -> new Salmon(false, field, location), Seaweed.class);
+ 
+-    // The food value of a single salmon. In effect, this is the
+-    // number of steps a fox can go before it has to eat again.
+-    private static final int SEAWEED_FOOD_VALUE = 13;
+-
+-    /**
+-     * Create a new salmon. A salmon may be created with age
+-     * zero (a new born) or with a random age.
+-     * 
+-     * @param randomAge If true, the salmon will have a random age.
+-     * @param field The field currently occupied.
+-     * @param location The location within the field.
+-     */
+     public Salmon(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        initializeState(randomAge, MAX_AGE, SEAWEED_FOOD_VALUE);
++        super(randomAge, field, location, PROFILE);
+     }
+-
+-    /**
+-     * Decide if two salmons countered has different sex;
+-     */
+-    public boolean encounterWithDiffSex()
+-    {
+-        return hasDifferentSexNearby(Salmon.class, 2);
+-    }
+-
+-    /**
+-     * Look for seaweed adjacent to the current location.
+-     * Only the first live seaweed is eaten, if the nearby animal is
+-     * infected, then this animal also may be infected.
+-     */
+-    public Location search(Disease disease, int step)
+-    {
+-        return findFood(disease, step, SEAWEED_FOOD_VALUE, Seaweed.class);
+-    }
+-
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
+-    }
+-
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+-    }
+-
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-
+-    protected boolean canBreed()
+-    {
+-        return getAge() >= BREEDING_AGE && encounterWithDiffSex();
+-    }
+-
+-    protected Animal createYoung(Field field, Location location)
+-    {
+-        return new Salmon(false, field, location);
+-    }
+-
+ }
+diff --git a/Shark.java b/Shark.java
+index 38fb3bc..d136a5d 100644
+--- a/Shark.java
++++ b/Shark.java
+@@ -1,89 +1,19 @@
+ /**
+- ** A simple model of a shark.
+- * 
+- * Sharks age, move, eat cod or salmon, consume oxygen, propogate, 
++ * A simple model of a shark.
++ *
++ * Sharks age, move, eat cod or salmon, consume oxygen, propagate,
+  * and may get infected by disease and die of that or of weather.
+  *
+  * @version 2022/03/02
+  */
+ public class Shark extends Animal
+ {
+-    // Characteristics shared by all sharkes (class variables).
+-
+-    // The age at which a shark can start to breed.
+-    private static final int BREEDING_AGE = 6;
+-    // The age to which a shark can live.
+-    private static final int MAX_AGE = 150;
+-    // The likelihood of a shark breeding.
+-    private static final double BREEDING_PROBABILITY = 0.4;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 8;
+-    // The food value of a single rabbit. In effect, this is the
+-    // number of steps a shark can go before it has to eat again.
+-    private static final int COD_FOOD_VALUE = 8;
++    private static final AnimalProfile PROFILE =
++        new AnimalProfile(Shark.class, 150, 6, 0.4, 8, 8, 2, false,
++            (field, location) -> new Shark(false, field, location), Cod.class, Salmon.class);
+ 
+-    /**
+-     * Create a shark. A shark can be created as a new born (age zero
+-     * and not hungry) or with a random age and food level.
+-     * 
+-     * @param randomAge If true, the shark will have random age and hunger level.
+-     * @param field The field currently occupied.
+-     * @param location The location within the field.
+-     */
+     public Shark(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        initializeState(randomAge, MAX_AGE, COD_FOOD_VALUE);
+-    }
+-
+-    /**
+-     * Look for Cod and Salmon adjacent to the current location.
+-     * Only the first live Cod or Salmon is eaten, if the nearby animal is 
+-     * infected, then this animal also may be infected.
+-     * @param disease disease.
+-     * @param step int current step.
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    public Location search(Disease disease, int step)
+-    {
+-        return findFood(disease, step, COD_FOOD_VALUE, Cod.class, Salmon.class);
+-    }
+-
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
+-    }
+-
+-    /**
+-     * A shark can breed if it has reached the breeding age.
+-     */
+-    protected boolean canBreed()
+-    {
+-        return getAge() >= BREEDING_AGE;
+-    }
+-
+-    /**
+-     *  Decide whether two sharks have different sex.
+-     *  @return true if two sharks have different sex, false otherwise.
+-     */
+-    public boolean encounterWithDiffSex()
+-    {
+-        return hasDifferentSexNearby(Shark.class, 2);
+-    }
+-
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+-    }
+-
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-
+-    protected Animal createYoung(Field field, Location location)
+-    {
+-        return new Shark(false, field, location);
++        super(randomAge, field, location, PROFILE);
+     }
+-
+ }
+diff --git a/Whale.java b/Whale.java
+index ae953f3..6b20c9f 100644
+--- a/Whale.java
++++ b/Whale.java
+@@ -1,89 +1,19 @@
+ /**
+  * A simple model of a whale.
+- * 
+- * Whales age, move, eat cod or salmon, consume oxygen, propogate, 
++ *
++ * Whales age, move, eat cod or salmon, consume oxygen, propagate,
+  * and may get infected by disease and die of that or of weather.
+  *
+  * @version 2022/03/02
+  */
+ public class Whale extends Animal
+ {
+-    // Characteristics shared by all whales (class variables).
+-
+-    // The age at which a whale can start to breed.
+-    private static final int BREEDING_AGE = 6;
+-    // The age to which a whale can live.
+-    private static final int MAX_AGE = 150;
+-    // The likelihood of a whale breeding.
+-    private static final double BREEDING_PROBABILITY = 0.2;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 8;
+-    // The food value of a single Cod. In effect, this is the
+-    // number of steps a whale can go before it has to eat again.
+-    private static final int COD_FOOD_VALUE = 8;
++    private static final AnimalProfile PROFILE =
++        new AnimalProfile(Whale.class, 150, 6, 0.2, 8, 8, 2, false,
++            (field, location) -> new Whale(false, field, location), Cod.class, Salmon.class);
+ 
+-    /**
+-     * Create a whale. A whale can be created as a new born (age zero
+-     * and not hungry) or with a random age and food level.
+-     * 
+-     * @param randomAge If true, the whale will have random age and hunger level.
+-     * @param field The field currently occupied.
+-     * @param location The location within the field.
+-     */
+     public Whale(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        initializeState(randomAge, MAX_AGE, COD_FOOD_VALUE);
+-    }
+-
+-    /**
+-     * Look for Cods and Salmon adjacent to the current location.
+-     * Only the first live Cod or Salmon is eaten, if the nearby animal is 
+-     * infected, then this animal also may be infected.
+-     * @param disease disease.
+-     * @param step int current step.
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    public Location search(Disease disease, int step)
+-    {
+-        return findFood(disease, step, COD_FOOD_VALUE, Cod.class, Salmon.class);
+-    }
+-
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
+-    }
+-
+-    /**
+-     * A whale can breed if it has reached the breeding age.
+-     */
+-    protected boolean canBreed()
+-    {
+-        return getAge() >= BREEDING_AGE;
+-    }
+-
+-    /**
+-     * Decide whether two whales have different sex.
+-     * @return true if two whales have different sex, false otherwise.
+-     */
+-    public boolean encounterWithDiffSex()
+-    {
+-        return hasDifferentSexNearby(Whale.class, 2);
+-    }
+-
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+-    }
+-
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-
+-    protected Animal createYoung(Field field, Location location)
+-    {
+-        return new Whale(false, field, location);
++        super(randomAge, field, location, PROFILE);
+     }
+-
+ }

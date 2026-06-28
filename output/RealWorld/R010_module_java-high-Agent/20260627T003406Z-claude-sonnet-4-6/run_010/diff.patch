@@ -1,0 +1,265 @@
+diff --git a/ColorRegistrationEvent.java b/ColorRegistrationEvent.java
+new file mode 100644
+index 0000000..1ae85c4
+--- /dev/null
++++ b/ColorRegistrationEvent.java
+@@ -0,0 +1,12 @@
++import java.awt.Color;
++
++/** Published once per species at startup so subscribers can register display colors. */
++public class ColorRegistrationEvent {
++    public final Class<?> entityClass;
++    public final Color color;
++
++    public ColorRegistrationEvent(Class<?> entityClass, Color color) {
++        this.entityClass = entityClass;
++        this.color = color;
++    }
++}
+diff --git a/EntityFactory.java b/EntityFactory.java
+index 81d0620..2c08510 100644
+--- a/EntityFactory.java
++++ b/EntityFactory.java
+@@ -16,9 +16,9 @@ public class EntityFactory {
+         registry.add(provider);
+     }
+ 
+-    public void registerColors(SimulationObserver observer) {
++    public void registerColors(EventBus bus) {
+         for (EntityProvider p : registry) {
+-            observer.onColorRegistered(p.getEntityClass(), p.getColor());
++            bus.publish(new ColorRegistrationEvent(p.getEntityClass(), p.getColor()));
+         }
+     }
+ 
+diff --git a/EventBus.java b/EventBus.java
+new file mode 100644
+index 0000000..248319a
+--- /dev/null
++++ b/EventBus.java
+@@ -0,0 +1,36 @@
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.function.Consumer;
++
++/**
++ * Generic publish/subscribe event bus. Subscribers register a handler
++ * for a specific event class; publishers post an event instance and all
++ * matching handlers are invoked synchronously in subscription order.
++ */
++public class EventBus {
++    private final Map<Class<?>, List<Consumer<Object>>> subscribers = new HashMap<>();
++
++    /**
++     * Subscribe to events of exactly the given type.
++     * The handler is called synchronously inside publish().
++     */
++    @SuppressWarnings("unchecked")
++    public <E> void subscribe(Class<E> eventType, Consumer<E> handler) {
++        subscribers.computeIfAbsent(eventType, k -> new ArrayList<>())
++                   .add((Consumer<Object>) handler);
++    }
++
++    /**
++     * Deliver the event to all handlers registered for its exact runtime type.
++     */
++    public void publish(Object event) {
++        List<Consumer<Object>> handlers = subscribers.get(event.getClass());
++        if (handlers != null) {
++            for (Consumer<Object> handler : handlers) {
++                handler.accept(event);
++            }
++        }
++    }
++}
+diff --git a/Main.java b/Main.java
+index 82f460b..99574b2 100644
+--- a/Main.java
++++ b/Main.java
+@@ -15,8 +15,10 @@ public class Main {
+ 
+         int depth = 80;
+         int width = 120;
++        EventBus bus = new EventBus();
+         SimulatorView view = new SimulatorView(depth, width);
+-        Simulator sim = new Simulator(depth, width, view);
++        view.subscribe(bus);
++        Simulator sim = new Simulator(depth, width, bus);
+         sim.runLongSimulation();
+     }
+ }
+diff --git a/SimulationObserver.java b/SimulationObserver.java
+deleted file mode 100644
+index 1e81e2f..0000000
+--- a/SimulationObserver.java
++++ /dev/null
+@@ -1,11 +0,0 @@
+-import java.awt.Color;
+-
+-/**
+- * Observer interface for simulation lifecycle events.
+- * Decouples Simulator from any specific UI implementation.
+- */
+-public interface SimulationObserver {
+-    void showStatus(int step, Field field, int time, String weather);
+-    boolean isViable(Field field);
+-    void onColorRegistered(Class<?> entityClass, Color color);
+-}
+diff --git a/Simulator.java b/Simulator.java
+index d4a7a5b..ad4ab2c 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -24,8 +24,8 @@ public class Simulator
+     private int step;
+     // The current daytime of the simulation.
+     private int time;
+-    // Observer notified of each simulation step and viability queries.
+-    private SimulationObserver observer;
++    // Event bus used to publish simulation events to all subscribers.
++    private EventBus bus;
+     // Factory that owns per-species configuration and population logic.
+     private EntityFactory factory;
+ 
+@@ -33,9 +33,9 @@ public class Simulator
+      * Create a simulation field with the given size.
+      * @param depth Depth of the field. Must be greater than zero.
+      * @param width Width of the field. Must be greater than zero.
+-     * @param observer Observer to be notified of each simulation step.
++     * @param bus Event bus that subscribers use to observe simulation events.
+      */
+-    public Simulator(int depth, int width, SimulationObserver observer) {
++    public Simulator(int depth, int width, EventBus bus) {
+         if(width <= 0 || depth <= 0) {
+             System.out.println("The dimensions must be greater than zero.");
+             System.out.println("Using default values.");
+@@ -43,12 +43,12 @@ public class Simulator
+             width = DEFAULT_WIDTH;
+         }
+ 
+-        this.observer = observer;
++        this.bus = bus;
+         entities = new ArrayList<>();
+         weather = "none";
+         field = new Field(depth, width);
+         factory = new EntityFactory();
+-        factory.registerColors(observer);
++        factory.registerColors(bus);
+ 
+         // Setup a valid starting point.
+         reset();
+@@ -63,13 +63,19 @@ public class Simulator
+         simulate(4000);
+     }
+ 
++    private boolean isViable() {
++        ViabilityCheckEvent e = new ViabilityCheckEvent(field);
++        bus.publish(e);
++        return e.isViable();
++    }
++
+     /**
+      * Run the simulation from its current state for the given number of steps.
+      * Stop before the given number of steps if it ceases to be viable.
+      * @param numSteps The number of steps to run for.
+      */
+     public void simulate(int numSteps) {
+-        for(int step = 1; step <= numSteps && observer.isViable(field); step++) {
++        for(int step = 1; step <= numSteps && isViable(); step++) {
+             simulateOneStep();
+             if (time == 24) {
+                 time = 0;
+@@ -120,7 +126,7 @@ public class Simulator
+         }
+         entities.addAll(newEntities);
+ 
+-        observer.showStatus(step, field, time, weather);
++        bus.publish(new StepEvent(step, field, time, weather));
+     }
+ 
+     /**
+@@ -132,7 +138,7 @@ public class Simulator
+         populate();
+ 
+         // Show the starting state in the view.
+-        observer.showStatus(step, field, time, weather);
++        bus.publish(new StepEvent(step, field, time, weather));
+     }
+ 
+     /**
+diff --git a/SimulatorView.java b/SimulatorView.java
+index a9b9d8f..afd4051 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -13,7 +13,7 @@ import java.util.Map;
+  *
+  * @version 01.03.22
+  */
+-public class SimulatorView extends JFrame implements SimulationObserver
++public class SimulatorView extends JFrame
+ {
+     // Colors used for empty locations.
+     private static final Color EMPTY_COLOR = Color.white;
+@@ -77,8 +77,17 @@ public class SimulatorView extends JFrame implements SimulationObserver
+         colors.put(animalClass, color);
+     }
+ 
+-    public void onColorRegistered(Class<?> entityClass, Color color) {
+-        setColor(entityClass, color);
++    /**
++     * Subscribe to all simulation events published on the given bus.
++     * Call this once at startup before the simulator runs.
++     */
++    public void subscribe(EventBus bus) {
++        bus.subscribe(StepEvent.class,
++                e -> showStatus(e.step, e.field, e.time, e.weather));
++        bus.subscribe(ColorRegistrationEvent.class,
++                e -> setColor(e.entityClass, e.color));
++        bus.subscribe(ViabilityCheckEvent.class,
++                e -> { if (!isViable(e.field)) e.veto(); });
+     }
+ 
+     /**
+diff --git a/StepEvent.java b/StepEvent.java
+new file mode 100644
+index 0000000..8ce6bf7
+--- /dev/null
++++ b/StepEvent.java
+@@ -0,0 +1,14 @@
++/** Published after each simulation step and after reset. */
++public class StepEvent {
++    public final int step;
++    public final Field field;
++    public final int time;
++    public final String weather;
++
++    public StepEvent(int step, Field field, int time, String weather) {
++        this.step = step;
++        this.field = field;
++        this.time = time;
++        this.weather = weather;
++    }
++}
+diff --git a/ViabilityCheckEvent.java b/ViabilityCheckEvent.java
+new file mode 100644
+index 0000000..a4d5deb
+--- /dev/null
++++ b/ViabilityCheckEvent.java
+@@ -0,0 +1,16 @@
++/**
++ * Published before each simulation step to determine whether to continue.
++ * Starts viable; a subscriber calls veto() to signal that the simulation
++ * should stop. The publisher reads isViable() after publish() returns.
++ */
++public class ViabilityCheckEvent {
++    public final Field field;
++    private boolean viable = true;
++
++    public ViabilityCheckEvent(Field field) {
++        this.field = field;
++    }
++
++    public boolean isViable() { return viable; }
++    public void veto() { viable = false; }
++}

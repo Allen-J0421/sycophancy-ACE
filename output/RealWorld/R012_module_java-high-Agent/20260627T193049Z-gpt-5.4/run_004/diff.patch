@@ -1,0 +1,333 @@
+diff --git a/FieldStats.java b/FieldStats.java
+index 3a8b9da..ba8e2bb 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -5,26 +5,22 @@
+  */
+ public class FieldStats
+ {
+-    // A shared weather object between the organisms and the simulator
+-    public static final Weather weather = Weather.getWeather();
+-    // The step of the simulation
+-    private int step;
++    private final SimulationRulesEngine rules;
+ 
+     /**
+      * Construct a FieldStats object.
+      */
+-    public FieldStats(int steps)
++    public FieldStats(SimulationRulesEngine rules)
+     {
+-        step = steps;
++        this.rules = rules;
+     }
+ 
+     /**
+      * Get details of what is in the current snapshot.
+      * @return A string describing the visible field state.
+      */
+-    public String getPopulationDetails(FieldSnapshot snapshot)
++    public String getPopulationDetails(FieldSnapshot snapshot, int step)
+     {
+-        ++step;
+         StringBuffer buffer = new StringBuffer();
+         for(Species species : snapshot.getPresentSpecies()) {
+             buffer.append(species.getDisplayName());
+@@ -32,20 +28,11 @@ public class FieldStats
+             buffer.append(snapshot.getPopulationCount(species));
+             buffer.append(' ');
+         }
+-        buffer.append("Weather: " + weather.getCurrentWeather());
+-        buffer.append(" Time: " + getTimeOfDay());
++        buffer.append("Weather: " + rules.getCurrentWeather());
++        buffer.append(" Time: " + rules.getTimeOfDay(step).getDisplayName());
+         return buffer.toString();
+     }
+     
+-    private String getTimeOfDay()
+-    {
+-        if(step % 80<=55)
+-        {
+-            return "Day";
+-        }
+-        return "Night";
+-    }
+-    
+     /**
+      * Determine whether the simulation is still viable.
+      * @return true If there is more than one species alive.
+diff --git a/SimulationRulesEngine.java b/SimulationRulesEngine.java
+new file mode 100644
+index 0000000..58a23ea
+--- /dev/null
++++ b/SimulationRulesEngine.java
+@@ -0,0 +1,89 @@
++/**
++ * Centralizes the event rules that control time-of-day and weather changes.
++ *
++ * @version 2022.03.02
++ */
++public class SimulationRulesEngine
++{
++    private static final int DAY_NIGHT_CYCLE_LENGTH = 80;
++    private static final int DAYLIGHT_DURATION = 55;
++    private static final int WEATHER_CHANGE_INTERVAL = 450;
++
++    private final Weather weather;
++
++    public SimulationRulesEngine()
++    {
++        this(Weather.getWeather());
++    }
++
++    public SimulationRulesEngine(Weather weather)
++    {
++        this.weather = weather;
++    }
++
++    /**
++     * Apply step-based environment events such as periodic weather changes.
++     *
++     * @param step The simulation step being executed.
++     */
++    public void applyStepEvents(int step)
++    {
++        if (step % WEATHER_CHANGE_INTERVAL == 0) {
++            weather.changeWeather();
++        }
++    }
++
++    /**
++     * Determine whether an organism should act during the current step.
++     *
++     * @param organism The organism being considered.
++     * @param step The current simulation step.
++     * @return True if the organism is active this step.
++     */
++    public boolean canAct(Organism organism, int step)
++    {
++        return getTimeOfDay(step).matches(organism.isDiurnal());
++    }
++
++    /**
++     * Return the time-of-day phase for the given step.
++     *
++     * @param step The current simulation step.
++     * @return The time-of-day phase.
++     */
++    public TimeOfDay getTimeOfDay(int step)
++    {
++        if (step % DAY_NIGHT_CYCLE_LENGTH <= DAYLIGHT_DURATION) {
++            return TimeOfDay.DAY;
++        }
++        return TimeOfDay.NIGHT;
++    }
++
++    /**
++     * Return the weather label for the current environment.
++     *
++     * @return The current weather name.
++     */
++    public String getCurrentWeather()
++    {
++        return weather.getCurrentWeather();
++    }
++
++    /**
++     * Set the weather explicitly.
++     *
++     * @param weatherName The new weather to apply.
++     */
++    public void setWeather(String weatherName)
++    {
++        weather.setWeather(weatherName);
++    }
++
++    /**
++     * Reset the event rules to their initial state.
++     */
++    public void reset()
++    {
++        weather.resetWeather();
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index b33d123..154270e 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -47,9 +47,6 @@ public class Simulator
+         new PopulationRule(PLANT_CREATION_PROBABILITY, Plant::new,
+                            Species.PLANT, Color.GREEN)
+     };
+-    // A shared Weather object between organisms and the simulator
+-    public static final Weather weather = Weather.getWeather();
+-
+ 
+     // List of animals in the field.
+     private List<Organism> organisms;
+@@ -59,6 +56,8 @@ public class Simulator
+     private int step;
+     // A graphical view of the simulation.
+     private SimulatorView view;
++    // Centralized engine for weather and time-of-day event rules.
++    private SimulationRulesEngine rules;
+     
+     /**
+      * Construct a simulation field with default size.
+@@ -84,9 +83,10 @@ public class Simulator
+         
+         organisms = new ArrayList<>();
+         field = new Field(depth, width);
++        rules = new SimulationRulesEngine();
+ 
+         // Create a view of the state of each location in the field.
+-        view = new SimulatorView(depth, width, step);
++        view = new SimulatorView(depth, width, rules);
+         for(PopulationRule rule : PRIMARY_POPULATION_RULES) {
+             view.setColor(rule.getSpecies(), rule.getColor());
+         }
+@@ -142,17 +142,14 @@ public class Simulator
+     public void simulateOneStep()
+     {
+         step++;
+-        randomWeather();
++        rules.applyStepEvents(step);
+         // Provide space for newborn animals.
+         List<Organism> newOrganisms = new ArrayList<>();        
+         // Let all rabbits act.
+         for(Iterator<Organism> it = organisms.iterator(); it.hasNext(); ) {
+             Organism organism = it.next();
+             
+-            if (organism.isDiurnal() && step % 80 <= 55) {
+-                organism.act(newOrganisms);
+-            }
+-            else if (!organism.isDiurnal() && step % 80 > 55) {
++            if (rules.canAct(organism, step)) {
+                 organism.act(newOrganisms);
+             }
+             if(! organism.isAlive()) {
+@@ -173,7 +170,7 @@ public class Simulator
+         step = 0;
+         organisms.clear();
+         populate();
+-        weather.resetWeather();
++        rules.reset();
+         
+         // Show the starting state in the view.
+         view.showStatus(step, field.createSnapshot());
+@@ -207,15 +204,6 @@ public class Simulator
+         }
+     }
+     
+-    /**
+-     * Randomises the weather
+-     */
+-    public void randomWeather() {
+-        if (step % 450 == 0) {
+-            weather.changeWeather();
+-        }
+-    }
+-
+     /**
+      * Populate one location by selecting the first species whose creation
+      * probability passes. Each cell can contain at most one organism.
+diff --git a/SimulatorView.java b/SimulatorView.java
+index bbf99c6..5a75e4a 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -27,27 +27,24 @@ public class SimulatorView extends JFrame
+     private final String POPULATION_PREFIX = "Population: ";
+     private JLabel stepLabel, population, infoLabel;
+     private FieldView fieldView;
+-    private int step;
+     
+     // A map for storing colors for participants in the simulation
+     private Map<Species, Color> colors;
+     // A statistics object computing and storing simulation information
+     private FieldStats stats;
+-    
+-    public static final Weather weather = Weather.getWeather();
++    private final SimulationRulesEngine rules;
+ 
+     /**
+      * Create a view of the given width and height.
+      * @param height The simulation's height.
+      * @param width  The simulation's width.
+      */
+-    public SimulatorView(int height, int width, int steps)
++    public SimulatorView(int height, int width, SimulationRulesEngine rules)
+     {
+-        stats = new FieldStats(steps);
++        this.rules = rules;
++        stats = new FieldStats(rules);
+         colors = new LinkedHashMap<>();
+-        
+-        step = steps;
+-        
++
+         setTitle("Animal Simulation");
+         stepLabel = new JLabel(STEP_PREFIX, JLabel.CENTER);
+         infoLabel = new JLabel("  ", JLabel.CENTER);
+@@ -93,17 +90,17 @@ public class SimulatorView extends JFrame
+     
+     private void SunnyButton()
+     {
+-        weather.setWeather("Sunny");
++        rules.setWeather("Sunny");
+     }
+     
+     private void RainyButton()
+     {
+-        weather.setWeather("Rainy");
++        rules.setWeather("Rainy");
+     }
+     
+     private void FoggyButton()
+     {
+-        weather.setWeather("Foggy");
++        rules.setWeather("Foggy");
+     }
+     
+     /**
+@@ -165,7 +162,7 @@ public class SimulatorView extends JFrame
+             }
+         }
+ 
+-        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(snapshot));
++        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(snapshot, step));
+         fieldView.repaint();
+     }
+ 
+diff --git a/TimeOfDay.java b/TimeOfDay.java
+new file mode 100644
+index 0000000..b9782ce
+--- /dev/null
++++ b/TimeOfDay.java
+@@ -0,0 +1,27 @@
++/**
++ * Day/night phases for the simulation event rules.
++ *
++ * @version 2022.03.02
++ */
++public enum TimeOfDay
++{
++    DAY("Day"),
++    NIGHT("Night");
++
++    private final String displayName;
++
++    TimeOfDay(String displayName)
++    {
++        this.displayName = displayName;
++    }
++
++    public String getDisplayName()
++    {
++        return displayName;
++    }
++
++    public boolean matches(boolean diurnal)
++    {
++        return diurnal ? this == DAY : this == NIGHT;
++    }
++}

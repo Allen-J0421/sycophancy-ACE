@@ -1,0 +1,296 @@
+diff --git a/Animal.java b/Animal.java
+index f4094a4..7a2dc18 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -124,14 +124,28 @@ public abstract class Animal extends Organism implements Actor
+     }
+ 
+     /**
+-     * Look for food adjacent to the current location.
+-     * Only the first food is eaten.
++     * Look for food adjacent to the current location. While scanning, the animal
++     * may catch a contact disease from a neighbour; it then eats the first
++     * organism in its diet (if still hungry).
+      * @return Where food was found, or null if it wasn't.
+      */
+     protected Location findFood()
++    {
++        // The adjacency is computed once and shared so both passes scan the same
++        // (already shuffled) order.
++        List<Location> adjacent = getField().adjacentLocations(getLocation());
++        maybeContractContactDisease(adjacent);
++        return eatFromAdjacent(adjacent);
++    }
++
++    /**
++     * Possibly catch a non-CONTACT-type disease from the first diseased
++     * neighbour encountered (hunters excluded).
++     * @param adjacent The adjacent locations to scan.
++     */
++    private void maybeContractContactDisease(List<Location> adjacent)
+     {
+         Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+         for(Location loc : adjacent){
+             if(field.getObjectAt(loc) != null && !(field.getObjectAt(loc) instanceof Hunter)){
+                 Organism organism = (Organism) field.getObjectAt(loc);
+@@ -142,6 +156,17 @@ public abstract class Animal extends Organism implements Actor
+                 }
+             }
+         }
++    }
++
++    /**
++     * Eat the first adjacent organism that is in this animal's diet, provided it
++     * is still hungry. Foodborne disease may be contracted from the meal.
++     * @param adjacent The adjacent locations to scan.
++     * @return Where food was found, or null if it wasn't.
++     */
++    private Location eatFromAdjacent(List<Location> adjacent)
++    {
++        Field field = getField();
+         Iterator<Location> it = adjacent.iterator();
+         // only eats if it's not full (food level less than max)
+         while(it.hasNext() && foodLevel <= traits.getMaxFoodLevel()) {
+diff --git a/ReferenceHarness.java b/ReferenceHarness.java
+deleted file mode 100644
+index d2d2693..0000000
+--- a/ReferenceHarness.java
++++ /dev/null
+@@ -1,171 +0,0 @@
+-import java.util.*;
+-
+-/**
+- * Ground-truth reference: replicates the ORIGINAL baseline Simulator's exact
+- * if-else populate() + inline simulateOneStep() loop (verbatim from commit
+- * 1cf94f0, with the behaviour-preserving STEPS_PER_STAGE->getStepsPerStage
+- * rename), driving the CURRENT model classes.
+- *
+- * If this produces the same fingerprint as RegressionHarness (which drives the
+- * new SimulationEngine), the engine extraction faithfully reproduces the
+- * original orchestration. Verification artifact only.
+- */
+-public class ReferenceHarness
+-{
+-    static final int DEPTH = 160, WIDTH = 240, STEPS = 150, HUNTER_LIMIT = 5;
+-    static int hunterCount = 0;
+-    static final Map<Class<?>, Double> CREATION_PROBABILITIES = Map.ofEntries(
+-            Map.entry(Coyote.class, 0.010), Map.entry(Deer.class, 0.080),
+-            Map.entry(Wolf.class, 0.010), Map.entry(Eagle.class, 0.01),
+-            Map.entry(Mouse.class, 0.080), Map.entry(Grass.class, 0.030),
+-            Map.entry(Hunter.class, 0.03));
+-
+-    static Field field;
+-    static Environment environment;
+-    static List<Actor> actors;
+-    static Random rand;
+-    static int step;
+-
+-    static final List<Class<?>> SPAWN_ORDER = List.of(
+-            Grass.class, Deer.class, Coyote.class, Wolf.class, Eagle.class, Mouse.class, Hunter.class);
+-
+-    public static void main(String[] a)
+-    {
+-        boolean dataDriven = a.length > 0 && a[0].equals("datadriven");
+-        Randomizer.reset();
+-        rand = Randomizer.getRandom();
+-        field = new Field(DEPTH, WIDTH);
+-        environment = new Environment(new Time(), new Weather());
+-        actors = new ArrayList<>();
+-
+-        // baseline reset(): populate then reset time
+-        if (dataDriven) populateDataDriven(); else populate();
+-        environment.getTime().reset();
+-        System.out.println("MODE=" + (dataDriven ? "datadriven" : "ifelse"));
+-
+-        boolean verbose = a.length > 1 && a[1].equals("verbose");
+-        long fingerprint = 1469598103934665603L;
+-        for (step = 1; step <= STEPS; step++) {
+-            simulateOneStep();
+-            long sig = signature(field, step);
+-            if (verbose) System.out.println(step + "," + sig);
+-            fingerprint = mix(fingerprint, sig);
+-        }
+-        System.out.println("FINGERPRINT=" + fingerprint);
+-    }
+-
+-    static void simulateOneStep()
+-    {
+-        environment.getTime().incrementTime();
+-        environment.getWeather().checkWeatherChange(step);
+-
+-        List<Actor> newActors = new ArrayList<>();
+-        for (Iterator<Actor> it = actors.iterator(); it.hasNext(); ) {
+-            Actor actor = it.next();
+-            if (actor instanceof Animal) {
+-                if (((Animal) actor).isAwake(environment)) {
+-                    if (((Animal) actor).isDiseased() && ((Animal) actor).getDisease().getPropagationRate() <= rand.nextDouble()) {
+-                        ((Animal) actor).setDead();
+-                    }
+-                    actor.act(newActors, environment);
+-                }
+-            } else {
+-                actor.act(newActors, environment);
+-            }
+-            if (actor instanceof Plant) {
+-                if (step % ((Plant) actor).getStepsPerStage() == 0) {
+-                    ((Plant) actor).incrementGrowth();
+-                }
+-            }
+-            if (!actor.isAlive()) {
+-                it.remove();
+-            }
+-        }
+-        actors.addAll(newActors);
+-        plantGrassInPatches();
+-    }
+-
+-    static void plantGrassInPatches()
+-    {
+-        for (Location location : field.getRandomFreePatches(CREATION_PROBABILITIES.get(Grass.class))) {
+-            if (rand.nextDouble() <= CREATION_PROBABILITIES.get(Grass.class) && environment.getWeather().getCurrentWeather() == WeatherType.RAINING) {
+-                actors.add(new Grass(field, location));
+-            }
+-        }
+-    }
+-
+-    static void populate()
+-    {
+-        field.clear();
+-        for (int row = 0; row < field.getDepth(); row++) {
+-            for (int col = 0; col < field.getWidth(); col++) {
+-                Animal.Gender sex = Randomizer.getRandomSex();
+-                Location location = new Location(row, col);
+-                if (rand.nextDouble() <= CREATION_PROBABILITIES.get(Grass.class)) {
+-                    actors.add(new Grass(field, location));
+-                } else if (rand.nextDouble() <= CREATION_PROBABILITIES.get(Deer.class)) {
+-                    actors.add(new Deer(true, field, location, sex));
+-                } else if (rand.nextDouble() <= CREATION_PROBABILITIES.get(Coyote.class)) {
+-                    actors.add(new Coyote(true, field, location, sex));
+-                } else if (rand.nextDouble() <= CREATION_PROBABILITIES.get(Wolf.class)) {
+-                    actors.add(new Wolf(true, field, location, sex));
+-                } else if (rand.nextDouble() <= CREATION_PROBABILITIES.get(Eagle.class)) {
+-                    actors.add(new Eagle(true, field, location, sex));
+-                } else if (rand.nextDouble() <= CREATION_PROBABILITIES.get(Mouse.class)) {
+-                    actors.add(new Mouse(true, field, location, sex));
+-                } else if (rand.nextDouble() <= CREATION_PROBABILITIES.get(Hunter.class)) {
+-                    if (!(hunterCount >= HUNTER_LIMIT)) {
+-                        actors.add(new Hunter(field, location, environment));
+-                        hunterCount++;
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    static void populateDataDriven()
+-    {
+-        field.clear();
+-        for (int row = 0; row < field.getDepth(); row++) {
+-            for (int col = 0; col < field.getWidth(); col++) {
+-                Animal.Gender sex = Randomizer.getRandomSex();
+-                Location location = new Location(row, col);
+-                for (Class<?> species : SPAWN_ORDER) {
+-                    if (rand.nextDouble() <= CREATION_PROBABILITIES.get(species)) {
+-                        Actor actor = null;
+-                        if (species == Grass.class) actor = new Grass(field, location);
+-                        else if (species == Deer.class) actor = new Deer(true, field, location, sex);
+-                        else if (species == Coyote.class) actor = new Coyote(true, field, location, sex);
+-                        else if (species == Wolf.class) actor = new Wolf(true, field, location, sex);
+-                        else if (species == Eagle.class) actor = new Eagle(true, field, location, sex);
+-                        else if (species == Mouse.class) actor = new Mouse(true, field, location, sex);
+-                        else if (species == Hunter.class) {
+-                            if (!(hunterCount >= HUNTER_LIMIT)) { actor = new Hunter(field, location, environment); hunterCount++; }
+-                        }
+-                        if (actor != null) actors.add(actor);
+-                        break;
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    static long signature(Field field, int step)
+-    {
+-        long s = 1469598103934665603L ^ step;
+-        for (int row = 0; row < field.getDepth(); row++) {
+-            for (int col = 0; col < field.getWidth(); col++) {
+-                Object o = field.getObjectAt(row, col);
+-                long cell = 0;
+-                if (o != null) {
+-                    cell = o.getClass().getName().hashCode();
+-                    if (o instanceof Organism && ((Organism) o).isDiseased()) cell = cell * 7 + 3;
+-                }
+-                s = (s ^ cell) * 1099511628211L;
+-            }
+-        }
+-        return s;
+-    }
+-
+-    static long mix(long h, long v) { h ^= v; h *= 1099511628211L; return h; }
+-}
+diff --git a/RegressionHarness.java b/RegressionHarness.java
+deleted file mode 100644
+index 8668b3d..0000000
+--- a/RegressionHarness.java
++++ /dev/null
+@@ -1,59 +0,0 @@
+-import java.util.*;
+-
+-/**
+- * Headless regression harness. Drives the REAL SimulationEngine (no copied
+- * loop) and FNV-hashes per-step class counts. Deterministic via the fixed-seed
+- * Randomizer. Expected fingerprint after the engine extraction = the same value
+- * the copied-loop harness produced for the default path: -2010090214429012298.
+- *
+- * NOT part of the shipped simulation - a verification artifact only.
+- */
+-public class RegressionHarness
+-{
+-    private static final int DEPTH = 160;
+-    private static final int WIDTH = 240;
+-    private static final int STEPS = 150;
+-
+-    public static void main(String[] args)
+-    {
+-        Randomizer.reset();
+-
+-        SimulationEngine engine = new SimulationEngine(DEPTH, WIDTH);
+-        engine.reset();
+-
+-        boolean verbose = args.length > 0 && args[0].equals("verbose");
+-        long fingerprint = 1469598103934665603L; // FNV-1a offset basis
+-        for (int step = 1; step <= STEPS; step++) {
+-            engine.step();
+-            long sig = signature(engine.getField(), step);
+-            if (verbose) System.out.println(step + "," + sig);
+-            fingerprint = mix(fingerprint, sig);
+-        }
+-        System.out.println("FINGERPRINT=" + fingerprint);
+-    }
+-
+-    private static long signature(Field field, int step)
+-    {
+-        // Position-sensitive: hash the class (and diseased flag) at every cell.
+-        long s = 1469598103934665603L ^ step;
+-        for (int row = 0; row < field.getDepth(); row++) {
+-            for (int col = 0; col < field.getWidth(); col++) {
+-                Object o = field.getObjectAt(row, col);
+-                long cell = 0;
+-                if (o != null) {
+-                    cell = o.getClass().getName().hashCode();
+-                    if (o instanceof Organism && ((Organism) o).isDiseased()) cell = cell * 7 + 3;
+-                }
+-                s = (s ^ cell) * 1099511628211L;
+-            }
+-        }
+-        return s;
+-    }
+-
+-    private static long mix(long h, long v)
+-    {
+-        h ^= v;
+-        h *= 1099511628211L; // FNV prime
+-        return h;
+-    }
+-}

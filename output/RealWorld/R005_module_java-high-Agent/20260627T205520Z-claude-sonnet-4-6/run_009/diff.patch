@@ -1,0 +1,246 @@
+diff --git a/Animal.java b/Animal.java
+index 2840850..2d23465 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -30,6 +30,8 @@ public class Animal extends Species
+     private static final double FOOD_LEVEL_FULL_MULTIPLIER = 1.5;
+     // Temperature offset above minimum at which hibernating animals enter hibernation
+     private static final int HIBERNATION_TEMPERATURE_OFFSET = 5;
++    // Divisor used to compute the lower bound of a newborn's initial food level
++    private static final int INITIAL_FOOD_LEVEL_MIN_DIVISOR = 2;
+ 
+     // Fields prone to change during the animal's life
+ 
+@@ -159,7 +161,7 @@ public class Animal extends Species
+         }
+ 
+         // Eats if it is possible
+-        if (isNotFull()) {
++        if (canEat()) {
+             findFoodAndEat();
+         }
+ 
+@@ -219,9 +221,9 @@ public class Animal extends Species
+     }
+     
+     /**
+-     * @return (boolean) true if the animal is not full and therefore can eat and false if it is full.
++     * @return (boolean) true if the animal can eat (food level below the fullness threshold).
+      */
+-    protected boolean isNotFull()
++    protected boolean canEat()
+     {
+         return foodLevel < getNutritionalValue() * FOOD_LEVEL_FULL_MULTIPLIER;
+     }
+@@ -245,7 +247,7 @@ public class Animal extends Species
+             if (species instanceof Plant) {
+                 Plant plant = (Plant) species;
+                 if (plant.isAlive()) {
+-                    plant.isEaten();
++                    plant.eaten();
+                     incrementFoodLevel(plant.getNutritionalValue());
+                     break;
+                 }
+@@ -314,7 +316,7 @@ public class Animal extends Species
+      */
+     private int randomFoodLevel()
+     {
+-        int lowBound = getNutritionalValue()/2;
++        int lowBound = getNutritionalValue() / INITIAL_FOOD_LEVEL_MIN_DIVISOR;
+         return rand.nextInt(lowBound) + lowBound;
+     }
+ 
+diff --git a/ClimateScenarios.java b/ClimateScenarios.java
+index 4241bdf..b3a89c7 100644
+--- a/ClimateScenarios.java
++++ b/ClimateScenarios.java
+@@ -10,6 +10,7 @@ public enum ClimateScenarios
+ 
+     private final String label;
+     private double concreteChange;
++    private final double initialConcreteChange;
+     private final double changePercentage;
+ 
+     /**
+@@ -23,6 +24,7 @@ public enum ClimateScenarios
+     {
+         this.label = label;
+         this.concreteChange = concreteChange;
++        this.initialConcreteChange = concreteChange;
+         this.changePercentage = changePercentage;
+     }
+ 
+@@ -63,4 +65,12 @@ public enum ClimateScenarios
+     {
+         concreteChange = concreteChange + (changePercentage * concreteChange);
+     }
++
++    /**
++     * Reset concreteChange to its initial value so each simulation run starts from the base scenario.
++     */
++    public void reset()
++    {
++        concreteChange = initialConcreteChange;
++    }
+ }
+diff --git a/Field.java b/Field.java
+index 8382c9f..18407aa 100644
+--- a/Field.java
++++ b/Field.java
+@@ -140,14 +140,8 @@ public class Field
+      */
+     public Location freeAdjacentLocation(Location location)
+     {
+-        // The available free ones.
+         List<Location> free = getFreeAdjacentLocations(location);
+-        if(free.size() > 0) {
+-            return free.get(0);
+-        }
+-        else {
+-            return null;
+-        }
++        return free.isEmpty() ? null : free.get(0);
+     }
+ 
+     /**
+diff --git a/Habitat.java b/Habitat.java
+index 1b8f2d5..7658c5a 100644
+--- a/Habitat.java
++++ b/Habitat.java
+@@ -46,6 +46,7 @@ public class Habitat
+         initialiseSeasons(spring, summer, autumn, winter);
+         currentSeason = seasons.get(0);   // the simulation always starts with spring
+         isSpring = true;
++        changeScenario.reset(); // reset scenario to base value so each simulation starts fresh
+         climateChangeEffect(); // do the climate change effect on the first season
+     }
+ 
+diff --git a/Initializer.java b/Initializer.java
+index fbdb390..5a787d0 100644
+--- a/Initializer.java
++++ b/Initializer.java
+@@ -97,6 +97,9 @@ public class Initializer
+         Field field = new Field(DEFAULT_DEPTH, DEFAULT_WIDTH);
+         ClimateScenarios chosenClimateChangeScenario = ClimateScenarios.fromLabel(scenarioName);
+         Habitat simulationHabitat = createHabitat(chosenHabitat, simulatorStepCounter, chosenClimateChangeScenario);
++        if (simulationHabitat == null) {
++            return null;
++        }
+         if (getNumberOfPlants() + getNumberOfAnimals(animalsToCreate) > calculateFieldArea()) {
+             ErrorThrower.throwMessage("Too many animals were added for this habitat, please reduce the number of animals and try again");
+             return null;
+@@ -139,49 +142,39 @@ public class Initializer
+     private void populateWithAnimals(HashMap<String, Integer> animalsToCreate, Field field)
+     {
+         idxOfColorToUseNext = 0;
+-        Location freeLocationToPlaceAnimal;
+ 
+         for(String animalName : animalsToCreate.keySet()) {
+-            animalReader.extractDataFor(animalName);
+-            if (animalsToCreate.get(animalName) != 0)
+-            {
+-                // Retrieve appropriate data.
+-                String name = animalReader.getName();
+-                int maximumTemperature = animalReader.getMaximumTemperature();
+-                int minimumTemperature = animalReader.getMinimumTemperature();
+-                int maxAge = animalReader.getMaximumAge();
+-                int breedingAge = animalReader.getBreedingAge();
+-                double breedingProbability = animalReader.getBreedingProbability();
+-                int maxLitterSize = animalReader.getMaxLitterSize();
+-                int nutritionalValue = animalReader.getNutritionalValue();
+-                boolean hibernates = animalReader.canHibernate();
+-                boolean isNocturnal = animalReader.isNocturnal();
++            int count = animalsToCreate.get(animalName);
++            if (count == 0) continue;
+ 
+-                if (animalReader.isPredator()) {
+-                    // Predator object should be created, retrieving appropriate data.
+-                    int strength = animalReader.getStrength();
++            animalReader.extractDataFor(animalName);
++            String name = animalReader.getName();
++            int maximumTemperature = animalReader.getMaximumTemperature();
++            int minimumTemperature = animalReader.getMinimumTemperature();
++            int maxAge = animalReader.getMaximumAge();
++            int breedingAge = animalReader.getBreedingAge();
++            double breedingProbability = animalReader.getBreedingProbability();
++            int maxLitterSize = animalReader.getMaxLitterSize();
++            int nutritionalValue = animalReader.getNutritionalValue();
++            boolean hibernates = animalReader.canHibernate();
++            boolean isNocturnal = animalReader.isNocturnal();
+ 
+-                    // Creating the right number of Predator objects.
+-                    for (int i = 0; i < animalsToCreate.get(animalName); i++) {
+-                        freeLocationToPlaceAnimal = findAvailableLocation(field);
+-                        Predator newPredator = new Predator(strength, field, freeLocationToPlaceAnimal, name, maximumTemperature, minimumTemperature, nutritionalValue, breedingProbability, maxAge, breedingAge, maxLitterSize, RANDOM_ANIMAL_AGE, hibernates, isNocturnal);
+-                        speciesToEvolveInSimulation.add(newPredator);
+-                    }
++            if (animalReader.isPredator()) {
++                int strength = animalReader.getStrength();
++                for (int i = 0; i < count; i++) {
++                    Location loc = findAvailableLocation(field);
++                    speciesToEvolveInSimulation.add(new Predator(strength, field, loc, name, maximumTemperature, minimumTemperature, nutritionalValue, breedingProbability, maxAge, breedingAge, maxLitterSize, RANDOM_ANIMAL_AGE, hibernates, isNocturnal));
+                 }
+-                else {
+-                    // Animal object should be created
+-                    // Creating the right number of Animal objects.
+-                    for (int i = 0; i < animalsToCreate.get(animalName); i++) {
+-                        freeLocationToPlaceAnimal = findAvailableLocation(field);
+-                        Animal newAnimal = new Animal(field, freeLocationToPlaceAnimal, name, maximumTemperature, minimumTemperature, nutritionalValue, breedingProbability, maxAge, breedingAge, maxLitterSize, RANDOM_ANIMAL_AGE, hibernates, isNocturnal);
+-                        speciesToEvolveInSimulation.add(newAnimal);
+-                    }
++            }
++            else {
++                for (int i = 0; i < count; i++) {
++                    Location loc = findAvailableLocation(field);
++                    speciesToEvolveInSimulation.add(new Animal(field, loc, name, maximumTemperature, minimumTemperature, nutritionalValue, breedingProbability, maxAge, breedingAge, maxLitterSize, RANDOM_ANIMAL_AGE, hibernates, isNocturnal));
+                 }
+-
+-                // Setting the color for this species.
+-                view.setColor(name, listOfColorsForAnimals.get(idxOfColorToUseNext));
+-                idxOfColorToUseNext ++;
+             }
++
++            view.setColor(name, listOfColorsForAnimals.get(idxOfColorToUseNext));
++            idxOfColorToUseNext++;
+         }
+     }
+ 
+diff --git a/Plant.java b/Plant.java
+index 8fa716b..357cd20 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -154,7 +154,7 @@ public class Plant extends Species
+      * The effect of getting eaten by an animal.
+      * Decrement currentHealth by one, and set dead if the current health is less than 1.
+      */
+-    public void isEaten()
++    public void eaten()
+     {
+         currentHealth--;
+ 
+diff --git a/Predator.java b/Predator.java
+index 57a61dc..a9047a3 100644
+--- a/Predator.java
++++ b/Predator.java
+@@ -63,7 +63,7 @@ public class Predator extends Animal
+ 
+             // Move towards a source of food if found.
+             Location newLocation = null;
+-            if (isNotFull()) {
++            if (canEat()) {
+                 newLocation = findFoodAndEat(neighboringAnimals);
+             } 
+ 
+diff --git a/Species.java b/Species.java
+index 2898f95..4e4e315 100644
+--- a/Species.java
++++ b/Species.java
+@@ -10,7 +10,7 @@ import java.util.Random;
+  */
+ public abstract class Species
+ {
+-    // The probability for an individual to die if exposed to too high or too cold temperatures. Can be adjusted for simulation realism purposes.
++    // The probability for an individual to die if exposed to too high or too cold temperatures.
+     private static final double DYING_OF_COLD_OR_HEAT_PROBABILITY = 0.8;
+     // Whether the species is alive or not.
+     private boolean alive;

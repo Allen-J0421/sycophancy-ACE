@@ -1,0 +1,372 @@
+diff --git a/ActorPopulation.java b/ActorPopulation.java
+new file mode 100644
+index 0000000..bbca0a9
+--- /dev/null
++++ b/ActorPopulation.java
+@@ -0,0 +1,64 @@
++import java.util.ArrayList;
++import java.util.Iterator;
++import java.util.List;
++
++/**
++ * Tracks a homogeneous population of actors and applies per-step updates.
++ */
++public class ActorPopulation<T extends Actor>
++{
++    private final Class<T> actorType;
++    private final List<T> actors;
++
++    public ActorPopulation(Class<T> actorType)
++    {
++        this.actorType = actorType;
++        this.actors = new ArrayList<>();
++    }
++
++    public void add(T actor)
++    {
++        actors.add(actor);
++    }
++
++    public void clear()
++    {
++        actors.clear();
++    }
++
++    public int size()
++    {
++        return actors.size();
++    }
++
++    public T get(int index)
++    {
++        return actors.get(index);
++    }
++
++    public void simulateStep(Weather weather, DayState dayState)
++    {
++        List<Actor> newborns = new ArrayList<>();
++        for(Iterator<T> it = actors.iterator(); it.hasNext(); ) {
++            T actor = it.next();
++            actor.act(newborns, weather, dayState);
++            if(!actor.isAlive()) {
++                it.remove();
++            }
++        }
++        appendNewActors(newborns);
++    }
++
++    private void appendNewActors(List<Actor> newborns)
++    {
++        for (Actor actor : newborns) {
++            if(!actorType.isInstance(actor)) {
++                throw new IllegalStateException(
++                    "Expected newborn actor of type " + actorType.getSimpleName()
++                        + " but got " + actor.getClass().getSimpleName()
++                );
++            }
++            actors.add(actorType.cast(actor));
++        }
++    }
++}
+diff --git a/Location.java b/Location.java
+index d76bb33..49a3258 100644
+--- a/Location.java
++++ b/Location.java
+@@ -6,8 +6,8 @@
+ public class Location
+ {
+     // Row and column positions.
+-    private int row;
+-    private int col;
++    private final int row;
++    private final int col;
+ 
+     /**
+      * Represent a row and column.
+@@ -23,6 +23,7 @@ public class Location
+     /**
+      * Implement content equality.
+      */
++    @Override
+     public boolean equals(Object obj)
+     {
+         if(obj instanceof Location) {
+@@ -38,6 +39,7 @@ public class Location
+      * Return a string of the form row,column
+      * @return A string representation of the location.
+      */
++    @Override
+     public String toString()
+     {
+         return row + "," + col;
+@@ -49,6 +51,7 @@ public class Location
+      * unique hash code for each (row, col) pair.
+      * @return A hashcode for the location.
+      */
++    @Override
+     public int hashCode()
+     {
+         return (row << 16) + col;
+diff --git a/PopulationGenerator.java b/PopulationGenerator.java
+index 1456ba3..36af2d0 100644
+--- a/PopulationGenerator.java
++++ b/PopulationGenerator.java
+@@ -1,5 +1,4 @@
+ import java.util.Random;
+-import java.util.List;
+ /**
+  * A class responsible for generating the population,
+  * as well as setting up the colours associated with each animal and plant class.
+@@ -70,18 +69,17 @@ public class PopulationGenerator
+     /**
+      * Populate the grid with animals and plants, infect the animals.
+      * 
+-     * @param animals The list of Actor objects representing animals in the simulation
+-     * @param plants The list of Plant objects representing plants in the simulation
++     * @param population The population to populate.
+      */
+-    public void populate(List<Actor> animals , List<Actor> plants)
++    public void populate(SimulationPopulation population)
+     {
+         field.clear();
+-        populateAnimals(animals);
+-        infectInitialAnimals(animals);
+-        populatePlants(plants);
++        populateAnimals(population);
++        population.infectInitialAnimals(INITIAL_INFECTION_COUNT);
++        populatePlants(population);
+     }
+ 
+-    private void populateAnimals(List<Actor> animals)
++    private void populateAnimals(SimulationPopulation population)
+     {
+         Random rand = Randomizer.getRandom();
+         for(int row = 0; row < field.getDepth(); row++) {
+@@ -89,21 +87,13 @@ public class PopulationGenerator
+                 Location location = new Location(row, col);
+                 Animal animal = createAnimalAt(rand, location);
+                 if(animal != null) {
+-                    animals.add(animal);
++                    population.addAnimal(animal);
+                 }
+             }
+         }
+     }
+ 
+-    private void infectInitialAnimals(List<Actor> animals)
+-    {
+-        int infectedCount = Math.min(INITIAL_INFECTION_COUNT, animals.size());
+-        for (int i = 0; i < infectedCount; i++) {
+-            ((Animal) animals.get(i)).setInfectionTimestamp(0);
+-        }
+-    }
+-
+-    private void populatePlants(List<Actor> plants)
++    private void populatePlants(SimulationPopulation population)
+     {
+         Random rand = Randomizer.getRandom();
+         for(int row = 0; row < field.getDepth(); row++) {
+@@ -111,7 +101,7 @@ public class PopulationGenerator
+                 Location location = new Location(row, col);
+                 Plant plant = createPlantAt(rand, location);
+                 if(plant != null) {
+-                    plants.add(plant);
++                    population.addPlant(plant);
+                 }
+             }
+         }
+diff --git a/Randomizer.java b/Randomizer.java
+index c268b60..1d12d7c 100644
+--- a/Randomizer.java
++++ b/Randomizer.java
+@@ -6,7 +6,7 @@ import java.util.Random;
+  *
+  * @version 2016.02.29
+  */
+-public class Randomizer
++public final class Randomizer
+ {
+     // The default seed for control of randomization.
+     private static final int SEED = 1111;
+@@ -18,7 +18,7 @@ public class Randomizer
+     /**
+      * Constructor for objects of class Randomizer
+      */
+-    public Randomizer()
++    private Randomizer()
+     {
+     }
+ 
+diff --git a/SimulationPopulation.java b/SimulationPopulation.java
+new file mode 100644
+index 0000000..423469f
+--- /dev/null
++++ b/SimulationPopulation.java
+@@ -0,0 +1,44 @@
++/**
++ * Owns the live animal and plant populations in the simulation.
++ */
++public class SimulationPopulation
++{
++    private final ActorPopulation<Animal> animals;
++    private final ActorPopulation<Plant> plants;
++
++    public SimulationPopulation()
++    {
++        animals = new ActorPopulation<>(Animal.class);
++        plants = new ActorPopulation<>(Plant.class);
++    }
++
++    public void addAnimal(Animal animal)
++    {
++        animals.add(animal);
++    }
++
++    public void addPlant(Plant plant)
++    {
++        plants.add(plant);
++    }
++
++    public void clear()
++    {
++        animals.clear();
++        plants.clear();
++    }
++
++    public void infectInitialAnimals(int count)
++    {
++        int infectedCount = Math.min(count, animals.size());
++        for (int i = 0; i < infectedCount; i++) {
++            animals.get(i).setInfectionTimestamp(0);
++        }
++    }
++
++    public void simulateStep(Weather weather, DayState dayState)
++    {
++        plants.simulateStep(weather, dayState);
++        animals.simulateStep(weather, dayState);
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index e635c1f..62e9ee8 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -1,6 +1,3 @@
+-import java.util.List;
+-import java.util.ArrayList;
+-import java.util.Iterator;
+ import java.util.NavigableMap;
+ /**
+  * A simple predator-prey simulator, based on a rectangular field
+@@ -23,24 +20,22 @@ public class Simulator
+                                    STATE
+     //////////////////////////////////////////////////////////////*/
+     
+-    // List of animals in the field.
+-    private List<Actor> animals;
+-    private List<Actor> plants;
++    private final SimulationPopulation population;
+     // The current state of the field.
+-    private Field field;
++    private final Field field;
+     
+-    private SimulatorClock clock;
+-    private WeatherHandler weatherHandler;
++    private final SimulatorClock clock;
++    private final WeatherHandler weatherHandler;
+     // The current step of the simulation.
+     private int step;
+     // A graphical view of the simulation.
+-    private SimulatorView view;
++    private final SimulatorView view;
+     // handles the simulation of the disease
+-    private DiseaseHandler diseaseHandler;
++    private final DiseaseHandler diseaseHandler;
+     // swing component dashboard
+     private Dashboard dashboard;
+     // generator for the initial terrain and population
+-    private PopulationGenerator populationGenerator;
++    private final PopulationGenerator populationGenerator;
+     
+     /*///////////////////////////////////////////////////////////////
+                                 CONSTRUCTORS
+@@ -71,8 +66,7 @@ public class Simulator
+             width = DEFAULT_WIDTH;
+         }
+         
+-        animals = new ArrayList<>();
+-        plants = new ArrayList<>();
++        population = new SimulationPopulation();
+         field = new Field(depth, width);
+         clock = new SimulatorClock();
+         weatherHandler = new WeatherHandler(clock);
+@@ -116,7 +110,6 @@ public class Simulator
+     {
+         for(int step = 1; step <= numSteps && view.isViable(field); step++) {
+             simulateOneStep();
+-            //delay(1000);   // uncomment this to run more slowly
+         }
+     }
+     
+@@ -131,12 +124,7 @@ public class Simulator
+         clock.incrementStep();
+         weatherHandler.updateWeather();
+         diseaseHandler.simulateDiseaseStep();
+-        
+-        List<Actor> newAnimals = new ArrayList<>();
+-        List<Actor> newPlants = new ArrayList<>();
+-        
+-        actorsAct(plants, newPlants);
+-        actorsAct(animals, newAnimals);        
++        population.simulateStep(weatherHandler.getWeather(), clock.getDayState());
+         
+         view.showStatus(step, field, clock, weatherHandler.getWeather());
+ 
+@@ -154,9 +142,8 @@ public class Simulator
+         clock.reset();
+         weatherHandler.reset();
+         diseaseHandler.reset();
+-        animals.clear();
+-        plants.clear();
+-        populationGenerator.populate(animals, plants);
++        population.clear();
++        populationGenerator.populate(population);
+         
+         // Show the starting state in the view.
+         view.showStatus(step, field, clock, weatherHandler.getWeather());
+@@ -169,35 +156,4 @@ public class Simulator
+     {
+         return diseaseHandler.getInfectionCounts();
+     }
+-    
+-    /**
+-     * Iterates through a set of actors and makes them act, die if they are dead and subsequently adds the newborns.
+-     * 
+-     * @param actors List of all actors in the field.
+-     * @param newActors List of newborns after actors act.
+-     */
+-    private void actorsAct(List<Actor> actors, List<Actor> newActors) {
+-        for(Iterator<Actor> it = actors.iterator(); it.hasNext(); ) {
+-            Actor actor = it.next();
+-            actor.act(newActors, weatherHandler.getWeather(), clock.getDayState());
+-            if(! actor.isAlive()) {
+-                it.remove();
+-            }
+-        }
+-        actors.addAll(newActors);
+-    }
+-    
+-    /**
+-     * Pause for a given time.
+-     * 
+-     * @param millisec The time to pause for, in milliseconds.
+-     */
+-    private void delay(int millisec)
+-    {
+-        try {
+-            Thread.sleep(millisec);
+-        }
+-        catch (InterruptedException ie) {
+-        }
+-    }
+ }

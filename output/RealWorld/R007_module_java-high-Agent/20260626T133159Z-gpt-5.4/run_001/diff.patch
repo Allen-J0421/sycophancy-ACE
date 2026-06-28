@@ -1,0 +1,1101 @@
+diff --git a/Animal.java b/Animal.java
+index 4e34d9d..677901e 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -14,12 +14,6 @@ public abstract class Animal extends Creature
+ 
+     // The amount of oxygen an animal need to survive
+     protected static final double ANIMAL_OXYGEN_REQUIRED = 0.0000009;
+-    // The possibility that an animal may be infected by a disease.
+-    protected static final double INFECTION_RATE = 1;
+-    // The possibility an animal may die of a disease.
+-    protected static final double MORTALITY_RATE = 1;
+-    // The steps an animal need to withstand in order to get immunity
+-    protected static final int stepStandNum = 3;
+ 
+     // If the animal is infected by disease.
+     private boolean isInfected;
+@@ -58,6 +52,14 @@ public abstract class Animal extends Creature
+ 
+     public abstract Location search(Disease disease, int step);
+ 
++    protected abstract void incrementAge();
++
++    protected abstract void incrementHunger();
++
++    protected abstract void giveBirth(List<Creature> newAnimals);
++
++    protected abstract void setFoodLevel(int foodLevel);
++
+     /**
+      * identify whether a creature need to sleep
+      * 
+@@ -103,6 +105,35 @@ public abstract class Animal extends Creature
+         this.isImmuned = isImmuned;
+     }
+ 
++    /**
++     * Run one simulation step for an animal.
++     *
++     * @return the oxygen level the species consumed after action.
++     */
++    public final double act(List<Creature> newAnimals, boolean atDayTime, double oxygenLevel,
++                            Disease disease, int step)
++    {
++        if(oxygenLevel < ANIMAL_OXYGEN_REQUIRED) {
++            setDead();
++            return 0;
++        }
++
++        if(dieOfInfection(disease)) {
++            return 0;
++        }
++
++        ifCanGrantImmunity(disease, step);
++        incrementAge();
++        incrementHunger();
++
++        if(isAlive() && !needSleep(atDayTime)) {
++            giveBirth(newAnimals);
++            moveTo(search(disease, step));
++        }
++
++        return -ANIMAL_OXYGEN_REQUIRED;
++    }
++
+     /**
+      *  Make an animal infected while the disease exists.
+      *  
+@@ -110,12 +141,9 @@ public abstract class Animal extends Creature
+      *  @param step current step.
+      */
+     protected void makeInfected(Disease disease, int step){
+-        if((!this.getIsImmuned()) && Randomizer.getRandom().nextDouble() <= disease.INFECTION_RATE)
+-            setIsInfected(true);  
+-
+-        //if the animal is infected in current step, record its start step.
+-        if(getIsInfected() && infectionStartStep == 0)
+-            infectionStartStep = step;
++        if((!this.getIsImmuned()) && Randomizer.getRandom().nextDouble() <= disease.INFECTION_RATE) {
++            infect(step);
++        }
+     }
+ 
+     /**
+@@ -152,5 +180,94 @@ public abstract class Animal extends Creature
+         return false;
+     }
+ 
++    /**
++     * Mark the animal as infected and record the first infected step.
++     */
++    public void infect(int step)
++    {
++        setIsInfected(true);
++        if(infectionStartStep == 0) {
++            infectionStartStep = step;
++        }
++    }
++
++    /**
++     * Find whether there is an adjacent animal of the same species but opposite sex.
++     */
++    protected boolean hasDifferentSexNearby(Class<? extends Animal> species, int searchDistance)
++    {
++        for(Location location : getField().adjacentLocations(getLocation(), searchDistance)) {
++            Creature nearbyCreature = getField().getCreatureAt(location);
++            if(species.isInstance(nearbyCreature)) {
++                Animal nearbyAnimal = species.cast(nearbyCreature);
++                if(this.getSex() != nearbyAnimal.getSex()) {
++                    return true;
++                }
++            }
++        }
++        return false;
++    }
++
++    /**
++     * Search for prey around the animal and handle infection spread during the search.
++     */
++    @SafeVarargs
++    protected final Location findFood(Disease disease, int step, int searchDistance, int foodValue,
++                                      Class<? extends Creature>... preyTypes)
++    {
++        for(Location location : getField().adjacentLocations(getLocation(), searchDistance)) {
++            Creature nearbyCreature = getField().getCreatureAt(location);
++            exposeToInfection(nearbyCreature, disease, step);
++            if(isMatchingPrey(nearbyCreature, preyTypes) && nearbyCreature.isAlive()) {
++                nearbyCreature.setDead();
++                setFoodLevel(foodValue);
++                return location;
++            }
++        }
++        return null;
++    }
++
++    /**
++     * Move to a new location if possible, otherwise die from overcrowding.
++     */
++    private void moveTo(Location preferredLocation)
++    {
++        Location newLocation = preferredLocation;
++        if(newLocation == null) {
++            newLocation = getField().freeAdjacentLocation(getLocation());
++        }
++
++        if(newLocation != null) {
++            setLocation(newLocation);
++        }
++        else {
++            setDead();
++        }
++    }
++
++    private void exposeToInfection(Creature nearbyCreature, Disease disease, int step)
++    {
++        if(nearbyCreature instanceof Animal) {
++            Animal nearbyAnimal = (Animal) nearbyCreature;
++            if(nearbyAnimal.getIsInfected()) {
++                makeInfected(disease, step);
++            }
++        }
++    }
++
++    @SafeVarargs
++    private final boolean isMatchingPrey(Creature creature, Class<? extends Creature>... preyTypes)
++    {
++        if(creature == null) {
++            return false;
++        }
++        for(Class<? extends Creature> preyType : preyTypes) {
++            if(preyType.isInstance(creature)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
+     
+ }
+diff --git a/Cod.java b/Cod.java
+index 7207064..a8d3a89 100644
+--- a/Cod.java
++++ b/Cod.java
+@@ -1,6 +1,5 @@
+ import java.util.Random;
+ import java.util.List;
+-import java.util.Iterator;
+ 
+ /**
+  * A simple model of a cod.
+@@ -38,9 +37,6 @@ public class Cod extends Animal
+     // THe cod's food level
+     private int foodLevel;
+ 
+-    // Track the first step at which the animal is infected;
+-    private int infectionStartStep;
+-
+     /**
+      * Create a new cod. A cod may be created with age
+      * zero (a new born) or with a random age.
+@@ -76,49 +72,7 @@ public class Cod extends Animal
+      * @return the oxygen level the species produced or consumed after action.
+      * 
+      */
+-    public double act(List<Creature> newCods, boolean atDayTime, double oxygenLevel, Disease disease, int step)
+-    {   
+-        if(oxygenLevel < ANIMAL_OXYGEN_REQUIRED){
+-            setDead();
+-            return 0;
+-        }     
+-
+-        //if the cod dies of disease, it will consume no oxygen.
+-        if(dieOfInfection(disease))
+-            return 0;
+-
+-        // check if the cod is qualified for immunity.
+-        ifCanGrantImmunity(disease, step);
+-
+-        incrementAge();
+-        incrementHunger();
+-
+-        if(isAlive() && !needSleep(atDayTime)) {
+-            giveBirth(newCods);            
+-            // Move towards a source of food if found.
+-            Location newLocation = search(disease, step);
+-            if(newLocation == null) { 
+-                // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            // See if it was possible to move.
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                // Overcrowding.
+-                setDead();
+-            }
+-
+-        }
+-        return -ANIMAL_OXYGEN_REQUIRED;         
+-    }
+-
+-    /**
+-     * Increase the age.
+-     * This could result in the cod's death.
+-     */
+-    private void incrementAge()
++    protected void incrementAge()
+     {
+         age++;
+         if(age > MAX_AGE) {
+@@ -129,7 +83,7 @@ public class Cod extends Animal
+     /**
+      * Make this cod more hungry. This could result in the cod's death.
+      */
+-    private void incrementHunger()
++    protected void incrementHunger()
+     {
+         foodLevel--;
+         if(foodLevel <= 0) {
+@@ -143,7 +97,7 @@ public class Cod extends Animal
+      * @param newCods A list to return newly born cods.
+ 
+      */
+-    private void giveBirth(List<Creature> newCod)
++    protected void giveBirth(List<Creature> newCod)
+     {
+         // New cods are born into adjacent locations.
+         // Get a list of adjacent free locations.
+@@ -185,20 +139,7 @@ public class Cod extends Animal
+      * @return true if two cods have different sex, false otherwise.
+      */
+     public boolean encounterWithDiffSex(){
+-        Field field = getField();
+-
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object animalAtThisLoc = field.getObjectAt(where);
+-            if(animalAtThisLoc != null && animalAtThisLoc instanceof Cod){
+-                Cod codAtThisLoc = (Cod)animalAtThisLoc;
+-                if(this.getSex() != codAtThisLoc.getSex())
+-                    return true;
+-            }
+-        }
+-        return false;
++        return hasDifferentSexNearby(Cod.class, 1);
+     }
+ 
+     /**
+@@ -210,32 +151,12 @@ public class Cod extends Animal
+      * @return Where food was found, or null if it wasn't.
+      */
+     public Location search(Disease disease, int step){
+-        Field field = getField();
+-        //trying to find food.
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location loc = it.next();
+-            Object creature = field.getObjectAt(loc);
+-            //If nearby animal is infected,then it has the probability to be infected as well
+-            if(creature instanceof Animal){
+-                Animal animal = (Animal)creature;
+-                if(animal.getIsInfected()){
+-                    makeInfected(disease, step);
+-                }
+-            }
+-            // if food is found, set the food death.
+-            if(creature instanceof Seaweed) {
+-                Seaweed seaweed = (Seaweed) creature;
+-                if(seaweed.isAlive()) { 
+-                    seaweed.setDead();
+-                    foodLevel = SEAWEED_FOOD_VALUE;
+-                    return loc;
+-                }
+-            }
+-        }
+-        return null;
++        return findFood(disease, step, 1, SEAWEED_FOOD_VALUE, Seaweed.class);
++    }
+ 
++    protected void setFoodLevel(int foodLevel)
++    {
++        this.foodLevel = foodLevel;
+     }
+ 
+ }
+diff --git a/Counter.java b/Counter.java
+index 0458bd9..1224597 100644
+--- a/Counter.java
++++ b/Counter.java
+@@ -1,5 +1,3 @@
+-import java.awt.Color;
+-
+ /**
+  * Provide a counter for a participant in the simulation.
+  * This includes an identifying string and a count of how
+diff --git a/Disease.java b/Disease.java
+index 46d08d4..56d25e9 100644
+--- a/Disease.java
++++ b/Disease.java
+@@ -1,6 +1,5 @@
+ import java.util.List;
+ import java.util.ArrayList;
+-import java.util.Iterator;
+ 
+ /**
+  * Write a description of class Disease here.
+@@ -39,38 +38,28 @@ public class Disease
+     /**
+      * create the source of infection
+      */
+-    protected void creationSourceOfInfection(List<Creature> creatures, int step){
+-       
++    protected void tryToStartSpread(List<Creature> creatures, int step){
+         if(!getIsSpread() && Randomizer.getRandom().nextDouble() <= DISEASE_OCCURENCE_PROBABILITY){
+-            ArrayList<Animal> animalCollection = new ArrayList<>();
+-            Iterator<Creature> it = creatures.iterator();
+-            while(it.hasNext()){
+-                Creature creature = it.next();
+-                if(creature instanceof Animal){
+-                    Animal animal = (Animal)creature;
+-                        animalCollection.add(animal);
+-                }
+-            }
+-            
+-            for(Animal ani: animalCollection){
+-                if(Randomizer.getRandom().nextDouble() <= 0.3){
+-                    ani.setIsInfected(true);
+-                    ani.infectionStartStep = step;
++            List<Animal> animals = collectAnimals(creatures);
++            for(Animal animal : animals){
++                if(Randomizer.getRandom().nextDouble() <= INFECTION_RATE){
++                    animal.infect(step);
+                     setIsSpread(true);
+-
+                 }
+             }
+-            
+-
+         }
++    }
+ 
++    private List<Animal> collectAnimals(List<Creature> creatures)
++    {
++        List<Animal> animals = new ArrayList<>();
++        for(Creature creature : creatures) {
++            if(creature instanceof Animal) {
++                animals.add((Animal) creature);
++            }
++        }
++        return animals;
+     }
+-    
+-   
+-    
+-    
+-            
+ }
+     
+     
+-
+diff --git a/Field.java b/Field.java
+index 5563de9..fe7d2d1 100644
+--- a/Field.java
++++ b/Field.java
+@@ -1,5 +1,4 @@
+ import java.util.Collections;
+-import java.util.Iterator;
+ import java.util.LinkedList;
+ import java.util.List;
+ import java.util.Random;
+@@ -19,7 +18,7 @@ public class Field
+     // The depth and width of the field.
+     private int depth, width;
+     // Storage for the creatures.
+-    private Object[][] field;
++    private Creature[][] field;
+ 
+     /**
+      * Represent a field of the given dimensions.
+@@ -30,7 +29,7 @@ public class Field
+     {
+         this.depth = depth;
+         this.width = width;
+-        field = new Object[depth][width];
++        field = new Creature[depth][width];
+     }
+     
+     /**
+@@ -62,7 +61,7 @@ public class Field
+      * @param row Row coordinate of the location.
+      * @param col Column coordinate of the location.
+      */
+-    public void place(Object creature, int row, int col)
++    public void place(Creature creature, int row, int col)
+     {
+         place(creature, new Location(row, col));
+     }
+@@ -74,7 +73,7 @@ public class Field
+      * @param creature The creature to be placed.
+      * @param location Where to place the creature.
+      */
+-    public void place(Object creature, Location location)
++    public void place(Creature creature, Location location)
+     {
+         field[location.getRow()][location.getCol()] = creature;
+     }
+@@ -84,9 +83,9 @@ public class Field
+      * @param location Where in the field.
+      * @return The creature at the given location, or null if there is none.
+      */
+-    public Object getObjectAt(Location location)
++    public Creature getCreatureAt(Location location)
+     {
+-        return getObjectAt(location.getRow(), location.getCol());
++        return getCreatureAt(location.getRow(), location.getCol());
+     }
+     
+     /**
+@@ -95,7 +94,7 @@ public class Field
+      * @param col The desired column.
+      * @return The creature at the given location, or null if there is none.
+      */
+-    public Object getObjectAt(int row, int col)
++    public Creature getCreatureAt(int row, int col)
+     {
+         return field[row][col];
+     }
+@@ -124,7 +123,7 @@ public class Field
+         List<Location> free = new LinkedList<>();
+         List<Location> adjacent = adjacentLocations(location, 1);
+         for(Location next : adjacent) {
+-            if(getObjectAt(next) == null) {
++            if(getCreatureAt(next) == null) {
+                 free.add(next);
+             }
+         }
+@@ -247,10 +246,10 @@ public class Field
+      */
+      public Location generateRandomLocation()
+     {
+-       int randomWidth = rand.nextInt(width);
+-       int randomDepth = rand.nextInt(depth);
++       int randomRow = rand.nextInt(depth);
++       int randomCol = rand.nextInt(width);
+        
+-       return new Location(randomWidth, randomDepth);
++       return new Location(randomRow, randomCol);
+          
+     }
+     /**
+@@ -259,19 +258,17 @@ public class Field
+      * @param adjacentDistance used to Controls the range to which this method can search in the field.
+      * @return a list of adjacent objects.
+      */
+-    public List<Object> getAllObjectAt(Location location, int adjacentDistance)
++    public List<Creature> getCreaturesAt(Location location, int adjacentDistance)
+     {
+-        List<Object> adjacentObjectList = new ArrayList();
++        List<Creature> adjacentCreatures = new ArrayList<>();
+         
+         List<Location> adjacent = adjacentLocationsIncludingSelf(location, adjacentDistance);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object adjacentObject = getObjectAt(where);
+-            if(adjacentObject != null) {
+-            adjacentObjectList.add(adjacentObject);
++        for(Location where : adjacent) {
++            Creature adjacentCreature = getCreatureAt(where);
++            if(adjacentCreature != null) {
++                adjacentCreatures.add(adjacentCreature);
+             }
+         }
+-        return adjacentObjectList;
++        return adjacentCreatures;
+     }
+ }
+diff --git a/FieldStats.java b/FieldStats.java
+index e4ecbd6..aeb38a3 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -1,4 +1,3 @@
+-import java.awt.Color;
+ import java.util.HashMap;
+ 
+ /**
+@@ -11,7 +10,7 @@ import java.util.HashMap;
+ public class FieldStats
+ {
+     // Counters for each type of entity (fox, rabbit, etc.) in the simulation.
+-    private HashMap<Class, Counter> counters;
++    private HashMap<Class<?>, Counter> counters;
+     // Whether the counters are currently up to date.
+     private boolean countsValid;
+ 
+@@ -36,7 +35,7 @@ public class FieldStats
+         if(!countsValid) {
+             generateCounts(field);
+         }
+-        for(Class key : counters.keySet()) {
++        for(Class<?> key : counters.keySet()) {
+             Counter info = counters.get(key);
+             buffer.append(info.getName());
+             buffer.append(": ");
+@@ -53,7 +52,7 @@ public class FieldStats
+     public void reset()
+     {
+         countsValid = false;
+-        for(Class key : counters.keySet()) {
++        for(Class<?> key : counters.keySet()) {
+             Counter count = counters.get(key);
+             count.reset();
+         }
+@@ -65,7 +64,7 @@ public class FieldStats
+      * Increment the count for one class of animal.
+      * @param animalClass The class of animal to increment.
+      */
+-    public void incrementCount(Class animalClass)
++    public void incrementCount(Class<?> animalClass)
+     {
+         Counter count = counters.get(animalClass);
+         if(count == null) {
+@@ -97,7 +96,7 @@ public class FieldStats
+         if(!countsValid) {
+             generateCounts(field);
+         }
+-        for(Class key : counters.keySet()) {
++        for(Class<?> key : counters.keySet()) {
+             Counter info = counters.get(key);
+             if(info.getCount() > 0) {
+                 nonZero++;
+@@ -118,7 +117,7 @@ public class FieldStats
+         reset();
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+-                Object animal = field.getObjectAt(row, col);
++                Creature animal = field.getCreatureAt(row, col);
+                 if(animal != null) {
+                     incrementCount(animal.getClass());
+                 }
+diff --git a/Salmon.java b/Salmon.java
+index c418716..7429802 100644
+--- a/Salmon.java
++++ b/Salmon.java
+@@ -1,6 +1,5 @@
+ import java.util.List;
+ import java.util.Random;
+-import java.util.Iterator;
+ 
+ /**
+  * A simple model of a Salmon.
+@@ -72,53 +71,7 @@ public class Salmon extends Animal
+      * 
+      * @return the oxygen level the species produced or consumed after action.
+      */
+-    public double act(List<Creature> newSalmons, boolean atDayTime, double oxygenLevel, Disease disease, int step)
+-    {
+-        // if there is not enough oxygen, set to death;
+-        if(oxygenLevel < ANIMAL_OXYGEN_REQUIRED){
+-            setDead();
+-            return 0;
+-        }     
+-
+-        //if the salmon dies of disease, it will consume no oxygen.
+-        if(dieOfInfection(disease))
+-            return 0;
+-
+-        // check if the salmon is qualified for immunity.
+-        ifCanGrantImmunity(disease, step);
+-
+-        incrementAge();
+-        incrementHunger();
+-
+-        if(isAlive() && !needSleep(atDayTime)) {
+-            giveBirth(newSalmons);            
+-            // Move towards a source of food if found.
+-            Location newLocation = search(disease, step);
+-            Field field = getField();
+-
+-            if(newLocation == null) { 
+-                // No food found - try to move to a free location.
+-                newLocation = field.freeAdjacentLocation(getLocation());
+-            }
+-            // See if it was possible to move.
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                // Overcrowding.
+-                setDead();
+-            }
+-
+-        }
+-
+-        return -ANIMAL_OXYGEN_REQUIRED;
+-    }
+-
+-    /**
+-     * Increase the age.
+-     * This could result in the salmon's death.
+-     */
+-    private void incrementAge()
++    protected void incrementAge()
+     {
+         age++;
+         if(age > MAX_AGE) {
+@@ -129,7 +82,7 @@ public class Salmon extends Animal
+     /**
+      * Make this salmon more hungry. This could result in the salmon's death.
+      */
+-    private void incrementHunger()
++    protected void incrementHunger()
+     {
+         foodLevel--;
+         if(foodLevel <= 0) {
+@@ -146,40 +99,14 @@ public class Salmon extends Animal
+      * @return Where food was found, or null if it wasn't.
+      */
+     public Location search(Disease disease, int step){
+-        Field field = getField();
+-         //trying to find food.
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location loc = it.next();
+-            Object creature = field.getObjectAt(loc);
+-            //If nearby animal is infected,then it has the probability to be infected as well
+-            if(creature instanceof Animal){
+-                Animal animal = (Animal)creature;
+-                if(animal.getIsInfected()){
+-                    makeInfected(disease, step);
+-                }
+-            }
+-            // if food is found, set the food death.
+-            if(creature instanceof Seaweed) {
+-                Seaweed seaweed = (Seaweed) creature;
+-                if(seaweed.isAlive()) { 
+-                    seaweed.setDead();
+-                    foodLevel = SEAWEED_FOOD_VALUE;
+-                    return loc;
+-                }
+-            }
+-        }
+-        return null;
+-
+-        
++        return findFood(disease, step, 1, SEAWEED_FOOD_VALUE, Seaweed.class);
+     }
+     /**
+      * Check whether or not this salmon is to give birth at this step.
+      * New births will be made into free adjacent locations.
+      * @param newsalmons A list to return newly born salmons.
+      */
+-    private void giveBirth(List<Creature> newSalmons)
++    protected void giveBirth(List<Creature> newSalmons)
+     {
+         // New salmons are born into adjacent locations.
+         // Get a list of adjacent free locations.
+@@ -221,18 +148,12 @@ public class Salmon extends Animal
+      * Decide if two salmons countered has different sex;
+      */
+     public boolean encounterWithDiffSex(){
++        return hasDifferentSexNearby(Salmon.class, 2);
++    }
+ 
+-        List<Location> adjacentLocation = getField().adjacentLocations(getLocation(), 2);
+-
+-        for(Location loc: adjacentLocation){
+-            Object creatureAtThisLoc = getField().getObjectAt(loc);
+-            if(creatureAtThisLoc != null && creatureAtThisLoc instanceof Salmon){
+-                Salmon salmonAtThisLoc = (Salmon)creatureAtThisLoc;
+-                if(this.getSex() != salmonAtThisLoc.getSex())
+-                    return true;
+-            }
+-        }
+-        return false;
++    protected void setFoodLevel(int foodLevel)
++    {
++        this.foodLevel = foodLevel;
+     }
+ 
+ }
+diff --git a/Shark.java b/Shark.java
+index f1b9512..a1b1cd9 100644
+--- a/Shark.java
++++ b/Shark.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.Iterator;
+ import java.util.Random;
+ 
+ /**
+@@ -25,7 +24,6 @@ public class Shark extends Animal
+     // The food value of a single rabbit. In effect, this is the
+     // number of steps a shark can go before it has to eat again.
+     private static final int COD_FOOD_VALUE = 8;
+-    private static final int SALMON_FOOD_VALUE = 8;
+ 
+     // A shared random number generator to control breeding.
+     private static final Random rand = Randomizer.getRandom();
+@@ -71,49 +69,7 @@ public class Shark extends Animal
+      * 
+      * @return the oxygen level the species produced or consumed after action.
+      */
+-    public double act(List<Creature> newSharks, boolean atDayTime, double oxygenLevel, Disease disease, int step)
+-    {   
+-        if(oxygenLevel < ANIMAL_OXYGEN_REQUIRED){
+-            setDead();
+-            return 0;
+-        }     
+-
+-        //if the shark dies of disease, it will consume no oxygen.
+-        if(dieOfInfection(disease))
+-            return 0;
+-
+-        // check if the shark is qualified for immunity.
+-        ifCanGrantImmunity(disease, step);
+-
+-        incrementAge();
+-        incrementHunger();
+-
+-        if(isAlive() && !needSleep(atDayTime)) {
+-            giveBirth(newSharks);            
+-            // Move towards a source of food if found.
+-            Location newLocation = search(disease, step);
+-            if(newLocation == null) { 
+-                // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            // See if it was possible to move.
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                // Overcrowding.
+-                setDead();
+-            }
+-
+-        }
+-
+-        return -ANIMAL_OXYGEN_REQUIRED;
+-    }
+-
+-    /**
+-     * Increase the age. This could result in the shark's death.
+-     */
+-    private void incrementAge()
++    protected void incrementAge()
+     {
+         age++;
+         if(age > MAX_AGE) {
+@@ -124,7 +80,7 @@ public class Shark extends Animal
+     /**
+      * Make this shark more hungry. This could result in the shark's death.
+      */
+-    private void incrementHunger()
++    protected void incrementHunger()
+     {
+         foodLevel--;
+         if(foodLevel <= 0) {
+@@ -141,35 +97,7 @@ public class Shark extends Animal
+      * @return Where food was found, or null if it wasn't.
+      */
+     public Location search(Disease disease, int step){
+-        Field field = getField();
+-        //trying to find food.
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location loc = it.next();
+-            Object creature = field.getObjectAt(loc);
+-            //If nearby animal is infected,then it has the probability to be infected as well
+-            if(creature instanceof Animal){
+-                Animal animal = (Animal)creature;
+-                if(animal.getIsInfected()){
+-                    makeInfected(disease, step);
+-                }
+-            }
+-            // if food is found, set the food death.
+-            if(creature instanceof Cod || creature instanceof Salmon) {
+-                Animal animal = (Animal) creature;
+-                if(animal.isAlive()) { 
+-                    animal.setDead();
+-                    if(animal instanceof Cod)
+-                        foodLevel = COD_FOOD_VALUE;
+-                    else
+-                        foodLevel = SALMON_FOOD_VALUE;
+-                    return loc;
+-                }
+-            }
+-        }
+-        return null;
+-
++        return findFood(disease, step, 1, COD_FOOD_VALUE, Cod.class, Salmon.class);
+     }
+ 
+     /**
+@@ -177,7 +105,7 @@ public class Shark extends Animal
+      * New births will be made into free adjacent locations.
+      * @param newsharkes A list to return newly born sharkes.
+      */
+-    private void giveBirth(List<Creature> newSharkes)
++    protected void giveBirth(List<Creature> newSharkes)
+     {
+         // New sharkes are born into adjacent locations.
+         // Get a list of adjacent free locations.
+@@ -218,20 +146,12 @@ public class Shark extends Animal
+      *  @return true if two sharks have different sex, false otherwise.
+      */
+     public boolean encounterWithDiffSex(){
++        return hasDifferentSexNearby(Shark.class, 2);
++    }
+ 
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 2);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object animalAtThisLoc = field.getObjectAt(where);
+-            if(animalAtThisLoc != null && animalAtThisLoc instanceof Cod){
+-                Cod codAtThisLoc = (Cod)animalAtThisLoc;
+-                if(this.getSex() != codAtThisLoc.getSex())
+-                    return true;
+-            }
+-        }
+-        return false;
++    protected void setFoodLevel(int foodLevel)
++    {
++        this.foodLevel = foodLevel;
+     }
+ 
+ }
+diff --git a/Simulator.java b/Simulator.java
+index 8dd03e0..6b818f6 100644
+Binary files a/Simulator.java and b/Simulator.java differ
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 044414e..21f6230 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -1,10 +1,8 @@
+ import java.awt.*;
+-import java.awt.event.*;
+ import javax.swing.*;
+ import java.util.LinkedHashMap;
+ import java.util.Map;
+ import java.util.List;
+-import java.util.Iterator;
+ 
+ 
+ /**
+@@ -24,9 +22,6 @@ public class SimulatorView extends JFrame
+     // Color used for objects that have no defined color.
+     private static final Color UNKNOWN_COLOR = Color.gray;
+     
+-    // Colour used for underwater storm
+-    private static final Color UNDERWATERSTORM_COLOR = Color.blue;
+-    
+     // Colour used for objects that are infected by disease;
+     private static final Color INFECTED_COLOR = Color.green;
+     
+@@ -41,7 +36,7 @@ public class SimulatorView extends JFrame
+     private FieldView fieldView;
+     
+     // A map for storing colors for participants in the simulation
+-    private Map<Class, Color> colors;
++    private Map<Class<?>, Color> colors;
+     // A statistics object computing and storing simulation information
+     private FieldStats stats;
+ 
+@@ -86,7 +81,7 @@ public class SimulatorView extends JFrame
+      * @param animalClass The animal's Class object.
+      * @param color The color to be used for the given class.
+      */
+-    public void setColor(Class animalClass, Color color)
++    public void setColor(Class<?> animalClass, Color color)
+     {
+         colors.put(animalClass, color);
+     }
+@@ -102,7 +97,7 @@ public class SimulatorView extends JFrame
+     /**
+      * @return The color to be used for a given class of animal.
+      */
+-    private Color getColor(Class animalClass)
++    private Color getColor(Class<?> animalClass)
+     {
+         Color col = colors.get(animalClass);
+         if(col == null) {
+@@ -138,7 +133,7 @@ public class SimulatorView extends JFrame
+ 
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+-                Object creature = field.getObjectAt(row, col);
++                Creature creature = field.getCreatureAt(row, col);
+                 if(creature != null && weather.getStormStart() == false) {
+                     stats.incrementCount(creature.getClass());
+                     if(creature instanceof Animal){
+@@ -188,9 +183,7 @@ public class SimulatorView extends JFrame
+      */
+     private void drawStormColor(Field field, Weather weather) {
+         List<Location> stormLocation = field.adjacentLocationsIncludingSelf(weather.getRandomLocation(),weather.getStormScope());
+-        Iterator<Location> it = stormLocation.iterator();
+-        while(it.hasNext() ) {
+-            Location location = it.next();
++        for(Location location : stormLocation) {
+             fieldView.drawMark(location.getCol(),location.getRow(),getColor(Weather.class));
+         }
+         
+diff --git a/Weather.java b/Weather.java
+index 8f0b0c6..3e30ee4 100644
+Binary files a/Weather.java and b/Weather.java differ
+diff --git a/Whale.java b/Whale.java
+index df6f69e..32e6824 100644
+--- a/Whale.java
++++ b/Whale.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.Iterator;
+ import java.util.Random;
+ 
+ /**
+@@ -25,7 +24,6 @@ public class Whale extends Animal
+     // The food value of a single Cod. In effect, this is the
+     // number of steps a whale can go before it has to eat again.
+     private static final int COD_FOOD_VALUE = 8;
+-    private static final int SALMON_FOOD_VALUE = 8;
+ 
+     // A shared random number generator to control breeding.
+     private static final Random rand = Randomizer.getRandom();
+@@ -70,48 +68,7 @@ public class Whale extends Animal
+      * @return the oxygen level the species produced or consumed after action.
+      * 
+      */
+-    public double act(List<Creature> newWhales, boolean atDayTime, double oxygenLevel, Disease disease, int step)
+-    {   
+-        if(oxygenLevel < ANIMAL_OXYGEN_REQUIRED){
+-            setDead();
+-            return 0;
+-        }     
+-
+-        //if the whale dies of disease, it will consume no oxygen.
+-        if(dieOfInfection(disease))
+-            return 0;
+-
+-        // check if the whale is qualified for immunity.
+-        ifCanGrantImmunity(disease, step);
+-
+-        incrementAge();
+-        incrementHunger();
+-
+-        if(isAlive() && !needSleep(atDayTime)) {
+-            giveBirth(newWhales);            
+-            // Move towards a source of food if found.
+-            Location newLocation = search(disease, step);
+-            if(newLocation == null) { 
+-                // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            // See if it was possible to move.
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                // Overcrowding.
+-                setDead();
+-            }
+-
+-        }
+-        return -ANIMAL_OXYGEN_REQUIRED;
+-    }
+-
+-    /**
+-     * Increase the age. This could result in the whale's death.
+-     */
+-    private void incrementAge()
++    protected void incrementAge()
+     {
+         age++;
+         if(age > MAX_AGE) {
+@@ -122,7 +79,7 @@ public class Whale extends Animal
+     /**
+      * Make this whale more hungry. This could result in the whale's death.
+      */
+-    private void incrementHunger()
++    protected void incrementHunger()
+     {
+         foodLevel--;
+         if(foodLevel <= 0) {
+@@ -139,35 +96,7 @@ public class Whale extends Animal
+      * @return Where food was found, or null if it wasn't.
+      */
+     public Location search(Disease disease, int step){
+-        Field field = getField();
+-        //trying to find food.
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location loc = it.next();
+-            Object creature = field.getObjectAt(loc);
+-            //If nearby animal is infected,then it has the probability to be infected as well
+-            if(creature instanceof Animal){
+-                Animal animal = (Animal)creature;
+-                if(animal.getIsInfected()){
+-                    makeInfected(disease, step);
+-                }
+-            }
+-                // if food is found, set the food death.
+-            if(creature instanceof Cod || creature instanceof Salmon) {
+-                Animal animal = (Animal) creature;
+-                if(animal.isAlive()) { 
+-                    animal.setDead();
+-                    if(animal instanceof Cod)
+-                        foodLevel = COD_FOOD_VALUE;
+-                    else
+-                        foodLevel = SALMON_FOOD_VALUE;
+-                    return loc;
+-                }
+-            }
+-        }
+-        return null;
+-
++        return findFood(disease, step, 1, COD_FOOD_VALUE, Cod.class, Salmon.class);
+     }
+ 
+     /**
+@@ -175,7 +104,7 @@ public class Whale extends Animal
+      * New births will be made into free adjacent locations.
+      * @param newwhales A list to return newly born whales.
+      */
+-    private void giveBirth(List<Creature> newWhales)
++    protected void giveBirth(List<Creature> newWhales)
+     {
+         // New whales are born into adjacent locations.
+         // Get a list of adjacent free locations.
+@@ -216,18 +145,12 @@ public class Whale extends Animal
+      * @return true if two whales have different sex, false otherwise.
+      */
+     public boolean encounterWithDiffSex(){
++        return hasDifferentSexNearby(Whale.class, 2);
++    }
+ 
+-        List<Location> adjacentLocation = getField().adjacentLocations(getLocation(), 2);
+-
+-        for(Location loc: adjacentLocation){
+-            Object creatureAtThisLoc = getField().getObjectAt(loc);
+-            if(creatureAtThisLoc != null && creatureAtThisLoc instanceof Salmon){
+-                Salmon salmonAtThisLoc = (Salmon)creatureAtThisLoc;
+-                if(this.getSex() != salmonAtThisLoc.getSex())
+-                    return true;
+-            }
+-        }
+-        return false;
++    protected void setFoodLevel(int foodLevel)
++    {
++        this.foodLevel = foodLevel;
+     }
+ 
+ }

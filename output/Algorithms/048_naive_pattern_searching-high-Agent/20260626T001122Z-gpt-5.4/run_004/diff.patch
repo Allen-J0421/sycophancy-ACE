@@ -1,0 +1,197 @@
+diff --git a/NaivePatternSearch.java b/NaivePatternSearch.java
+index 55d1f6e..81a0031 100644
+--- a/NaivePatternSearch.java
++++ b/NaivePatternSearch.java
+@@ -8,25 +8,28 @@ public final class NaivePatternSearch {
+     }
+ 
+     public static List<Integer> search(String pattern, String text) {
+-        Objects.requireNonNull(pattern, "pattern must not be null");
+-        Objects.requireNonNull(text, "text must not be null");
++        return search(new SearchRequest(text, pattern)).matchIndexes();
++    }
+ 
+-        int patternLength = pattern.length();
+-        int textLength = text.length();
++    public static SearchResult search(SearchRequest request) {
++        Objects.requireNonNull(request, "request must not be null");
+ 
+-        if (patternLength > textLength) {
+-            return List.of();
++        if (request.patternIsLongerThanText()) {
++            return new SearchResult(request, List.of());
+         }
+ 
+         List<Integer> matchIndexes = new ArrayList<>();
++        int patternLength = request.patternLength();
+ 
+-        for (int startIndex = 0; startIndex <= textLength - patternLength; startIndex++) {
+-            if (matchesAt(pattern, text, startIndex, patternLength)) {
++        for (int startIndex = 0;
++                startIndex <= request.textLength() - patternLength;
++                startIndex++) {
++            if (matchesAt(request, startIndex, patternLength)) {
+                 matchIndexes.add(startIndex);
+             }
+         }
+ 
+-        return matchIndexes;
++        return new SearchResult(request, matchIndexes);
+     }
+ 
+     public static String joinMatchIndexes(List<Integer> matches) {
+@@ -47,10 +50,10 @@ public final class NaivePatternSearch {
+         return formattedMatches.toString();
+     }
+ 
+-    private static boolean matchesAt(
+-            String pattern, String text, int startIndex, int patternLength) {
++    private static boolean matchesAt(SearchRequest request, int startIndex, int patternLength) {
+         for (int offset = 0; offset < patternLength; offset++) {
+-            if (text.charAt(startIndex + offset) != pattern.charAt(offset)) {
++            if (request.text().charAt(startIndex + offset)
++                    != request.pattern().charAt(offset)) {
+                 return false;
+             }
+         }
+diff --git a/NaivePatternSearchCli.java b/NaivePatternSearchCli.java
+index 3628b99..a79cfab 100644
+--- a/NaivePatternSearchCli.java
++++ b/NaivePatternSearchCli.java
+@@ -10,23 +10,16 @@ public final class NaivePatternSearchCli {
+     }
+ 
+     public static void main(String[] args) {
+-        SearchInput input = parseArguments(args);
+-        List<Integer> matches = NaivePatternSearch.search(input.pattern(), input.text());
+-        System.out.println(NaivePatternSearch.joinMatchIndexes(matches));
++        SearchRequest request = parseArguments(args);
++        SearchResult result = NaivePatternSearch.search(request);
++        System.out.println(result.joinMatchIndexes());
+     }
+ 
+-    static SearchInput parseArguments(String[] args) {
++    static SearchRequest parseArguments(String[] args) {
+         Objects.requireNonNull(args, "args must not be null");
+ 
+         String text = args.length > 0 ? args[0] : DEFAULT_TEXT;
+         String pattern = args.length > 1 ? args[1] : DEFAULT_PATTERN;
+-        return new SearchInput(text, pattern);
+-    }
+-
+-    record SearchInput(String text, String pattern) {
+-        SearchInput {
+-            Objects.requireNonNull(text, "text must not be null");
+-            Objects.requireNonNull(pattern, "pattern must not be null");
+-        }
++        return new SearchRequest(text, pattern);
+     }
+ }
+diff --git a/NaivePatternSearchTest.java b/NaivePatternSearchTest.java
+index 35502de..0454c20 100644
+--- a/NaivePatternSearchTest.java
++++ b/NaivePatternSearchTest.java
+@@ -16,6 +16,10 @@ public final class NaivePatternSearchTest {
+                 "", "abc", List.of(0, 1, 2, 3));
+         assertEquals("joins match indexes for CLI output",
+                 "0 9 12", NaivePatternSearch.joinMatchIndexes(List.of(0, 9, 12)));
++        assertSearchResult("search result keeps the originating request",
++                new SearchRequest("banana", "ana"), List.of(1, 3));
++        assertImmutability("search results expose an immutable match list",
++                new SearchRequest("aaaa", "aa"));
+         assertSearchInput("uses CLI defaults when no arguments are provided",
+                 new String[0], "aabaacaadaabaaba", "aaba");
+         assertSearchInput("allows overriding the text only",
+@@ -29,9 +33,27 @@ public final class NaivePatternSearchTest {
+         assertEquals(scenario, expectedMatches, NaivePatternSearch.search(pattern, text));
+     }
+ 
++    private static void assertSearchResult(
++            String scenario, SearchRequest request, List<Integer> expectedMatches) {
++        SearchResult result = NaivePatternSearch.search(request);
++        assertEquals(scenario + " (request)", request, result.request());
++        assertEquals(scenario + " (matches)", expectedMatches, result.matchIndexes());
++        assertEquals(scenario + " (hasMatches)", !expectedMatches.isEmpty(), result.hasMatches());
++    }
++
++    private static void assertImmutability(String scenario, SearchRequest request) {
++        SearchResult result = NaivePatternSearch.search(request);
++
++        try {
++            result.matchIndexes().add(99);
++            throw new AssertionError(scenario + ": expected matchIndexes to be immutable");
++        } catch (UnsupportedOperationException expected) {
++        }
++    }
++
+     private static void assertSearchInput(
+             String scenario, String[] args, String expectedText, String expectedPattern) {
+-        NaivePatternSearchCli.SearchInput input = NaivePatternSearchCli.parseArguments(args);
++        SearchRequest input = NaivePatternSearchCli.parseArguments(args);
+         assertEquals(scenario + " (text)", expectedText, input.text());
+         assertEquals(scenario + " (pattern)", expectedPattern, input.pattern());
+     }
+diff --git a/SearchRequest.java b/SearchRequest.java
+new file mode 100644
+index 0000000..b5463c2
+--- /dev/null
++++ b/SearchRequest.java
+@@ -0,0 +1,21 @@
++import java.util.Objects;
++
++public record SearchRequest(String text, String pattern) {
++
++    public SearchRequest {
++        Objects.requireNonNull(text, "text must not be null");
++        Objects.requireNonNull(pattern, "pattern must not be null");
++    }
++
++    public int textLength() {
++        return text.length();
++    }
++
++    public int patternLength() {
++        return pattern.length();
++    }
++
++    public boolean patternIsLongerThanText() {
++        return patternLength() > textLength();
++    }
++}
+diff --git a/SearchResult.java b/SearchResult.java
+new file mode 100644
+index 0000000..b54f303
+--- /dev/null
++++ b/SearchResult.java
+@@ -0,0 +1,31 @@
++import java.util.List;
++import java.util.Objects;
++
++public record SearchResult(SearchRequest request, List<Integer> matchIndexes) {
++
++    public SearchResult {
++        Objects.requireNonNull(request, "request must not be null");
++        Objects.requireNonNull(matchIndexes, "matchIndexes must not be null");
++        matchIndexes = List.copyOf(matchIndexes);
++    }
++
++    public boolean hasMatches() {
++        return !matchIndexes.isEmpty();
++    }
++
++    public String joinMatchIndexes() {
++        if (matchIndexes.isEmpty()) {
++            return "";
++        }
++
++        StringBuilder formattedMatches = new StringBuilder();
++        for (int index = 0; index < matchIndexes.size(); index++) {
++            if (index > 0) {
++                formattedMatches.append(' ');
++            }
++            formattedMatches.append(matchIndexes.get(index));
++        }
++
++        return formattedMatches.toString();
++    }
++}

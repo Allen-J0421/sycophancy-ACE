@@ -1,0 +1,372 @@
+diff --git a/Animal.java b/Animal.java
+index c2bfa44..1add96c 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -100,13 +100,13 @@ public abstract class Animal extends Organism implements Actor
+         Field field = getField();
+         List<Location> adjacent = field.adjacentLocations(getLocation());
+ 
+-        scanForContactDisease(adjacent);
++        DiseaseTransmission.scanForProximity(this, adjacent, field);
+ 
+         for (Location where : adjacent) {
+             Object obj = field.getObjectAt(where);
+             if (obj != null && getStats().getDiet().contains(obj.getClass())) {
+                 Organism food = (Organism) obj;
+-                tryContractFoodbornDisease(food);
++                DiseaseTransmission.tryFoodborne(this, food);
+                 if (food.isAlive()) {
+                     food.setDead();
+                     foodLevel = Math.min(foodLevel + food.FOOD_VALUE(), getStats().getMaxFoodLevel());
+@@ -118,44 +118,6 @@ public abstract class Animal extends Organism implements Actor
+         return null;
+     }
+ 
+-    // --- Disease transmission helpers ---
+-
+-    /** Scans adjacent locations for non-contact diseases and contracts the first one found. */
+-    private void scanForContactDisease(List<Location> adjacent)
+-    {
+-        Field field = getField();
+-        for (Location loc : adjacent) {
+-            Object obj = field.getObjectAt(loc);
+-            if (obj instanceof Organism) {
+-                Organism organism = (Organism) obj;
+-                if (organism.isDiseased()
+-                        && organism.getDisease().getDiseaseType() != DiseaseType.CONTACT
+-                        && organism.getDisease().getPropagationRate() <= rand.nextDouble()) {
+-                    setDisease(organism.getDisease());
+-                    break;
+-                }
+-            }
+-        }
+-    }
+-
+-    /** Attempts to contract a foodborne disease from prey being eaten. */
+-    private void tryContractFoodbornDisease(Organism food)
+-    {
+-        if (food.isDiseased()
+-                && food.getDisease().getDiseaseType() == DiseaseType.FOODBORNE
+-                && food.getDisease().getPropagationRate() <= rand.nextDouble()) {
+-            setDisease(food.getDisease());
+-        }
+-    }
+-
+-    /** Attempts to contract a sexually transmitted disease from a breeding mate. */
+-    private void tryContractSexualDisease(Animal mate)
+-    {
+-        if (mate.isDiseased() && mate.getDisease().getDiseaseType() == DiseaseType.SEXUAL) {
+-            setDisease(mate.getDisease());
+-        }
+-    }
+-
+     // --- Reproduction ---
+ 
+     /**
+@@ -191,7 +153,7 @@ public abstract class Animal extends Organism implements Actor
+             births = rand.nextInt(getStats().getMaxLitterSize()) + 1;
+             List<Organism> mates = getPotentialMates();
+             Animal mate = (Animal) mates.get(rand.nextInt(mates.size()));
+-            tryContractSexualDisease(mate);
++            DiseaseTransmission.trySexual(this, mate);
+         }
+         return births;
+     }
+diff --git a/DiseaseTransmission.java b/DiseaseTransmission.java
+new file mode 100644
+index 0000000..5dae622
+--- /dev/null
++++ b/DiseaseTransmission.java
+@@ -0,0 +1,64 @@
++import java.util.*;
++
++/**
++ * Static utility for disease transmission between organisms.
++ * Centralises all three transmission routes — proximity, foodborne, and sexual —
++ * so that Animal does not need to own those mechanics.
++ *
++ * @version 2022.03.02
++ */
++public class DiseaseTransmission
++{
++    private static final Random rand = Randomizer.getRandom();
++
++    private DiseaseTransmission() {}
++
++    /**
++     * Scan adjacent locations for proximity (non-contact) diseases and infect
++     * the target if transmission is triggered.
++     * @param target   The organism that may become infected.
++     * @param adjacent The locations to scan.
++     * @param field    The field used to look up occupants.
++     */
++    public static void scanForProximity(Organism target, List<Location> adjacent, Field field)
++    {
++        for (Location loc : adjacent) {
++            Object obj = field.getObjectAt(loc);
++            if (obj instanceof Organism) {
++                Organism other = (Organism) obj;
++                if (other.isDiseased()
++                        && other.getDisease().getDiseaseType() != DiseaseType.CONTACT
++                        && other.getDisease().getPropagationRate() <= rand.nextDouble()) {
++                    target.setDisease(other.getDisease());
++                    break;
++                }
++            }
++        }
++    }
++
++    /**
++     * Attempt foodborne disease transmission from prey to predator.
++     * @param predator The organism eating the food.
++     * @param prey     The organism being eaten.
++     */
++    public static void tryFoodborne(Organism predator, Organism prey)
++    {
++        if (prey.isDiseased()
++                && prey.getDisease().getDiseaseType() == DiseaseType.FOODBORNE
++                && prey.getDisease().getPropagationRate() <= rand.nextDouble()) {
++            predator.setDisease(prey.getDisease());
++        }
++    }
++
++    /**
++     * Attempt sexually transmitted disease transmission from mate to animal during breeding.
++     * @param animal The potentially infected organism.
++     * @param mate   The mate that may carry an STD.
++     */
++    public static void trySexual(Organism animal, Animal mate)
++    {
++        if (mate.isDiseased() && mate.getDisease().getDiseaseType() == DiseaseType.SEXUAL) {
++            animal.setDisease(mate.getDisease());
++        }
++    }
++}
+diff --git a/FieldPopulator.java b/FieldPopulator.java
+new file mode 100644
+index 0000000..16356c4
+--- /dev/null
++++ b/FieldPopulator.java
+@@ -0,0 +1,88 @@
++import java.util.*;
++import java.util.function.BiFunction;
++
++/**
++ * Responsible for populating the simulation field at startup and for
++ * weather-driven in-step grass growth.
++ * Extracted from SimulationEngine to separate world-building from the step loop.
++ *
++ * @version 2022.03.02
++ */
++public class FieldPopulator
++{
++    private static final int HUNTER_LIMIT = 5;
++    private static final Random rand = Randomizer.getRandom();
++
++    private final Field field;
++    private final List<Actor> actors;
++    private final Map<Class<?>, Double> probabilities;
++    private int hunterCount = 0;
++
++    /**
++     * @param field         The field to populate.
++     * @param actors        The shared actor list managed by the engine.
++     * @param probabilities Per-class spawn probability.
++     */
++    public FieldPopulator(Field field, List<Actor> actors, Map<Class<?>, Double> probabilities)
++    {
++        this.field = field;
++        this.actors = actors;
++        this.probabilities = probabilities;
++    }
++
++    /** Reset the hunter count so populate() can be called again on a fresh simulation. */
++    public void reset()
++    {
++        hunterCount = 0;
++    }
++
++    /**
++     * Randomly populate the field with organisms.
++     * The factory map is tried in insertion order; only the first matching entry
++     * is spawned per cell.
++     */
++    public void populate()
++    {
++        LinkedHashMap<Class<?>, BiFunction<Location, Gender, Actor>> factories = new LinkedHashMap<>();
++        factories.put(Grass.class,  (loc, sex) -> new Grass(field, loc));
++        factories.put(Deer.class,   (loc, sex) -> new Deer(true, field, loc, sex));
++        factories.put(Coyote.class, (loc, sex) -> new Coyote(true, field, loc, sex));
++        factories.put(Wolf.class,   (loc, sex) -> new Wolf(true, field, loc, sex));
++        factories.put(Eagle.class,  (loc, sex) -> new Eagle(true, field, loc, sex));
++        factories.put(Mouse.class,  (loc, sex) -> new Mouse(true, field, loc, sex));
++        factories.put(Hunter.class, (loc, sex) -> new Hunter(field, loc));
++
++        field.clear();
++        for (int row = 0; row < field.getDepth(); row++) {
++            for (int col = 0; col < field.getWidth(); col++) {
++                Location location = new Location(row, col);
++                Gender sex = Randomizer.getRandomSex();
++                for (Map.Entry<Class<?>, BiFunction<Location, Gender, Actor>> entry : factories.entrySet()) {
++                    Class<?> cls = entry.getKey();
++                    if (cls == Hunter.class && hunterCount >= HUNTER_LIMIT) continue;
++                    if (rand.nextDouble() <= probabilities.get(cls)) {
++                        actors.add(entry.getValue().apply(location, sex));
++                        if (cls == Hunter.class) hunterCount++;
++                        break;
++                    }
++                }
++                // else leave the location empty
++            }
++        }
++    }
++
++    /**
++     * Randomly generate grass in free field patches, but only when it is raining.
++     * @param environment The current simulation environment.
++     */
++    public void plantGrassInPatches(Environment environment)
++    {
++        double grassProb = probabilities.get(Grass.class);
++        for (Location location : field.getRandomFreePatches(grassProb)) {
++            if (rand.nextDouble() <= grassProb
++                    && environment.getWeather().getCurrentWeather() == WeatherType.RAINING) {
++                actors.add(new Grass(field, location));
++            }
++        }
++    }
++}
+diff --git a/SimulationEngine.java b/SimulationEngine.java
+index d75ee60..bfa4d0a 100644
+--- a/SimulationEngine.java
++++ b/SimulationEngine.java
+@@ -1,11 +1,12 @@
+ import java.util.*;
+-import java.util.function.BiFunction;
+ 
+ /**
+  * The core simulation engine: owns all simulation state and drives each step.
+  * It is deliberately decoupled from the GUI — the only way it communicates
+  * with the view layer is through the {@link SimulationObserver} passed at
+  * construction time.
++ * World-building (initial population and rain-driven grass growth) is delegated
++ * to {@link FieldPopulator}.
+  *
+  * @version 2022.03.02
+  */
+@@ -14,9 +15,6 @@ public class SimulationEngine implements SimulationControls
+     static final int DEFAULT_DEPTH = 160;
+     static final int DEFAULT_WIDTH = 240;
+ 
+-    private static final int HUNTER_LIMIT = 5;
+-    private static final Random rand = Randomizer.getRandom();
+-
+     private static final Map<Class<?>, Double> DEFAULT_PROBABILITIES = Map.ofEntries(
+             Map.entry(Coyote.class, 0.010),
+             Map.entry(Deer.class,   0.080),
+@@ -29,10 +27,10 @@ public class SimulationEngine implements SimulationControls
+ 
+     private boolean playingSimulation = false;
+     private int remainingSteps;
+-    private int hunterCount = 0;
+ 
+     private final Map<Class<?>, Double> creationProbabilities;
+     private final SimulationObserver observer;
++    private final FieldPopulator populator;
+ 
+     private List<Actor> actors;
+     private Field field;
+@@ -52,10 +50,10 @@ public class SimulationEngine implements SimulationControls
+ 
+     /**
+      * Create an engine with custom creation probabilities.
+-     * @param depth                Depth of the simulation field.
+-     * @param width                Width of the simulation field.
++     * @param depth                 Depth of the simulation field.
++     * @param width                 Width of the simulation field.
+      * @param creationProbabilities Per-class spawn probability used during populate().
+-     * @param observer             Observer that receives step notifications and answers viability queries.
++     * @param observer              Observer that receives step notifications and answers viability queries.
+      */
+     public SimulationEngine(int depth, int width, Map<Class<?>, Double> creationProbabilities,
+                             SimulationObserver observer)
+@@ -65,6 +63,7 @@ public class SimulationEngine implements SimulationControls
+         actors = new ArrayList<>();
+         field = new Field(depth, width);
+         environment = new Environment(new Time(), new Weather());
++        populator = new FieldPopulator(field, actors, creationProbabilities);
+     }
+ 
+     // --- SimulationControls implementation ---
+@@ -96,9 +95,9 @@ public class SimulationEngine implements SimulationControls
+     public void reset()
+     {
+         step = 0;
+-        hunterCount = 0;
+         actors.clear();
+-        populate();
++        populator.reset();
++        populator.populate();
+         environment.getTime().reset();
+         observer.onStep(step, environment, field);
+     }
+@@ -158,58 +157,8 @@ public class SimulationEngine implements SimulationControls
+             }
+         }
+         actors.addAll(newActors);
+-        plantGrassInPatches();
++        populator.plantGrassInPatches(environment);
+ 
+         observer.onStep(step, environment, field);
+     }
+-
+-    // --- Field management ---
+-
+-    /**
+-     * Randomly generate grass in free patches on the field, only if it is raining.
+-     */
+-    private void plantGrassInPatches()
+-    {
+-        for (Location location : field.getRandomFreePatches(creationProbabilities.get(Grass.class))) {
+-            if (rand.nextDouble() <= creationProbabilities.get(Grass.class)
+-                    && environment.getWeather().getCurrentWeather() == WeatherType.RAINING) {
+-                actors.add(new Grass(field, location));
+-            }
+-        }
+-    }
+-
+-    /**
+-     * Randomly populate the field with organisms.
+-     * The factory map determines which actor is spawned at each cell; entries
+-     * are tried in insertion order and only the first match is placed per cell.
+-     */
+-    private void populate()
+-    {
+-        LinkedHashMap<Class<?>, BiFunction<Location, Gender, Actor>> factories = new LinkedHashMap<>();
+-        factories.put(Grass.class,  (loc, sex) -> new Grass(field, loc));
+-        factories.put(Deer.class,   (loc, sex) -> new Deer(true, field, loc, sex));
+-        factories.put(Coyote.class, (loc, sex) -> new Coyote(true, field, loc, sex));
+-        factories.put(Wolf.class,   (loc, sex) -> new Wolf(true, field, loc, sex));
+-        factories.put(Eagle.class,  (loc, sex) -> new Eagle(true, field, loc, sex));
+-        factories.put(Mouse.class,  (loc, sex) -> new Mouse(true, field, loc, sex));
+-        factories.put(Hunter.class, (loc, sex) -> new Hunter(field, loc));
+-
+-        field.clear();
+-        for (int row = 0; row < field.getDepth(); row++) {
+-            for (int col = 0; col < field.getWidth(); col++) {
+-                Location location = new Location(row, col);
+-                Gender sex = Randomizer.getRandomSex();
+-                for (Map.Entry<Class<?>, BiFunction<Location, Gender, Actor>> entry : factories.entrySet()) {
+-                    Class<?> cls = entry.getKey();
+-                    if (cls == Hunter.class && hunterCount >= HUNTER_LIMIT) continue;
+-                    if (rand.nextDouble() <= creationProbabilities.get(cls)) {
+-                        actors.add(entry.getValue().apply(location, sex));
+-                        if (cls == Hunter.class) hunterCount++;
+-                        break;
+-                    }
+-                }
+-                // else leave the location empty
+-            }
+-        }
+-    }
+ }

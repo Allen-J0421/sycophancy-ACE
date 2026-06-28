@@ -1,0 +1,552 @@
+diff --git a/Animal.java b/Animal.java
+index b6d5eb1..2d9c129 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -12,8 +12,6 @@ import java.util.stream.Collectors;
+  */
+ public abstract class Animal extends Organism implements Actor
+ {
+-    private static final double RANDOM_CONTRACTION_RATE = 0.002;
+-
+     protected int age;
+     protected boolean isNocturnal;
+     protected int foodLevel;
+@@ -57,7 +55,6 @@ public abstract class Animal extends Organism implements Actor
+             this.age = 0;
+             foodLevel = getMaxFoodLevel();
+         }
+-        randomlyContractDisease();
+     }
+ 
+     /**
+@@ -69,7 +66,6 @@ public abstract class Animal extends Organism implements Actor
+     public void act(List<Actor> newAnimals, Environment environment)
+     {
+         Random rand = getRandomProvider().getRandom();
+-        randomlyContractDisease();
+         incrementAge();
+         incrementHunger();
+         if(isAlive()) {
+@@ -98,13 +94,6 @@ public abstract class Animal extends Organism implements Actor
+                 // Overcrowding
+                 setDead();
+             }
+-
+-            if(isDiseased() && getDisease().getLethalityRate() <= rand.nextDouble()){
+-                // every step, check if the Animal is diseased
+-                // if it is Diseased, and a random double is less than the lethality rate, the Animal dies
+-                setDead();
+-            }
+-
+         }
+     }
+ 
+@@ -125,19 +114,10 @@ public abstract class Animal extends Organism implements Actor
+      */
+     protected Location findFood()
+     {
+-        Random rand = getRandomProvider().getRandom();
+         Field field = getField();
++        DiseaseService diseaseService = field.getDiseaseService();
+         List<Location> adjacent = field.adjacentLocations(getLocation());
+-        for(Location loc : adjacent){
+-            if(field.getObjectAt(loc) != null && !(field.getObjectAt(loc) instanceof Hunter)){
+-                Organism organism = (Organism) field.getObjectAt(loc);
+-                if (organism.isDiseased() && organism.getDisease().getDiseaseType() != DiseaseType.CONTACT && organism.getDisease().getPropagationRate() <= rand.nextDouble()){
+-                    // contracts the first contact disease it encounters amongst the adjacent animals
+-                    this.setDisease(organism.getDisease());
+-                    break;
+-                }
+-            }
+-        }
++        diseaseService.applyAdjacentExposure(this, adjacent, field);
+         Iterator<Location> it = adjacent.iterator();
+         // only eats if it's not full (food level less than max)
+         while(it.hasNext() && foodLevel <= getMaxFoodLevel()) {
+@@ -146,11 +126,7 @@ public abstract class Animal extends Organism implements Actor
+             if(animal != null && getDiet().contains(animal.getClass()))
+             {
+                 Organism food = (Organism) animal;
+-                if (food.isDiseased() &&  food.getDisease().getDiseaseType() == DiseaseType.FOODBORNE && food.getDisease().getPropagationRate() <= rand.nextDouble()) 
+-                {
+-                    // contracts disease from food if it has a disease and that disease is foodborne
+-                    setDisease(food.getDisease());
+-                }
++                diseaseService.applyFoodborneExposure(this, food);
+                 if(food.isAlive()) 
+                 {
+                     food.setDead();
+@@ -167,18 +143,6 @@ public abstract class Animal extends Organism implements Actor
+         return null;
+     }
+ 
+-    /**
+-     * Returns true if an animal contracts a disease at birth.
+-     * Returns false if otherwise. 
+-     */
+-    protected void randomlyContractDisease()
+-    {
+-        Random rand = getRandomProvider().getRandom();
+-        if(rand.nextDouble() <= RANDOM_CONTRACTION_RATE) {
+-            setDisease(new Disease(getRandomProvider()));
+-        }
+-    }
+-
+     /**
+      * Check whether this animal is to give birth at this step.
+      * New births will be made into free adjacent locations.
+@@ -225,9 +189,7 @@ public abstract class Animal extends Organism implements Actor
+         if(canBreed() && rand.nextDouble() <= getBreedingProbability()) {
+             births = rand.nextInt(getMaxLitterSize()) + 1;
+             Animal mate = (Animal) getPotentialMates().get(rand.nextInt(getPotentialMates().size()));
+-            if(mate.isDiseased() && mate.getDisease().getDiseaseType() == DiseaseType.SEXUAL){
+-                this.setDisease(mate.getDisease());
+-            }
++            getField().getDiseaseService().applySexualExposure(this, mate);
+         }
+         return births;
+     }
+diff --git a/Disease.java b/Disease.java
+index 232d93e..38a7564 100644
+--- a/Disease.java
++++ b/Disease.java
+@@ -10,11 +10,11 @@ import java.util.Random;
+ public class Disease 
+ {
+     // The propagation rate of the disease
+-    private static double PROPAGATION_RATE = 0.0;
++    private final double propagationRate;
+     // the lethality rate of the disease
+-    private static double LETHALITY_RATE = 0.0;
++    private final double lethalityRate;
+     // the transmission route of the disease 
+-    private DiseaseType PROPAGATION_MODE;
++    private final DiseaseType propagationMode;
+ 
+     /**
+      * Creates a new disease with random propagation and lethality rates.
+@@ -24,9 +24,9 @@ public class Disease
+     public Disease(RandomProvider randomProvider) 
+     {
+         Random rand = randomProvider.getRandom();
+-        PROPAGATION_RATE = 0.6 * rand.nextDouble(); // max prop. rate is 60%
+-        LETHALITY_RATE = 0.4 * rand.nextDouble(); // max lethality rate is 40%
+-        PROPAGATION_MODE = DiseaseType.values()[rand.nextInt(DiseaseType.values().length)];
++        propagationRate = 0.6 * rand.nextDouble(); // max prop. rate is 60%
++        lethalityRate = 0.4 * rand.nextDouble(); // max lethality rate is 40%
++        propagationMode = DiseaseType.values()[rand.nextInt(DiseaseType.values().length)];
+     }
+     
+     /**
+@@ -37,9 +37,9 @@ public class Disease
+      */
+     public Disease(double propRate, double lethalRate, DiseaseType propMode)
+     {
+-        PROPAGATION_RATE = propRate;
+-        LETHALITY_RATE = lethalRate;
+-        PROPAGATION_MODE = propMode;
++        propagationRate = propRate;
++        lethalityRate = lethalRate;
++        propagationMode = propMode;
+     }
+ 
+     /**
+@@ -47,7 +47,7 @@ public class Disease
+      */
+     public double getPropagationRate() 
+     {
+-        return PROPAGATION_RATE;
++        return propagationRate;
+     }
+ 
+     /**
+@@ -55,7 +55,7 @@ public class Disease
+      */
+     public double getLethalityRate() 
+     {
+-        return LETHALITY_RATE;
++        return lethalityRate;
+     }
+ 
+     /**
+@@ -63,6 +63,6 @@ public class Disease
+      */
+     public DiseaseType getDiseaseType() 
+     {
+-        return PROPAGATION_MODE;
++        return propagationMode;
+     }
+ }
+diff --git a/DiseaseService.java b/DiseaseService.java
+new file mode 100644
+index 0000000..0a92203
+--- /dev/null
++++ b/DiseaseService.java
+@@ -0,0 +1,140 @@
++import java.util.IdentityHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Random;
++
++/**
++ * Centralizes disease creation, infection state, and transmission rules.
++ */
++public class DiseaseService
++{
++    private static final double RANDOM_CONTRACTION_RATE = 0.002;
++
++    private final RandomProvider randomProvider;
++    private final Map<Organism, Disease> infections;
++
++    public DiseaseService(RandomProvider randomProvider)
++    {
++        this.randomProvider = randomProvider;
++        this.infections = new IdentityHashMap<>();
++    }
++
++    public void initializeOrganism(Organism organism)
++    {
++        if(organism instanceof Animal) {
++            maybeInfectAtCreation(organism);
++        }
++    }
++
++    public void reset()
++    {
++        infections.clear();
++    }
++
++    public void unregister(Organism organism)
++    {
++        infections.remove(organism);
++    }
++
++    public boolean isDiseased(Organism organism)
++    {
++        return infections.containsKey(organism);
++    }
++
++    public Disease getDisease(Organism organism)
++    {
++        return infections.get(organism);
++    }
++
++    public void infect(Organism organism, Disease disease)
++    {
++        infections.put(organism, disease);
++    }
++
++    public boolean processPreAct(Animal animal)
++    {
++        if(!animal.isAlive()) {
++            return false;
++        }
++
++        if(shouldKillByPropagation(animal)) {
++            kill(animal);
++            return false;
++        }
++
++        maybeInfectAtCreation(animal);
++        return animal.isAlive();
++    }
++
++    public void processPostAct(Animal animal)
++    {
++        if(animal.isAlive() && shouldKillByLethality(animal)) {
++            kill(animal);
++        }
++    }
++
++    public void applyAdjacentExposure(Animal animal, List<Location> adjacentLocations, Field field)
++    {
++        for(Location location : adjacentLocations) {
++            Object nearby = field.getObjectAt(location);
++            if(nearby instanceof Organism organism
++                    && !(nearby instanceof Hunter)
++                    && isDiseased(organism)
++                    && getDisease(organism).getDiseaseType() != DiseaseType.CONTACT
++                    && succeeds(getDisease(organism).getPropagationRate())) {
++                infect(animal, getDisease(organism));
++                break;
++            }
++        }
++    }
++
++    public void applyFoodborneExposure(Animal animal, Organism food)
++    {
++        if(isDiseased(food)
++                && getDisease(food).getDiseaseType() == DiseaseType.FOODBORNE
++                && succeeds(getDisease(food).getPropagationRate())) {
++            infect(animal, getDisease(food));
++        }
++    }
++
++    public void applySexualExposure(Animal animal, Animal mate)
++    {
++        if(isDiseased(mate) && getDisease(mate).getDiseaseType() == DiseaseType.SEXUAL) {
++            infect(animal, getDisease(mate));
++        }
++    }
++
++    public Disease createRandomDisease()
++    {
++        return new Disease(randomProvider);
++    }
++
++    private void maybeInfectAtCreation(Organism organism)
++    {
++        if(!isDiseased(organism) && succeeds(RANDOM_CONTRACTION_RATE)) {
++            infect(organism, createRandomDisease());
++        }
++    }
++
++    private boolean shouldKillByPropagation(Animal animal)
++    {
++        return isDiseased(animal) && succeeds(getDisease(animal).getPropagationRate());
++    }
++
++    private boolean shouldKillByLethality(Animal animal)
++    {
++        return isDiseased(animal) && succeeds(getDisease(animal).getLethalityRate());
++    }
++
++    private boolean succeeds(double threshold)
++    {
++        Random rand = randomProvider.getRandom();
++        return threshold <= rand.nextDouble();
++    }
++
++    private void kill(Organism organism)
++    {
++        organism.setDead();
++        unregister(organism);
++    }
++}
+diff --git a/Field.java b/Field.java
+index 1d59520..5f44646 100644
+--- a/Field.java
++++ b/Field.java
+@@ -10,6 +10,7 @@ public class Field
+ {
+     private final RandomProvider randomProvider;
+     private final OrganismFactory organismFactory;
++    private final DiseaseService diseaseService;
+ 
+     // The depth and width of the field.
+     private int depth, width;
+@@ -21,10 +22,15 @@ public class Field
+      * @param depth The depth of the field.
+      * @param width The width of the field.
+      */
+-    public Field(RandomProvider randomProvider, OrganismFactory organismFactory, int depth, int width)
++    public Field(RandomProvider randomProvider,
++            OrganismFactory organismFactory,
++            DiseaseService diseaseService,
++            int depth,
++            int width)
+     {
+         this.randomProvider = randomProvider;
+         this.organismFactory = organismFactory;
++        this.diseaseService = diseaseService;
+         this.depth = depth;
+         this.width = width;
+         field = new Object[depth][width];
+@@ -290,4 +296,9 @@ public class Field
+     {
+         return organismFactory;
+     }
++
++    public DiseaseService getDiseaseService()
++    {
++        return diseaseService;
++    }
+ }
+diff --git a/FieldStats.java b/FieldStats.java
+index 15acd53..8b25ddf 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -155,16 +155,15 @@ public class FieldStats
+      */
+     private void generateCounts(Field field)
+     {
++        DiseaseService diseaseService = field.getDiseaseService();
+         reset();
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+                 Object actor = field.getObjectAt(row, col);
+                 if(actor != null) {
+                     incrementCount(actor.getClass());
+-                    if(actor instanceof Organism){
+-                        if(((Organism) actor).isDiseased()){
+-                            incrementDiseasedCount();
+-                        }
++                    if(actor instanceof Organism organism && diseaseService.isDiseased(organism)) {
++                        incrementDiseasedCount();
+                     }
+                 }
+             }
+diff --git a/Organism.java b/Organism.java
+index 0c2b731..f2e082e 100644
+--- a/Organism.java
++++ b/Organism.java
+@@ -14,10 +14,6 @@ public abstract class Organism {
+     private Field field;
+     // The organism's position in the field.
+     private Location location;
+-    
+-    // Whether the organism has a disease 
+-    private Disease disease = null;
+-    private boolean hasDisease = false;
+ 
+ 
+     protected abstract int getFoodValue();
+@@ -93,30 +89,4 @@ public abstract class Organism {
+         }
+     }
+ 
+-    /**
+-     * Returns true if the organism is infected. 
+-     */
+-    public boolean isDiseased()
+-    {
+-        return hasDisease;
+-    }
+-
+-    /**
+-     * Returns the organism's disease.
+-     * @return Disease The organism's disease.
+-     */
+-    public Disease getDisease()
+-    {
+-        return disease;
+-    }
+-
+-    /**
+-     * Sets the organism to be infected.
+-     * @param disease The disease that the organism is gonna be infected by. 
+-     */
+-    protected void setDisease(Disease disease)
+-    {
+-        this.disease = disease;
+-        hasDisease = true;
+-    }
+ }
+diff --git a/OrganismFactory.java b/OrganismFactory.java
+index 8f5ff17..7f8fa32 100644
+--- a/OrganismFactory.java
++++ b/OrganismFactory.java
+@@ -20,12 +20,14 @@ public class OrganismFactory
+ 
+     private final SimulationConfig config;
+     private final RandomProvider randomProvider;
++    private final DiseaseService diseaseService;
+     private final Map<Class<? extends Organism>, OrganismCreator<? extends Organism>> creators;
+ 
+-    public OrganismFactory(RandomProvider randomProvider, SimulationConfig config)
++    public OrganismFactory(RandomProvider randomProvider, SimulationConfig config, DiseaseService diseaseService)
+     {
+         this.randomProvider = randomProvider;
+         this.config = config;
++        this.diseaseService = diseaseService;
+         this.creators = Map.ofEntries(
+                 Map.entry(Grass.class, (field, location, options) -> new Grass(field, location)),
+                 Map.entry(Hunter.class, (field, location, options) -> new Hunter(field, location)),
+@@ -122,7 +124,9 @@ public class OrganismFactory
+             throw new IllegalArgumentException("Unsupported organism type: " + organismClass.getName());
+         }
+ 
+-        return organismClass.cast(creator.create(field, location, options));
++        T organism = organismClass.cast(creator.create(field, location, options));
++        diseaseService.initializeOrganism(organism);
++        return organism;
+     }
+ 
+     private Animal.Gender getRandomSex()
+diff --git a/SimulationState.java b/SimulationState.java
+index af863b1..c6dad33 100644
+--- a/SimulationState.java
++++ b/SimulationState.java
+@@ -34,6 +34,7 @@ public class SimulationState
+ 
+     public static SimulationState capture(int step, Environment environment, Field field)
+     {
++        DiseaseService diseaseService = field.getDiseaseService();
+         Map<Class<?>, Integer> populationCounts = new LinkedHashMap<>();
+         for(Class<?> actorClass : SimulationInfo.ALL_ACTORS) {
+             populationCounts.put(actorClass, 0);
+@@ -45,7 +46,7 @@ public class SimulationState
+                 Object actor = field.getObjectAt(row, col);
+                 if(actor != null) {
+                     populationCounts.merge(actor.getClass(), 1, Integer::sum);
+-                    if(actor instanceof Organism organism && organism.isDiseased()) {
++                    if(actor instanceof Organism organism && diseaseService.isDiseased(organism)) {
+                         diseasedPopulation++;
+                     }
+                 }
+diff --git a/Simulator.java b/Simulator.java
+index 5df4b1b..667e32d 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -25,6 +25,7 @@ public class Simulator
+     // Configuration and actor creation rules for the simulation.
+     private final SimulationConfig config;
+     private final RandomProvider randomProvider;
++    private final DiseaseService diseaseService;
+     private final OrganismFactory organismFactory;
+     // Published state for observers.
+     private final List<SimulationObserver> observers;
+@@ -123,8 +124,9 @@ public class Simulator
+         this.randomProvider = randomProvider;
+         this.config = config;
+         this.actors = new ArrayList<>();
+-        this.organismFactory = new OrganismFactory(randomProvider, config);
+-        this.field = new Field(randomProvider, organismFactory, depth, width);
++        this.diseaseService = new DiseaseService(randomProvider);
++        this.organismFactory = new OrganismFactory(randomProvider, config, diseaseService);
++        this.field = new Field(randomProvider, organismFactory, diseaseService, depth, width);
+         this.environment = new Environment(new Time(), new Weather(randomProvider));
+         this.observers = new ArrayList<>();
+ 
+@@ -249,6 +251,9 @@ public class Simulator
+             maybeGrowPlant(actor);
+ 
+             if(!actor.isAlive()) {
++                if(actor instanceof Organism organism) {
++                    diseaseService.unregister(organism);
++                }
+                 it.remove();
+             }
+         }
+@@ -267,6 +272,7 @@ public class Simulator
+         remainingSteps = 0;
+         step = 0;
+         environment.reset();
++        diseaseService.reset();
+ 
+         actors.clear();
+         actors.addAll(organismFactory.populate(field));
+@@ -290,18 +296,20 @@ public class Simulator
+ 
+     private void processActor(Actor actor, List<Actor> newActors)
+     {
+-        Random rand = randomProvider.getRandom();
+         if(actor instanceof Animal animal) {
+             if(!animal.isAwake(environment)) {
+                 return;
+             }
+-            if(animal.isDiseased() && animal.getDisease().getPropagationRate() <= rand.nextDouble()) {
+-                animal.setDead();
++            if(!diseaseService.processPreAct(animal)) {
++                return;
+             }
+         }
+ 
+         if(actor.isAlive()) {
+             actor.act(newActors, environment);
++            if(actor instanceof Animal animal) {
++                diseaseService.processPostAct(animal);
++            }
+         }
+     }
+ 

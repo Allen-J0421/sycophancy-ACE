@@ -1,0 +1,464 @@
+diff --git a/ActorFactory.java b/ActorFactory.java
+new file mode 100644
+index 0000000..c5a3106
+--- /dev/null
++++ b/ActorFactory.java
+@@ -0,0 +1,20 @@
++/**
++ * Generic factory for creating actors from explicit species definitions.
++ */
++public class ActorFactory<T extends Actor, S extends SpawnableActorType<T>>
++{
++    private final Field field;
++
++    public ActorFactory(Field field)
++    {
++        this.field = field;
++    }
++
++    public T create(S species, Location location)
++    {
++        if(species == null) {
++            return null;
++        }
++        return species.createRandom(field, location);
++    }
++}
+diff --git a/AnimalFactory.java b/AnimalFactory.java
+index 6e5c163..4bf0f8a 100644
+--- a/AnimalFactory.java
++++ b/AnimalFactory.java
+@@ -3,36 +3,14 @@
+  *
+  * @version 1.0
+  */
+-public class AnimalFactory
++public class AnimalFactory extends ActorFactory<Animal, AnimalSpecies>
+ {
+-    
+-    private final Field field;
+-    
+-    /*///////////////////////////////////////////////////////////////
+-                                CONSTRUCTOR
+-    //////////////////////////////////////////////////////////////*/
+-    
+     /**
+      * Creates an AnimalFactory
+      * @param reference to field to later pass in to animals
+      */
+     public AnimalFactory(Field field) 
+     {
+-        this.field = field;
+-    }
+-    
+-    /**
+-     * Creates an animal of the given species.
+-     *
+-     * @param species the species to create.
+-     * @param location The base location of the newly created animal
+-     * @return the created animal
+-     */
+-    public Animal create(AnimalSpecies species, Location location)
+-    {
+-        if(species == null) {
+-            return null;
+-        }
+-        return species.createRandom(field, location);
++        super(field);
+     }
+ }
+diff --git a/AnimalSpecies.java b/AnimalSpecies.java
+index e1fbd88..eb88857 100644
+--- a/AnimalSpecies.java
++++ b/AnimalSpecies.java
+@@ -3,7 +3,7 @@ import java.awt.Color;
+ /**
+  * Central definition of the supported animal species and their creation metadata.
+  */
+-public enum AnimalSpecies implements ActorType
++public enum AnimalSpecies implements SpawnableActorType<Animal>
+ {
+     FOX("Fox", true, 0.09, new Color(227, 93, 57), 25, 18, 71, 12, 0.076, 3, false, 1.0, CarnivoreFox::new),
+     REINDEER("Reindeer", false, 0.11, new Color(217, 162, 147), 15, 18, 28, 4, 0.7, 5, true, 1.0, Reindeer::new),
+@@ -72,11 +72,13 @@ public enum AnimalSpecies implements ActorType
+         return ActorCategory.ANIMAL;
+     }
+ 
++    @Override
+     public double getSpawnProbability()
+     {
+         return spawnProbability;
+     }
+ 
++    @Override
+     public Color getColor()
+     {
+         return color;
+@@ -120,6 +122,7 @@ public enum AnimalSpecies implements ActorType
+         return activeAtNight || dayState != DayState.NIGHT;
+     }
+ 
++    @Override
+     public Animal createRandom(Field field, Location location)
+     {
+         return creator.create(true, field, location, Utils.getRandomEnumValue(Gender.class));
+diff --git a/DiseaseHandler.java b/DiseaseHandler.java
+index f2dbf09..a735481 100644
+--- a/DiseaseHandler.java
++++ b/DiseaseHandler.java
+@@ -47,39 +47,74 @@ public class DiseaseHandler
+     //////////////////////////////////////////////////////////////*/
+     
+     /**
+-     * Simulates the disease by iterating through every block in the field, and computing the density of the number of ppl infected 
+-     * in the given block to determine the likelyhood of being infected in the block
++     * Simulates disease spread by evaluating each field block independently.
+      */
+     public void simulateDiseaseStep()
+     {
+-        int infectionCount = 0;
+-        int[] totalInfections = {0};
+         currentStep++;
++        InfectionTally infectionTally = new InfectionTally();
+         field.forEachAnimalBlock(block -> {
+-            int densityIndex = 0;
+-            List<Animal> uninfectedAnimals = new ArrayList<>();
+-            for(Animal animal : block) {
+-                if(animal.getInfectionTimestamp() != null && currentStep - animal.getInfectionTimestamp() < DISINFECTION_DURATION) {
+-                    // increase the counter of number of animals infected within this block.
+-                    densityIndex++;
+-                    continue;
+-                }
+-                if(animal.getInfectionTimestamp() == null) {
+-                    uninfectedAnimals.add(animal);
+-                }
++            infectionTally.addInfected(evaluateBlock(block));
++        });
++        infectionCounts.put(currentStep, infectionTally.getInfectedCount());
++    }
++
++    private int evaluateBlock(List<Animal> block)
++    {
++        int infectedCount = countActiveInfections(block);
++        infectSusceptibleAnimals(block, infectedCount);
++        return infectedCount;
++    }
++
++    private int countActiveInfections(List<Animal> block)
++    {
++        int infectedCount = 0;
++        for(Animal animal : block) {
++            if(isActivelyInfected(animal)) {
++                infectedCount++;
+             }
+-            // compute probability of being infected.
+-            double pValue = block.isEmpty() ? 0.0 : ((double) densityIndex / (double) block.size());
+-            for(Animal animal : uninfectedAnimals) {
+-                double randNumber = rand.nextDouble();
+-                if(randNumber < pValue ) {
+-                    animal.setInfectionTimestamp(currentStep);
+-                }
++        }
++        return infectedCount;
++    }
++
++    private void infectSusceptibleAnimals(List<Animal> block, int infectedCount)
++    {
++        double infectionProbability = calculateInfectionProbability(block.size(), infectedCount);
++        if(infectionProbability == 0.0) {
++            return;
++        }
++
++        for(Animal animal : findSusceptibleAnimals(block)) {
++            if(rand.nextDouble() < infectionProbability) {
++                animal.setInfectionTimestamp(currentStep);
+             }
+-            totalInfections[0] += densityIndex;
+-        });
+-        infectionCount = totalInfections[0];
+-        infectionCounts.put(currentStep, infectionCount);
++        }
++    }
++
++    private List<Animal> findSusceptibleAnimals(List<Animal> block)
++    {
++        List<Animal> susceptibleAnimals = new ArrayList<>();
++        for(Animal animal : block) {
++            if(animal.getInfectionTimestamp() == null) {
++                susceptibleAnimals.add(animal);
++            }
++        }
++        return susceptibleAnimals;
++    }
++
++    private boolean isActivelyInfected(Animal animal)
++    {
++        Integer infectionTimestamp = animal.getInfectionTimestamp();
++        return infectionTimestamp != null
++            && currentStep - infectionTimestamp < DISINFECTION_DURATION;
++    }
++
++    private double calculateInfectionProbability(int blockSize, int infectedCount)
++    {
++        if(blockSize == 0) {
++            return 0.0;
++        }
++        return (double) infectedCount / (double) blockSize;
+     }
+ 
+     /**
+@@ -98,4 +133,19 @@ public class DiseaseHandler
+     {
+         return infectionCounts;
+     }
++
++    private static class InfectionTally
++    {
++        private int infectedCount;
++
++        void addInfected(int amount)
++        {
++            infectedCount += amount;
++        }
++
++        int getInfectedCount()
++        {
++            return infectedCount;
++        }
++    }
+ }
+diff --git a/PlantFactory.java b/PlantFactory.java
+index 19dd01f..d68c592 100644
+--- a/PlantFactory.java
++++ b/PlantFactory.java
+@@ -1,42 +1,17 @@
+ /**
+- * Plant factory for creating objects that extend the Plant class.
++ * Factory for creating plants from explicit species definitions.
+  *
+  * @version 1.0
+  */
+-public class PlantFactory
++public class PlantFactory extends ActorFactory<Plant, PlantSpecies>
+ {
+-    
+-    /*///////////////////////////////////////////////////////////////
+-                                STATE
+-    //////////////////////////////////////////////////////////////*/
+-    
+-    private Field field;
+-    
+-    /*///////////////////////////////////////////////////////////////
+-                                CONSTRUCTOR
+-    //////////////////////////////////////////////////////////////*/
+-    
+     /**
+-     * Creates a Plant Factory.
++     * Creates a PlantFactory.
+      * 
+      * @param field reference to field to later pass in to plants.
+      */
+     public PlantFactory(Field field)
+     {
+-        this.field = field;
+-    }
+-    
+-    /**
+-     * Creates a Plant given an input plant type.
+-     * 
+-     * @param plantType the type of the plant.
+-     * @param location The base location of the newly created plant.
+-     * @return the created plant.
+-     */
+-    public Plant create(PlantSpecies plantType, Location location) {
+-        if(plantType == null) {
+-            return null;
+-        }
+-        return plantType.createRandom(field, location);
++        super(field);
+     }
+ }
+diff --git a/PlantSpecies.java b/PlantSpecies.java
+index 7e8aa52..7fb6979 100644
+--- a/PlantSpecies.java
++++ b/PlantSpecies.java
+@@ -6,7 +6,7 @@ import java.awt.Color;
+ /**
+  * Central definition of the supported plant species and their creation metadata.
+  */
+-public enum PlantSpecies implements ActorType
++public enum PlantSpecies implements SpawnableActorType<Plant>
+ {
+     GRASS("Grass", 0.09, new Color(50, 184, 121), 25, 0.2, 4.0, EnumSet.of(Weather.RAIN, Weather.SUNNY), Grass::new),
+     SAGE("Sage", 0.075, new Color(27, 117, 19), 20, 0.15, 4.0, EnumSet.of(Weather.RAIN, Weather.SUNNY), Sage::new),
+@@ -41,6 +41,7 @@ public enum PlantSpecies implements ActorType
+         this.creator = creator;
+     }
+ 
++    @Override
+     public double getSpawnProbability()
+     {
+         return spawnProbability;
+@@ -58,6 +59,7 @@ public enum PlantSpecies implements ActorType
+         return ActorCategory.PLANT;
+     }
+ 
++    @Override
+     public Color getColor()
+     {
+         return color;
+@@ -76,6 +78,7 @@ public enum PlantSpecies implements ActorType
+         return spreadProbability;
+     }
+ 
++    @Override
+     public Plant createRandom(Field field, Location location)
+     {
+         return creator.create(true, field, location);
+diff --git a/PopulationGenerator.java b/PopulationGenerator.java
+index 4d26fc8..74e5bfa 100644
+--- a/PopulationGenerator.java
++++ b/PopulationGenerator.java
+@@ -1,7 +1,7 @@
+ import java.util.Random;
+ /**
+  * A class responsible for generating the population,
+- * as well as setting up the colours associated with each animal and plant class.
++ * as well as setting up the colours associated with each actor type.
+  *
+  * @version 1.0
+  */
+@@ -35,13 +35,19 @@ public class PopulationGenerator
+     private final AnimalFactory animalFactory;
+     private final PlantFactory plantFactory;
+     private final Field field;
++
++    @FunctionalInterface
++    private interface PopulationAdder<T extends Actor>
++    {
++        void add(SimulationPopulation population, T actor);
++    }
+     
+     /*///////////////////////////////////////////////////////////////
+                                 CONSTRUCTOR
+     //////////////////////////////////////////////////////////////*/
+     
+     /**
+-     * Construct a population generator and set up the colours for representation of each animal class.
++     * Construct a population generator and set up the colours for each supported actor type.
+      */
+     public PopulationGenerator(SimulatorView view, Field field)
+     {
+@@ -53,16 +59,12 @@ public class PopulationGenerator
+     }
+     
+     /**
+-     * The RGB colours associated with the given animals and plants passed to the constructor of Color class from awt library.
++     * The RGB colours associated with the supported actor types.
+      */
+     private void setUpColors()
+     {
+-        for (AnimalSpecies species : AnimalSpecies.values()) {
+-            view.setColor(species, species.getColor());
+-        }
+-        for (PlantSpecies species : PlantSpecies.values()) {
+-            view.setColor(species, species.getColor());
+-        }
++        registerColors(AnimalSpecies.values());
++        registerColors(PlantSpecies.values());
+         view.showColors();
+     }
+     
+@@ -74,50 +76,43 @@ public class PopulationGenerator
+     public void populate(SimulationPopulation population)
+     {
+         field.clear();
+-        populateAnimals(population);
++        populateActors(population, ANIMAL_SPAWN_ORDER, animalFactory, SimulationPopulation::addAnimal);
+         population.infectInitialAnimals(INITIAL_INFECTION_COUNT);
+-        populatePlants(population);
++        populateActors(population, PLANT_SPAWN_ORDER, plantFactory, SimulationPopulation::addPlant);
+     }
+ 
+-    private void populateAnimals(SimulationPopulation population)
++    private void registerColors(SpawnableActorType<?>[] actorTypes)
+     {
+-        Random rand = Randomizer.getRandom();
+-        field.forEachLocation((row, col) -> {
+-            Location location = new Location(row, col);
+-            Animal animal = createAnimalAt(rand, location);
+-            if(animal != null) {
+-                population.addAnimal(animal);
+-            }
+-        });
++        for (SpawnableActorType<?> actorType : actorTypes) {
++            view.setColor(actorType, actorType.getColor());
++        }
+     }
+ 
+-    private void populatePlants(SimulationPopulation population)
+-    {
++    private <T extends Actor, S extends SpawnableActorType<T>> void populateActors(
++        SimulationPopulation population,
++        S[] spawnOrder,
++        ActorFactory<T, S> factory,
++        PopulationAdder<T> populationAdder
++    ) {
+         Random rand = Randomizer.getRandom();
+         field.forEachLocation((row, col) -> {
+             Location location = new Location(row, col);
+-            Plant plant = createPlantAt(rand, location);
+-            if(plant != null) {
+-                population.addPlant(plant);
++            T actor = createActorAt(rand, location, spawnOrder, factory);
++            if(actor != null) {
++                populationAdder.add(population, actor);
+             }
+         });
+     }
+ 
+-    private Animal createAnimalAt(Random rand, Location location)
+-    {
+-        for (AnimalSpecies species : ANIMAL_SPAWN_ORDER) {
+-            if(rand.nextDouble() <= species.getSpawnProbability()) {
+-                return animalFactory.create(species, location);
+-            }
+-        }
+-        return null;
+-    }
+-
+-    private Plant createPlantAt(Random rand, Location location)
+-    {
+-        for (PlantSpecies species : PLANT_SPAWN_ORDER) {
++    private <T extends Actor, S extends SpawnableActorType<T>> T createActorAt(
++        Random rand,
++        Location location,
++        S[] spawnOrder,
++        ActorFactory<T, S> factory
++    ) {
++        for (S species : spawnOrder) {
+             if(rand.nextDouble() <= species.getSpawnProbability()) {
+-                return plantFactory.create(species, location);
++                return factory.create(species, location);
+             }
+         }
+         return null;
+diff --git a/SpawnableActorType.java b/SpawnableActorType.java
+new file mode 100644
+index 0000000..08d762c
+--- /dev/null
++++ b/SpawnableActorType.java
+@@ -0,0 +1,13 @@
++import java.awt.Color;
++
++/**
++ * Shared metadata and creation behavior for actor species that can be spawned into the field.
++ */
++public interface SpawnableActorType<T extends Actor> extends ActorType
++{
++    double getSpawnProbability();
++
++    Color getColor();
++
++    T createRandom(Field field, Location location);
++}

@@ -1,0 +1,703 @@
+diff --git a/ActorFactory.java b/ActorFactory.java
+index 0adc3d7..ba843b2 100644
+--- a/ActorFactory.java
++++ b/ActorFactory.java
+@@ -7,7 +7,6 @@ import java.util.Random;
+  */
+ public class ActorFactory
+ {
+-    private static final Random rand = Randomizer.getRandom();
+     private static final List<Class<?>> CREATION_ORDER = List.of(
+             Grass.class,
+             Deer.class,
+@@ -19,9 +18,11 @@ public class ActorFactory
+     );
+ 
+     private final SimulationConfig config;
++    private final RandomProvider randomProvider;
+ 
+-    public ActorFactory(SimulationConfig config)
++    public ActorFactory(RandomProvider randomProvider, SimulationConfig config)
+     {
++        this.randomProvider = randomProvider;
+         this.config = config;
+     }
+ 
+@@ -49,6 +50,7 @@ public class ActorFactory
+ 
+     public List<Actor> createGrassPatches(Field field, Environment environment)
+     {
++        Random rand = randomProvider.getRandom();
+         if(environment.getWeather().getCurrentWeather() != WeatherType.RAINING) {
+             return List.of();
+         }
+@@ -66,6 +68,7 @@ public class ActorFactory
+ 
+     private Actor maybeCreateActor(Field field, Location location, int hunterCount)
+     {
++        Random rand = randomProvider.getRandom();
+         for(Class<?> actorClass : CREATION_ORDER) {
+             if(actorClass == Hunter.class && hunterCount >= config.getHunterLimit()) {
+                 continue;
+@@ -88,7 +91,9 @@ public class ActorFactory
+             return new Hunter(field, location);
+         }
+ 
+-        Animal.Gender sex = Randomizer.getRandomSex();
++        Animal.Gender sex = randomProvider.getRandom().nextBoolean()
++                ? Animal.Gender.MALE
++                : Animal.Gender.FEMALE;
+         if(actorClass == Deer.class) {
+             return new Deer(true, field, location, sex);
+         }
+diff --git a/Animal.java b/Animal.java
+index 9626ca9..c82ba42 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -1,4 +1,8 @@
+-import java.util.*;
++import java.util.ArrayList;
++import java.util.Iterator;
++import java.util.List;
++import java.util.Random;
++import java.util.Set;
+ import java.util.stream.Collectors;
+ 
+ /**
+@@ -15,8 +19,6 @@ public abstract class Animal extends Organism implements Actor
+     protected int foodLevel;
+     protected Gender sex;
+ 
+-    protected static final Random rand = Randomizer.getRandom();
+-
+     // An animal is either male or female 
+     protected enum Gender {
+         MALE,
+@@ -43,10 +45,11 @@ public abstract class Animal extends Organism implements Actor
+      * @param randomAge The animal's random starting age.
+      * @param sex The animal's gender. 
+      */
+-    public Animal(Field field, Location location, boolean randomAge, Gender sex)
++    public Animal(RandomProvider randomProvider, Field field, Location location, boolean randomAge, Gender sex)
+     {
+-        super(field, location);
++        super(randomProvider, field, location);
+         this.sex = sex;
++        Random rand = getRandomProvider().getRandom();
+         if(randomAge) {
+             this.age = rand.nextInt(getMaxAge());
+             foodLevel = rand.nextInt(getMaxFoodLevel());
+@@ -66,6 +69,7 @@ public abstract class Animal extends Organism implements Actor
+      */
+     public void act(List<Actor> newAnimals, Environment environment)
+     {
++        Random rand = getRandomProvider().getRandom();
+         randomlyContractDisease();
+         incrementAge();
+         incrementHunger();
+@@ -122,6 +126,7 @@ public abstract class Animal extends Organism implements Actor
+      */
+     protected Location findFood()
+     {
++        Random rand = getRandomProvider().getRandom();
+         Field field = getField();
+         List<Location> adjacent = field.adjacentLocations(getLocation());
+         for(Location loc : adjacent){
+@@ -169,8 +174,9 @@ public abstract class Animal extends Organism implements Actor
+      */
+     protected void randomlyContractDisease()
+     {
++        Random rand = getRandomProvider().getRandom();
+         if(rand.nextDouble() <= RANDOM_CONTRACTION_RATE) {
+-            setDisease(new Disease());
++            setDisease(new Disease(getRandomProvider()));
+         }
+     }
+ 
+@@ -187,7 +193,7 @@ public abstract class Animal extends Organism implements Actor
+         int births = breed();
+         for(int b = 0; b < births && !free.isEmpty(); b++) {
+             Location loc = free.remove(0);
+-            Gender sex = Randomizer.getRandomSex();
++            Gender sex = getRandomProvider().getRandom().nextBoolean() ? Gender.MALE : Gender.FEMALE;
+             newAnimals.add(createYoung(field, loc, sex));
+         }
+     }
+@@ -210,6 +216,7 @@ public abstract class Animal extends Organism implements Actor
+      */
+     protected int breed()
+     {
++        Random rand = getRandomProvider().getRandom();
+         int births = 0;
+         if(canBreed() && rand.nextDouble() <= getBreedingProbability()) {
+             births = rand.nextInt(getMaxLitterSize()) + 1;
+diff --git a/Coyote.java b/Coyote.java
+index c36c378..e31d6ee 100644
+--- a/Coyote.java
++++ b/Coyote.java
+@@ -44,7 +44,7 @@ public class Coyote extends Animal
+      */
+     public Coyote(boolean randomAge, Field field, Location location, Gender sex)
+     {
+-        super(field, location, randomAge, sex);
++        super(field.getRandomProvider(), field, location, randomAge, sex);
+         this.isNocturnal = true;
+     }
+ 
+diff --git a/Deer.java b/Deer.java
+index 4210e33..3b88881 100644
+--- a/Deer.java
++++ b/Deer.java
+@@ -46,7 +46,7 @@ public class Deer extends Animal
+      */
+     public Deer(boolean randomAge, Field field, Location location, Gender sex)
+     {
+-        super(field, location, randomAge, sex);
++        super(field.getRandomProvider(), field, location, randomAge, sex);
+         this.isNocturnal = false;
+     }
+ 
+diff --git a/Disease.java b/Disease.java
+index a66808d..232d93e 100644
+--- a/Disease.java
++++ b/Disease.java
+@@ -9,7 +9,6 @@ import java.util.Random;
+ */
+ public class Disease 
+ {
+-    private Random rand = Randomizer.getRandom();
+     // The propagation rate of the disease
+     private static double PROPAGATION_RATE = 0.0;
+     // the lethality rate of the disease
+@@ -22,8 +21,9 @@ public class Disease
+      * double randomValue = rangeMin + (rangeMax - rangeMin) * r.nextDouble();
+      * https://stackoverflow.com/questions/3680637/generate-a-random-double-in-a-range
+      */
+-    public Disease() 
++    public Disease(RandomProvider randomProvider) 
+     {
++        Random rand = randomProvider.getRandom();
+         PROPAGATION_RATE = 0.6 * rand.nextDouble(); // max prop. rate is 60%
+         LETHALITY_RATE = 0.4 * rand.nextDouble(); // max lethality rate is 40%
+         PROPAGATION_MODE = DiseaseType.values()[rand.nextInt(DiseaseType.values().length)];
+diff --git a/Eagle.java b/Eagle.java
+index 4ca41c5..0a3ff6c 100644
+--- a/Eagle.java
++++ b/Eagle.java
+@@ -45,7 +45,7 @@ public class Eagle extends Animal
+      */
+     public Eagle(boolean randomAge, Field field, Location location, Gender sex)
+     {
+-        super(field, location,randomAge,sex);
++        super(field.getRandomProvider(), field, location, randomAge, sex);
+         this.isNocturnal = false;
+     }
+ 
+diff --git a/Field.java b/Field.java
+index 3559b9d..36bc09b 100644
+--- a/Field.java
++++ b/Field.java
+@@ -8,8 +8,7 @@ import java.util.*;
+  */
+ public class Field
+ {
+-    // A random number generator for providing random locations.
+-    private static final Random rand = Randomizer.getRandom();
++    private final RandomProvider randomProvider;
+ 
+     // The depth and width of the field.
+     private int depth, width;
+@@ -21,8 +20,9 @@ public class Field
+      * @param depth The depth of the field.
+      * @param width The width of the field.
+      */
+-    public Field(int depth, int width)
++    public Field(RandomProvider randomProvider, int depth, int width)
+     {
++        this.randomProvider = randomProvider;
+         this.depth = depth;
+         this.width = width;
+         field = new Object[depth][width];
+@@ -124,6 +124,7 @@ public class Field
+      */
+     public List<Location> getRandomFreePatches(double rateOfGeneration)
+     {
++        Random rand = randomProvider.getRandom();
+         List<Location> patches = getFreePatches();
+         List<Location> randPatches = new ArrayList<>();
+         for(int i=0; i<rateOfGeneration* patches.size(); i++)
+@@ -255,7 +256,7 @@ public class Field
+             
+             // Shuffle the list. Several other methods rely on the list
+             // being in a random order.
+-            Collections.shuffle(locations, rand);
++            Collections.shuffle(locations, randomProvider.getRandom());
+         }
+         return locations;
+     }
+@@ -277,4 +278,9 @@ public class Field
+     {
+         return width;
+     }
++
++    public RandomProvider getRandomProvider()
++    {
++        return randomProvider;
++    }
+ }
+diff --git a/Grass.java b/Grass.java
+index c5a818b..97a1868 100644
+--- a/Grass.java
++++ b/Grass.java
+@@ -1,4 +1,5 @@
+ import java.util.List;
++import java.util.Random;
+ 
+ /**
+  * This class models grass.
+@@ -33,11 +34,11 @@ public class Grass extends Plant
+      */
+     public Grass(Field field, Location location)
+     {
+-        super(field, location);
++        super(field.getRandomProvider(), field, location);
+ 
+         numberOfStages = MAX_GROWTH_STAGES;
+         stepsPerStage = DEFAULT_STEPS_PER_STAGE;
+-        stageOfGrowth = rand.nextInt(numberOfStages);
++        stageOfGrowth = getRandomProvider().getRandom().nextInt(numberOfStages);
+         foodValue = stageOfGrowth;
+ 
+     }
+@@ -51,6 +52,7 @@ public class Grass extends Plant
+      */
+     public void act(List<Actor> newGrass, Environment environment)
+     {
++        Random rand = getRandomProvider().getRandom();
+         if(isAlive()
+                 && environment.getTime().isDay()
+                 && rand.nextDouble() <= getGerminationRate(environment)
+diff --git a/Hunter.java b/Hunter.java
+index 7aa6c4b..ba2af8c 100644
+--- a/Hunter.java
++++ b/Hunter.java
+@@ -7,7 +7,6 @@ import java.util.*;
+  */
+ public class Hunter extends Organism implements Actor
+ {
+-    private static final Random rand = Randomizer.getRandom();
+     // A hunter hunts every species. 
+     private static final Set<Class<? extends Organism>> DIET = new HashSet<>(Arrays.asList(
+             Deer.class,
+@@ -25,7 +24,7 @@ public class Hunter extends Organism implements Actor
+      */
+     public Hunter(Field field, Location location)
+     {
+-        super(field, location);
++        super(field.getRandomProvider(), field, location);
+     }
+ 
+     @Override
+@@ -41,6 +40,7 @@ public class Hunter extends Organism implements Actor
+      */
+     public void act(List<Actor> newActors, Environment environment)
+     {
++        Random rand = getRandomProvider().getRandom();
+         if(isAlive()) {
+             Location newLocation = findPrey();
+             if(newLocation == null) {
+diff --git a/Main.java b/Main.java
+index 3c55927..ee1865d 100644
+--- a/Main.java
++++ b/Main.java
+@@ -4,7 +4,8 @@
+  */
+ public class Main {
+     public static void main(String[] args) {
+-        Simulator sim = new Simulator();
++        RandomProvider randomProvider = new RandomProvider();
++        Simulator sim = new Simulator(randomProvider);
+         SimulationState initialState = sim.getCurrentState();
+         SimulatorView view = new SimulatorView(
+                 initialState.getField().getDepth(),
+diff --git a/Mouse.java b/Mouse.java
+index f0bc973..26c47ae 100644
+--- a/Mouse.java
++++ b/Mouse.java
+@@ -45,7 +45,7 @@ public class Mouse extends Animal
+      */
+     public Mouse(boolean randomAge, Field field, Location location, Gender sex)
+     {
+-        super(field, location, randomAge, sex);
++        super(field.getRandomProvider(), field, location, randomAge, sex);
+         this.isNocturnal = false;
+     }
+ 
+diff --git a/Organism.java b/Organism.java
+index c0c3e02..0c2b731 100644
+--- a/Organism.java
++++ b/Organism.java
+@@ -9,6 +9,7 @@ public abstract class Organism {
+ 
+     // Whether the organism is alive or not.
+     private boolean alive;
++    private final RandomProvider randomProvider;
+     // The organism's field.
+     private Field field;
+     // The organism's position in the field.
+@@ -24,9 +25,10 @@ public abstract class Organism {
+     /**
+      * Creates a new organism. 
+      */
+-    public Organism(Field field, Location location)
++    public Organism(RandomProvider randomProvider, Field field, Location location)
+     {
+         alive = true;
++        this.randomProvider = randomProvider;
+         this.field = field;
+         setLocation(location);
+     }
+@@ -63,6 +65,11 @@ public abstract class Organism {
+         return field;
+     }
+ 
++    protected RandomProvider getRandomProvider()
++    {
++        return randomProvider;
++    }
++
+     /**
+      * Check whether the organism is alive or not.
+      * @return true if the organism is still alive.
+diff --git a/Plant.java b/Plant.java
+index c037c28..63315d2 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -1,5 +1,3 @@
+-import java.util.Random;
+-
+ /**
+  * A class representing shared characteristics of plants.
+  *
+@@ -12,20 +10,15 @@ public abstract class Plant extends Organism implements Actor
+     protected int stepsPerStage = 1;
+     protected int stageOfGrowth;
+ 
+-
+-    // Implementing abstract methods to return fields to be used by the superclass
+-    protected static final Random rand = Randomizer.getRandom();
+-    
+-    
+     /**
+      * Create a new plant at location in field.
+      *
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+-    public Plant(Field field, Location location)
++    public Plant(RandomProvider randomProvider, Field field, Location location)
+     {
+-        super(field, location);
++        super(randomProvider, field, location);
+     }
+ 
+     public int getStepsPerStage()
+diff --git a/RandomProvider.java b/RandomProvider.java
+new file mode 100644
+index 0000000..2cfb6b9
+--- /dev/null
++++ b/RandomProvider.java
+@@ -0,0 +1,41 @@
++import java.util.Random;
++
++/**
++ * Provides the shared random generator used by a simulation run.
++ */
++public class RandomProvider
++{
++    private static final long DEFAULT_SEED = 1L;
++
++    private final Random random;
++    private final Long initialSeed;
++
++    public RandomProvider()
++    {
++        this(DEFAULT_SEED);
++    }
++
++    public RandomProvider(long seed)
++    {
++        this.random = new Random(seed);
++        this.initialSeed = seed;
++    }
++
++    public RandomProvider(Random random)
++    {
++        this.random = random;
++        this.initialSeed = null;
++    }
++
++    public Random getRandom()
++    {
++        return random;
++    }
++
++    public void reset()
++    {
++        if(initialSeed != null) {
++            random.setSeed(initialSeed);
++        }
++    }
++}
+diff --git a/Randomizer.java b/Randomizer.java
+deleted file mode 100644
+index 669f8ba..0000000
+--- a/Randomizer.java
++++ /dev/null
+@@ -1,68 +0,0 @@
+-import java.util.Random;
+-
+-/**
+- * Provide control over the randomization of the simulation. By using the shared, fixed-seed 
+- * randomizer, repeated runs will perform exactly the same (which helps with testing). Set 
+- * 'useShared' to false to get different random behaviour every time.
+- *
+- * @version 2022.03.02
+- */
+-public class Randomizer
+-{
+-    // The default seed for control of randomization.
+-    private static final int SEED = 1;
+-    // A shared Random object, if required.
+-    private static final Random rand = new Random(SEED);
+-    // Determine whether a shared random generator is to be provided.
+-    private static final boolean useShared = true;
+-
+-    /**
+-     * Constructor for objects of class Randomizer
+-     */
+-    public Randomizer()
+-    {
+-    }
+-
+-    /**
+-     * Provide a random generator.
+-     * @return A random object.
+-     */
+-    public static Random getRandom()
+-    {
+-        if(useShared) {
+-            return rand;
+-        }
+-        else {
+-            return new Random();
+-        }
+-    }
+-
+-    /**
+-     * @return  A random gender (of enum type Animal.Gender)
+-     */
+-    public static Animal.Gender getRandomSex()
+-    {
+-        Animal.Gender sex;
+-        if (rand.nextBoolean()) { 
+-            sex = Animal.Gender.MALE; 
+-        }
+-        else {
+-            sex = Animal.Gender.FEMALE; 
+-        }
+-
+-        return sex;
+-    }
+-
+-    
+-    /**
+-     * Reset the randomization.
+-     * This will have no effect if randomization is not through
+-     * a shared Random generator.
+-     */
+-    public static void reset()
+-    {
+-        if(useShared) {
+-            rand.setSeed(SEED);
+-        }
+-    }
+-}
+diff --git a/Simulator.java b/Simulator.java
+index 0e5102d..3127401 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -11,8 +11,6 @@ import java.util.Random;
+  */
+ public class Simulator
+ {
+-    private static final Random rand = Randomizer.getRandom();
+-
+     private boolean playingSimulation;
+     private int remainingSteps;
+ 
+@@ -26,6 +24,7 @@ public class Simulator
+     private final Environment environment;
+     // Configuration and actor creation rules for the simulation.
+     private final SimulationConfig config;
++    private final RandomProvider randomProvider;
+     private final ActorFactory actorFactory;
+     // Published state for observers.
+     private final List<SimulationObserver> observers;
+@@ -44,6 +43,7 @@ public class Simulator
+             double mouseProbability)
+     {
+         this(
++                new RandomProvider(),
+                 SimulationConfig.withCreationProbabilities(
+                         grassProbability,
+                         deerProbability,
+@@ -63,7 +63,7 @@ public class Simulator
+      */
+     public Simulator()
+     {
+-        this(SimulationConfig.defaultConfig(), SimulationConfig.DEFAULT_DEPTH, SimulationConfig.DEFAULT_WIDTH);
++        this(new RandomProvider(), SimulationConfig.defaultConfig(), SimulationConfig.DEFAULT_DEPTH, SimulationConfig.DEFAULT_WIDTH);
+     }
+ 
+     /**
+@@ -73,10 +73,45 @@ public class Simulator
+      */
+     public Simulator(int depth, int width)
+     {
+-        this(SimulationConfig.defaultConfig(), depth, width);
++        this(new RandomProvider(), SimulationConfig.defaultConfig(), depth, width);
++    }
++
++    public Simulator(RandomProvider randomProvider)
++    {
++        this(randomProvider, SimulationConfig.defaultConfig(), SimulationConfig.DEFAULT_DEPTH, SimulationConfig.DEFAULT_WIDTH);
++    }
++
++    public Simulator(RandomProvider randomProvider, int depth, int width)
++    {
++        this(randomProvider, SimulationConfig.defaultConfig(), depth, width);
++    }
++
++    public Simulator(RandomProvider randomProvider,
++            double grassProbability,
++            double deerProbability,
++            double coyoteProbability,
++            double wolfProbability,
++            double eagleProbability,
++            double hunterProbability,
++            double mouseProbability)
++    {
++        this(
++                randomProvider,
++                SimulationConfig.withCreationProbabilities(
++                        grassProbability,
++                        deerProbability,
++                        coyoteProbability,
++                        wolfProbability,
++                        eagleProbability,
++                        hunterProbability,
++                        mouseProbability
++                ),
++                SimulationConfig.DEFAULT_DEPTH,
++                SimulationConfig.DEFAULT_WIDTH
++        );
+     }
+ 
+-    private Simulator(SimulationConfig config, int depth, int width)
++    private Simulator(RandomProvider randomProvider, SimulationConfig config, int depth, int width)
+     {
+         if(width <= 0 || depth <= 0) {
+             System.out.println("The dimensions must be greater than zero.");
+@@ -85,11 +120,12 @@ public class Simulator
+             width = SimulationConfig.DEFAULT_WIDTH;
+         }
+ 
++        this.randomProvider = randomProvider;
+         this.config = config;
+         this.actors = new ArrayList<>();
+-        this.field = new Field(depth, width);
+-        this.environment = new Environment(new Time(), new Weather());
+-        this.actorFactory = new ActorFactory(config);
++        this.field = new Field(randomProvider, depth, width);
++        this.environment = new Environment(new Time(), new Weather(randomProvider));
++        this.actorFactory = new ActorFactory(randomProvider, config);
+         this.observers = new ArrayList<>();
+ 
+         reset();
+@@ -254,6 +290,7 @@ public class Simulator
+ 
+     private void processActor(Actor actor, List<Actor> newActors)
+     {
++        Random rand = randomProvider.getRandom();
+         if(actor instanceof Animal animal) {
+             if(!animal.isAwake(environment)) {
+                 return;
+diff --git a/TestingMain.java b/TestingMain.java
+index 11fab6c..0a69e26 100644
+--- a/TestingMain.java
++++ b/TestingMain.java
+@@ -20,8 +20,9 @@ public class TestingMain {
+         tester();
+         Integer watch = SimulationInfo.HIGHEST_STEPS;
+         Simulator tempSim;
++        RandomProvider randomProvider = new RandomProvider();
+         for(Double[] probs : allCombs){
+-            tempSim = new Simulator(probs[0], probs[1], probs[2], probs[3], probs[4], probs[5], probs[6]);
++            tempSim = new Simulator(randomProvider, probs[0], probs[1], probs[2], probs[3], probs[4], probs[5], probs[6]);
+             tempSim.runLongSimulation();
+             tempSim.simulateOneStep();
+             tempSim = null;
+diff --git a/Weather.java b/Weather.java
+index e11ba6c..08f1417 100644
+--- a/Weather.java
++++ b/Weather.java
+@@ -9,7 +9,7 @@ import java.util.*;
+ public class Weather
+ {
+     private WeatherType currentWeather;
+-    private static final Random rand = Randomizer.getRandom();
++    private final RandomProvider randomProvider;
+     private int randomInt;
+     private int duration; // to keep track of when weather changes (every X hours)
+     private boolean randomDuration = false;
+@@ -19,8 +19,9 @@ public class Weather
+     /**
+      * Create a new instance of weather. 
+      */
+-    public Weather()
++    public Weather(RandomProvider randomProvider)
+     {
++       this.randomProvider = randomProvider;
+        weatherList = new HashSet<>();
+        addWeatherList();
+        currentWeather = WeatherType.SUNNY; 
+@@ -50,6 +51,7 @@ public class Weather
+      */
+     public void checkWeatherChange(int steps)
+     {
++        Random rand = randomProvider.getRandom();
+         if(randomDuration){
+             duration = rand.nextInt(36) + 1;
+             if(steps % duration == 0){
+@@ -78,6 +80,7 @@ public class Weather
+      */
+     public void changeWeather()
+     {
++        Random rand = randomProvider.getRandom();
+         randomInt = rand.nextInt(weatherList.size());
+         currentWeather = (WeatherType) weatherList.toArray()[randomInt];
+     }
+diff --git a/Wolf.java b/Wolf.java
+index c183fff..8bb4979 100644
+--- a/Wolf.java
++++ b/Wolf.java
+@@ -45,7 +45,7 @@ public class Wolf extends Animal
+      */
+     public Wolf(boolean randomAge, Field field, Location location, Gender sex)
+     {
+-        super(field, location, randomAge, sex);
++        super(field.getRandomProvider(), field, location, randomAge, sex);
+         this.isNocturnal = true;
+     }
+ 

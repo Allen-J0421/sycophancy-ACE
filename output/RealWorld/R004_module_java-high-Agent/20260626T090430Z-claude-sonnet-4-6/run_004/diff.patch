@@ -1,0 +1,427 @@
+diff --git a/Animal.java b/Animal.java
+index f85d783..d50ad88 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -133,7 +133,7 @@ public abstract class Animal extends Organism implements Actor
+         Field field = getField();
+         for (Location loc : adjacent) {
+             Object obj = field.getObjectAt(loc);
+-            if (obj != null && !(obj instanceof Hunter)) {
++            if (obj instanceof Organism) {
+                 Organism organism = (Organism) obj;
+                 if (organism.isDiseased()
+                         && organism.getDisease().getDiseaseType() != DiseaseType.CONTACT
+diff --git a/Field.java b/Field.java
+index d8e9be9..f726880 100644
+--- a/Field.java
++++ b/Field.java
+@@ -97,14 +97,6 @@ public class Field
+         return field[row][col];
+     }
+ 
+-    /**
+-     * Returns the field of the simulation. 
+-     */
+-    public Object[][] getField()
+-    {
+-        return field;
+-    }
+-    
+     /**
+      * Generate a random location that is adjacent to the
+      * given location, or is the same location.
+diff --git a/FieldStats.java b/FieldStats.java
+index 15acd53..4006a71 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -33,7 +33,7 @@ public class FieldStats
+      */
+     public String getPopulationDetails(Field field)
+     {
+-        StringBuffer buffer = new StringBuffer();
++        StringBuilder buffer = new StringBuilder();
+         if(!countsValid) {
+             generateCounts(field);
+         }
+diff --git a/Grass.java b/Grass.java
+index 43f897c..4cad8ae 100644
+--- a/Grass.java
++++ b/Grass.java
+@@ -1,28 +1,27 @@
+-import java.util.List;
++import java.util.*;
+ 
+ /**
+  * This class models grass.
+- * Grass can germinate,grow and get eaten by animals.
++ * Grass can germinate, grow and get eaten by animals.
++ *
+  * @version 2022.03.02
+  */
+ public class Grass extends Plant
+ {
+-    private int FOOD_VALUE;
++    private static final PlantStats STATS = new PlantStats(3, 2);
++
++    @Override
++    protected PlantStats getStats() { return STATS; }
++
++    private int foodValue;
+     private static double GERMINATION_RATE = 0.1;
+ 
+-    /**
+-     * Returns the food value of the grass.
+-     * @return int The food value of the grass.
+-     */
+-    protected int FOOD_VALUE()
+-    {
+-        return FOOD_VALUE;
+-    }
++    @Override
++    protected int FOOD_VALUE() { return foodValue; }
+ 
+     /**
+      * Creates grass with a random stage of growth.
+-     * However, the maximum number of stages is fixed at 3,
+-     * and the growth rate is fixed at 2 steps per stage.
++     * Food value starts equal to the initial growth stage.
+      *
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+@@ -30,18 +29,12 @@ public class Grass extends Plant
+     public Grass(Field field, Location location)
+     {
+         super(field, location);
+-
+-        NUMBER_OF_STAGES = 3;
+-        STEPS_PER_STAGE = 2;
+-        STAGE_OF_GROWTH = rand.nextInt(NUMBER_OF_STAGES);
+-        FOOD_VALUE = STAGE_OF_GROWTH;
+-
++        this.foodValue = getStageOfGrowth();
+     }
+ 
+-
+     /**
+      * Make the grass act.
+-     * The germination rate of grass is affected by weather.
++     * The germination rate is affected by weather; growth advances every stepsPerStage steps.
+      * @param newGrass To store the newly germinated grass.
+      * @param environment The environment that the grass resides in.
+      */
+@@ -53,7 +46,7 @@ public class Grass extends Plant
+             changeGerminationRate(0.1);
+         }
+ 
+-        if (environment.getTime().getStep() % STEPS_PER_STAGE == 0) {
++        if (environment.getTime().getStep() % getStats().getStepsPerStage() == 0) {
+             incrementGrowth();
+         }
+ 
+@@ -64,20 +57,14 @@ public class Grass extends Plant
+     }
+ 
+     /**
+-     * Check whether this grass is to germinate at this step.
+-     * New grass will be made into free adjacent locations.
+-     * @param newGrass A list to return newly made grass.
++     * Spread to all free adjacent locations.
++     * @param newGrass A list to return newly created grass.
+      */
+     protected void germinate(List<Actor> newGrass)
+     {
+-        // New grass are made into adjacent locations.
+-        // Get a list of adjacent free locations.
+         Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        for(int b = 0; b < free.size(); b++) {
+-            Location loc = free.remove(0);
+-            Grass young = new Grass(field, loc);
+-            newGrass.add(young);
++        for (Location loc : field.getFreeAdjacentLocations(getLocation())) {
++            newGrass.add(new Grass(field, loc));
+         }
+     }
+ 
+@@ -87,26 +74,22 @@ public class Grass extends Plant
+      */
+     public void changeGerminationRate(double newRate)
+     {
+-        if(isAlive()) {
++        if (isAlive()) {
+             GERMINATION_RATE = newRate;
+         }
+     }
+ 
+     /**
+-     * Increment the stage of growth of grass
+-     * Incrementing the growth also increases the food level by 1
+-     * @return true If the grass grows.
+-     * @return false If the grass doesn't grow.
++     * Advance the growth stage and increase food value accordingly.
++     * @return true if the grass grew; false if already at maximum stage.
+      */
++    @Override
+     public boolean incrementGrowth()
+     {
+-        if(super.incrementGrowth()) {
+-            FOOD_VALUE++;
++        if (super.incrementGrowth()) {
++            foodValue++;
+             return true;
+         }
+         return false;
+     }
+-
+-
+-
+ }
+diff --git a/Hunter.java b/Hunter.java
+index f172a2f..4d29f2d 100644
+--- a/Hunter.java
++++ b/Hunter.java
+@@ -1,101 +1,70 @@
+ import java.util.*;
+ 
+ /**
+- * A simple model of a hunter. 
+- * Hunters hunt all of the species in the simulation.
++ * A simple model of a hunter.
++ * Hunters hunt all animal species in the simulation.
++ *
+  * @version 2022.03.02
+  */
+-public class Hunter implements Actor
++public class Hunter extends Organism implements Actor
+ {
+-    private boolean alive;
+-    private Field field;
+-    private Location location;
++    private static final Random rand = Randomizer.getRandom();
+ 
+-    private Random rand = Randomizer.getRandom();
+-    // A hunter hunts every species. 
+-    private static final Set<Class> DIET = new HashSet<>(Arrays.asList(Deer.class, Mouse.class, Wolf.class, Coyote.class, Eagle.class));
++    // Hunters cannot be eaten, so they contribute no food value.
++    @Override
++    protected int FOOD_VALUE() { return 0; }
+ 
++    // A hunter preys on every animal species.
++    private static final Set<Class> DIET = Set.of(
++        Deer.class, Mouse.class, Wolf.class, Coyote.class, Eagle.class
++    );
+ 
+     /**
+-     * Creates a new hunter.
++     * Creates a new hunter at the given location.
+      * @param field The field currently occupied.
+-     * @param location  The location within the field.
+-     * @param environment The environment that the hunter resides in. 
++     * @param location The location within the field.
+      */
+-    public Hunter(Field field, Location location, Environment environment)
++    public Hunter(Field field, Location location)
+     {
+-        alive = true;
+-        this.field = field;
+-        setLocation(location);
++        super(field, location);
+     }
+ 
+     /**
+-     * Returns true if the hunter is alive. 
+-     */
+-    public boolean isAlive() 
+-    {
+-        return alive;
+-    }
+-
+-    /**
+-     * Makes the hunter hunt for nearby animals. 
+-     * @param environment The environment that the hunter resides in. 
+-     * @param newActors A list to receive new actors. 
++     * Makes the hunter hunt for nearby animals.
++     * @param newActors A list to receive new actors (unused — hunters do not reproduce).
++     * @param environment The environment that the hunter resides in.
+      */
+     public void act(List<Actor> newActors, Environment environment)
+     {
+-        if(isAlive()) {
++        if (isAlive()) {
+             Location newLocation = findPrey();
+-            if(newLocation == null) {
+-                // No animals found - try to move to a free location.
+-                newLocation = field.freeAdjacentLocation(location);
++            if (newLocation == null) {
++                newLocation = getField().freeAdjacentLocation(getLocation());
+             }
+-            List<Location> adjacentGrassSpots = field.adjacentLocationsWithSpecies(location, Grass.class);
++            List<Location> adjacentGrassSpots = getField().adjacentLocationsWithSpecies(getLocation(), Grass.class);
+ 
+-            // See if it was possible to move.
+-            if(newLocation != null) {
++            if (newLocation != null) {
+                 setLocation(newLocation);
+-            }
+-            else if (adjacentGrassSpots.size() > 0) {
+-                field.clear(location);
++            } else if (adjacentGrassSpots.size() > 0) {
++                getField().clear(getLocation());
+                 setLocation(adjacentGrassSpots.get(rand.nextInt(adjacentGrassSpots.size())));
+             }
+-
+         }
+     }
+ 
+-    /**
+-     * Place the hunter at the new location in the given field.
+-     * @param newLocation The hunter's new location.
+-     */
+-    protected void setLocation(Location newLocation)
+-    {
+-        if(location != null) {
+-            field.clear(location);
+-        }
+-        location = newLocation;
+-        field.place(this, newLocation);
+-    }
+-
+-
+     /**
+      * Look for animals adjacent to the current location.
+-     * Only the first live animal is killed.
+-     * @return Location Where an animal was found, or null if it wasn't.
++     * Only the first live animal found is killed.
++     * @return The location where an animal was found, or null if none.
+      */
+     private Location findPrey()
+     {
+-        Field field = this.field;
+-        List<Location> adjacent = field.adjacentLocations(location);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            if(animal != null && DIET.contains(animal.getClass())) {
+-                Animal food = (Animal) animal;
+-                if(food.isAlive()) {
+-                    food.setDead();
+-                    return where;
++        for (Location where : getField().adjacentLocations(getLocation())) {
++            Object obj = getField().getObjectAt(where);
++            if (obj != null && DIET.contains(obj.getClass())) {
++                Animal prey = (Animal) obj;
++                if (prey.isAlive()) {
++                    prey.setDead();
+                 }
+                 return where;
+             }
+diff --git a/Plant.java b/Plant.java
+index d5520d5..3c4f047 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -7,19 +7,19 @@ import java.util.Random;
+  */
+ public abstract class Plant extends Organism implements Actor
+ {
+-    // the stages of growth for  plant
+-    protected int NUMBER_OF_STAGES;
+-    protected int STEPS_PER_STAGE = 1;
+-    protected int STAGE_OF_GROWTH;
++    protected static final Random rand = Randomizer.getRandom();
+ 
++    private int stageOfGrowth;
++
++    /**
++     * Returns this species' immutable configuration constants.
++     * Each concrete subclass provides a static PlantStats instance.
++     */
++    protected abstract PlantStats getStats();
+ 
+-    // Implementing abstract methods to return fields to be used by the superclass
+-    public int STEPS_PER_STAGE(){ return STEPS_PER_STAGE; }
+-    protected static final Random rand = Randomizer.getRandom();
+-    
+-    
+     /**
+      * Create a new plant at location in field.
++     * Stage of growth is initialised randomly within the species' range.
+      *
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+@@ -27,21 +27,25 @@ public abstract class Plant extends Organism implements Actor
+     public Plant(Field field, Location location)
+     {
+         super(field, location);
++        this.stageOfGrowth = rand.nextInt(getStats().getNumberOfStages());
++    }
++
++    /** Returns the plant's current stage of growth. */
++    protected int getStageOfGrowth()
++    {
++        return stageOfGrowth;
+     }
+ 
+     /**
+-     * Checks if the plant is still able to growth
+-     * Returns true and increments the growth of the plant 
+-     * if the plant hasn't reached its final stage.
+-     * Returns false otherwise
++     * Advances the plant to the next stage of growth if it has not yet reached its maximum.
++     * @return true if the plant grew; false if it was already at max stage.
+      */
+-    public boolean incrementGrowth() {
+-        if(STAGE_OF_GROWTH < NUMBER_OF_STAGES){
+-            STAGE_OF_GROWTH++;
++    public boolean incrementGrowth()
++    {
++        if (stageOfGrowth < getStats().getNumberOfStages()) {
++            stageOfGrowth++;
+             return true;
+         }
+         return false;
+     }
+-    
+-    
+ }
+diff --git a/PlantStats.java b/PlantStats.java
+new file mode 100644
+index 0000000..f317090
+--- /dev/null
++++ b/PlantStats.java
+@@ -0,0 +1,22 @@
++/**
++ * Immutable configuration bundle for a plant species.
++ * Centralises all species-specific constants so that each
++ * Plant subclass only needs to provide a single static STATS instance
++ * rather than setting protected fields directly.
++ *
++ * @version 2022.03.02
++ */
++public class PlantStats
++{
++    private final int numberOfStages;
++    private final int stepsPerStage;
++
++    public PlantStats(int numberOfStages, int stepsPerStage)
++    {
++        this.numberOfStages = numberOfStages;
++        this.stepsPerStage = stepsPerStage;
++    }
++
++    public int getNumberOfStages() { return numberOfStages; }
++    public int getStepsPerStage()  { return stepsPerStage; }
++}
+diff --git a/Simulator.java b/Simulator.java
+index a5ab251..7e188ff 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -223,7 +223,7 @@ public class Simulator implements SimulationControls
+         factories.put(Wolf.class,   (loc, sex) -> new Wolf(true, field, loc, sex));
+         factories.put(Eagle.class,  (loc, sex) -> new Eagle(true, field, loc, sex));
+         factories.put(Mouse.class,  (loc, sex) -> new Mouse(true, field, loc, sex));
+-        factories.put(Hunter.class, (loc, sex) -> new Hunter(field, loc, environment));
++        factories.put(Hunter.class, (loc, sex) -> new Hunter(field, loc));
+ 
+         field.clear();
+         for (int row = 0; row < field.getDepth(); row++) {

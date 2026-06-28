@@ -1,0 +1,226 @@
+diff --git a/Animal.java b/Animal.java
+index 2d23465..e8687b8 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -32,6 +32,8 @@ public class Animal extends Species
+     private static final int HIBERNATION_TEMPERATURE_OFFSET = 5;
+     // Divisor used to compute the lower bound of a newborn's initial food level
+     private static final int INITIAL_FOOD_LEVEL_MIN_DIVISOR = 2;
++    // Newborns always start at age 0, not a random age
++    protected static final boolean NEWBORN_RANDOM_AGE = false;
+ 
+     // Fields prone to change during the animal's life
+ 
+@@ -291,9 +293,9 @@ public class Animal extends Species
+         {
+             List<Location> free = field.getFreeAdjacentLocations(getLocation());
+             int births = numberOfBirths();
+-            for(int b = 0; b < births && free.size() > 0; b++) {
++            for(int b = 0; b < births && !free.isEmpty(); b++) {
+                 Location loc = free.remove(0);
+-                Animal young = new Animal(field, loc, getName(), getMaximumTemperature(), getMinimumTemperature(), getNutritionalValue(), getReproductionProbability(), maxAge, breedingAge, maxLitterSize,false, hibernates, isNocturnal);
++                Animal young = new Animal(field, loc, getName(), getMaximumTemperature(), getMinimumTemperature(), getNutritionalValue(), getReproductionProbability(), maxAge, breedingAge, maxLitterSize, NEWBORN_RANDOM_AGE, hibernates, isNocturnal);
+                 speciesInSimulation.add(young);
+             }
+         }
+diff --git a/CSVReader.java b/CSVReader.java
+index 16f3f8d..41f78a6 100644
+--- a/CSVReader.java
++++ b/CSVReader.java
+@@ -99,7 +99,6 @@ public abstract class CSVReader
+                 choicesList.add(attributes[0]);
+             }
+         } catch (Exception e) {
+-            e.printStackTrace();
+             System.out.println("Issue when parsing CSV");
+         }
+         return choicesList;
+diff --git a/HabitatCSVReader.java b/HabitatCSVReader.java
+index 0b74155..a30946a 100644
+--- a/HabitatCSVReader.java
++++ b/HabitatCSVReader.java
+@@ -110,28 +110,28 @@ public class HabitatCSVReader extends CSVReader {
+      */
+     public int[] getWinterTemperatures()
+     {
+-        return winterTemperatures;
++        return winterTemperatures.clone();
+     }
+ 
+     /**
+      * @return (int[]) Minimum, average, and maximum temperatures for the autumn.
+      */
+     public int[] getAutumnTemperatures() {
+-        return autumnTemperatures;
++        return autumnTemperatures.clone();
+     }
+ 
+     /**
+      * @return (int[]) Minimum, average, and maximum temperatures for the spring.
+      */
+     public int[] getSpringTemperatures() {
+-        return springTemperatures;
++        return springTemperatures.clone();
+     }
+ 
+     /**
+      * @return (int[]) Minimum, average, and maximum temperatures for the summer.
+      */
+     public int[] getSummerTemperatures() {
+-        return summerTemperatures;
++        return summerTemperatures.clone();
+     }
+ 
+     /**
+diff --git a/Plant.java b/Plant.java
+index 357cd20..29e2f52 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -16,8 +16,8 @@ public class Plant extends Species
+     private int currentHealth;
+     // true if the plant can regrow; reset each season change, cleared on wilt to prevent same-season re-emergence
+     private boolean canRegrow;
+-    // true if plant appears dead due to temperature circumstances
+-    private boolean deadDueTemperature;
++    // true if plant is temporarily wilted due to temperature (not permanently dead)
++    private boolean wiltedDueToTemperature;
+ 
+     /**
+      * Create an instance of Plant
+@@ -37,7 +37,7 @@ public class Plant extends Species
+         this.maxHealth = maxHealth;
+         currentHealth = maxHealth;
+         canRegrow = true;
+-        deadDueTemperature = false;
++        wiltedDueToTemperature = false;
+     }
+ 
+     /**
+@@ -63,7 +63,7 @@ public class Plant extends Species
+             canRegrow = true;
+         }
+         // 1)
+-        if (! deadDueTemperature && ! survivesTemperature(temperature))
++        if (! wiltedDueToTemperature && ! survivesTemperature(temperature))
+         {
+             wilt();
+         }
+@@ -71,11 +71,11 @@ public class Plant extends Species
+         else if (! isNight)
+         {
+             // i)
+-            if (deadDueTemperature && survivesTemperature(temperature) && isSpring) {
++            if (wiltedDueToTemperature && survivesTemperature(temperature) && isSpring) {
+                 regrow();
+             }
+             // ii)
+-            else if (! deadDueTemperature) {
++            else if (! wiltedDueToTemperature) {
+                 // a)
+                 if (yearPassed) {
+                     maxHealth++;
+@@ -104,7 +104,7 @@ public class Plant extends Species
+             {
+                 List<Location> free = field.getFreeAdjacentLocations(getLocation());
+ 
+-                if (free.size() > 0) {
++                if (!free.isEmpty()) {
+                     Location loc = free.remove(0);
+                     Plant newPlant = new Plant(field, loc, getName(), getMaximumTemperature(), getMinimumTemperature(), getNutritionalValue(), getReproductionProbability(), maxHealth);
+                     newPlants.add(newPlant);
+@@ -121,7 +121,7 @@ public class Plant extends Species
+     private void wilt()
+     {
+         if(getLocation() != null) {
+-            deadDueTemperature = true;
++            wiltedDueToTemperature = true;
+             canRegrow = false; // prevent immediate regrowth next step
+             getField().clear(getLocation());
+         }
+@@ -134,7 +134,7 @@ public class Plant extends Species
+     private void regrow()
+     {
+         if(getField().getObjectAt(getLocation()) == null && canRegrow)   {
+-            deadDueTemperature = false;
++            wiltedDueToTemperature = false;
+             getField().place(this, getLocation());
+             currentHealth = maxHealth;
+         }
+diff --git a/Predator.java b/Predator.java
+index a9047a3..91faf10 100644
+--- a/Predator.java
++++ b/Predator.java
+@@ -166,9 +166,9 @@ public class Predator extends Animal
+         {
+             List<Location> free = field.getFreeAdjacentLocations(getLocation());
+             int births = numberOfBirths();
+-            for(int b = 0; b < births && free.size() > 0; b++) {
++            for(int b = 0; b < births && !free.isEmpty(); b++) {
+                 Location loc = free.remove(0);
+-                Predator young = new Predator(strength, field, loc, getName(), getMaximumTemperature(), getMinimumTemperature(), getNutritionalValue(), getReproductionProbability(), getMaxAge(), getBreedingAge(), getMaxLitterSize(),false, getHibernates(), getIsNocturnal());
++                Predator young = new Predator(strength, field, loc, getName(), getMaximumTemperature(), getMinimumTemperature(), getNutritionalValue(), getReproductionProbability(), getMaxAge(), getBreedingAge(), getMaxLitterSize(), NEWBORN_RANDOM_AGE, getHibernates(), getIsNocturnal());
+                 newOfThisKind.add(young);
+             }
+         }
+diff --git a/Season.java b/Season.java
+index a4f5b58..bff7f82 100644
+--- a/Season.java
++++ b/Season.java
+@@ -35,14 +35,6 @@ public class Season
+         return name;
+     }
+ 
+-    /**
+-     * @return (int) average Temperature
+-     */
+-    public int getAveTemperature()
+-    {
+-        return aveTemperature;
+-    }
+-
+     /**
+      * Increment the season's average temperature by the given parameter
+      *
+diff --git a/Time.java b/Time.java
+index dc36f56..72cdc75 100644
+--- a/Time.java
++++ b/Time.java
+@@ -14,6 +14,8 @@ public class Time
+     private int currentHour;
+     // the number of steps before the type of day changes
+     private static final int DAY_CHANGE = 1;
++    // hours in a full day cycle
++    private static final int HOURS_IN_DAY = 24;
+ 
+     /**
+      * Construct a Time object with the given parameters.
+@@ -49,18 +51,8 @@ public class Time
+      */
+     public String timeString()
+     {
+-        String tString = "";
+-
+-        if(isNight) {
+-            tString += "Night \t";
+-        }
+-        else {
+-            tString += "Day \t";
+-        }
+-
+-        tString += "(" + getHourDisplay() + ")";
+-
+-        return tString;
++        String period = isNight ? "Night" : "Day";
++        return period + " \t(" + getHourDisplay() + ")";
+     }
+ 
+     /**
+@@ -90,7 +82,7 @@ public class Time
+      */
+     private void incHour()
+     {
+-        currentHour = (currentHour + (24 / (DAY_CHANGE * 2))) % 24;
++        currentHour = (currentHour + (HOURS_IN_DAY / (DAY_CHANGE * 2))) % HOURS_IN_DAY;
+     }
+ 
+     /**

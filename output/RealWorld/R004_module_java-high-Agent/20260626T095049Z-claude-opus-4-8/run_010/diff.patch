@@ -1,0 +1,365 @@
+diff --git a/SimulationEngine.java b/SimulationEngine.java
+index 69eb2da..0a4cc1b 100644
+--- a/SimulationEngine.java
++++ b/SimulationEngine.java
+@@ -14,47 +14,12 @@ public class SimulationEngine
+ {
+     private static final Random rand = Randomizer.getRandom();
+ 
+-    // Maximum number of hunters in the simulation.
+-    private static final int HUNTER_LIMIT = 5;
+-    private static int hunterCount = 0;
++    // Per-species counts of how many have been spawned, used to enforce
++    // Species.maxCount(). Static and never reset, so a cap (e.g. the hunter
++    // limit) applies globally across resets - matching the original behaviour.
++    private static final Map<Species, Integer> spawnedCounts = new EnumMap<>(Species.class);
+ 
+-    /**
+-     * Creates a single actor of a species at a location, or returns null when
+-     * one cannot be created (e.g. the hunter limit has been reached).
+-     */
+-    @FunctionalInterface
+-    private interface ActorSpawner {
+-        Actor spawn(Field field, Location location, Animal.Gender sex, Environment environment);
+-    }
+-
+-    /**
+-     * Static configuration for one species: its default creation probability and
+-     * how to create an instance. Collecting these (and their order below) here
+-     * means a species is defined in exactly one place.
+-     */
+-    private record SpeciesSpawn(Class<?> type, double defaultProbability, ActorSpawner spawner) {}
+-
+-    /**
+-     * The species considered for each cell when populating the field, in
+-     * priority order: the first whose creation probability succeeds is placed,
+-     * so the order is significant.
+-     */
+-    private static final List<SpeciesSpawn> SPECIES = List.of(
+-            new SpeciesSpawn(Grass.class,  0.030, (f, l, s, e) -> new Grass(f, l)),
+-            new SpeciesSpawn(Deer.class,   0.080, (f, l, s, e) -> new Deer(true, f, l, s)),
+-            new SpeciesSpawn(Coyote.class, 0.010, (f, l, s, e) -> new Coyote(true, f, l, s)),
+-            new SpeciesSpawn(Wolf.class,   0.010, (f, l, s, e) -> new Wolf(true, f, l, s)),
+-            new SpeciesSpawn(Eagle.class,  0.01,  (f, l, s, e) -> new Eagle(true, f, l, s)),
+-            new SpeciesSpawn(Mouse.class,  0.080, (f, l, s, e) -> new Mouse(true, f, l, s)),
+-            new SpeciesSpawn(Hunter.class, 0.03,  (f, l, s, e) -> {
+-                if(hunterCount >= HUNTER_LIMIT) {
+-                    return null;
+-                }
+-                hunterCount++;
+-                return new Hunter(f, l, e);
+-            }));
+-
+-    // The creation probabilities, keyed by class. Initialised from the SPECIES
++    // The creation probabilities, keyed by class. Initialised from the Species
+     // defaults but mutable so that probability sweeps (see TestingMain) can
+     // substitute their own combinations.
+     private static Map<Class<?>, Double> creationProbabilities = defaultProbabilities();
+@@ -62,8 +27,8 @@ public class SimulationEngine
+     private static Map<Class<?>, Double> defaultProbabilities()
+     {
+         Map<Class<?>, Double> probabilities = new HashMap<>();
+-        for(SpeciesSpawn species : SPECIES) {
+-            probabilities.put(species.type(), species.defaultProbability());
++        for(Species species : Species.values()) {
++            probabilities.put(species.actorClass(), species.defaultProbability());
+         }
+         return probabilities;
+     }
+@@ -207,12 +172,13 @@ public class SimulationEngine
+                 Location location = new Location(row, col);
+ 
+                 // Consider each species in priority order; the first whose
+-                // creation probability succeeds is placed here (if any).
+-                for(SpeciesSpawn species : SPECIES) {
+-                    if(rand.nextDouble() <= creationProbabilities.get(species.type())) {
+-                        Actor actor = species.spawner().spawn(field, location, sex, environment);
+-                        if(actor != null) {
+-                            actors.add(actor);
++                // creation probability succeeds is placed here (subject to its
++                // population cap).
++                for(Species species : Species.values()) {
++                    if(rand.nextDouble() <= creationProbabilities.get(species.actorClass())) {
++                        if(spawnedCounts.getOrDefault(species, 0) < species.maxCount()) {
++                            actors.add(species.spawn(field, location, sex, environment));
++                            spawnedCounts.merge(species, 1, Integer::sum);
+                         }
+                         break;
+                     }
+diff --git a/SimulationInfo.java b/SimulationInfo.java
+index f106958..9352517 100644
+--- a/SimulationInfo.java
++++ b/SimulationInfo.java
+@@ -1,37 +1,16 @@
+-import java.awt.*;
+-import java.util.ArrayList;
+-import java.util.Arrays;
+-import java.util.List;
+ import java.util.Map;
+ 
+ /**
+- * Utility class to store some information about the class, including the list of species (as a list of classes)
+- * and the default colours used in the simulation.
++ * Holder for cross-run testing/optimisation values used by {@link TestingMain}
++ * and {@link Simulator} (to track the most stable probability combination found).
+  *
+- * Additional fields are included for testing and optimization when TestingMain is run
+- * (to optimize probabilities for a more stable population)
++ * Per-species metadata (actor classes, colours, creation probabilities, ...) now
++ * lives in the {@link Species} registry.
+  */
+ public class SimulationInfo {
+-    /**
+-     * The list of the classes of all actors in the simulation
+-     */
+-    public static final List<Class> ALL_ACTORS = new ArrayList<>(Arrays.asList(Grass.class, Deer.class, Coyote.class, Wolf.class, Eagle.class, Hunter.class, Mouse.class));
+-
+-    /**
+-     * A Map connecting each class in the simulation to a default colour
+-     */
+-    public static final Map<Class<?>, Color> DEFAULT_COLOR_MAP = Map.ofEntries(
+-            Map.entry(Deer.class, Color.ORANGE),
+-            Map.entry(Coyote.class, Color.BLUE),
+-            Map.entry(Wolf.class, Color.RED),
+-            Map.entry(Mouse.class, Color.PINK),
+-            Map.entry(Grass.class, Color.GREEN),
+-            Map.entry(Hunter.class, Color.BLACK),
+-            Map.entry(Eagle.class, Color.MAGENTA)
+-    );
+ 
+     /**
+-     * Utility fields to help with the running of TestingMain
++     * Utility fields to help with the running of TestingMain.
+      */
+     public static Integer HIGHEST_STEPS = 0;
+     public static Map<Class<?>, Double> HIGHEST_STEP_PROBS;
+diff --git a/Simulator.java b/Simulator.java
+index 6537c12..33e3065 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -84,8 +84,8 @@ public class Simulator
+ 
+         // Create a view of the state of each location in the field.
+         view = new SimulatorView(depth, width);
+-        for(Class cls : SimulationInfo.DEFAULT_COLOR_MAP.keySet()) {
+-            view.setColor(cls, SimulationInfo.DEFAULT_COLOR_MAP.get(cls));
++        for(Species species : Species.values()) {
++            view.setColor(species.actorClass(), species.color());
+         }
+ 
+         // adding additional buttons to the GUI
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 091f130..3967da6 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -36,7 +36,7 @@ public class SimulatorView extends JFrame
+ 
+     // adding the new buttons
+     private JButton oneStepButton,stopButton, longButton, resetButton;
+-    private JCheckBox grassCheckBox, mouseCheckBox, deerCheckBox, wolfCheckBox, coyoteCheckBox, hunterCheckBox, eagleCheckBox;
++    // One population checkbox per species, built from the Species registry.
+     private Map<Class<?>, JCheckBox> classToCheckBox;
+ 
+ 
+@@ -100,48 +100,22 @@ public class SimulatorView extends JFrame
+ 
+ 
+ 
+-        grassCheckBox = new JCheckBox("Grass: 0", true);
+-        mouseCheckBox = new JCheckBox("Mouse: 0", true);
+-        deerCheckBox = new JCheckBox("Deer: 0", true);
+-        wolfCheckBox = new JCheckBox("Wolf: 0", true);
+-        coyoteCheckBox = new JCheckBox("Coyote: 0", true);
+-        hunterCheckBox = new JCheckBox("Hunter: 0", true);
+-        eagleCheckBox = new JCheckBox("Eagle: 0", true);
+-
+-
+-        classToCheckBox = Map.ofEntries(
+-                Map.entry(Deer.class, deerCheckBox),
+-                Map.entry(Coyote.class, coyoteCheckBox),
+-                Map.entry(Wolf.class, wolfCheckBox),
+-                Map.entry(Mouse.class, mouseCheckBox),
+-                Map.entry(Grass.class, grassCheckBox),
+-                Map.entry(Hunter.class, hunterCheckBox),
+-                Map.entry(Eagle.class, eagleCheckBox)
+-        );
+-
+-        for(Class cls : SimulationInfo.ALL_ACTORS){
+-            classToCheckBox.get(cls).setForeground(SimulationInfo.DEFAULT_COLOR_MAP.get(cls));
+-        }
+-
+-        deerCheckBox.addItemListener(e -> checkCheckBoxByColor(Deer.class));
+-        coyoteCheckBox.addItemListener(e -> checkCheckBoxByColor(Coyote.class));
+-        wolfCheckBox.addItemListener(e -> checkCheckBoxByColor(Wolf.class));
+-        mouseCheckBox.addItemListener(e -> checkCheckBoxByColor(Mouse.class));
+-        grassCheckBox.addItemListener(e -> checkCheckBoxByColor(Grass.class));
+-        hunterCheckBox.addItemListener(e -> checkCheckBoxByColor(Hunter.class));
+-        eagleCheckBox.addItemListener(e -> checkCheckBoxByColor(Eagle.class));
+-
+-
++        // Build a population checkbox per species, driven entirely by the Species
++        // registry: label, colour, tooltip and toggle behaviour are all derived,
++        // so adding a species needs no change here.
++        classToCheckBox = new LinkedHashMap<>();
+         JPanel checkboxes = new JPanel();
+         checkboxes.setLayout(new BoxLayout(checkboxes, BoxLayout.Y_AXIS));
+         checkboxes.add(new JLabel("POPULATIONS"));
+-        checkboxes.add(grassCheckBox);
+-        checkboxes.add(mouseCheckBox);
+-        checkboxes.add(deerCheckBox);
+-        checkboxes.add(wolfCheckBox);
+-        checkboxes.add(coyoteCheckBox);
+-        checkboxes.add(hunterCheckBox);
+-        checkboxes.add(eagleCheckBox);
++        for(Species species : Species.values()) {
++            Class<?> cls = species.actorClass();
++            JCheckBox checkBox = new JCheckBox(species.displayName() + ": 0", true);
++            checkBox.setForeground(species.color());
++            checkBox.setToolTipText("Show/hide " + species.displayName() + " in the field view");
++            checkBox.addItemListener(e -> checkCheckBoxByColor(cls));
++            classToCheckBox.put(cls, checkBox);
++            checkboxes.add(checkBox);
++        }
+         checkboxes.add(diseasedPopulation);
+ 
+         toolbar.add(checkboxes);
+@@ -219,12 +193,13 @@ public class SimulatorView extends JFrame
+     }
+ 
+     public void setColorsByCheckBox(){
+-        for(Class c : new Class[] {Grass.class, Deer.class, Coyote.class, Wolf.class, Eagle.class, Hunter.class}){
++        for(Species species : Species.values()){
++            Class<?> c = species.actorClass();
+             if(!classToCheckBox.get(c).isSelected()){
+                 setColor(c, Color.white);
+             }
+             else if(classToCheckBox.get(c).isSelected() && getColor(c).equals(UNKNOWN_COLOR)){
+-                setColor(c, SimulationInfo.DEFAULT_COLOR_MAP.get(c));
++                setColor(c, species.color());
+             }
+         }
+     }
+@@ -234,7 +209,7 @@ public class SimulatorView extends JFrame
+             setColor(c, Color.white);
+         }
+         else if(classToCheckBox.get(c).isSelected() && getColor(c).equals(Color.white)){
+-            setColor(c, SimulationInfo.DEFAULT_COLOR_MAP.get(c));
++            setColor(c, Species.forClass(c).color());
+         }
+     }
+ 
+@@ -274,8 +249,8 @@ public class SimulatorView extends JFrame
+             }
+         }
+         stats.countFinished();
+-        for(Class cls : SimulationInfo.ALL_ACTORS){
+-            classToCheckBox.get(cls).setText(stats.getCountDetails(cls));
++        for(Species species : Species.values()){
++            classToCheckBox.get(species.actorClass()).setText(stats.getCountDetails(species.actorClass()));
+         }
+ 
+ //        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(field));
+diff --git a/Species.java b/Species.java
+new file mode 100644
+index 0000000..9cd4f5c
+--- /dev/null
++++ b/Species.java
+@@ -0,0 +1,98 @@
++import java.awt.Color;
++import java.util.HashMap;
++import java.util.Map;
++
++/**
++ * Single source of truth for every species in the simulation.
++ *
++ * Each constant bundles all per-species metadata the rest of the program needs:
++ * the actor class, a display name, the GUI colour, the default creation
++ * probability, the maximum number that may be spawned, and a factory that
++ * creates one. Adding a species is a one-line change here: the population logic
++ * ({@link SimulationEngine}) and the view's colours, population checkboxes and
++ * tooltips ({@link SimulatorView}) all derive from this list, so no other file
++ * needs editing.
++ *
++ * The order of the constants is the population priority order: when a cell is
++ * populated, species are considered top-to-bottom and the first whose
++ * probability succeeds is placed.
++ *
++ * @version 2022.03.02
++ */
++public enum Species
++{
++    //      class         display    colour         prob    maxCount            spawner
++    GRASS  (Grass.class,  "Grass",   Color.GREEN,   0.030,  Integer.MAX_VALUE, (f, l, s, e) -> new Grass(f, l)),
++    DEER   (Deer.class,   "Deer",    Color.ORANGE,  0.080,  Integer.MAX_VALUE, (f, l, s, e) -> new Deer(true, f, l, s)),
++    COYOTE (Coyote.class, "Coyote",  Color.BLUE,    0.010,  Integer.MAX_VALUE, (f, l, s, e) -> new Coyote(true, f, l, s)),
++    WOLF   (Wolf.class,   "Wolf",    Color.RED,     0.010,  Integer.MAX_VALUE, (f, l, s, e) -> new Wolf(true, f, l, s)),
++    EAGLE  (Eagle.class,  "Eagle",   Color.MAGENTA, 0.010,  Integer.MAX_VALUE, (f, l, s, e) -> new Eagle(true, f, l, s)),
++    MOUSE  (Mouse.class,  "Mouse",   Color.PINK,    0.080,  Integer.MAX_VALUE, (f, l, s, e) -> new Mouse(true, f, l, s)),
++    HUNTER (Hunter.class, "Hunter",  Color.BLACK,   0.030,  5,                 (f, l, s, e) -> new Hunter(f, l, e));
++
++    /**
++     * Factory that creates a single actor of a species at a location.
++     */
++    @FunctionalInterface
++    public interface Spawner {
++        Actor spawn(Field field, Location location, Animal.Gender sex, Environment environment);
++    }
++
++    private final Class<?> actorClass;
++    private final String displayName;
++    private final Color color;
++    private final double defaultProbability;
++    private final int maxCount;
++    private final Spawner spawner;
++
++    Species(Class<?> actorClass, String displayName, Color color,
++            double defaultProbability, int maxCount, Spawner spawner)
++    {
++        this.actorClass = actorClass;
++        this.displayName = displayName;
++        this.color = color;
++        this.defaultProbability = defaultProbability;
++        this.maxCount = maxCount;
++        this.spawner = spawner;
++    }
++
++    /** @return The actor class this species creates. */
++    public Class<?> actorClass() { return actorClass; }
++
++    /** @return A human-readable name for the species. */
++    public String displayName() { return displayName; }
++
++    /** @return The colour used to draw this species in the view. */
++    public Color color() { return color; }
++
++    /** @return The default probability of creating this species in a free cell. */
++    public double defaultProbability() { return defaultProbability; }
++
++    /** @return The maximum number of this species that may be spawned. */
++    public int maxCount() { return maxCount; }
++
++    /**
++     * Create a single actor of this species.
++     */
++    public Actor spawn(Field field, Location location, Animal.Gender sex, Environment environment)
++    {
++        return spawner.spawn(field, location, sex, environment);
++    }
++
++    // Reverse lookup from actor class to species.
++    private static final Map<Class<?>, Species> BY_CLASS = new HashMap<>();
++    static {
++        for(Species species : values()) {
++            BY_CLASS.put(species.actorClass, species);
++        }
++    }
++
++    /**
++     * @param actorClass An actor class.
++     * @return The species for that class, or null if it is not a registered species.
++     */
++    public static Species forClass(Class<?> actorClass)
++    {
++        return BY_CLASS.get(actorClass);
++    }
++}

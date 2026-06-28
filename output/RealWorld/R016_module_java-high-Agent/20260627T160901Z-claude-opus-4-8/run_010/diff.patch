@@ -1,0 +1,154 @@
+diff --git a/Actor.java b/Actor.java
+index 7eed02e..0887c83 100644
+--- a/Actor.java
++++ b/Actor.java
+@@ -1,4 +1,5 @@
+ import java.util.List;
++import java.util.Random;
+ 
+ /**
+  * Represents all aspects of the simulator that perform some functionality
+@@ -48,4 +49,28 @@ interface Actor
+      * @return true if the actor should be removed.
+      */
+     default boolean isExpired() { return false; }
++
++    /**
++     * Expose this actor to the simulation's diseases, giving it a chance to
++     * randomly contract one this step. Most actors are not susceptible and
++     * ignore the exposure; organisms override this to roll against each
++     * disease they belong to.
++     * @param diseases The diseases currently present in the simulation.
++     * @param rand The shared random source.
++     */
++    default void exposeToDiseases(List<Disease> diseases, Random rand) { }
++
++    /**
++     * Choose which list this actor should be given when it acts this step.
++     * Environmental actors operate on the live population; organisms instead
++     * breed into the separate nursery so their newborns are not visited again
++     * during the same step.
++     * @param population The live actor list.
++     * @param nursery The collector for newly produced actors.
++     * @return The list this actor should act with.
++     */
++    default List<Actor> stepTarget(List<Actor> population, List<Actor> nursery)
++    {
++        return population;
++    }
+ }
+\ No newline at end of file
+diff --git a/Organism.java b/Organism.java
+index 3f1a9ba..97e6d33 100644
+--- a/Organism.java
++++ b/Organism.java
+@@ -1,4 +1,5 @@
+ import java.util.List;
++import java.util.Random;
+ 
+ /**
+  * A class to represent all living creatures in the simulation
+@@ -42,7 +43,36 @@ public abstract class Organism extends FieldOccupant implements Actor
+         incrementAge();
+         decreaseWaterLevel();
+     }
+-    
++
++    /**
++     * Organisms can randomly contract any disease whose species list includes
++     * their own: each disease is rolled against its occurrence probability.
++     * @param diseases The diseases currently present in the simulation.
++     * @param rand The shared random source.
++     */
++    public void exposeToDiseases(List<Disease> diseases, Random rand)
++    {
++        for (Disease disease : diseases) {
++            // random low chance of developing each disease in turn
++            if (rand.nextDouble() <= disease.getProbability()) {
++                // only contract a disease that affects this species
++                if (disease.getSpecies().contains(getClass().getName())) {
++                    disease.addIndividual(this);
++                    setInfected();
++                }
++            }
++        }
++    }
++
++    /**
++     * Organisms breed into the separate nursery so their newborns are not
++     * visited again during the same step.
++     */
++    public List<Actor> stepTarget(List<Actor> population, List<Actor> nursery)
++    {
++        return nursery;
++    }
++
+     /**
+      * Check whether the organism is alive or not.
+      * @return true if the organism is still alive.
+diff --git a/Simulator.java b/Simulator.java
+index 2d37703..e3b9d78 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -126,26 +126,18 @@ public class Simulator
+         
+         // Provide space for newborn organisms
+         List<Actor> newOrganisms = new ArrayList<>();
++        Random rand = Randomizer.getRandom();
+ 
+-        // Let all actors act
++        // Let all actors act. Each actor decides, polymorphically, whether it
++        // can catch a disease, whether it may act at this time of day, which
++        // list it acts into, and whether it has left the simulation.
+         Iterator<Actor> it = actors.iterator();
+         while(it.hasNext()) {
+             Actor actor = it.next();
+-            if (actor instanceof Organism) {
+-                // Organisms may catch a disease, only act when the time of
+-                // day suits them, and breed into the newborn collector so
+-                // their young are not visited this same step.
+-                generateDisease(actor);
+-                if (actor.canActNow(nightTime)) {
+-                    actor.act(newOrganisms);
+-                }
+-            }
+-            else {
+-                // Environmental actors (weather, disease) operate on the
+-                // live actor list.
+-                actor.act(actors);
++            actor.exposeToDiseases(diseases, rand);
++            if (actor.canActNow(nightTime)) {
++                actor.act(actor.stepTarget(actors, newOrganisms));
+             }
+-
+             // Remove anything that has left the simulation: a dead organism
+             // or an emptied water source.
+             if (actor.isExpired()) {
+@@ -245,27 +237,6 @@ public class Simulator
+     }
+     
+     /**
+-     * Random chance of a disease being generated in the population
+-     * @param actor An individual which could be infected
+-     */
+-    private void generateDisease(Actor actor)
+-    {
+-        Random rand = Randomizer.getRandom();
+-        for (Disease disease: diseases) {
+-            // random low chance of an individual developing a disease
+-            if(rand.nextDouble() <= disease.getProbability()) {
+-                // only infects certain species (must be organisms)
+-                if (disease.getSpecies().contains(actor.getClass().getName())) {
+-                    // adds infected individual to diseased list and sets infected to true
+-                    disease.addIndividual(actor);
+-                    Organism organism = (Organism) actor;
+-                    organism.setInfected();
+-                }
+-            }
+-        }
+-    }
+-    
+-    /** 
+      * Creates random water spaces in free locations in field
+      * Used when it rains to create new water sources
+      */

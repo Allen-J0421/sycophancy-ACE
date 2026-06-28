@@ -1,0 +1,259 @@
+diff --git a/Animal.java b/Animal.java
+index c34ec29..56bd1d3 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -70,7 +70,7 @@ public abstract class Animal extends MobileForager implements Edible
+         incrementHunger();
+         if(isAlive()) {
+             giveBirth(newAnimals, environment);
+-            forageAndMove();
++            forageAndMove(environment);
+ 
+             if(isDiseased() && getDisease().getLethalityRate() <= rand.nextDouble()){
+                 // every step, check if the Animal is diseased
+@@ -101,9 +101,9 @@ public abstract class Animal extends MobileForager implements Edible
+     protected abstract void giveBirth(List<Actor> newAnimals, Environment environment);
+ 
+     @Override
+-    protected Location locateTargetLocation()
++    protected Location locateTargetLocation(Environment environment)
+     {
+-        return TARGET_POLICY.acquireTarget(this);
++        return TARGET_POLICY.acquireTarget(this, environment);
+     }
+ 
+     /**
+diff --git a/AnimalTargetAcquisitionPolicy.java b/AnimalTargetAcquisitionPolicy.java
+index c3e31f9..43c85f0 100644
+--- a/AnimalTargetAcquisitionPolicy.java
++++ b/AnimalTargetAcquisitionPolicy.java
+@@ -6,7 +6,7 @@ import java.util.List;
+ public final class AnimalTargetAcquisitionPolicy implements TargetAcquisitionPolicy
+ {
+     @Override
+-    public Location acquireTarget(MobileForager forager)
++    public Location acquireTarget(MobileForager forager, Environment environment)
+     {
+         Animal animal = (Animal) forager;
+         contractDiseaseFromAdjacentOrganisms(animal);
+diff --git a/Eagle.java b/Eagle.java
+index aab572d..2034280 100644
+--- a/Eagle.java
++++ b/Eagle.java
+@@ -10,6 +10,7 @@ import java.util.*;
+  */
+ public class Eagle extends Animal
+ {
++    private static final TargetAcquisitionPolicy TARGET_POLICY = new EagleTargetAcquisitionPolicy();
+      // Characteristics shared by all eagles (class variables).
+ 
+     // The age at which a eagle can start to breed.
+@@ -38,6 +39,12 @@ public class Eagle extends Animal
+     public int getFoodValue() { return FOOD_VALUE; }
+     protected Set<Class<?>> DIET() { return DIET; }
+ 
++    @Override
++    protected Location locateTargetLocation(Environment environment)
++    {
++        return TARGET_POLICY.acquireTarget(this, environment);
++    }
++
+     /**
+      * Create a eagle. A eagle can be created as a new born (age zero
+      * and not hungry) or with a random age and food level.
+@@ -74,75 +81,9 @@ public class Eagle extends Animal
+         }
+     }
+ 
+-    /**
+-     * Make this animal act - that is: make it do
+-     * whatever it wants/needs to do.
+-     * @param newAnimals A list to receive newly born animals.
+-     * @param environment The environment that the eagle resides in. 
+-     */
+-    public void act(List<Actor> newAnimals, Environment environment)
+-    {
+-        randomlyContractDisease();
+-        incrementAge();
+-        incrementHunger();
+-        if(isAlive()) {
+-            giveBirth(newAnimals, environment);
+-            // Move towards a source of food if found.
+-            Location newLocation = findFood(environment);
+-            if(newLocation == null) {
+-                // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            List<Location> adjacentGrassSpots = getField().adjacentLocationsWithSpecies(getLocation(), Grass.class);
+-
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else if (adjacentGrassSpots.size() > 0) {
+-                getField().clear(getLocation());
+-                setLocation(adjacentGrassSpots.get(rand.nextInt(adjacentGrassSpots.size())));
+-            }
+-            // removing overcrowding for eagles since they're above everyone
+-
+-            if(isDiseased() && getDisease().getLethalityRate() <= rand.nextDouble()){
+-                // every step, check if the Animal is diseased
+-                // if it is Diseased, and a random double is less than the lethality rate, the Animal dies
+-                setDead();
+-            }
+-
+-        }
+-    }
+-
+-
+-    /**
+-     * Additional functionality that doesn't allow eagles to find food while it's raining
+-     * @param environment The environment that the eagle resides in. 
+-     * @return Location Where food was found, or null if it wasn't.
+-     */
+-    protected Location findFood(Environment environment)
++    @Override
++    protected void onMovementBlocked()
+     {
+-        if(environment.getWeather().getCurrentWeather() == WeatherType.RAINING) {
+-            return null;
+-        }
+-
+-        Location preyLocation = AdjacentTargetSearch.findMatchingLocation(getField(), getLocation(), animal ->
+-                animal != null && DIET.contains(animal.getClass()));
+-        if(preyLocation == null) {
+-            return null;
+-        }
+-
+-        Organism food = (Organism) getField().getObjectAt(preyLocation);
+-        if (food.isDiseased() &&  food.getDisease().getDiseaseType() == DiseaseType.FOODBORNE && food.getDisease().getPropagationRate() <= rand.nextDouble())
+-        {
+-            setDisease(food.getDisease());
+-        }
+-        if(food.isAlive())
+-        {
+-            food.setDead();
+-            int newFoodLevel = foodLevel + ((Edible) food).getFoodValue();
+-            foodLevel = Math.min(newFoodLevel, MAX_FOOD_LEVEL());
+-        }
+-        return preyLocation;
++        // Eagles stay alive if no movement is possible.
+     }
+-
+ }
+diff --git a/EagleTargetAcquisitionPolicy.java b/EagleTargetAcquisitionPolicy.java
+new file mode 100644
+index 0000000..bdc8f74
+--- /dev/null
++++ b/EagleTargetAcquisitionPolicy.java
+@@ -0,0 +1,40 @@
++/**
++ * Eagle-specific target acquisition logic.
++ */
++public final class EagleTargetAcquisitionPolicy implements TargetAcquisitionPolicy
++{
++    private static final java.util.Set<Class<?>> DIET = java.util.Set.of(Deer.class, Coyote.class, Mouse.class);
++
++    @Override
++    public Location acquireTarget(MobileForager forager, Environment environment)
++    {
++        Eagle eagle = (Eagle) forager;
++        if(environment.getWeather().getCurrentWeather() == WeatherType.RAINING) {
++            return null;
++        }
++
++        Location preyLocation = AdjacentTargetSearch.findMatchingLocation(
++                eagle.getField(),
++                eagle.getLocation(),
++                occupant -> occupant != null && DIET.contains(occupant.getClass())
++        );
++        if(preyLocation == null) {
++            return null;
++        }
++
++        Organism food = (Organism) eagle.getField().getObjectAt(preyLocation);
++        if (food.isDiseased()
++                && food.getDisease().getDiseaseType() == DiseaseType.FOODBORNE
++                && food.getDisease().getPropagationRate() <= Randomizer.getRandom().nextDouble())
++        {
++            eagle.setDisease(food.getDisease());
++        }
++        if(food.isAlive())
++        {
++            food.setDead();
++            int newFoodLevel = eagle.foodLevel + ((Edible) food).getFoodValue();
++            eagle.foodLevel = Math.min(newFoodLevel, eagle.MAX_FOOD_LEVEL());
++        }
++        return preyLocation;
++    }
++}
+diff --git a/Hunter.java b/Hunter.java
+index 280d580..d411eb3 100644
+--- a/Hunter.java
++++ b/Hunter.java
+@@ -28,14 +28,14 @@ public class Hunter extends MobileForager
+     public void act(List<Actor> newActors, Environment environment)
+     {
+         if(isAlive()) {
+-            forageAndMove();
++            forageAndMove(environment);
+         }
+     }
+ 
+     @Override
+-    protected Location locateTargetLocation()
++    protected Location locateTargetLocation(Environment environment)
+     {
+-        return TARGET_POLICY.acquireTarget(this);
++        return TARGET_POLICY.acquireTarget(this, environment);
+     }
+ 
+     @Override
+diff --git a/HunterTargetAcquisitionPolicy.java b/HunterTargetAcquisitionPolicy.java
+index 52afd75..28c0579 100644
+--- a/HunterTargetAcquisitionPolicy.java
++++ b/HunterTargetAcquisitionPolicy.java
+@@ -8,7 +8,7 @@ public final class HunterTargetAcquisitionPolicy implements TargetAcquisitionPol
+     );
+ 
+     @Override
+-    public Location acquireTarget(MobileForager forager)
++    public Location acquireTarget(MobileForager forager, Environment environment)
+     {
+         Hunter hunter = (Hunter) forager;
+         Location preyLocation = AdjacentTargetSearch.findMatchingLocation(
+diff --git a/MobileForager.java b/MobileForager.java
+index 90a3fb2..129b5ab 100644
+--- a/MobileForager.java
++++ b/MobileForager.java
+@@ -18,9 +18,9 @@ public abstract class MobileForager extends Organism
+     /**
+      * Template method for target acquisition and movement.
+      */
+-    protected final void forageAndMove()
++    protected final void forageAndMove(Environment environment)
+     {
+-        Location targetLocation = locateTargetLocation();
++        Location targetLocation = locateTargetLocation(environment);
+         if(targetLocation == null) {
+             targetLocation = getField().freeAdjacentLocation(getLocation());
+         }
+@@ -43,7 +43,7 @@ public abstract class MobileForager extends Organism
+     /**
+      * Find the resource or prey the organism is seeking.
+      */
+-    protected abstract Location locateTargetLocation();
++    protected abstract Location locateTargetLocation(Environment environment);
+ 
+     /**
+      * Hook for species-specific fallback movement targets.
+diff --git a/TargetAcquisitionPolicy.java b/TargetAcquisitionPolicy.java
+index ee79ee7..d6bdc15 100644
+--- a/TargetAcquisitionPolicy.java
++++ b/TargetAcquisitionPolicy.java
+@@ -3,5 +3,5 @@
+  */
+ public interface TargetAcquisitionPolicy
+ {
+-    Location acquireTarget(MobileForager forager);
++    Location acquireTarget(MobileForager forager, Environment environment);
+ }

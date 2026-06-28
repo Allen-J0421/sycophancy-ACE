@@ -1,0 +1,469 @@
+diff --git a/Cat.java b/Cat.java
+index d8082c7..2ff19a5 100644
+--- a/Cat.java
++++ b/Cat.java
+@@ -62,7 +62,7 @@ public class Cat extends Animal
+             giveBirth(newCats);
+             Location newLocation = findFood();
+             if (newLocation == null) {
+-                newLocation = getField().freeAdjacentLocation(getLocation());
++                newLocation = getNavigator().freeAdjacentLocation(getLocation());
+             }
+             if (newLocation != null) {
+                 setLocation(newLocation);
+@@ -90,7 +90,7 @@ public class Cat extends Animal
+     private Location findFood()
+     {
+         Field<Entity> field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
++        List<Location> adjacent = getNavigator().adjacentLocations(getLocation(), 1);
+         Iterator<Location> it = adjacent.iterator();
+         while (it.hasNext()) {
+             Location where = it.next();
+@@ -114,7 +114,7 @@ public class Cat extends Animal
+     private void giveBirth(List<Entity> newCats)
+     {
+         Field<Entity> field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
++        List<Location> free = getNavigator().getFreeAdjacentLocations(getLocation());
+         int births = breed();
+         for (int b = 0; b < births && free.size() > 0; b++) {
+             Location loc = free.remove(0);
+diff --git a/Deer.java b/Deer.java
+index 25da18b..4bb89e0 100644
+--- a/Deer.java
++++ b/Deer.java
+@@ -70,7 +70,7 @@ public class Deer extends Animal
+             }
+ 
+             if (newLocation == null) {
+-                newLocation = getField().freeAdjacentLocation(getLocation());
++                newLocation = getNavigator().freeAdjacentLocation(getLocation());
+             }
+             if (newLocation != null) {
+                 setLocation(newLocation);
+@@ -98,7 +98,7 @@ public class Deer extends Animal
+     private Location findFood()
+     {
+         Field<Entity> field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
++        List<Location> adjacent = getNavigator().adjacentLocations(getLocation(), 1);
+         Iterator<Location> it = adjacent.iterator();
+         while (it.hasNext()) {
+             Location where = it.next();
+@@ -126,7 +126,7 @@ public class Deer extends Animal
+     {
+         boolean breedingPair = false;
+         Field<Entity> field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 2);
++        List<Location> adjacent = getNavigator().adjacentLocations(getLocation(), 2);
+         Iterator<Location> it = adjacent.iterator();
+         while (it.hasNext()) {
+             Location where = it.next();
+@@ -140,7 +140,7 @@ public class Deer extends Animal
+             }
+         }
+ 
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
++        List<Location> free = getNavigator().getFreeAdjacentLocations(getLocation());
+         int births = breed();
+         for (int b = 0; b < births && free.size() > 0 && breedingPair; b++) {
+             Location loc = free.remove(0);
+diff --git a/Entity.java b/Entity.java
+index e943061..f2f004c 100644
+--- a/Entity.java
++++ b/Entity.java
+@@ -11,6 +11,8 @@ public abstract class Entity
+     private boolean alive;
+     // The field in which this entity lives.
+     private Field<Entity> field;
++    // Spatial navigation utilities over that field.
++    private FieldNavigator navigator;
+     // The entity's position in the field.
+     private Location location;
+ 
+@@ -24,6 +26,7 @@ public abstract class Entity
+     {
+         alive = true;
+         this.field = field;
++        this.navigator = new FieldNavigator(field);
+         setLocation(location);
+     }
+ 
+@@ -57,6 +60,7 @@ public abstract class Entity
+             field.clear(location);
+             location = null;
+             field = null;
++            navigator = null;
+         }
+     }
+ 
+@@ -88,4 +92,12 @@ public abstract class Entity
+     {
+         return field;
+     }
++
++    /**
++     * @return the navigator for spatial queries over the field.
++     */
++    protected FieldNavigator getNavigator()
++    {
++        return navigator;
++    }
+ }
+diff --git a/Field.java b/Field.java
+index 13e569c..e0932e1 100644
+--- a/Field.java
++++ b/Field.java
+@@ -1,28 +1,23 @@
+-import java.util.Collections;
+-import java.util.Iterator;
+-import java.util.LinkedList;
+-import java.util.List;
+-import java.util.Random;
+-
+ /**
+  * Represent a rectangular grid of field positions.
+  * Each position stores at most one entity.
+  *
++ * <p>This class is a pure data container: it supports placing, clearing, and
++ * retrieving entities by location. Spatial navigation utilities (adjacency
++ * queries, free-cell search) are provided by {@link FieldNavigator}.
++ *
+  * <p>The type parameter {@code E} constrains what may be stored so that
+  * {@link #getObjectAt} returns a typed value rather than a raw {@code Object},
+  * eliminating the need for callers to cast. The backing store is an
+- * {@code Object[][]} array (Java prohibits generic array creation), but
+- * the single {@code @SuppressWarnings} cast inside {@link #getObjectAt} is
+- * sound because {@link #place} is the only write path and it accepts only {@code E}.
++ * {@code Object[][]} array (Java prohibits generic array creation), but the
++ * single {@code @SuppressWarnings} cast inside {@link #getObjectAt} is sound
++ * because {@link #place} is the only write path and it accepts only {@code E}.
+  *
+  * @param <E> The type of entity stored in this field (must extend {@link Entity}).
+  * @version 2016.02.29
+  */
+ public class Field<E extends Entity>
+ {
+-    // A random number generator for providing random locations.
+-    private static final Random rand = Randomizer.getRandom();
+-
+     // The depth and width of the field.
+     private int depth, width;
+     // Backing grid — typed externally as E, but stored as Object to work around
+@@ -107,85 +102,6 @@ public class Field<E extends Entity>
+         return (E) grid[row][col];
+     }
+ 
+-    /**
+-     * Generate a random location that is adjacent to the given location,
+-     * or is the same location. The returned location will be within the
+-     * valid bounds of the field.
+-     * @param location The location from which to generate an adjacency.
+-     * @return A valid location within the grid area.
+-     */
+-    public Location randomAdjacentLocation(Location location)
+-    {
+-        List<Location> adjacent = adjacentLocations(location, 1);
+-        return adjacent.get(0);
+-    }
+-
+-    /**
+-     * Get a shuffled list of the free adjacent locations.
+-     * @param location Get locations adjacent to this.
+-     * @return A list of free adjacent locations.
+-     */
+-    public List<Location> getFreeAdjacentLocations(Location location)
+-    {
+-        List<Location> free = new LinkedList<>();
+-        List<Location> adjacent = adjacentLocations(location, 1);
+-        for (Location next : adjacent) {
+-            if (getObjectAt(next) == null) {
+-                free.add(next);
+-            }
+-        }
+-        return free;
+-    }
+-
+-    /**
+-     * Try to find a free location that is adjacent to the given location.
+-     * If there is none, return null.
+-     * @param location The location from which to generate an adjacency.
+-     * @return A valid location within the grid area, or null if all adjacent
+-     *         locations are occupied.
+-     */
+-    public Location freeAdjacentLocation(Location location)
+-    {
+-        List<Location> free = getFreeAdjacentLocations(location);
+-        if (free.size() > 0) {
+-            return free.get(0);
+-        } else {
+-            return null;
+-        }
+-    }
+-
+-    /**
+-     * Return a shuffled list of locations adjacent to the given one.
+-     * The list will not include the location itself.
+-     * All locations will lie within the grid.
+-     * @param location The location from which to generate adjacencies.
+-     * @param rcoffset The radius of the neighbourhood.
+-     * @return A list of locations adjacent to that given.
+-     */
+-    public List<Location> adjacentLocations(Location location, int rcoffset)
+-    {
+-        assert location != null : "Null location passed to adjacentLocations";
+-        List<Location> locations = new LinkedList<>();
+-        if (location != null) {
+-            int row = location.getRow();
+-            int col = location.getCol();
+-            for (int roffset = -rcoffset; roffset <= rcoffset; roffset++) {
+-                int nextRow = row + roffset;
+-                if (nextRow >= 0 && nextRow < depth) {
+-                    for (int coffset = -rcoffset; coffset <= rcoffset; coffset++) {
+-                        int nextCol = col + coffset;
+-                        if (nextCol >= 0 && nextCol < width && (roffset != 0 || coffset != 0)) {
+-                            locations.add(new Location(nextRow, nextCol));
+-                        }
+-                    }
+-                }
+-            }
+-            // Shuffle the list. Several other methods rely on the list being in a random order.
+-            Collections.shuffle(locations, rand);
+-        }
+-        return locations;
+-    }
+-
+     /**
+      * Return the depth of the field.
+      * @return The depth of the field.
+diff --git a/FieldNavigator.java b/FieldNavigator.java
+new file mode 100644
+index 0000000..9263716
+--- /dev/null
++++ b/FieldNavigator.java
+@@ -0,0 +1,100 @@
++import java.util.Collections;
++import java.util.LinkedList;
++import java.util.List;
++import java.util.Random;
++
++/**
++ * Provides spatial navigation utilities over a {@link Field}.
++ *
++ * <p>Separates grid-traversal algorithms from the data structure that stores
++ * entities. {@link Field} remains a pure container (place/clear/get); all
++ * adjacency queries and free-cell searches live here.
++ *
++ * <p>A single {@code FieldNavigator} is created per simulation field and
++ * exposed to entities through {@link Entity#getNavigator()}.
++ */
++public class FieldNavigator
++{
++    private static final Random rand = Randomizer.getRandom();
++
++    private final Field<Entity> field;
++
++    /**
++     * Create a navigator bound to the given field.
++     * @param field The field whose cells will be navigated.
++     */
++    public FieldNavigator(Field<Entity> field)
++    {
++        this.field = field;
++    }
++
++    /**
++     * Return a shuffled list of locations adjacent to the given one within
++     * the given radius. The list does not include the location itself.
++     * All returned locations lie within the grid bounds.
++     * @param location The centre location.
++     * @param radius The neighbourhood radius (1 = immediate neighbours).
++     * @return A shuffled list of in-bounds adjacent locations.
++     */
++    public List<Location> adjacentLocations(Location location, int radius)
++    {
++        assert location != null : "Null location passed to adjacentLocations";
++        List<Location> locations = new LinkedList<>();
++        if (location != null) {
++            int row = location.getRow();
++            int col = location.getCol();
++            for (int roffset = -radius; roffset <= radius; roffset++) {
++                int nextRow = row + roffset;
++                if (nextRow >= 0 && nextRow < field.getDepth()) {
++                    for (int coffset = -radius; coffset <= radius; coffset++) {
++                        int nextCol = col + coffset;
++                        if (nextCol >= 0 && nextCol < field.getWidth()
++                                && (roffset != 0 || coffset != 0)) {
++                            locations.add(new Location(nextRow, nextCol));
++                        }
++                    }
++                }
++            }
++            Collections.shuffle(locations, rand);
++        }
++        return locations;
++    }
++
++    /**
++     * Get a shuffled list of the free (unoccupied) adjacent locations.
++     * @param location The location whose neighbours are examined.
++     * @return A list of free adjacent locations.
++     */
++    public List<Location> getFreeAdjacentLocations(Location location)
++    {
++        List<Location> free = new LinkedList<>();
++        for (Location next : adjacentLocations(location, 1)) {
++            if (field.getObjectAt(next) == null) {
++                free.add(next);
++            }
++        }
++        return free;
++    }
++
++    /**
++     * Return the first free location adjacent to the given one,
++     * or {@code null} if all neighbours are occupied.
++     * @param location The location from which to search.
++     * @return A free adjacent location, or {@code null}.
++     */
++    public Location freeAdjacentLocation(Location location)
++    {
++        List<Location> free = getFreeAdjacentLocations(location);
++        return free.size() > 0 ? free.get(0) : null;
++    }
++
++    /**
++     * Return a random location adjacent to the given one.
++     * @param location The location from which to generate an adjacency.
++     * @return A random adjacent location within the grid.
++     */
++    public Location randomAdjacentLocation(Location location)
++    {
++        return adjacentLocations(location, 1).get(0);
++    }
++}
+diff --git a/Grass.java b/Grass.java
+index 1e45d0a..660deb2 100644
+--- a/Grass.java
++++ b/Grass.java
+@@ -67,7 +67,7 @@ public class Grass extends Plant
+                 getSteppeFire();
+                 if (steppeFire() && getLocation() != null) {                
+                     Field<Entity> field = getField();
+-                    List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
++                    List<Location> adjacent = getNavigator().adjacentLocations(getLocation(), 1);
+                     Iterator<Location> it = adjacent.iterator();
+                     while(it.hasNext()) {
+                         Location where = it.next();
+diff --git a/Lion.java b/Lion.java
+index 5d5f37d..0152904 100644
+--- a/Lion.java
++++ b/Lion.java
+@@ -69,7 +69,7 @@ public class Lion extends Animal
+                 newLocation = findFood();
+             }
+             if (newLocation == null) {
+-                newLocation = getField().freeAdjacentLocation(getLocation());
++                newLocation = getNavigator().freeAdjacentLocation(getLocation());
+             }
+             if (step % 4 != 0) {
+                 if (newLocation != null) {
+@@ -99,7 +99,7 @@ public class Lion extends Animal
+     private Location findFood()
+     {
+         Field<Entity> field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
++        List<Location> adjacent = getNavigator().adjacentLocations(getLocation(), 1);
+         Iterator<Location> it = adjacent.iterator();
+         while (it.hasNext()) {
+             Location where = it.next();
+@@ -146,7 +146,7 @@ public class Lion extends Animal
+     {
+         boolean breedingPair = false;
+         Field<Entity> field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 2);
++        List<Location> adjacent = getNavigator().adjacentLocations(getLocation(), 2);
+         Iterator<Location> it = adjacent.iterator();
+         while (it.hasNext()) {
+             Location where = it.next();
+@@ -160,7 +160,7 @@ public class Lion extends Animal
+             }
+         }
+ 
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
++        List<Location> free = getNavigator().getFreeAdjacentLocations(getLocation());
+         int births = breed();
+         for (int b = 0; b < births && free.size() > 0 && breedingPair; b++) {
+             Location loc = free.remove(0);
+diff --git a/Mouse.java b/Mouse.java
+index ba5c335..a967c18 100644
+--- a/Mouse.java
++++ b/Mouse.java
+@@ -75,7 +75,7 @@ public class Mouse extends Animal
+ 
+             Location newLocation = findFood();
+             if (newLocation == null) {
+-                newLocation = getField().freeAdjacentLocation(getLocation());
++                newLocation = getNavigator().freeAdjacentLocation(getLocation());
+             }
+             if (newLocation != null) {
+                 setLocation(newLocation);
+@@ -93,7 +93,7 @@ public class Mouse extends Animal
+     private void giveBirth(List<Entity> newMice)
+     {
+         Field<Entity> field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
++        List<Location> free = getNavigator().getFreeAdjacentLocations(getLocation());
+         int births = breed();
+         for (int b = 0; b < births && free.size() > 0; b++) {
+             Location loc = free.remove(0);
+@@ -108,7 +108,7 @@ public class Mouse extends Animal
+     private Location findFood()
+     {
+         Field<Entity> field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
++        List<Location> adjacent = getNavigator().adjacentLocations(getLocation(), 1);
+         Iterator<Location> it = adjacent.iterator();
+         while (it.hasNext()) {
+             Location where = it.next();
+@@ -158,7 +158,7 @@ public class Mouse extends Animal
+     private void spreadDisease()
+     {
+         Field<Entity> field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
++        List<Location> adjacent = getNavigator().adjacentLocations(getLocation(), 1);
+         Iterator<Location> it = adjacent.iterator();
+         while (it.hasNext()) {
+             Location where = it.next();
+diff --git a/Owl.java b/Owl.java
+index b9afc83..bd476ce 100644
+--- a/Owl.java
++++ b/Owl.java
+@@ -62,7 +62,7 @@ public class Owl extends Animal
+             giveBirth(newOwls);
+             Location newLocation = findFood();
+             if (newLocation == null) {
+-                newLocation = getField().freeAdjacentLocation(getLocation());
++                newLocation = getNavigator().freeAdjacentLocation(getLocation());
+             }
+             if (newLocation != null) {
+                 setLocation(newLocation);
+@@ -90,7 +90,7 @@ public class Owl extends Animal
+     private Location findFood()
+     {
+         Field<Entity> field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
++        List<Location> adjacent = getNavigator().adjacentLocations(getLocation(), 1);
+         Iterator<Location> it = adjacent.iterator();
+         while (it.hasNext()) {
+             Location where = it.next();
+@@ -114,7 +114,7 @@ public class Owl extends Animal
+     private void giveBirth(List<Entity> newOwls)
+     {
+         Field<Entity> field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
++        List<Location> free = getNavigator().getFreeAdjacentLocations(getLocation());
+         int births = breed();
+         for (int b = 0; b < births && free.size() > 0; b++) {
+             Location loc = free.remove(0);

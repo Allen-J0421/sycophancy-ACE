@@ -1,0 +1,1151 @@
+diff --git a/Animal.java b/Animal.java
+index 5535841..d851646 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -20,10 +20,12 @@ public abstract class Animal extends Organism
+     private double age;
+     // Indicates whether the animal is sleeping or not
+     private boolean sleeping;
+-    
++    // Shared random number generator
++    private static final Random rand = Randomizer.getRandom();
++
+     /**
+      * Create a new animal at location in field.
+-     * 
++     *
+      * @param randomAge If true, the animal will have a random age
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+@@ -32,7 +34,6 @@ public abstract class Animal extends Organism
+     {
+         super(randomAge, field, location);
+         nocturnal = false;
+-        Random rand = new Random();
+         female = rand.nextBoolean();
+         setWaterLevel(rand.nextInt(10) + 5);
+         sleeping = false;
+@@ -41,19 +42,43 @@ public abstract class Animal extends Organism
+             foodLevel = rand.nextInt(10) + 8;
+         }
+     }
+-    
++
++    // --- Abstract methods each subclass must define ---
++
++    /** @return The minimum age at which this animal can breed. */
++    abstract protected int getBreedingAge();
++
++    /** @return The probability of breeding when conditions are met. */
++    abstract protected double getBreedingProbability();
++
++    /** @return The maximum number of offspring per birth event. */
++    abstract protected int getMaxLitterSize();
++
++    /** @return The maximum age before this animal dies. */
++    abstract public int getMaxAge();
++
++    /** @return A new instance of this animal type placed at loc. */
++    abstract protected Animal createOffspring(Field field, Location loc);
++
++    /** @return Returns list of prey for each animal */
++    abstract public ArrayList<String> getPrey();
++
++    /**
++     * @return The probability of a successful hunt (default 1.0 — always succeeds).
++     *         Override in subclasses that have a hunt success rate.
++     */
++    protected double getHuntProbability() { return 1.0; }
++
+     /**
+      * Make this animal act - that is: make it do
+      * whatever it wants/needs to do.
+      * @param newAnimals A list to receive newly born animals.
+      */
+     public void act(List<Actor> newOrganisms) {
+-        // All animals eat; all organisms also increment age and water level
+         super.act(newOrganisms);
+         incrementHunger();
+-        if(isAlive() && !sleeping) {        
+-            // Move towards a source of food if found
+-            giveBirth(newOrganisms);  
++        if(isAlive() && !sleeping) {
++            giveBirth(newOrganisms);
+             Location newLocation = null;
+             if(getWaterLevel() < 3) {
+                 newLocation = findWater();
+@@ -64,39 +89,45 @@ public abstract class Animal extends Organism
+             if (newLocation == null) {
+                 newLocation = findMate();
+             }
+-            if(newLocation == null) { 
+-                // No food found - try to move to a free location.
++            if(newLocation == null) {
+                 newLocation = getField().freeAdjacentLocation(getLocation());
+             }
+-            
+-            // See if it was possible to move.
++
+             if(newLocation != null) {
+                 setLocation(newLocation);
+             }
+             else {
+-                // Overcrowding.
+                 setDead();
+             }
+         }
+         else if (sleeping) {
+-            // code for what to do when sleeping
+             sleeping = false;
+         }
+     }
+-    
++
++    /**
++     * Increase the age. This could result in the animal's death.
++     */
++    @Override
++    public void incrementAge() {
++        super.incrementAge();
++        if(getAge() > getMaxAge()) {
++            setDead();
++        }
++    }
++
+     /**
+-     * Move towards another animal of the same species to find a mate to breed with
+-     * 
++     * Move towards another animal of the same species to find a mate to breed with.
++     *
+      * @return The location of a potential mate if found, null if not
+      */
+-    public Location findMate() 
++    public Location findMate()
+     {
+         Field field = getField();
+         List<Location> adjacent = field.adjacentLocations(getLocation());
+         Iterator<Location> it = adjacent.iterator();
+         while(it.hasNext()) {
+             Location where = it.next();
+-            // Checks nearby location (adjacent to adjacent locations)
+             List<Location> adjacent2 = field.adjacentLocations(where);
+             Iterator<Location> it2 = adjacent2.iterator();
+             while (it2.hasNext()) {
+@@ -109,46 +140,47 @@ public abstract class Animal extends Organism
+         }
+         return null;
+     }
+-    
++
+     /**
+      * Look for prey adjacent to the current location.
+-     * Only the first live prey is eaten.
++     * Hunt success is gated by getHuntProbability().
+      * @return Where food was found, or null if it wasn't.
+      */
+     protected Location findFood(ArrayList<String> preyList)
+     {
++        if(rand.nextDouble() >= getHuntProbability()) {
++            return null;
++        }
+         Field field = getField();
+         List<Location> adjacent = field.adjacentLocations(getLocation());
+         Iterator<Location> it = adjacent.iterator();
+         while(it.hasNext()) {
+             Location where = it.next();
+             Object food = field.getObjectAt(where);
+-            if(food!= null) {
++            if(food != null) {
+                 if(preyList.contains(food.getClass().getName())) {
+                     Organism prey = (Organism) food;
+-                    if(prey.isAlive()) { 
++                    if(prey.isAlive()) {
+                         prey.setDead();
+-                        int increment = prey.getFoodValue() + this.getFoodLevel();
+-                        this.setFoodLevel(increment);
+-                        int newWaterLevel = getWaterLevel() + 5;
+-                        this.setWaterLevel(newWaterLevel);
+-                        return where;  
++                        setFoodLevel(prey.getFoodValue() + getFoodLevel());
++                        setWaterLevel(getWaterLevel() + 5);
++                        return where;
+                     }
+                 }
+             }
+         }
+         return null;
+     }
+-    
++
+     /**
+      * Look for water adjacent to the animal's current location
+-     * @return Where water was found, or null if it wasn't 
++     * @return Where water was found, or null if it wasn't
+      */
+     protected Location findWater() {
+         super.findWater();
+         return null;
+     }
+-    
++
+     /**
+      * Make the animal more hungry. This could result in the animal's death.
+      */
+@@ -159,38 +191,62 @@ public abstract class Animal extends Organism
+             setDead();
+         }
+     }
+-    
++
+     /**
+      * Check whether or not this animal is to give birth at this step.
+-     * New births will be made into free adjacent locations.
++     * Finds an adjacent mate of opposite sex, then spawns offspring into free locations.
+      * @param newAnimals A list to return newly born animals.
+-     * @return A list of the free adjacent locations for new young to be born into
+      */
+-    protected List<Location> giveBirth(List<Actor> newAnimals)
++    protected void giveBirth(List<Actor> newAnimals)
+     {
+-        // New animals are born into adjacent locations.
+-        // Get a list of adjacent free locations.
++        int births = breed();
++        if(births == 0) return;
++
+         Field field = getField();
+         List<Location> free = field.getFreeAdjacentLocations(getLocation());
+         List<Location> adjacent = field.adjacentLocations(getLocation());
+         Iterator<Location> it = adjacent.iterator();
+         while(it.hasNext()) {
+             Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            // can only breed if next to an animal of opposite sex
+-            if(animal != null && this.getClass().equals(animal.getClass())) {
+-                Animal mate = (Animal) animal;
+-                if (isFemale() != mate.isFemale()) {
+-                    return free;
+-                }
+-                else {
+-                    return null;
++            Object other = field.getObjectAt(where);
++            if(other != null && this.getClass().equals(other.getClass())) {
++                Animal mate = (Animal) other;
++                if(isFemale() != mate.isFemale()) {
++                    for(int b = 0; b < births && !free.isEmpty(); b++) {
++                        Location loc = free.remove(0);
++                        Animal young = createOffspring(field, loc);
++                        if(isInfected()) {
++                            young.setInfected();
++                        }
++                        newAnimals.add(young);
++                    }
+                 }
++                return;
+             }
+-        }    
+-        return null;
++        }
++    }
++
++    /**
++     * A animal can breed if it is female and has reached the breeding age.
++     */
++    private boolean canBreed()
++    {
++        return isFemale() && getAge() >= getBreedingAge();
++    }
++
++    /**
++     * Generate a number representing the number of births, if it can breed.
++     * @return The number of births (may be zero).
++     */
++    private int breed()
++    {
++        int births = 0;
++        if(canBreed() && rand.nextDouble() <= getBreedingProbability()) {
++            births = rand.nextInt(getMaxLitterSize()) + 1;
++        }
++        return births;
+     }
+-    
++
+     /**
+      * @param foodValue The level of food an animal has eaten
+      */
+@@ -198,48 +254,43 @@ public abstract class Animal extends Organism
+     {
+         foodLevel = foodValue;
+     }
+-    
+-    /** 
++
++    /**
+      * @return The level of food an animal has eaten
+      */
+     protected int getFoodLevel()
+     {
+         return foodLevel;
+     }
+-    
+-    /** 
++
++    /**
+      * @return True if this animal is a female, capable of breeding
+      */
+     public boolean isFemale()
+     {
+         return female;
+     }
+-    
+-    /** 
+-     * @return True if this animal is a female, capable of breeding
++
++    /**
++     * Mark this animal as nocturnal.
+      */
+     public void setNocturnal()
+     {
+         nocturnal = true;
+     }
+-    
+-    /** 
++
++    /**
+      * @return True if this animal is nocturnal, false if not
+      */
+     public boolean isNocturnal()
+     {
+         return nocturnal;
+     }
+-    
++
+     /**
+      * Sets the sleeping boolean variable to the opposite state it currently has.
+      */
+     public void setSleepStatus(){
+-        sleeping = ! sleeping;
++        sleeping = !sleeping;
+     }
+-    
+-    /**
+-     * @return Returns list of prey for each animal
+-     */
+-    abstract public ArrayList<String> getPrey();
+ }
+diff --git a/FennecFox.java b/FennecFox.java
+index 08377d7..942fbd6 100644
+--- a/FennecFox.java
++++ b/FennecFox.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.Iterator;
+ import java.util.Random;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+@@ -13,7 +12,7 @@ import java.util.Arrays;
+ public class FennecFox extends Animal
+ {
+     // Characteristics shared by all fennec foxes (class variables).
+-    
++
+     // The age at which a fennec fox can start to breed.
+     private static final int BREEDING_AGE = 12;
+     // The age to which a fennec fox can live.
+@@ -22,20 +21,19 @@ public class FennecFox extends Animal
+     private static final double BREEDING_PROBABILITY = 0.5;
+     // The maximum number of births.
+     private static final int MAX_LITTER_SIZE = 2;
+-    // The probability of the animal successfully hunting their food
+-    private final double SUCCESSFUL_HUNT_PROB = 0.6;
+-    // The food value of a single fennec fox. In effect, this is the
+-    // number of steps a predator can go before it has to eat again.
++    // The probability of the animal successfully hunting their food.
++    private static final double SUCCESSFUL_HUNT_PROB = 0.6;
++    // The food value of a single fennec fox.
+     private static final int FENNECFOX_FOOD_VALUE = 12;
+     // A shared random number generator to control breeding.
+-    private static final Random rand = Randomizer.getRandom(); 
+-    // A list of the prey that the fennec fox eats
++    private static final Random rand = Randomizer.getRandom();
++    // A list of the prey that the fennec fox eats.
+     private static final ArrayList<String> prey = new ArrayList(Arrays.asList("Grass", "Mouse"));
+-    
++
+     /**
+      * Create a fennec fox. A fennec fox can be created as a new born (age zero
+      * and not hungry) or with a random age and food level.
+-     * 
++     *
+      * @param randomAge If true, the fennec fox will have random age and hunger level.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+@@ -49,98 +47,38 @@ public class FennecFox extends Animal
+             this.setFoodLevel(FENNECFOX_FOOD_VALUE);
+         }
+     }
+-    
+-    /**
+-     * This is what the fennec fox does most of the time: it hunts for
+-     * mice. In the process, it might breed, die of hunger,
+-     * or die of old age.
+-     * @param field The field currently occupied.
+-     * @param newFoxes A list to return newly born foxes.
+-     */
+-    public void act(List<Actor> newFoxes)
+-    {
+-        super.act(newFoxes);
+-    }
+-    
+-    /**
+-     * Increase the age. This could result in the fennec fox's death.
+-     */
+-    public void incrementAge() {
+-        super.incrementAge();    
+-        if(this.getAge() > MAX_AGE) {
+-            setDead();
+-        }
+-    }
+-    
+-    /**
+-     * Look for prey adjacent to the current location.
+-     * Only the first prey is eaten.
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    private Location findFood()
+-    {
+-        if (rand.nextDouble() < SUCCESSFUL_HUNT_PROB) {
+-            super.findFood(prey);
+-        }
+-        return null;
+-    }
+-    
+-    /**
+-     * Check whether or not this fennec fox is to give birth at this step.
+-     * New births will be made into free adjacent locations.
+-     * @param newFoxes A list to return newly born fennec foxs.
+-     */
+-    protected List<Location> giveBirth(List<Actor> newFoxes)
+-    {
+-         Field field = getField();
+-        int births = breed();
+-        List<Location> free = super.giveBirth(newFoxes);
+-        if (free != null) {
+-            for(int b = 0; b < births && free.size() > 0; b++) {    
+-                Location loc = free.remove(0);
+-                FennecFox young = new FennecFox(false, field, loc);
+-                if (this.isInfected()) {
+-                    young.setInfected();
+-                }
+-                newFoxes.add(young);
+-            }       
+-        }  
+-        return null;
+-    }
+-        
+-    /**
+-     * Generate a number representing the number of births,
+-     * if it can breed.
+-     * @return The number of births (may be zero).
+-     */
+-    private int breed()
+-    {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
++
++    @Override
++    protected int getBreedingAge() { return BREEDING_AGE; }
++
++    @Override
++    protected double getBreedingProbability() { return BREEDING_PROBABILITY; }
++
++    @Override
++    protected int getMaxLitterSize() { return MAX_LITTER_SIZE; }
++
++    @Override
++    public int getMaxAge() { return MAX_AGE; }
++
++    @Override
++    protected Animal createOffspring(Field field, Location loc) {
++        return new FennecFox(false, field, loc);
+     }
+ 
++    @Override
++    protected double getHuntProbability() { return SUCCESSFUL_HUNT_PROB; }
++
+     /**
+-     * A fennec fox can breed if it is female and has reached the breeding age.
+-     */
+-     private boolean canBreed()
+-    {
+-        return (this.isFemale() && this.getAge() >= BREEDING_AGE);
+-    }
+-    
+-     /**
+-     * @return the food value of a fennec fox, which a predator gains if 
++     * @return the food value of a fennec fox, which a predator gains if
+      * the fennec fox is eaten
+      */
+     public int getFoodValue()
+-    { 
++    {
+         return FENNECFOX_FOOD_VALUE;
+     }
+-    
++
+     /**
+-     * @return The list of prey which it eats 
++     * @return The list of prey which it eats
+      */
+     public ArrayList<String> getPrey()
+     {
+diff --git a/Gazelle.java b/Gazelle.java
+index d2b49da..2301e22 100644
+--- a/Gazelle.java
++++ b/Gazelle.java
+@@ -1,12 +1,11 @@
+ import java.util.List;
+ import java.util.Random;
+-import java.util.Iterator;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ 
+ /**
+- * A simple model of a gazelle
+- * Gazelles age, move, find water, find food(grass), find mate, breed, and die.
++ * A simple model of a gazelle.
++ * Gazelles age, move, find water, find food (grass), find mate, breed, and die.
+  *
+  * @version 2022.02.27
+  */
+@@ -21,7 +20,6 @@ public class Gazelle extends Animal
+     // The likelihood of a gazelle breeding.
+     private static final double BREEDING_PROBABILITY = 0.5;
+     // The food value of a gazelle that predators get when they eat it.
+-    // In effect, the number of steps a predator can go before they need to eat again
+     private static final int GAZELLE_FOOD_VALUE = 20;
+     // The maximum number of births a gazelle can give.
+     private static final int MAX_LITTER_SIZE = 4;
+@@ -33,7 +31,7 @@ public class Gazelle extends Animal
+     /**
+      * Create a new gazelle. A gazelle may be created with age
+      * zero (a new born) or with a random age.
+-     * 
++     *
+      * @param randomAge If true, the gazelle will have a random age.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+@@ -47,98 +45,35 @@ public class Gazelle extends Animal
+             this.setFoodLevel(GAZELLE_FOOD_VALUE);
+         }
+     }
+-    
+-    /**
+-     * This is what the gazelle does most of the time - it runs 
+-     * around and eats grass. Sometimes it will breed or die of old age.
+-     * @param newGazelles A list to return newly born gazelles.
+-     */
+-    public void act(List<Actor> newGazelles)
+-    {
+-        super.act(newGazelles);
+-    }
+-    
+-    /**
+-     * Look for grass adjacent to the current location.
+-     * Only the first piece of grass is eaten.
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    private Location findFood()
+-    {
+-        super.findFood(prey);
+-        return null;
+-    }
+ 
+-    /**
+-     * Increase the age.
+-     * This could result in the gazelle's death.
+-     */
+-    public void incrementAge()
+-    {
+-        super.incrementAge();
+-        if(this.getAge() > MAX_AGE) {
+-            setDead();
+-        }
+-    }
+-    
+-    /**
+-     * Check whether or not this gazelle is to give birth at this step.
+-     * New births will be made into free adjacent locations.
+-     * @param newGazelles A list to return newly born Gazelles.
+-     */
+-    protected List<Location> giveBirth(List<Actor> newGazelles)
+-    {
+-        Field field = getField();
+-        int births = breed();
+-        List<Location> free = super.giveBirth(newGazelles);
+-        if (free != null) {
+-            for(int b = 0; b < births && free.size() > 0; b++) {
+-                Location loc = free.remove(0);
+-                Gazelle young = new Gazelle(false, field, loc);
+-                // If this animal is infected with a disease, passes on to young
+-                if (this.isInfected()) {
+-                    young.setInfected();
+-                }
+-                newGazelles.add(young);
+-            }
+-        }
+-        return null;
+-    }
+-        
+-    /**
+-     * Generate a number representing the number of births,
+-     * if it can breed.
+-     * @return The number of births (may be zero).
+-     */
+-    private int breed()
+-    {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
+-    }
++    @Override
++    protected int getBreedingAge() { return BREEDING_AGE; }
+ 
+-    /**
+-     * A gazelle can breed if it is female and has reached the breeding age.
+-     * @return true if the gazelle can breed, false otherwise.
+-     */
+-     private boolean canBreed()
+-    {
+-        return (this.isFemale() && this.getAge() >= BREEDING_AGE);
++    @Override
++    protected double getBreedingProbability() { return BREEDING_PROBABILITY; }
++
++    @Override
++    protected int getMaxLitterSize() { return MAX_LITTER_SIZE; }
++
++    @Override
++    public int getMaxAge() { return MAX_AGE; }
++
++    @Override
++    protected Animal createOffspring(Field field, Location loc) {
++        return new Gazelle(false, field, loc);
+     }
+-    
++
+     /**
+-     * @return the food value of a gazelle, which a predator gains if 
++     * @return the food value of a gazelle, which a predator gains if
+      * the gazelle is eaten
+      */
+     public int getFoodValue()
+-    { 
++    {
+         return GAZELLE_FOOD_VALUE;
+     }
+-    
++
+     /**
+-     * @return The list of prey which it eats 
++     * @return The list of prey which it eats
+      */
+     public ArrayList<String> getPrey()
+     {
+diff --git a/Hyena.java b/Hyena.java
+index 83f3a69..1d5d7f0 100644
+--- a/Hyena.java
++++ b/Hyena.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.Iterator;
+ import java.util.Random;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+@@ -13,7 +12,7 @@ import java.util.Arrays;
+ public class Hyena extends Animal
+ {
+     // Characteristics shared by all hyenas (class variables).
+-    
++
+     // The age at which a hyena can start to breed.
+     private static final int BREEDING_AGE = 10;
+     // The age to which a hyena can live.
+@@ -23,9 +22,8 @@ public class Hyena extends Animal
+     // The maximum number of births.
+     private static final int MAX_LITTER_SIZE = 2;
+     // The probability of the animal successfully hunting their food
+-    private final double SUCCESSFUL_HUNT_PROB = 0.63;
+-    // The food value of a hyena - not eaten by any predators so initial
+-    // food value of newly generated hyenas
++    private static final double SUCCESSFUL_HUNT_PROB = 0.63;
++    // The food value of a hyena
+     private static final int HYENA_FOOD_VALUE = 15;
+     // A shared random number generator to control breeding.
+     private static final Random rand = Randomizer.getRandom();
+@@ -35,7 +33,7 @@ public class Hyena extends Animal
+     /**
+      * Create a hyena. A hyena can be created as a new born (age zero
+      * and not hungry) or with a random age and food level.
+-     * 
++     *
+      * @param randomAge If true, the hyena will have random age and hunger level.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+@@ -50,103 +48,43 @@ public class Hyena extends Animal
+         }
+     }
+ 
+-    /**
+-     * This is what the hyena does most of the time: it hunts for
+-     * gazelles. In the process, it might breed, die of hunger,
+-     * or die of old age.
+-     * @param field The field currently occupied.
+-     * @param newHyenas A list to return newly born hyenas.
+-     */
+-    public void act(List<Actor> newHyenas)
+-    {
+-        super.act(newHyenas);
+-    }
++    @Override
++    protected int getBreedingAge() { return BREEDING_AGE; }
+ 
+-    /**
+-     * Increase the age. This could result in the hyena's death.
+-     */
+-    public void incrementAge() {
+-        super.incrementAge();    
+-        if(this.getAge() > MAX_AGE) {
+-            setDead();
+-        }
+-    }
++    @Override
++    protected double getBreedingProbability() { return BREEDING_PROBABILITY; }
+ 
+-    /**
+-     * Look for prey adjacent to the current location.
+-     * Only the first live prey is eaten.
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    private Location findFood()
+-    {
+-        if (rand.nextDouble() < SUCCESSFUL_HUNT_PROB) {
+-            super.findFood(prey);
+-        }
+-        return null;
+-    }
++    @Override
++    protected int getMaxLitterSize() { return MAX_LITTER_SIZE; }
+ 
+-    /**
+-     * Check whether or not this hyena is to give birth at this step.
+-     * New births will be made into free adjacent locations.
+-     * @param newhyenas A list to return newly born hyenas.
+-     */
+-    protected List<Location> giveBirth(List<Actor> newHyenas)
+-    {
+-         Field field = getField();
+-        int births = breed();
+-        List<Location> free = super.giveBirth(newHyenas);
+-        if (free != null) {
+-            for(int b = 0; b < births && free.size() > 0; b++) {
+-                Location loc = free.remove(0);
+-                Hyena young = new Hyena(false, field, loc);
+-                if (this.isInfected()) {
+-                    young.setInfected();
+-                }
+-                newHyenas.add(young);
+-            }
+-        } 
+-        return null;
+-    }
++    @Override
++    public int getMaxAge() { return MAX_AGE; }
+ 
+-    /**
+-     * Generate a number representing the number of births,
+-     * if it can breed.
+-     * @return The number of births (may be zero).
+-     */
+-    private int breed()
+-    {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
++    @Override
++    protected Animal createOffspring(Field field, Location loc) {
++        return new Hyena(false, field, loc);
+     }
+ 
+-    /**
+-     * A hyena can breed if it has reached the breeding age.
+-     */
+-    private boolean canBreed()
+-    {
+-        return (this.isFemale() && this.getAge() >= BREEDING_AGE);
+-    }
++    @Override
++    protected double getHuntProbability() { return SUCCESSFUL_HUNT_PROB; }
+ 
+-     /**
+-     * @return the food value of a hyena 
++    /**
++     * @return the food value of a hyena
+      */
+     public int getFoodValue()
+-    { 
++    {
+         return HYENA_FOOD_VALUE;
+     }
+ 
+     /**
+      * @return the probability of a hyena successfully hunting its prey
+      */
+-    public double getHuntProb(){
++    public double getHuntProb() {
+         return SUCCESSFUL_HUNT_PROB;
+     }
+-    
++
+     /**
+-     * @return The list of prey which it eats 
++     * @return The list of prey which it eats
+      */
+     public ArrayList<String> getPrey()
+     {
+diff --git a/Lion.java b/Lion.java
+index 8207dfa..fa2f455 100644
+--- a/Lion.java
++++ b/Lion.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.Iterator;
+ import java.util.Random;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+@@ -13,7 +12,7 @@ import java.util.Arrays;
+ public class Lion extends Animal
+ {
+     // Characteristics shared by all lions (class variables).
+-    
++
+     // The age at which a lion can start to breed.
+     private static final int BREEDING_AGE = 15;
+     // The age to which a lion can live.
+@@ -23,19 +22,18 @@ public class Lion extends Animal
+     // The maximum number of births a lion can give.
+     private static final int MAX_LITTER_SIZE = 4;
+     // The probability of the animal successfully hunting their food
+-    private final double SUCCESSFUL_HUNT_PROB = 0.65;
+-    // // The food value of a lion - not eaten by any predators so initial
+-    // food value of newly generated lions
++    private static final double SUCCESSFUL_HUNT_PROB = 0.65;
++    // The food value of a lion
+     private static final int LION_FOOD_VALUE = 15;
+     // A shared random number generator to control breeding.
+-    private static final Random rand = Randomizer.getRandom(); 
++    private static final Random rand = Randomizer.getRandom();
+     // A list of the prey that the lion eats
+     private static final ArrayList<String> prey = new ArrayList(Arrays.asList("Gazelle"));
+ 
+     /**
+      * Create a lion. A lion can be created as a new born (age zero
+      * and not hungry) or with a random age and food level.
+-     * 
++     *
+      * @param randomAge If true, the lion will have random age and hunger level.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+@@ -49,106 +47,46 @@ public class Lion extends Animal
+         }
+     }
+ 
+-    /**
+-     * This is what the lion does most of the time: it hunts for
+-     * gazelles. In the process, it might breed, die of hunger,
+-     * or die of old age.
+-     * @param field The field currently occupied.
+-     * @param newLions A list to return newly born lions.
+-     */
+-    public void act(List<Actor> newLions)
+-    {
+-        super.act(newLions);
+-    }
++    @Override
++    protected int getBreedingAge() { return BREEDING_AGE; }
+ 
+-    /**
+-     * Increase the age. This could result in the lion's death.
+-     */
+-    public void incrementAge() {
+-        super.incrementAge();    
+-        if(this.getAge() > MAX_AGE) {
+-            setDead();
+-        }
+-    }
++    @Override
++    protected double getBreedingProbability() { return BREEDING_PROBABILITY; }
+ 
+-    /**
+-     * Look for gazelles adjacent to the current location.
+-     * Only the first live gazelle is eaten.
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    private Location findFood()
+-    {
+-        if (rand.nextDouble() < SUCCESSFUL_HUNT_PROB) {
+-            super.findFood(prey);
+-        }
+-        return null;
+-    }
++    @Override
++    protected int getMaxLitterSize() { return MAX_LITTER_SIZE; }
+ 
+-    /**
+-     * Check whether or not this lion is to give birth at this step.
+-     * New births will be made into free adjacent locations.
+-     * @param newLionss A list to return newly born lions.
+-     */
+-    protected List<Location> giveBirth(List<Actor> newLions)
+-    {
+-        Field field = getField();
+-        int births = breed();
+-        List<Location> free = super.giveBirth(newLions);
+-        if (free != null) {
+-            for(int b = 0; b < births && free.size() > 0; b++) {
+-                Location loc = free.remove(0);
+-                Lion young = new Lion(false, field, loc);
+-                if (this.isInfected()) {
+-                    young.setInfected();
+-                }
+-                newLions.add(young);
+-            }
+-        }
+-        return null;
+-    }
++    @Override
++    public int getMaxAge() { return MAX_AGE; }
+ 
+-    /**
+-     * Generate a number representing the number of births,
+-     * if it can breed.
+-     * @return The number of births (may be zero).
+-     */
+-    private int breed()
+-    {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
++    @Override
++    protected Animal createOffspring(Field field, Location loc) {
++        return new Lion(false, field, loc);
+     }
+ 
++    @Override
++    protected double getHuntProbability() { return SUCCESSFUL_HUNT_PROB; }
++
+     /**
+-     * A lion can breed if it is female and has reached the breeding age.
+-     */
+-    private boolean canBreed()
+-    {
+-        return (this.isFemale() && this.getAge() >= BREEDING_AGE);
+-    }
+-    
+-     /**
+      * @return The food value of a lion
+      */
+     public int getFoodValue()
+-    { 
++    {
+         return LION_FOOD_VALUE;
+     }
+ 
+     /**
+      * @return The probability of a lion successfully hunting its prey
+      */
+-    public double getHuntProb(){
++    public double getHuntProb() {
+         return SUCCESSFUL_HUNT_PROB;
+     }
+-    
++
+     /**
+-     * @return The list of prey which it eats 
++     * @return The list of prey which it eats
+      */
+     public ArrayList<String> getPrey()
+     {
+         return prey;
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/Mouse.java b/Mouse.java
+index 9ecc9bb..8620940 100644
+--- a/Mouse.java
++++ b/Mouse.java
+@@ -1,6 +1,5 @@
+ import java.util.List;
+ import java.util.Random;
+-import java.util.Iterator;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ 
+@@ -20,21 +19,21 @@ public class Mouse extends Animal
+     private static final int MAX_AGE = 40;
+     // The likelihood of a mouse breeding.
+     private static final double BREEDING_PROBABILITY = 0.2;
+-    // The food value of eating a single mouse
++    // The food value of eating a single mouse.
+     private static final int MOUSE_FOOD_VALUE = 10;
+-    // The maximum number of births
++    // The maximum number of births.
+     private static final int MAX_LITTER_SIZE = 4;
+-    // The probability of the animal successfully hunting their food
+-    private final double SUCCESSFUL_HUNT_PROB = 0.7;
++    // The probability of the animal successfully hunting their food.
++    private static final double SUCCESSFUL_HUNT_PROB = 0.7;
+     // A shared random number generator to control breeding.
+     private static final Random rand = Randomizer.getRandom();
+-    // A list of the prey that the mouse eats
++    // A list of the prey that the mouse eats.
+     private static final ArrayList<String> prey = new ArrayList(Arrays.asList("Grass"));
+ 
+     /**
+      * Create a new mouse. A mouse may be created with age
+      * zero (a new born) or with a random age.
+-     * 
++     *
+      * @param randomAge If true, the mouse will have a random age.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+@@ -47,99 +46,38 @@ public class Mouse extends Animal
+             this.setFoodLevel(MOUSE_FOOD_VALUE);
+         }
+     }
+-    
+-    /**
+-     * This is what the mouse does most of the time - it runs 
+-     * around. Sometimes it will breed or die of old age.
+-     * @param newMice A list to return newly born mice.
+-     */
+-    public void act(List<Actor> newMice)
+-    {
+-        super.act(newMice);
+-    }
+ 
+-    /**
+-     * Increase the age.
+-     * This could result in the mouse's death.
+-     */
+-    public void incrementAge()
+-    {
+-        super.incrementAge();
+-        if(this.getAge() > MAX_AGE) {
+-            setDead();
+-        }
+-    }
+-    
+-    /**
+-     * Look for grass adjacent to the current location.
+-     * Only the first piece of grass is eaten.
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    protected Location findFood(ArrayList<String> preyList)
+-    {
+-        if (rand.nextDouble() < SUCCESSFUL_HUNT_PROB) {
+-            super.findFood(prey);
+-        }
+-        return null;
+-    }
+-    
+-    /**
+-     * Check whether or not this mouse is to give birth at this step.
+-     * New births will be made into free adjacent locations.
+-     * @param newMice A list to return newly born mice.
+-     */
+-    protected List<Location> giveBirth(List<Actor> newMice)
+-    {
+-        Field field = getField();
+-        int births = breed();
+-        List<Location> free = super.giveBirth(newMice);
+-        if (free != null) {
+-            for(int b = 0; b < births && free.size() > 0; b++) {
+-                Location loc = free.remove(0);
+-                Mouse young = new Mouse(false, field, loc);
+-                if (this.isInfected()) {
+-                    young.setInfected();
+-                }
+-                newMice.add(young);
+-            }
+-        }  
+-        return null;
+-    }
+-        
+-    /**
+-     * Generate a number representing the number of births,
+-     * if it can breed.
+-     * @return The number of births (may be zero).
+-     */
+-    private int breed()
+-    {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
++    @Override
++    protected int getBreedingAge() { return BREEDING_AGE; }
++
++    @Override
++    protected double getBreedingProbability() { return BREEDING_PROBABILITY; }
++
++    @Override
++    protected int getMaxLitterSize() { return MAX_LITTER_SIZE; }
++
++    @Override
++    public int getMaxAge() { return MAX_AGE; }
++
++    @Override
++    protected Animal createOffspring(Field field, Location loc) {
++        return new Mouse(false, field, loc);
+     }
+ 
++    @Override
++    protected double getHuntProbability() { return SUCCESSFUL_HUNT_PROB; }
++
+     /**
+-     * A mouse can breed if it has reached the breeding age.
+-     * @return true if the mouse can breed, false otherwise.
+-     */
+-     private boolean canBreed()
+-    {
+-        return (this.isFemale() && this.getAge() >= BREEDING_AGE);
+-    }
+-    
+-     /**
+-     * @return the food value of a mouse, which a predator gains if 
++     * @return the food value of a mouse, which a predator gains if
+      * the mouse is eaten
+      */
+     public int getFoodValue()
+-    { 
++    {
+         return MOUSE_FOOD_VALUE;
+     }
+-    
++
+     /**
+-     * @return The list of prey which it eats 
++     * @return The list of prey which it eats
+      */
+     public ArrayList<String> getPrey()
+     {

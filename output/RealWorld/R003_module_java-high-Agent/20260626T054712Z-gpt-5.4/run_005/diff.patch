@@ -1,0 +1,281 @@
+diff --git a/SimulatorView.java b/SimulatorView.java
+index d1949c3..04881c8 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -1,5 +1,4 @@
+ import java.awt.*;
+-import java.awt.event.*;
+ import javax.swing.*;
+ import java.util.LinkedHashMap;
+ import java.util.Map;
+@@ -14,15 +13,26 @@ import java.util.Map;
+  */
+ public class SimulatorView extends JFrame
+ {
++    private static final int BUTTON_ROWS = 3;
++    private static final int GRID_VIEW_SCALING_FACTOR = 6;
++    private static final int INITIAL_WINDOW_X = 100;
++    private static final int INITIAL_WINDOW_Y = 50;
++
+     // Colors used for empty locations:
+     private static final Color EMPTY_COLOR = Color.white;
+     // Color used for objects that have no defined color:
+     private static final Color UNKNOWN_COLOR = Color.gray;
+ 
+-    private final String STEP_PREFIX = "Step: ";
+-    private final String POPULATION_PREFIX = "Population: ";
+-    private JLabel stepLabel, population, infoLabel, weatherPropertiesLabel,dayLabel;
+-    private FieldView fieldView;
++    private static final String STEP_PREFIX = "Step: ";
++    private static final String POPULATION_PREFIX = "Population: ";
++    private static final String DAY_PREFIX = "Day : ";
++
++    private final JLabel stepLabel;
++    private final JLabel population;
++    private final JLabel infoLabel;
++    private final JLabel weatherPropertiesLabel;
++    private final JLabel dayLabel;
++    private final FieldView fieldView;
+     
+     // A map for storing colors for participants in the simulation:
+     private final Map<Class<? extends Actor>, Color> colors;
+@@ -30,10 +40,8 @@ public class SimulatorView extends JFrame
+     private final FieldStats stats;
+     private final Simulator simulator;
+     
+-    // Threads for each method called by the buttons:
+-    private Thread runLongSimulationThread;
+-    private Thread resetThread;
+-    private Thread simulateOneStepThread;
++    // The currently running simulation task, if any.
++    private Thread simulationThread;
+     
+     /**
+      * Create a view of the given width and height.
+@@ -46,58 +54,20 @@ public class SimulatorView extends JFrame
+         this.stats = stats;
+         colors = new LinkedHashMap<>();
+         this.simulator = simulator;
++
+         setTitle("Australian Savannah Simulation");
+         stepLabel = new JLabel(STEP_PREFIX, JLabel.CENTER);
+         infoLabel = new JLabel("  ", JLabel.CENTER);
+         population = new JLabel(POPULATION_PREFIX, JLabel.CENTER);
+-        dayLabel = new JLabel("Day : 0",JLabel.CENTER);
+-        JPanel buttonGrid = new JPanel();
+-        buttonGrid.setLayout(new GridLayout(3,0));
+-        JButton longSimButton = new JButton("4000 Steps");
+-        longSimButton.addActionListener(new ActionListener(){
+-            public void actionPerformed(ActionEvent e){
+-                if (runLongSimulationThread != null && runLongSimulationThread.isAlive()) return;
+-                if (simulateOneStepThread != null && simulateOneStepThread.isAlive()) return;
+-                
+-                runLongSimulationThread = new Thread(simulator::runLongSimulation);
+-                runLongSimulationThread.start();
+-            }
+-        });
+-        JButton resetButton = new JButton("Reset");
+-        resetButton.addActionListener(new ActionListener(){
+-            public void actionPerformed(ActionEvent e){
+-                if (resetThread != null && resetThread.isAlive()) return;
+-                if (runLongSimulationThread != null && runLongSimulationThread.isAlive()) return;
+-                if (simulateOneStepThread != null && simulateOneStepThread.isAlive()) return;
+-                
+-                resetThread = new Thread(simulator::reset);
+-                resetThread.start();
+-            }
+-        });
+-        JButton oneSimButton = new JButton("One Step");
+-        oneSimButton.addActionListener(new ActionListener(){
+-            public void actionPerformed(ActionEvent e){
+-                if (simulateOneStepThread != null && simulateOneStepThread.isAlive()) return;
+-                if (runLongSimulationThread != null && runLongSimulationThread.isAlive()) return;
+-                
+-                simulateOneStepThread = new Thread(simulator::simulateOneStep);
+-                simulateOneStepThread.start();
+-            }
+-        });
+-
+-        buttonGrid.add(longSimButton);
+-        buttonGrid.add(resetButton);
+-        buttonGrid.add(oneSimButton);
+-        weatherPropertiesLabel = new JLabel(""); 
++        weatherPropertiesLabel = new JLabel("");
++        dayLabel = new JLabel(DAY_PREFIX + "0", JLabel.CENTER);
+         updateWeatherPropertiesLabel();
+         updateDayLabel();
+ 
+-        setLocation(100, 50);
+-        
++        setLocation(INITIAL_WINDOW_X, INITIAL_WINDOW_Y);
+         fieldView = new FieldView(height, width);
+ 
+         Container contents = getContentPane();
+-        
+         JPanel infoPane = new JPanel(new BorderLayout());
+         infoPane.add(stepLabel, BorderLayout.WEST);
+         infoPane.add(weatherPropertiesLabel, BorderLayout.EAST);
+@@ -107,10 +77,67 @@ public class SimulatorView extends JFrame
+         contents.add(infoPane, BorderLayout.NORTH);
+         contents.add(fieldView, BorderLayout.CENTER);
+         contents.add(population, BorderLayout.SOUTH);
+-        contents.add(buttonGrid,BorderLayout.WEST);
++        contents.add(createButtonPanel(), BorderLayout.WEST);
++
+         pack();
+         setVisible(true);
+     }
++
++    /**
++     * Create the panel containing the simulation control buttons.
++     *
++     * @return The control button panel.
++     */
++    private JPanel createButtonPanel()
++    {
++        JPanel buttonGrid = new JPanel(new GridLayout(BUTTON_ROWS, 0));
++
++        buttonGrid.add(createButton("4000 Steps", "run-long-simulation", simulator::runLongSimulation));
++        buttonGrid.add(createButton("Reset", "reset-simulation", simulator::reset));
++        buttonGrid.add(createButton("One Step", "simulate-one-step", simulator::simulateOneStep));
++
++        return buttonGrid;
++    }
++
++    /**
++     * Create a control button that runs a simulation task when clicked.
++     *
++     * @param label The button label.
++     * @param threadName The worker thread name.
++     * @param task The simulation task to run.
++     * @return The configured button.
++     */
++    private JButton createButton(String label, String threadName, Runnable task)
++    {
++        JButton button = new JButton(label);
++        button.addActionListener(e -> runSimulationTask(threadName, task));
++        return button;
++    }
++
++    /**
++     * Run a simulation task if no other simulation task is active.
++     *
++     * @param threadName The name for the worker thread.
++     * @param task The simulation task to execute.
++     */
++    private synchronized void runSimulationTask(String threadName, Runnable task)
++    {
++        if (isSimulationTaskRunning())
++        {
++            return;
++        }
++
++        simulationThread = new Thread(task, threadName);
++        simulationThread.start();
++    }
++
++    /**
++     * @return Whether a simulation task is currently running.
++     */
++    private synchronized boolean isSimulationTaskRunning()
++    {
++        return simulationThread != null && simulationThread.isAlive();
++    }
+     
+     /**
+      * Update the text displayed in the weather properties
+@@ -118,18 +145,15 @@ public class SimulatorView extends JFrame
+      */
+     private void updateWeatherPropertiesLabel()
+     {
+-        String text;
+-        
+-        if (WeatherSystem.getIsRaining()) text = "RAINING";
+-        else                              text = "NOT RAINING";
+-        
+-        weatherPropertiesLabel.setText(text);
++        weatherPropertiesLabel.setText(WeatherSystem.getIsRaining() ? "RAINING" : "NOT RAINING");
+     }
++
++    /**
++     * Update the displayed day label.
++     */
+     public void updateDayLabel()
+     {   
+-        String text;
+-        text = "Day : " + TimeSystem.getCurrentDay();
+-        dayLabel.setText(text);
++        dayLabel.setText(DAY_PREFIX + TimeSystem.getCurrentDay());
+     }
+     
+     /**
+@@ -159,8 +183,7 @@ public class SimulatorView extends JFrame
+         Color col = colors.get(animalClass);
+         
+         // No color defined for this class:
+-        if (col == null) return UNKNOWN_COLOR;
+-        else             return col;
++        return col == null ? UNKNOWN_COLOR : col;
+     }
+ 
+     /**
+@@ -182,17 +205,7 @@ public class SimulatorView extends JFrame
+         {
+             for (int col = 0; col < field.getWidth(); col++)
+             {
+-                Actor actor = field.getActorAt(row, col);
+-                
+-                if(actor != null)
+-                {
+-                    stats.incrementCount(actor.getClass());
+-                    fieldView.drawMark(col, row, getColor(actor.getClass()));
+-                }
+-                else
+-                {
+-                    fieldView.drawMark(col, row, EMPTY_COLOR);
+-                }
++                drawActor(field.getActorAt(row, col), row, col);
+             }
+         }
+         
+@@ -205,6 +218,25 @@ public class SimulatorView extends JFrame
+         fieldView.repaint();
+     }
+ 
++    /**
++     * Draw a single field location and update statistics for its actor.
++     *
++     * @param actor The actor at the location, or null if empty.
++     * @param row The row coordinate.
++     * @param col The column coordinate.
++     */
++    private void drawActor(Actor actor, int row, int col)
++    {
++        if (actor == null)
++        {
++            fieldView.drawMark(col, row, EMPTY_COLOR);
++            return;
++        }
++
++        stats.incrementCount(actor.getClass());
++        fieldView.drawMark(col, row, getColor(actor.getClass()));
++    }
++
+     /**
+      * Determine whether the simulation should continue to run.
+      * 
+@@ -225,11 +257,10 @@ public class SimulatorView extends JFrame
+      */
+     private class FieldView extends JPanel
+     {
+-        private final int GRID_VIEW_SCALING_FACTOR = 6;
+-
+-        private int gridWidth, gridHeight;
++        private final int gridWidth;
++        private final int gridHeight;
+         private int xScale, yScale;
+-        Dimension size;
++        private Dimension size;
+         private Graphics g;
+         private Image fieldImage;
+ 

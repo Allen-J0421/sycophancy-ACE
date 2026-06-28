@@ -1,0 +1,766 @@
+diff --git a/Animal.java b/Animal.java
+index 2d9c129..d6056fd 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -1,9 +1,7 @@
+ import java.util.ArrayList;
+-import java.util.Iterator;
+ import java.util.List;
+ import java.util.Random;
+ import java.util.Set;
+-import java.util.stream.Collectors;
+ 
+ /**
+  * A class representing shared characteristics of animals.
+@@ -65,35 +63,11 @@ public abstract class Animal extends Organism implements Actor
+      */
+     public void act(List<Actor> newAnimals, Environment environment)
+     {
+-        Random rand = getRandomProvider().getRandom();
+         incrementAge();
+         incrementHunger();
+         if(isAlive()) {
+             giveBirth(newAnimals, environment);
+-            // Move towards a source of food if found.
+-            Location newLocation = findFood(environment);
+-            if(newLocation == null) {
+-                // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-
+-            // list of adjacent locations that contain an instance of Grass
+-            List<Location> adjacentGrassSpots = getField().adjacentLocationsWithSpecies(getLocation(), Grass.class);
+-
+-            if(newLocation != null) {
+-                // See if it was possible to move.
+-                setLocation(newLocation);
+-            }
+-            else if (adjacentGrassSpots.size() > 0) {
+-                // if there is grass adjacent to the animal, clear the current location
+-                // and move to a random location that contained grass
+-                getField().clear(getLocation());
+-                setLocation(adjacentGrassSpots.get(rand.nextInt(adjacentGrassSpots.size())));
+-            }
+-            else {
+-                // Overcrowding
+-                setDead();
+-            }
++            move(environment);
+         }
+     }
+ 
+@@ -102,45 +76,14 @@ public abstract class Animal extends Organism implements Actor
+      * Only the first food is eaten.
+      * @return Where food was found, or null if it wasn't.
+      */
+-    protected Location findFood(Environment environment)
+-    {
+-        return findFood();
+-    }
+-
+-    /**
+-     * Look for food adjacent to the current location.
+-     * Only the first food is eaten.
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    protected Location findFood()
++    protected MovementService.MovementDecision findFood(Environment environment)
+     {
+         Field field = getField();
++        MovementService movementService = field.getMovementService();
+         DiseaseService diseaseService = field.getDiseaseService();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
++        List<Location> adjacent = movementService.getAdjacentLocations(field, getLocation());
+         diseaseService.applyAdjacentExposure(this, adjacent, field);
+-        Iterator<Location> it = adjacent.iterator();
+-        // only eats if it's not full (food level less than max)
+-        while(it.hasNext() && foodLevel <= getMaxFoodLevel()) {
+-            Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            if(animal != null && getDiet().contains(animal.getClass()))
+-            {
+-                Organism food = (Organism) animal;
+-                diseaseService.applyFoodborneExposure(this, food);
+-                if(food.isAlive()) 
+-                {
+-                    food.setDead();
+-                    int newFoodLevel = foodLevel + food.getFoodValue();
+-
+-                    // caps the food level at the maximum
+-                    foodLevel = Math.min(newFoodLevel, getMaxFoodLevel());
+-
+-                    return where;
+-                }
+-                return where;
+-            }
+-        }
+-        return null;
++        return movementService.resolveAnimalMovement(this, environment, adjacent);
+     }
+ 
+     /**
+@@ -152,7 +95,7 @@ public abstract class Animal extends Organism implements Actor
+     protected void giveBirth(List<Actor> newAnimals, Environment environment)
+     {
+         Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
++        List<Location> free = field.getMovementService().getFreeAdjacentLocations(field, getLocation());
+         int births = breed();
+         for(int b = 0; b < births && !free.isEmpty(); b++) {
+             Location loc = free.remove(0);
+@@ -210,18 +153,10 @@ public abstract class Animal extends Organism implements Actor
+      */
+     protected List<Organism> getPotentialMates()
+     {
+-        List<Organism> potentialMates = new ArrayList<>();
+         if(getField() != null){
+-            potentialMates = getField().adjacentLocations(getLocation()).stream()
+-                    .map(s -> getField().getObjectAt(s))
+-                    .filter(s -> s != null)
+-                    .filter(s -> s.getClass().equals(this.getClass()))
+-                    .filter(s -> this.sex != ((Animal) s).sex)
+-                    .map(s -> (Organism) s)
+-                    .collect(Collectors.toList());
+-            // stream counts the number of Animals of the same species, as well as opposite gender
++            return getField().getMovementService().findPotentialMates(this);
+         }
+-        return potentialMates;
++        return new ArrayList<>();
+     }
+ 
+ 
+@@ -247,4 +182,29 @@ public abstract class Animal extends Organism implements Actor
+         }
+     }
+ 
++    private void move(Environment environment)
++    {
++        MovementService.MovementDecision movementDecision = findFood(environment);
++        if(movementDecision.consumedOrganism() != null) {
++            consume(movementDecision.consumedOrganism());
++        }
++
++        if(movementDecision.targetLocation() != null) {
++            getField().getMovementService().moveOrganism(this, movementDecision.targetLocation());
++        }
++        else if(movementDecision.overcrowded()) {
++            setDead();
++        }
++    }
++
++    private void consume(Organism food)
++    {
++        getField().getDiseaseService().applyFoodborneExposure(this, food);
++        if(food.isAlive()) {
++            food.setDead();
++            int newFoodLevel = foodLevel + food.getFoodValue();
++            foodLevel = Math.min(newFoodLevel, getMaxFoodLevel());
++        }
++    }
++
+ }
+diff --git a/Eagle.java b/Eagle.java
+index 4acbf97..d0916f0 100644
+--- a/Eagle.java
++++ b/Eagle.java
+@@ -48,17 +48,4 @@ public class Eagle extends Animal
+         super(field.getRandomProvider(), field, location, randomAge, sex);
+         this.isNocturnal = false;
+     }
+-    /**
+-     * Additional functionality that doesn't allow eagles to find food while it's raining
+-     * @param environment The environment that the eagle resides in. 
+-     * @return Location Where food was found, or null if it wasn't.
+-     */
+-    @Override
+-    protected Location findFood(Environment environment)
+-    {
+-        if(environment.getWeatherService().allowsEagleForaging()) {
+-            return super.findFood(environment);
+-        }
+-        return null;
+-    }
+ }
+diff --git a/Field.java b/Field.java
+index 5f44646..b683a82 100644
+--- a/Field.java
++++ b/Field.java
+@@ -11,6 +11,7 @@ public class Field
+     private final RandomProvider randomProvider;
+     private final OrganismFactory organismFactory;
+     private final DiseaseService diseaseService;
++    private final MovementService movementService;
+ 
+     // The depth and width of the field.
+     private int depth, width;
+@@ -25,12 +26,14 @@ public class Field
+     public Field(RandomProvider randomProvider,
+             OrganismFactory organismFactory,
+             DiseaseService diseaseService,
++            MovementService movementService,
+             int depth,
+             int width)
+     {
+         this.randomProvider = randomProvider;
+         this.organismFactory = organismFactory;
+         this.diseaseService = diseaseService;
++        this.movementService = movementService;
+         this.depth = depth;
+         this.width = width;
+         field = new Object[depth][width];
+@@ -111,164 +114,6 @@ public class Field
+         return field;
+     }
+     
+-    /**
+-     * Generate a random location that is adjacent to the
+-     * given location, or is the same location.
+-     * The returned location will be within the valid bounds
+-     * of the field.
+-     * @param location The location from which to generate an adjacency.
+-     * @return A valid location within the grid area.
+-     */
+-    public Location randomAdjacentLocation(Location location)
+-    {
+-        List<Location> adjacent = adjacentLocations(location);
+-        return adjacent.get(0);
+-    }
+-
+-    /**
+-     * Returns a random set of patches from getFreePatches() based on a given rate
+-     * getFreePatches() returns a list of size n, only (n*rate) random locations are returned
+-     * @param rateOfGeneration The rate
+-     */
+-    public List<Location> getRandomFreePatches(double rateOfGeneration)
+-    {
+-        Random rand = randomProvider.getRandom();
+-        List<Location> patches = getFreePatches();
+-        List<Location> randPatches = new ArrayList<>();
+-        for(int i=0; i<rateOfGeneration* patches.size(); i++)
+-        {
+-            Location selectedPatch = patches.get(rand.nextInt(patches.size()));
+-            randPatches.add(selectedPatch);
+-            for(Location loc : adjacentLocations(selectedPatch)){
+-                // avoids duplicates in the patches
+-                patches.remove(loc);
+-            }
+-        }
+-        return randPatches;
+-    }
+-
+-    /**
+-     * Gets the free patches in the field and returns them.
+-     * A 'patch' is a 3x3 square of locations, the locations in the list are the centers of said squares
+-     * Patches do not overlap, so the adjacent locations of one patch don't have common locations with
+-     * the adjacent locations of any other square
+-     *
+-     * @return The list of free patches in the field.
+-     */
+-    public List<Location> getFreePatches()
+-    {
+-        List<Location> res = new ArrayList<>();
+-        for(int i=0; i<field.length; i++){
+-            for(int j=0; j<field[1].length; j++){
+-                if (field[i][j] == null){
+-                    List<Location> nearby = adjacentLocations(new Location(i, j));
+-                    boolean allNulls = true;
+-                    for(Location loc : nearby){
+-                        if(getObjectAt(loc) != null){
+-                            allNulls = false;
+-                        }
+-                    }
+-                    if(allNulls){
+-                        res.add(new Location(i, j));
+-                    }
+-                }
+-            }
+-        }
+-
+-        return res;
+-    }
+-
+-    /**
+-     * Get a shuffled list of the free adjacent locations.
+-     * @param location Get locations adjacent to this.
+-     * @return A list of free adjacent locations.
+-     */
+-    public List<Location> getFreeAdjacentLocations(Location location)
+-    {
+-        List<Location> free = new LinkedList<>();
+-        List<Location> adjacent = adjacentLocations(location);
+-        for(Location next : adjacent) {
+-            Object objectAtNext = getObjectAt(next);
+-            if(objectAtNext == null) {
+-                free.add(next);
+-            }
+-        }
+-        return free;
+-    }
+-
+-    /**
+-     * Try to find a free location that is adjacent to the
+-     * given location. If there is none, return null.
+-     * The returned location will be within the valid bounds
+-     * of the field.
+-     * @param location The location from which to generate an adjacency.
+-     * @return A valid location within the grid area.
+-     */
+-    public Location freeAdjacentLocation(Location location)
+-    {
+-        // The available free ones.
+-        List<Location> free = getFreeAdjacentLocations(location);
+-        if(free.size() > 0) {
+-            return free.get(0);
+-        }
+-        else {
+-            return null;
+-        }
+-    }
+-
+-    /**
+-     * Returns adjacent locations in the field containing a certain class
+-     * For example, adjacentSpecies(location, Grass.class) returns the adjacent locations with Grass
+-     * @param location The location of an organism.
+-     * @param speciesClass The type of species.
+-     * @return adjacentSpecies A list of adjacent locations with the specified species 
+-     */
+-    public List<Location> adjacentLocationsWithSpecies(Location location, Class<?> speciesClass) {
+-        List<Location> free = adjacentLocations(location);
+-        List<Location> res = new ArrayList<>();
+-        for (Location loc : free) {
+-            if (getObjectAt(loc) != null && getObjectAt(loc).getClass()==speciesClass) {
+-                res.add(loc);
+-            }
+-        }
+-        return res;
+-    }
+-
+-    /**
+-     * Return a shuffled list of locations adjacent to the given one.
+-     * The list will not include the location itself.
+-     * All locations will lie within the grid.
+-     * @param location The location from which to generate adjacencies.
+-     * @return A list of locations adjacent to that given.
+-     */
+-    public List<Location> adjacentLocations(Location location)
+-    {
+-        assert location != null : "Null location passed to adjacentLocations";
+-        // The list of locations to be returned.
+-        List<Location> locations = new LinkedList<>();
+-        if(location != null) {
+-            int row = location.getRow();
+-            int col = location.getCol();
+-            for(int roffset = -1; roffset <= 1; roffset++) {
+-                int nextRow = row + roffset;
+-                if(nextRow >= 0 && nextRow < depth) {
+-                    for(int coffset = -1; coffset <= 1; coffset++) {
+-                        int nextCol = col + coffset;
+-                        // Exclude invalid locations and the original location.
+-                        if(nextCol >= 0 && nextCol < width && (roffset != 0 || coffset != 0)) {
+-                            locations.add(new Location(nextRow, nextCol));
+-                        }
+-                    }
+-                }
+-            }
+-            
+-            // Shuffle the list. Several other methods rely on the list
+-            // being in a random order.
+-            Collections.shuffle(locations, randomProvider.getRandom());
+-        }
+-        return locations;
+-    }
+-
+     /**
+      * Return the depth of the field.
+      * @return The depth of the field.
+@@ -301,4 +146,9 @@ public class Field
+     {
+         return diseaseService;
+     }
++
++    public MovementService getMovementService()
++    {
++        return movementService;
++    }
+ }
+diff --git a/Grass.java b/Grass.java
+index 1a463a9..44ea55e 100644
+--- a/Grass.java
++++ b/Grass.java
+@@ -70,7 +70,7 @@ public class Grass extends Plant
+         // New grass are made into adjacent locations.
+         // Get a list of adjacent free locations.
+         Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
++        List<Location> free = field.getMovementService().getFreeAdjacentLocations(field, getLocation());
+         for(int b = 0; b < free.size(); b++) {
+             Location loc = free.remove(0);
+             Grass young = field.getOrganismFactory().createOffspring(Grass.class, field, loc);
+diff --git a/Hunter.java b/Hunter.java
+index ba2af8c..beb25ff 100644
+--- a/Hunter.java
++++ b/Hunter.java
+@@ -40,50 +40,32 @@ public class Hunter extends Organism implements Actor
+      */
+     public void act(List<Actor> newActors, Environment environment)
+     {
+-        Random rand = getRandomProvider().getRandom();
+         if(isAlive()) {
+-            Location newLocation = findPrey();
+-            if(newLocation == null) {
+-                // No animals found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            List<Location> adjacentGrassSpots = getField().adjacentLocationsWithSpecies(getLocation(), Grass.class);
+-
+-            // See if it was possible to move.
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else if (adjacentGrassSpots.size() > 0) {
+-                getField().clear(getLocation());
+-                setLocation(adjacentGrassSpots.get(rand.nextInt(adjacentGrassSpots.size())));
+-            }
+-
++            move();
+         }
+     }
+ 
+     /**
+-     * Look for animals adjacent to the current location.
+-     * Only the first live animal is killed.
+-     * @return Location Where an animal was found, or null if it wasn't.
++     * Returns the species that hunters can target.
+      */
+-    private Location findPrey()
++    protected Set<Class<? extends Organism>> getDiet()
++    {
++        return DIET;
++    }
++
++    private void move()
+     {
+         Field field = getField();
+-        Location currentLocation = getLocation();
+-        List<Location> adjacent = field.adjacentLocations(currentLocation);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            if(animal != null && DIET.contains(animal.getClass())) {
+-                Organism food = (Organism) animal;
+-                if(food.isAlive()) {
+-                    food.setDead();
+-                    return where;
+-                }
+-                return where;
+-            }
++        MovementService movementService = field.getMovementService();
++        List<Location> adjacentLocations = movementService.getAdjacentLocations(field, getLocation());
++        MovementService.MovementDecision movementDecision = movementService.resolveHunterMovement(this, adjacentLocations);
++
++        if(movementDecision.consumedOrganism() != null) {
++            movementDecision.consumedOrganism().setDead();
++        }
++
++        if(movementDecision.targetLocation() != null) {
++            movementService.moveOrganism(this, movementDecision.targetLocation());
+         }
+-        return null;
+     }
+ }
+diff --git a/MovementService.java b/MovementService.java
+new file mode 100644
+index 0000000..ff03e39
+--- /dev/null
++++ b/MovementService.java
+@@ -0,0 +1,253 @@
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.LinkedList;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
++/**
++ * Centralizes adjacency, target selection, and movement-related rules.
++ */
++public class MovementService
++{
++    private static final Class<? extends Organism> DEFAULT_FALLBACK_SPECIES = Grass.class;
++
++    private final RandomProvider randomProvider;
++    private final Map<Class<? extends Organism>, MovementRule> movementRules;
++
++    public MovementService(RandomProvider randomProvider)
++    {
++        this.randomProvider = randomProvider;
++        this.movementRules = Map.of(
++                Eagle.class,
++                new MovementRule(DEFAULT_FALLBACK_SPECIES, environment -> environment.getWeatherService().allowsEagleForaging())
++        );
++    }
++
++    public void moveOrganism(Organism organism, Location location)
++    {
++        organism.setLocation(location);
++    }
++
++    public List<Location> getAdjacentLocations(Field field, Location location)
++    {
++        assert location != null : "Null location passed to getAdjacentLocations";
++        List<Location> locations = new LinkedList<>();
++        int row = location.getRow();
++        int col = location.getCol();
++        for(int roffset = -1; roffset <= 1; roffset++) {
++            int nextRow = row + roffset;
++            if(nextRow >= 0 && nextRow < field.getDepth()) {
++                for(int coffset = -1; coffset <= 1; coffset++) {
++                    int nextCol = col + coffset;
++                    if(nextCol >= 0
++                            && nextCol < field.getWidth()
++                            && (roffset != 0 || coffset != 0)) {
++                        locations.add(new Location(nextRow, nextCol));
++                    }
++                }
++            }
++        }
++
++        Collections.shuffle(locations, randomProvider.getRandom());
++        return locations;
++    }
++
++    public List<Location> getFreeAdjacentLocations(Field field, Location location)
++    {
++        return getFreeAdjacentLocations(field, getAdjacentLocations(field, location));
++    }
++
++    public Location findFreeAdjacentLocation(Field field, Location location)
++    {
++        return firstOrNull(getFreeAdjacentLocations(field, location));
++    }
++
++    public List<Location> findAdjacentLocationsWithSpecies(Field field, Location location, Class<?> speciesClass)
++    {
++        return findAdjacentLocationsWithSpecies(field, getAdjacentLocations(field, location), speciesClass);
++    }
++
++    public List<Organism> findPotentialMates(Animal animal)
++    {
++        List<Organism> potentialMates = new ArrayList<>();
++        Field field = animal.getField();
++        if(field != null) {
++            for(Location location : getAdjacentLocations(field, animal.getLocation())) {
++                Object nearby = field.getObjectAt(location);
++                if(nearby instanceof Animal mate
++                        && mate.getClass().equals(animal.getClass())
++                        && mate.sex != animal.sex) {
++                    potentialMates.add(mate);
++                }
++            }
++        }
++        return potentialMates;
++    }
++
++    public List<Location> getRandomFreePatches(Field field, double rateOfGeneration)
++    {
++        List<Location> patches = getFreePatches(field);
++        List<Location> randomPatches = new ArrayList<>();
++        for(int i = 0; i < rateOfGeneration * patches.size() && !patches.isEmpty(); i++) {
++            Location selectedPatch = patches.get(randomProvider.getRandom().nextInt(patches.size()));
++            randomPatches.add(selectedPatch);
++            for(Location location : getAdjacentLocations(field, selectedPatch)) {
++                patches.remove(location);
++            }
++            patches.remove(selectedPatch);
++        }
++        return randomPatches;
++    }
++
++    public MovementDecision resolveAnimalMovement(Animal animal,
++            Environment environment,
++            List<Location> adjacentLocations)
++    {
++        MovementRule rule = getMovementRule(animal.getClass());
++        if(rule.canForage(environment)) {
++            MovementDecision foodTarget = findTarget(fieldOf(animal), adjacentLocations, animal.getDiet());
++            if(foodTarget != null) {
++                return foodTarget;
++            }
++        }
++
++        return resolveFallbackMovement(fieldOf(animal), adjacentLocations, rule);
++    }
++
++    public MovementDecision resolveHunterMovement(Hunter hunter, List<Location> adjacentLocations)
++    {
++        MovementDecision preyTarget = findTarget(fieldOf(hunter), adjacentLocations, hunter.getDiet());
++        if(preyTarget != null) {
++            return preyTarget;
++        }
++
++        return resolveFallbackMovement(fieldOf(hunter), adjacentLocations, getMovementRule(Hunter.class));
++    }
++
++    private Field fieldOf(Organism organism)
++    {
++        return organism.getField();
++    }
++
++    private MovementDecision resolveFallbackMovement(Field field,
++            List<Location> adjacentLocations,
++            MovementRule rule)
++    {
++        Location freeLocation = firstOrNull(getFreeAdjacentLocations(field, adjacentLocations));
++        if(freeLocation != null) {
++            return new MovementDecision(freeLocation, null, false);
++        }
++
++        Location speciesFallback = pickRandomLocation(
++                findAdjacentLocationsWithSpecies(field, adjacentLocations, rule.fallbackSpecies())
++        );
++        if(speciesFallback != null) {
++            return new MovementDecision(speciesFallback, null, false);
++        }
++
++        return new MovementDecision(null, null, true);
++    }
++
++    private MovementDecision findTarget(Field field,
++            List<Location> adjacentLocations,
++            Set<Class<? extends Organism>> targetSpecies)
++    {
++        for(Location location : adjacentLocations) {
++            Object occupant = field.getObjectAt(location);
++            if(occupant instanceof Organism organism && targetSpecies.contains(occupant.getClass())) {
++                if(organism.isAlive()) {
++                    return new MovementDecision(location, organism, false);
++                }
++                return new MovementDecision(location, null, false);
++            }
++        }
++        return null;
++    }
++
++    private List<Location> getFreeAdjacentLocations(Field field, List<Location> adjacentLocations)
++    {
++        List<Location> free = new LinkedList<>();
++        for(Location location : adjacentLocations) {
++            if(field.getObjectAt(location) == null) {
++                free.add(location);
++            }
++        }
++        return free;
++    }
++
++    private List<Location> findAdjacentLocationsWithSpecies(Field field,
++            List<Location> adjacentLocations,
++            Class<?> speciesClass)
++    {
++        List<Location> matches = new ArrayList<>();
++        for(Location location : adjacentLocations) {
++            Object occupant = field.getObjectAt(location);
++            if(occupant != null && occupant.getClass() == speciesClass) {
++                matches.add(location);
++            }
++        }
++        return matches;
++    }
++
++    private List<Location> getFreePatches(Field field)
++    {
++        List<Location> freePatches = new ArrayList<>();
++        for(int row = 0; row < field.getDepth(); row++) {
++            for(int col = 0; col < field.getWidth(); col++) {
++                Location center = new Location(row, col);
++                if(field.getObjectAt(center) == null && isPatchFree(field, center)) {
++                    freePatches.add(center);
++                }
++            }
++        }
++        return freePatches;
++    }
++
++    private boolean isPatchFree(Field field, Location center)
++    {
++        for(Location location : getAdjacentLocations(field, center)) {
++            if(field.getObjectAt(location) != null) {
++                return false;
++            }
++        }
++        return true;
++    }
++
++    private Location pickRandomLocation(List<Location> locations)
++    {
++        if(locations.isEmpty()) {
++            return null;
++        }
++        return locations.get(randomProvider.getRandom().nextInt(locations.size()));
++    }
++
++    private Location firstOrNull(List<Location> locations)
++    {
++        if(locations.isEmpty()) {
++            return null;
++        }
++        return locations.get(0);
++    }
++
++    public record MovementDecision(Location targetLocation, Organism consumedOrganism, boolean overcrowded) { }
++
++    private record MovementRule(Class<? extends Organism> fallbackSpecies, ForageRule forageRule)
++    {
++        private boolean canForage(Environment environment)
++        {
++            return forageRule.canForage(environment);
++        }
++    }
++
++    @FunctionalInterface
++    private interface ForageRule
++    {
++        boolean canForage(Environment environment);
++    }
++
++    private MovementRule getMovementRule(Class<? extends Organism> organismClass)
++    {
++        return movementRules.getOrDefault(organismClass, new MovementRule(DEFAULT_FALLBACK_SPECIES, environment -> true));
++    }
++}
+diff --git a/OrganismFactory.java b/OrganismFactory.java
+index 8a68c81..f77b979 100644
+--- a/OrganismFactory.java
++++ b/OrganismFactory.java
+@@ -70,7 +70,7 @@ public class OrganismFactory
+ 
+         double creationRate = config.getCreationProbability(Grass.class);
+         List<Actor> grassActors = new ArrayList<>();
+-        for(Location location : field.getRandomFreePatches(creationRate)) {
++        for(Location location : field.getMovementService().getRandomFreePatches(field, creationRate)) {
+             if(rand.nextDouble() <= creationRate) {
+                 grassActors.add(createOffspring(Grass.class, field, location));
+             }
+diff --git a/Simulator.java b/Simulator.java
+index 24cb96c..05b8495 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -27,6 +27,7 @@ public class Simulator
+     private final RandomProvider randomProvider;
+     private final DiseaseService diseaseService;
+     private final WeatherService weatherService;
++    private final MovementService movementService;
+     private final OrganismFactory organismFactory;
+     // Published state for observers.
+     private final List<SimulationObserver> observers;
+@@ -127,8 +128,9 @@ public class Simulator
+         this.actors = new ArrayList<>();
+         this.diseaseService = new DiseaseService(randomProvider);
+         this.weatherService = new WeatherService(randomProvider);
++        this.movementService = new MovementService(randomProvider);
+         this.organismFactory = new OrganismFactory(randomProvider, config, diseaseService);
+-        this.field = new Field(randomProvider, organismFactory, diseaseService, depth, width);
++        this.field = new Field(randomProvider, organismFactory, diseaseService, movementService, depth, width);
+         this.environment = new Environment(new Time(), weatherService);
+         this.observers = new ArrayList<>();
+ 

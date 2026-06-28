@@ -1,0 +1,211 @@
+diff --git a/AbstractTargetAcquisitionPolicy.java b/AbstractTargetAcquisitionPolicy.java
+new file mode 100644
+index 0000000..66916d7
+--- /dev/null
++++ b/AbstractTargetAcquisitionPolicy.java
+@@ -0,0 +1,57 @@
++import java.util.List;
++import java.util.Random;
++import java.util.function.Predicate;
++
++/**
++ * Shared helper base for target-acquisition policies.
++ */
++public abstract class AbstractTargetAcquisitionPolicy implements TargetAcquisitionPolicy
++{
++    protected static final Random rand = Randomizer.getRandom();
++
++    protected final Location findAdjacentTarget(MobileForager forager, Predicate<Object> matcher)
++    {
++        return AdjacentTargetSearch.findMatchingLocation(forager.getField(), forager.getLocation(), matcher);
++    }
++
++    protected final void contractDiseaseFromAdjacentOrganisms(Animal consumer, Predicate<Object> infectableFilter)
++    {
++        Field field = consumer.getField();
++        List<Location> adjacent = field.adjacentLocations(consumer.getLocation());
++        for(Location loc : adjacent){
++            Object occupant = field.getObjectAt(loc);
++            if(occupant != null && infectableFilter.test(occupant)) {
++                Organism organism = (Organism) occupant;
++                if (organism.isDiseased()
++                        && organism.getDisease().getDiseaseType() != DiseaseType.CONTACT
++                        && organism.getDisease().getPropagationRate() <= rand.nextDouble()){
++                    consumer.setDisease(organism.getDisease());
++                    break;
++                }
++            }
++        }
++    }
++
++    protected final void consumePrey(Animal consumer, Organism prey)
++    {
++        if (prey.isDiseased()
++                && prey.getDisease().getDiseaseType() == DiseaseType.FOODBORNE
++                && prey.getDisease().getPropagationRate() <= rand.nextDouble())
++        {
++            consumer.setDisease(prey.getDisease());
++        }
++        if(prey.isAlive())
++        {
++            prey.setDead();
++            int newFoodLevel = consumer.foodLevel + ((Edible) prey).getFoodValue();
++            consumer.foodLevel = Math.min(newFoodLevel, consumer.MAX_FOOD_LEVEL());
++        }
++    }
++
++    protected final void consumePrey(Organism prey)
++    {
++        if(prey.isAlive()) {
++            prey.setDead();
++        }
++    }
++}
+diff --git a/AnimalTargetAcquisitionPolicy.java b/AnimalTargetAcquisitionPolicy.java
+index 43c85f0..4d84dd2 100644
+--- a/AnimalTargetAcquisitionPolicy.java
++++ b/AnimalTargetAcquisitionPolicy.java
+@@ -3,53 +3,22 @@ import java.util.List;
+ /**
+  * Animal-specific target acquisition logic.
+  */
+-public final class AnimalTargetAcquisitionPolicy implements TargetAcquisitionPolicy
++public final class AnimalTargetAcquisitionPolicy extends AbstractTargetAcquisitionPolicy
+ {
+     @Override
+     public Location acquireTarget(MobileForager forager, Environment environment)
+     {
+         Animal animal = (Animal) forager;
+-        contractDiseaseFromAdjacentOrganisms(animal);
++        contractDiseaseFromAdjacentOrganisms(animal, occupant ->
++                occupant != null && !(occupant instanceof Hunter));
+ 
+-        Location foodLocation = AdjacentTargetSearch.findMatchingLocation(
+-                animal.getField(),
+-                animal.getLocation(),
+-                occupant -> occupant instanceof Edible && animal.DIET().contains(occupant.getClass())
+-        );
++        Location foodLocation = findAdjacentTarget(animal,
++                occupant -> occupant instanceof Edible && animal.DIET().contains(occupant.getClass()));
+         if(foodLocation == null) {
+             return null;
+         }
+ 
+-        Organism food = (Organism) animal.getField().getObjectAt(foodLocation);
+-        if (food.isDiseased()
+-                && food.getDisease().getDiseaseType() == DiseaseType.FOODBORNE
+-                && food.getDisease().getPropagationRate() <= Randomizer.getRandom().nextDouble())
+-        {
+-            animal.setDisease(food.getDisease());
+-        }
+-        if(food.isAlive())
+-        {
+-            food.setDead();
+-            int newFoodLevel = animal.foodLevel + ((Edible) food).getFoodValue();
+-            animal.foodLevel = Math.min(newFoodLevel, animal.MAX_FOOD_LEVEL());
+-        }
++        consumePrey(animal, (Organism) animal.getField().getObjectAt(foodLocation));
+         return foodLocation;
+     }
+-
+-    private void contractDiseaseFromAdjacentOrganisms(Animal animal)
+-    {
+-        Field field = animal.getField();
+-        List<Location> adjacent = field.adjacentLocations(animal.getLocation());
+-        for(Location loc : adjacent){
+-            if(field.getObjectAt(loc) != null && !(field.getObjectAt(loc) instanceof Hunter)){
+-                Organism organism = (Organism) field.getObjectAt(loc);
+-                if (organism.isDiseased()
+-                        && organism.getDisease().getDiseaseType() != DiseaseType.CONTACT
+-                        && organism.getDisease().getPropagationRate() <= Randomizer.getRandom().nextDouble()){
+-                    animal.setDisease(organism.getDisease());
+-                    break;
+-                }
+-            }
+-        }
+-    }
+ }
+diff --git a/EagleTargetAcquisitionPolicy.java b/EagleTargetAcquisitionPolicy.java
+index bdc8f74..74fe500 100644
+--- a/EagleTargetAcquisitionPolicy.java
++++ b/EagleTargetAcquisitionPolicy.java
+@@ -1,7 +1,7 @@
+ /**
+  * Eagle-specific target acquisition logic.
+  */
+-public final class EagleTargetAcquisitionPolicy implements TargetAcquisitionPolicy
++public final class EagleTargetAcquisitionPolicy extends AbstractTargetAcquisitionPolicy
+ {
+     private static final java.util.Set<Class<?>> DIET = java.util.Set.of(Deer.class, Coyote.class, Mouse.class);
+ 
+@@ -13,28 +13,18 @@ public final class EagleTargetAcquisitionPolicy implements TargetAcquisitionPoli
+             return null;
+         }
+ 
+-        Location preyLocation = AdjacentTargetSearch.findMatchingLocation(
+-                eagle.getField(),
+-                eagle.getLocation(),
++        contractDiseaseFromAdjacentOrganisms(eagle, occupant ->
++                occupant != null && !(occupant instanceof Hunter));
++
++        Location preyLocation = findAdjacentTarget(
++                eagle,
+                 occupant -> occupant != null && DIET.contains(occupant.getClass())
+         );
+         if(preyLocation == null) {
+             return null;
+         }
+ 
+-        Organism food = (Organism) eagle.getField().getObjectAt(preyLocation);
+-        if (food.isDiseased()
+-                && food.getDisease().getDiseaseType() == DiseaseType.FOODBORNE
+-                && food.getDisease().getPropagationRate() <= Randomizer.getRandom().nextDouble())
+-        {
+-            eagle.setDisease(food.getDisease());
+-        }
+-        if(food.isAlive())
+-        {
+-            food.setDead();
+-            int newFoodLevel = eagle.foodLevel + ((Edible) food).getFoodValue();
+-            eagle.foodLevel = Math.min(newFoodLevel, eagle.MAX_FOOD_LEVEL());
+-        }
++        consumePrey(eagle, (Organism) eagle.getField().getObjectAt(preyLocation));
+         return preyLocation;
+     }
+ }
+diff --git a/HunterTargetAcquisitionPolicy.java b/HunterTargetAcquisitionPolicy.java
+index 28c0579..47854a1 100644
+--- a/HunterTargetAcquisitionPolicy.java
++++ b/HunterTargetAcquisitionPolicy.java
+@@ -1,7 +1,7 @@
+ /**
+  * Hunter-specific target acquisition logic.
+  */
+-public final class HunterTargetAcquisitionPolicy implements TargetAcquisitionPolicy
++public final class HunterTargetAcquisitionPolicy extends AbstractTargetAcquisitionPolicy
+ {
+     private static final java.util.Set<Class<?>> DIET = java.util.Set.of(
+             Deer.class, Mouse.class, Wolf.class, Coyote.class, Eagle.class
+@@ -11,19 +11,15 @@ public final class HunterTargetAcquisitionPolicy implements TargetAcquisitionPol
+     public Location acquireTarget(MobileForager forager, Environment environment)
+     {
+         Hunter hunter = (Hunter) forager;
+-        Location preyLocation = AdjacentTargetSearch.findMatchingLocation(
+-                hunter.getField(),
+-                hunter.getLocation(),
++        Location preyLocation = findAdjacentTarget(
++                hunter,
+                 occupant -> occupant != null && DIET.contains(occupant.getClass())
+         );
+         if(preyLocation == null) {
+             return null;
+         }
+ 
+-        Animal food = (Animal) hunter.getField().getObjectAt(preyLocation);
+-        if(food.isAlive()) {
+-            food.setDead();
+-        }
++        consumePrey((Animal) hunter.getField().getObjectAt(preyLocation));
+         return preyLocation;
+     }
+ }

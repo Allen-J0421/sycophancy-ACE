@@ -1,0 +1,1176 @@
+diff --git a/Acacia.java b/Acacia.java
+index 7b14af8..e62f1ef 100644
+--- a/Acacia.java
++++ b/Acacia.java
+@@ -1,5 +1,3 @@
+-import java.util.List;
+-
+ /**
+  * A simple model of an acacia plant.
+  * Acacia plants reproduce and grow into other locations
+@@ -27,30 +25,15 @@ public class Acacia extends Plant
+         super(field, location);
+     }
+ 
+-    /**
+-     * This is what the acacia does most of the time:
+-     * it grows and reproduces offspring into adjacent locations
+-     * @param newAcacias A list to return newly produced acacia.
+-     */
+-    public void act(List<Plant> newAcacias) {
+-        if(isAlive()) {
+-            grow(newAcacias);
+-        }
++    protected double getReproducingProbability() {
++        return REPRODUCING_PROBABILITY;
+     }
+ 
+-    /**
+-     * Check whether or not this acacia is to reproduce at this step.
+-     * New acacias will be made into free adjacent locations.
+-     * @param newAcacias A list to return newly produced acacias.
+-     */
+-    private void grow(List<Plant> newAcacias) {
+-        Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        int offspring = breed(REPRODUCING_PROBABILITY, MAX_OFFSPRING_SIZE);
+-        for(int b = 0; b < offspring && free.size() > 0; b++) {
+-            Location loc = free.remove(0);
+-            Acacia young = new Acacia(field, loc);
+-            newAcacias.add(young);
+-        }
++    protected int getMaxOffspringSize() {
++        return MAX_OFFSPRING_SIZE;
++    }
++
++    protected Plant createYoung(Field field, Location location) {
++        return new Acacia(field, location);
+     }
+ }
+diff --git a/Animal.java b/Animal.java
+index f4b2c72..db216c7 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -9,6 +9,28 @@ import java.util.Random;
+  */
+ public abstract class Animal
+ {
++    /**
++     * A food type this animal can eat, and the food level it restores.
++     */
++    protected static class FoodSource
++    {
++        private Class<?> foodClass;
++        private int foodValue;
++
++        public FoodSource(Class<?> foodClass, int foodValue) {
++            this.foodClass = foodClass;
++            this.foodValue = foodValue;
++        }
++
++        private boolean matches(Object object) {
++            return foodClass.isInstance(object);
++        }
++
++        private int getFoodValue() {
++            return foodValue;
++        }
++    }
++
+     // Whether the animal is alive or not.
+     private boolean alive;
+     // The animal's field.
+@@ -48,7 +70,53 @@ public abstract class Animal
+      * whatever it wants/needs to do.
+      * @param newAnimals A list to receive newly born animals.
+      */
+-    abstract public void act(List<Animal> newAnimals, int time);
++    public void act(List<Animal> newAnimals, int time) {
++        incrementAge(getMaxAge());
++        incrementHunger();
++
++        if(isAlive() && isActive(time)) {
++            if(getDisease()) {
++                spreadDisease();
++            }
++            produceOffspring(newAnimals);
++            move();
++        }
++    }
++
++    /**
++     * Return the oldest age this animal can reach.
++     */
++    protected abstract int getMaxAge();
++
++    /**
++     * Return the age at which this animal can start to breed.
++     */
++    protected abstract int getBreedingAge();
++
++    /**
++     * Return the likelihood of this animal breeding.
++     */
++    protected abstract double getBreedingProbability();
++
++    /**
++     * Return the maximum number of births for this animal.
++     */
++    protected abstract int getMaxLitterSize();
++
++    /**
++     * Return whether this animal is active at the current simulation time.
++     */
++    protected abstract boolean isActive(int time);
++
++    /**
++     * Create a newborn animal of this species.
++     */
++    protected abstract Animal createYoung(Field field, Location location);
++
++    /**
++     * Return the foods this animal can eat, in search priority order.
++     */
++    protected abstract FoodSource[] getFoodSources();
+ 
+     /**
+      * Check whether the animal is alive or not.
+@@ -267,4 +335,135 @@ public abstract class Animal
+         }
+     }
+ 
++    /**
++     * Check whether fog or another species-specific condition prevents finding food.
++     */
++    protected boolean canFindFood() {
++        return true;
++    }
++
++    /**
++     * Return whether this animal can trample plants it does not eat.
++     */
++    protected boolean canTramplePlants() {
++        return true;
++    }
++
++    /**
++     * Check whether this animal is active between two times, inclusive.
++     */
++    protected boolean isActiveBetween(int time, int start, int end) {
++        return time >= start && time <= end;
++    }
++
++    /**
++     * Check whether this animal is active in a time range that crosses midnight.
++     */
++    protected boolean isActiveOutside(int time, int inactiveStart, int inactiveEnd) {
++        return time <= inactiveStart || time >= inactiveEnd;
++    }
++
++    /**
++     * Add any newborn animals to the new animals list.
++     */
++    private void produceOffspring(List<Animal> newAnimals) {
++        int breedingAge = getBreedingAge();
++        if (giveBirth(breedingAge)) {
++            Field field = getField();
++            List<Location> free = field.getFreeAdjacentLocations(getLocation());
++            int births = breed(breedingAge, getBreedingProbability(), getMaxLitterSize());
++            for (int b = 0; b < births && free.size() > 0; b++) {
++                Location loc = free.remove(0);
++                newAnimals.add(createYoung(field, loc));
++            }
++        }
++    }
++
++    /**
++     * Move toward food if available, otherwise move to a free adjacent location.
++     */
++    private void move() {
++        Location newLocation = findFood();
++        if(newLocation == null) {
++            newLocation = getField().freeAdjacentLocation(getLocation());
++        }
++        if(newLocation != null) {
++            setLocation(newLocation);
++        }
++        else {
++            setDead();
++        }
++    }
++
++    /**
++     * Look for food adjacent to the current location.
++     * Only the first live food source is eaten. Other plants may be trampled.
++     * @return where food was found, or null if it wasn't.
++     */
++    private Location findFood() {
++        if(!canFindFood()) {
++            return null;
++        }
++
++        Field field = getField();
++        List<Location> adjacent = field.adjacentLocations(getLocation());
++        Iterator<Location> it = adjacent.iterator();
++        while(it.hasNext()) {
++            Location where = it.next();
++            Object object = field.getObjectAt(where);
++            FoodSource foodSource = foodSourceFor(object);
++
++            if(foodSource != null && isAliveFood(object)) {
++                setDeadFood(object);
++                setFoodLevel(foodSource.getFoodValue());
++                return where;
++            }
++            else if(canTramplePlants() && object instanceof Plant) {
++                Plant plant = (Plant) object;
++                if(plant.isAlive()) {
++                    plant.setDead();
++                    return where;
++                }
++            }
++        }
++        return null;
++    }
++
++    /**
++     * Return the food source matched by the object, if any.
++     */
++    private FoodSource foodSourceFor(Object object) {
++        for(FoodSource foodSource : getFoodSources()) {
++            if(foodSource.matches(object)) {
++                return foodSource;
++            }
++        }
++        return null;
++    }
++
++    /**
++     * Check whether a matched food object is alive.
++     */
++    private boolean isAliveFood(Object object) {
++        if(object instanceof Animal) {
++            return ((Animal) object).isAlive();
++        }
++        else if(object instanceof Plant) {
++            return ((Plant) object).isAlive();
++        }
++        return false;
++    }
++
++    /**
++     * Remove a matched food object from the field.
++     */
++    private void setDeadFood(Object object) {
++        if(object instanceof Animal) {
++            ((Animal) object).setDead();
++        }
++        else if(object instanceof Plant) {
++            ((Plant) object).setDead();
++        }
++    }
++
+ }
+diff --git a/Ant.java b/Ant.java
+index 8b25d63..c404066 100644
+--- a/Ant.java
++++ b/Ant.java
+@@ -1,5 +1,3 @@
+-import java.util.Iterator;
+-import java.util.List;
+ import java.util.Random;
+ 
+ /**
+@@ -26,6 +24,11 @@ public class Ant extends Animal
+     // The food value of a single grass. In effect, this is the
+     // number of steps an ant can go before it has to eat again.
+     private static final int GRASS_FOOD_VALUE = 60;
++    // The food sources ants eat, in search order.
++    private static final FoodSource[] FOOD_SOURCES = {
++        new FoodSource(Acacia.class, ACACIA_FOOD_VALUE),
++        new FoodSource(Grass.class, GRASS_FOOD_VALUE)
++    };
+     // A shared random number generator to control breeding.
+     private static final Random rand = Randomizer.getRandom();
+ 
+@@ -50,77 +53,36 @@ public class Ant extends Animal
+         }
+     }
+ 
+-    /**
+-     * This is what the ant does most of the time: it eats grass
+-     * and acacia. In the process, it might breed, die of hunger,
+-     * or die of old age.
+-     * @param newAnts A list to return newly born ants.
+-     * @param time the current time in the simulation
+-     */
+-    public void act(List<Animal> newAnts, int time) {
+-        incrementAge(MAX_AGE);
+-        incrementHunger();
++    protected int getMaxAge() {
++        return MAX_AGE;
++    }
+ 
+-        if(isAlive() && ((time >= 4)&&(time <= 20)))
+-        {
+-            if (getDisease()) {
+-                spreadDisease();
+-            }
+-            if (giveBirth(BREEDING_AGE)) {
+-                Field field = getField();
+-                List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-                int births = breed(BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE);
+-                for (int b = 0; b < births && free.size() > 0; b++) {
+-                    Location loc = free.remove(0);
+-                    Ant young = new Ant(false, field, loc);
+-                    young.setGender();
+-                    newAnts.add(young);
+-                }
+-            }
++    protected int getBreedingAge() {
++        return BREEDING_AGE;
++    }
+ 
+-            Location newLocation = findFood();
+-            if(newLocation == null) {
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                setDead();
+-            }
+-        }
++    protected double getBreedingProbability() {
++        return BREEDING_PROBABILITY;
+     }
+ 
+-    /**
+-     * Look for acacia and grass adjacent to the current location.
+-     * Only the first grass or acacia is eaten.
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    private Location findFood() {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object plant = field.getObjectAt(where);
+-            if(plant instanceof Acacia) {
+-                Acacia acacia = (Acacia) plant;
+-                if (acacia.isAlive()) {
+-                    acacia.setDead();
+-                    setFoodLevel(ACACIA_FOOD_VALUE);
+-                    return where;
+-                }
+-            }
+-            else if (plant instanceof Grass) {
+-                Grass grass = (Grass) plant;
+-                if(grass.isAlive()) {
+-                    grass.setDead();
+-                    setFoodLevel(GRASS_FOOD_VALUE);
+-                    return where;
+-                }
+-            }
+-        }
+-        return null;
++    protected int getMaxLitterSize() {
++        return MAX_LITTER_SIZE;
++    }
++
++    protected boolean isActive(int time) {
++        return isActiveBetween(time, 4, 20);
++    }
++
++    protected Animal createYoung(Field field, Location location) {
++        return new Ant(false, field, location);
++    }
++
++    protected FoodSource[] getFoodSources() {
++        return FOOD_SOURCES;
++    }
++
++    protected boolean canTramplePlants() {
++        return false;
+     }
+ 
+ }
+diff --git a/Dingo.java b/Dingo.java
+index f1bf410..515d823 100644
+--- a/Dingo.java
++++ b/Dingo.java
+@@ -1,5 +1,3 @@
+-import java.util.List;
+-import java.util.Iterator;
+ import java.util.Random;
+ 
+ /**
+@@ -23,6 +21,10 @@ public class Dingo extends Animal
+     // The food value of a single snake. In effect, this is the
+     // number of steps a dingo can go before it has to eat again.
+     private static final int SNAKE_FOOD_VALUE = 100;
++    // The food sources dingoes eat, in search order.
++    private static final FoodSource[] FOOD_SOURCES = {
++        new FoodSource(Snake.class, SNAKE_FOOD_VALUE)
++    };
+     // A shared random number generator to control breeding.
+     private static final Random rand = Randomizer.getRandom();
+ 
+@@ -46,103 +48,36 @@ public class Dingo extends Animal
+             setFoodLevel(SNAKE_FOOD_VALUE);
+         }
+     }
+-    
+-    /**
+-     * This is what the dingo does most of the time: it hunts for
+-     * snakes. In the process, it might breed, die of hunger,
+-     * or die of old age.
+-     * @param newDingoes A list to return newly born dingoes.
+-     * @param time the current time in the simulation
+-     */
+-    public void act(List<Animal> newDingoes, int time) {
+-        incrementAge(MAX_AGE);
+-        incrementHunger();
+-        if(isAlive() && ((time>=8)&&(time <=24)))
+-        {
+-            if (getDisease()){
+-                spreadDisease();
+-            }
+-            if (giveBirth(BREEDING_AGE)) {
+-                Field field = getField();
+-                List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-                int births = breed(BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE);
+-                for (int b = 0; b < births && free.size() > 0; b++) {
+-                    Location loc = free.remove(0);
+-                    Dingo young = new Dingo(false, field, loc);
+-                    young.setGender();
+-                    newDingoes.add(young);
+-                }
+-            }
+-            Location newLocation = findFood();
+-            if(newLocation == null) {
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                setDead();
+-            }
+-        }
++
++    protected int getMaxAge() {
++        return MAX_AGE;
+     }
+ 
+-    /**
+-     * Look for snakes adjacent to the current location.
+-     * Only the first live snake is eaten.
+-     * If it is a plant, then it is 'trampled'
+-     * @return where food was found, or null if it wasn't.
+-     */
+-    private Location findFood() {
+-        if (getFog()){
+-            if (rand.nextInt(2) == 0) {
+-                Field field = getField();
+-                List<Location> adjacent = field.adjacentLocations(getLocation());
+-                Iterator<Location> it = adjacent.iterator();
+-                while (it.hasNext()) {
+-                    Location where = it.next();
+-                    Object animal = field.getObjectAt(where);
+-                    if (animal instanceof Snake) {
+-                        Snake snake = (Snake) animal;
+-                        if (snake.isAlive()) {
+-                            snake.setDead();
+-                            setFoodLevel(SNAKE_FOOD_VALUE);
+-                            return where;
+-                        }
+-                    } else if (animal instanceof Plant) {
+-                        Plant plant = (Plant) animal;
+-                        if (plant.isAlive()) {
+-                            plant.setDead();
+-                            return where;
+-                        }
+-                    }
+-                }
+-            }
+-            return null;
+-        }
+-        else {
+-            Field field = getField();
+-            List<Location> adjacent = field.adjacentLocations(getLocation());
+-            Iterator<Location> it = adjacent.iterator();
+-            while (it.hasNext()) {
+-                Location where = it.next();
+-                Object animal = field.getObjectAt(where);
+-                if (animal instanceof Snake) {
+-                    Snake snake = (Snake) animal;
+-                    if (snake.isAlive()) {
+-                        snake.setDead();
+-                        setFoodLevel(SNAKE_FOOD_VALUE);
+-                        return where;
+-                    }
+-                }
+-                else if (animal instanceof Plant){
+-                    Plant plant = (Plant) animal;
+-                    if(plant.isAlive()) {
+-                        plant.setDead();
+-                        return where;
+-                    }
+-                }
+-            }
+-            return null;
+-        }
++    protected int getBreedingAge() {
++        return BREEDING_AGE;
++    }
++
++    protected double getBreedingProbability() {
++        return BREEDING_PROBABILITY;
++    }
++
++    protected int getMaxLitterSize() {
++        return MAX_LITTER_SIZE;
++    }
++
++    protected boolean isActive(int time) {
++        return isActiveBetween(time, 8, 24);
++    }
++
++    protected Animal createYoung(Field field, Location location) {
++        return new Dingo(false, field, location);
++    }
++
++    protected FoodSource[] getFoodSources() {
++        return FOOD_SOURCES;
++    }
++
++    protected boolean canFindFood() {
++        return !getFog() || rand.nextInt(2) == 0;
+     }
+ }
+diff --git a/Eagle.java b/Eagle.java
+index 2e1352a..8b4ff75 100644
+--- a/Eagle.java
++++ b/Eagle.java
+@@ -1,5 +1,3 @@
+-import java.util.Iterator;
+-import java.util.List;
+ import java.util.Random;
+ 
+ /**
+@@ -27,6 +25,11 @@ public class Eagle extends Animal
+     // The food value of a single snake. In effect, this is the
+     // number of steps an eagle can go before it has to eat again.
+     private static final int SNAKE_FOOD_VALUE = 60;
++    // The food sources eagles eat, in search order.
++    private static final FoodSource[] FOOD_SOURCES = {
++        new FoodSource(Snake.class, SNAKE_FOOD_VALUE),
++        new FoodSource(Rat.class, RAT_FOOD_VALUE)
++    };
+     // A shared random number generator to control breeding.
+     private static final Random rand = Randomizer.getRandom();
+ 
+@@ -51,118 +54,31 @@ public class Eagle extends Animal
+         }
+     }
+ 
+-    /**
+-     * This is what the eagle does most of the time: it hunts for
+-     * rats and snakes. In the process, it might breed, die of hunger,
+-     * or die of old age.
+-     * @param newEagles A list to return newly born eagles.
+-     * @param time the current time in the simulation
+-     */
+-    public void act(List<Animal> newEagles, int time) {
+-        incrementAge(MAX_AGE);
+-        incrementHunger();
+-        if(isAlive() && ((time >= 6)&&(time <= 22))) {
+-            if (getDisease()){
+-                spreadDisease();
+-            }
+-            if (giveBirth(BREEDING_AGE)) {
+-                Field field = getField();
+-                List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-                int births = breed(BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE);
+-                for (int b = 0; b < births && free.size() > 0; b++) {
+-                    Location loc = free.remove(0);
+-                    Eagle young = new Eagle(false, field, loc);
+-                    young.setGender();
+-                    newEagles.add(young);
+-                }
+-            }
+-            Location newLocation = findFood();
+-            if(newLocation == null) {
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                setDead();
+-            }
++    protected int getMaxAge() {
++        return MAX_AGE;
++    }
+ 
+-        }
++    protected int getBreedingAge() {
++        return BREEDING_AGE;
++    }
+ 
++    protected double getBreedingProbability() {
++        return BREEDING_PROBABILITY;
+     }
+ 
+-    /**
+-     * Look for rats and snakes adjacent to the current location.
+-     * Only the first live rat or snake is eaten.
+-     * If it is a plant, then it is 'trampled'
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    private Location findFood() {
+-        if (getFog() && (rand.nextInt(2) == 0)) {
+-            Field field = getField();
+-            List<Location> adjacent = field.adjacentLocations(getLocation());
+-            Iterator<Location> it = adjacent.iterator();
+-            while(it.hasNext()) {
+-                Location where = it.next();
+-                Object animal = field.getObjectAt(where);
+-                if(animal instanceof Snake) {
+-                    Snake snake = (Snake) animal;
+-                    if(snake.isAlive()) {
+-                        snake.setDead();
+-                        setFoodLevel(SNAKE_FOOD_VALUE);
+-                        return where;
+-                    }
+-                }
+-                else if(animal instanceof Rat) {
+-                    Rat rat = (Rat) animal;
+-                    if(rat.isAlive()) {
+-                        rat.setDead();
+-                        setFoodLevel(RAT_FOOD_VALUE);
+-                        return where;
+-                    }
+-                }
+-                else if (animal instanceof Plant) {
+-                    Plant plant = (Plant) animal;
+-                    if(plant.isAlive()) {
+-                        plant.setDead();
+-                        return where;
+-                    }
+-                }
+-            }
+-            return null;
+-        }
+-        else {
+-            Field field = getField();
+-            List<Location> adjacent = field.adjacentLocations(getLocation());
+-            Iterator<Location> it = adjacent.iterator();
+-            while (it.hasNext()) {
+-                Location where = it.next();
+-                Object animal = field.getObjectAt(where);
+-                if (animal instanceof Snake) {
+-                    Snake snake = (Snake) animal;
+-                    if (snake.isAlive()) {
+-                        snake.setDead();
+-                        setFoodLevel(SNAKE_FOOD_VALUE);
+-                        return where;
+-                    }
+-                }
+-                else if(animal instanceof Rat) {
+-                    Rat rat = (Rat) animal;
+-                    if(rat.isAlive()) {
+-                        rat.setDead();
+-                        setFoodLevel(RAT_FOOD_VALUE);
+-                        return where;
+-                    }
+-                }
+-                else if (animal instanceof Plant){
+-                    Plant plant = (Plant) animal;
+-                    if(plant.isAlive()) {
+-                        plant.setDead();
+-                        return where;
+-                    }
+-                }
+-            }
+-            return null;
+-        }
++    protected int getMaxLitterSize() {
++        return MAX_LITTER_SIZE;
++    }
++
++    protected boolean isActive(int time) {
++        return isActiveBetween(time, 6, 22);
++    }
++
++    protected Animal createYoung(Field field, Location location) {
++        return new Eagle(false, field, location);
++    }
++
++    protected FoodSource[] getFoodSources() {
++        return FOOD_SOURCES;
+     }
+ }
+diff --git a/Emu.java b/Emu.java
+index bfca249..414263b 100644
+--- a/Emu.java
++++ b/Emu.java
+@@ -1,5 +1,3 @@
+-import java.util.Iterator;
+-import java.util.List;
+ import java.util.Random;
+ 
+ /**
+@@ -23,6 +21,10 @@ public class Emu extends Animal
+     // The food value of a single grass. In effect, this is the
+     // number of steps an emu can go before it has to eat again.
+     private static final int GRASS_FOOD_VALUE = 60;
++    // The food sources emus eat, in search order.
++    private static final FoodSource[] FOOD_SOURCES = {
++        new FoodSource(Grass.class, GRASS_FOOD_VALUE)
++    };
+     // A shared random number generator to control breeding.
+     private static final Random rand = Randomizer.getRandom();
+ 
+@@ -47,75 +49,31 @@ public class Emu extends Animal
+         }
+     }
+ 
+-    /**
+-     * This is what the emu does most of the time: it eats grass.
+-     * In the process, it might breed, die of hunger,
+-     * or die of old age.
+-     * @param newEmus A list to return newly born emus.
+-     * @param time the current time in the simulation
+-     */
+-    public void act(List<Animal> newEmus,int time) {
+-        incrementAge(MAX_AGE);
+-        incrementHunger();
++    protected int getMaxAge() {
++        return MAX_AGE;
++    }
+ 
+-        if(isAlive() && ((time <= 9)||(time >= 21))) {
+-            if (getDisease()){
+-                spreadDisease();
+-            }
+-            if (giveBirth(BREEDING_AGE)) {
+-                Field field = getField();
+-                List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-                int births = breed(BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE);
+-                for (int b = 0; b < births && free.size() > 0; b++) {
+-                    Location loc = free.remove(0);
+-                    Emu young = new Emu(false, field, loc);
+-                    young.setGender();
+-                    newEmus.add(young);
+-                }
+-            }
+-            Location newLocation = findFood();
+-            if(newLocation == null) {
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                setDead();
+-            }
+-        }
++    protected int getBreedingAge() {
++        return BREEDING_AGE;
+     }
+ 
++    protected double getBreedingProbability() {
++        return BREEDING_PROBABILITY;
++    }
+ 
+-    /**
+-     * Look for grass adjacent to the current location.
+-     * Only the first grass is eaten.
+-     * If acacia is adjacent, it is 'trampled'
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    private Location findFood() {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object searchPlant = field.getObjectAt(where);
+-            if(searchPlant instanceof Grass) {
+-                Grass grass = (Grass) searchPlant;
+-                if (grass.isAlive()) {
+-                    grass.setDead();
+-                    setFoodLevel(GRASS_FOOD_VALUE);
+-                    return where;
+-                }
+-            }
+-            else if (searchPlant instanceof Plant) {
+-                Plant plant = (Plant) searchPlant;
+-                if(plant.isAlive()) {
+-                    plant.setDead();
+-                    return where;
+-                }
+-            }
+-        }
+-        return null;
++    protected int getMaxLitterSize() {
++        return MAX_LITTER_SIZE;
++    }
++
++    protected boolean isActive(int time) {
++        return isActiveOutside(time, 9, 21);
++    }
++
++    protected Animal createYoung(Field field, Location location) {
++        return new Emu(false, field, location);
++    }
++
++    protected FoodSource[] getFoodSources() {
++        return FOOD_SOURCES;
+     }
+ }
+diff --git a/Grass.java b/Grass.java
+index 2ef1a90..c4b87f0 100644
+--- a/Grass.java
++++ b/Grass.java
+@@ -1,5 +1,3 @@
+-import java.util.List;
+-
+ /**
+  * A simple model of a grass plant.
+  * Grass plants reproduce and grow into other locations
+@@ -26,30 +24,15 @@ public class Grass extends Plant
+         super(field, location);
+     }
+ 
+-    /**
+-     * This is what the grass does most of the time:
+-     * it grows and reproduces offspring into adjacent locations
+-     * @param newGrass A list to return newly produced grasses.
+-     */
+-    public void act(List<Plant> newGrass) {
+-        if(isAlive()) {
+-            grow(newGrass);
+-        }
++    protected double getReproducingProbability() {
++        return REPRODUCING_PROBABILITY;
+     }
+ 
+-    /**
+-     * Check whether or not this grass is to reproduce at this step.
+-     * New grass plants will be created into free adjacent locations.
+-     * @param newGrass A list to return newly produced grass.
+-     */
+-    private void grow(List<Plant> newGrass) {
+-        Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        int offspring = breed(REPRODUCING_PROBABILITY, MAX_OFFSPRING_SIZE);
+-        for(int b = 0; b < offspring && free.size() > 0; b++) {
+-            Location loc = free.remove(0);
+-            Grass young = new Grass(field, loc);
+-            newGrass.add(young);
+-        }
++    protected int getMaxOffspringSize() {
++        return MAX_OFFSPRING_SIZE;
++    }
++
++    protected Plant createYoung(Field field, Location location) {
++        return new Grass(field, location);
+     }
+ }
+diff --git a/Plant.java b/Plant.java
+index 48303c9..43f7658 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -39,7 +39,26 @@ public abstract class Plant
+      * whatever it wants/needs to do.
+      * @param newPlants A list to receive newly created plants.
+      */
+-    abstract public void act(List<Plant> newPlants);
++    public void act(List<Plant> newPlants) {
++        if(isAlive()) {
++            grow(newPlants);
++        }
++    }
++
++    /**
++     * Return the likelihood of this plant reproducing.
++     */
++    protected abstract double getReproducingProbability();
++
++    /**
++     * Return the maximum number of offspring this plant can produce.
++     */
++    protected abstract int getMaxOffspringSize();
++
++    /**
++     * Create a newborn plant of this species.
++     */
++    protected abstract Plant createYoung(Field field, Location location);
+ 
+     /**
+      * Check whether the plant is alive or not.
+@@ -122,4 +141,17 @@ public abstract class Plant
+         }
+         return offspring;
+     }
++
++    /**
++     * Produce offspring into free adjacent locations.
++     */
++    private void grow(List<Plant> newPlants) {
++        Field field = getField();
++        List<Location> free = field.getFreeAdjacentLocations(getLocation());
++        int offspring = breed(getReproducingProbability(), getMaxOffspringSize());
++        for(int b = 0; b < offspring && free.size() > 0; b++) {
++            Location loc = free.remove(0);
++            newPlants.add(createYoung(field, loc));
++        }
++    }
+ }
+diff --git a/Rat.java b/Rat.java
+index 8800b4f..c8bb000 100644
+--- a/Rat.java
++++ b/Rat.java
+@@ -1,5 +1,3 @@
+-import java.util.Iterator;
+-import java.util.List;
+ import java.util.Random;
+ 
+ /**
+@@ -23,6 +21,10 @@ public class Rat extends Animal
+     // The food value of a single ant. In effect, this is the
+     // number of steps a rat can go before it has to eat again.
+     private static final int ANT_FOOD_VALUE = 100;
++    // The food sources rats eat, in search order.
++    private static final FoodSource[] FOOD_SOURCES = {
++        new FoodSource(Ant.class, ANT_FOOD_VALUE)
++    };
+     // A shared random number generator to control breeding.
+     private static final Random rand = Randomizer.getRandom();
+ 
+@@ -47,75 +49,31 @@ public class Rat extends Animal
+         }
+     }
+ 
+-    /**
+-     * This is what the rat does most of the time: it hunts for
+-     * ants. In the process, it might breed, die of hunger,
+-     * or die of old age.
+-     * @param newRats A list to return newly born rats.
+-     * @param time the current time in the simulation
+-     */
+-    public void act(List<Animal> newRats, int time) {
+-        incrementAge(MAX_AGE);
+-        incrementHunger();
++    protected int getMaxAge() {
++        return MAX_AGE;
++    }
+ 
+-        if(isAlive() && ((time >= 0)&&(time <= 18)))
+-        {
+-            if (getDisease()){
+-                spreadDisease();
+-            }
+-            if (giveBirth(BREEDING_AGE)) {
+-                Field field = getField();
+-                List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-                int births = breed(BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE);
+-                for (int b = 0; b < births && free.size() > 0; b++) {
+-                    Location loc = free.remove(0);
+-                    Rat young = new Rat(false, field, loc);
+-                    young.setGender();
+-                    newRats.add(young);
+-                }
+-            }
+-            Location newLocation = findFood();
+-            if(newLocation == null) {
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                setDead();
+-            }
+-        }
++    protected int getBreedingAge() {
++        return BREEDING_AGE;
+     }
+ 
+-    /**
+-     * Look for ants adjacent to the current location.
+-     * Only the first live ant is eaten.
+-     * if there is a plant adjacent, it can be 'trampled'
+-     * @return where food was found, or null if it wasn't.
+-     */
+-    private Location findFood() {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            if(animal instanceof Ant) {
+-                Ant ant = (Ant) animal;
+-                if(ant.isAlive()) {
+-                    ant.setDead();
+-                    setFoodLevel(ANT_FOOD_VALUE);
+-                    return where;
+-                }
+-            }
+-            else if (animal instanceof Plant) {
+-                Plant plant = (Plant) animal;
+-                if(plant.isAlive()) {
+-                    plant.setDead();
+-                    return where;
+-                }
+-            }
+-        }
+-        return null;
++    protected double getBreedingProbability() {
++        return BREEDING_PROBABILITY;
++    }
++
++    protected int getMaxLitterSize() {
++        return MAX_LITTER_SIZE;
++    }
++
++    protected boolean isActive(int time) {
++        return isActiveBetween(time, 0, 18);
++    }
++
++    protected Animal createYoung(Field field, Location location) {
++        return new Rat(false, field, location);
++    }
++
++    protected FoodSource[] getFoodSources() {
++        return FOOD_SOURCES;
+     }
+ }
+diff --git a/Snake.java b/Snake.java
+index 0f10198..ff53323 100644
+--- a/Snake.java
++++ b/Snake.java
+@@ -1,5 +1,3 @@
+-import java.util.Iterator;
+-import java.util.List;
+ import java.util.Random;
+ 
+ /**
+@@ -23,6 +21,10 @@ public class Snake extends Animal
+     // The food value of a single rat. In effect, this is the
+     // number of steps a snake can go before it has to eat again.
+     private static final int RAT_FOOD_VALUE = 100;
++    // The food sources snakes eat, in search order.
++    private static final FoodSource[] FOOD_SOURCES = {
++        new FoodSource(Rat.class, RAT_FOOD_VALUE)
++    };
+     // A shared random number generator to control breeding.
+     private static final Random rand = Randomizer.getRandom();
+ 
+@@ -47,76 +49,32 @@ public class Snake extends Animal
+         }
+     }
+ 
+-    /**
+-     * This is what the snake does most of the time: it hunts for
+-     * rats. In the process, it might breed, die of hunger,
+-     * or die of old age.
+-     * @param time the current time in the simulation
+-     * @param newSnakes A list to return newly born snakes.
+-     */
+-    public void act(List<Animal> newSnakes, int time) {
+-        incrementAge(MAX_AGE);
+-        incrementHunger();
+-        if(isAlive() && ((time >= 5)&&(time <= 23)))
+-        {
+-            if (getDisease()){
+-                spreadDisease();
+-            }
+-            if (giveBirth(BREEDING_AGE)) {
+-                Field field = getField();
+-                List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-                int births = breed(BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE);
+-                for (int b = 0; b < births && free.size() > 0; b++) {
+-                    Location loc = free.remove(0);
+-                    Snake young = new Snake(false, field, loc);
+-                    young.setGender();
+-                    newSnakes.add(young);
+-                }
+-            }
+-            Location newLocation = findFood();
+-            if(newLocation == null) {
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                setDead();
+-            }
+-        }
++    protected int getMaxAge() {
++        return MAX_AGE;
+     }
+ 
+-    /**
+-     * Look for rats adjacent to the current location.
+-     * Only the first live ant is eaten.
+-     * If it is a plant, it can be 'trampled'
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    private Location findFood()
+-    {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            if(animal instanceof Rat) {
+-                Rat rat = (Rat) animal;
+-                if(rat.isAlive()) {
+-                    rat.setDead();
+-                    setFoodLevel(RAT_FOOD_VALUE);
+-                    return where;
+-                }
+-            }
+-            else if (animal instanceof Plant){
+-                Plant plant = (Plant) animal;
+-                if(plant.isAlive()) {
+-                    plant.setDead();
+-                    return where;
+-                }
+-            }
+-        }
+-        return null;
++    protected int getBreedingAge() {
++        return BREEDING_AGE;
++    }
++
++    protected double getBreedingProbability() {
++        return BREEDING_PROBABILITY;
++    }
++
++    protected int getMaxLitterSize() {
++        return MAX_LITTER_SIZE;
++    }
++
++    protected boolean isActive(int time) {
++        return isActiveBetween(time, 5, 23);
++    }
++
++    protected Animal createYoung(Field field, Location location) {
++        return new Snake(false, field, location);
++    }
++
++    protected FoodSource[] getFoodSources() {
++        return FOOD_SOURCES;
+     }
+ 
+ }

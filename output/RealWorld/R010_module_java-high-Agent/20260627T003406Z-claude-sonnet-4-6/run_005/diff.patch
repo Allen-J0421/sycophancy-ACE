@@ -1,0 +1,219 @@
+diff --git a/Animal.java b/Animal.java
+index ef87402..44d824a 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -220,6 +220,12 @@ public abstract class Animal implements Eater, Interactable, LivingEntity
+      */
+     protected void resetFog(){ fog = false; }
+ 
++    public void applyWeatherEffect(String weather) {
++        if("fog".equals(weather)) setFog();
++    }
++
++    public void resetWeatherEffects() { resetFog(); }
++
+     /**
+      * returns the fog field
+      * @return true if the weather is fog, false if it is not
+@@ -241,7 +247,7 @@ public abstract class Animal implements Eater, Interactable, LivingEntity
+      * gives an animal a disease
+      * 1 in 100 chance of assigning true to disease
+      */
+-    protected void giveDisease() {
++    public void giveDisease() {
+         Random rand = Randomizer.getRandom();
+         if (rand.nextInt(101) == 1) {
+             disease = true;
+@@ -257,7 +263,7 @@ public abstract class Animal implements Eater, Interactable, LivingEntity
+     /**
+      * assigns false to disease
+      */
+-    protected void resetDisease() { disease = false; }
++    public void resetDisease() { disease = false; }
+ 
+     /**
+      * if an animal has a disease, this method spreads it to animals
+diff --git a/Ant.java b/Ant.java
+index 375245e..32b0665 100644
+--- a/Ant.java
++++ b/Ant.java
+@@ -46,6 +46,8 @@ public class Ant extends Animal
+         return new Ant(false, field, location);
+     }
+ 
++    public boolean isFloodVulnerable() { return true; }
++
+     // Eater: ants eat acacia and grass but do not trample.
+     public int eatAcacia(Acacia acacia) { return ACACIA_FOOD_VALUE; }
+     public int eatGrass(Grass grass)    { return GRASS_FOOD_VALUE; }
+diff --git a/LivingEntity.java b/LivingEntity.java
+index 5f1ea06..edd4d5a 100644
+--- a/LivingEntity.java
++++ b/LivingEntity.java
+@@ -3,9 +3,29 @@ import java.util.List;
+ /**
+  * Common lifecycle interface for all entities in the simulation.
+  * Allows animals and plants to be managed in a single polymorphic collection.
++ * Default implementations are no-ops so that each subtype only overrides
++ * the behaviours that apply to it.
+  */
+ public interface LivingEntity {
+     void act(List<LivingEntity> newEntities, int time);
+     boolean isAlive();
+     void setDead();
++
++    /** Apply the named weather condition to this entity (e.g. "fog", "rain"). */
++    default void applyWeatherEffect(String weather) {}
++
++    /** Reset any weather state carried by this entity. */
++    default void resetWeatherEffects() {}
++
++    /** Returns true if this entity is killed by flood events (Ant, Rat). */
++    default boolean isFloodVulnerable() { return false; }
++
++    /** Returns true if this entity is killed by drought events (all plants). */
++    default boolean isDroughtVulnerable() { return false; }
++
++    /** Potentially give this entity a disease. */
++    default void giveDisease() {}
++
++    /** Clear any disease state carried by this entity. */
++    default void resetDisease() {}
+ }
+diff --git a/Plant.java b/Plant.java
+index a7cb93c..f13026c 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -141,6 +141,14 @@ public abstract class Plant implements Interactable, LivingEntity
+      */
+     protected void resetRain(){ rain = false; }
+ 
++    public void applyWeatherEffect(String weather) {
++        if("rain".equals(weather)) setRain();
++    }
++
++    public void resetWeatherEffects() { resetRain(); }
++
++    public boolean isDroughtVulnerable() { return true; }
++
+     /**
+      * Generate a number representing the number of plants to produce,
+      * if it can reproduce.
+diff --git a/Rat.java b/Rat.java
+index eef4bac..c283e9e 100644
+--- a/Rat.java
++++ b/Rat.java
+@@ -43,6 +43,8 @@ public class Rat extends Animal
+         return new Rat(false, field, location);
+     }
+ 
++    public boolean isFloodVulnerable() { return true; }
++
+     // Eater: rats eat ants and trample plants.
+     public int eatAnt(Ant ant)   { return ANT_FOOD_VALUE; }
+     public boolean tramplesPlants() { return true; }
+diff --git a/Simulator.java b/Simulator.java
+index 366fb02..19eb4dd 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -130,39 +130,17 @@ public class Simulator
+     public void simulateOneStep() {
+         step++;
+ 
+-        if(weather.equals("rain")) {
++        if(weather.equals("rain") || weather.equals("fog")) {
+             resetWeather();
+-            for(LivingEntity e : entities) {
+-                if(e instanceof Plant) ((Plant) e).setRain();
+-            }
++            for(LivingEntity e : entities) e.applyWeatherEffect(weather);
+         }
+         else if(weather.equals("flood")) {
+             resetWeather();
+-            List<LivingEntity> ratsAndAnts = new ArrayList<>();
+-            for(LivingEntity e : entities) {
+-                if(e instanceof Ant || e instanceof Rat) ratsAndAnts.add(e);
+-            }
+-            Collections.shuffle(ratsAndAnts);
+-            for(int i = 0; i < ratsAndAnts.size() / 5; i++) {
+-                ratsAndAnts.get(i).setDead();
+-            }
++            killFractionOf(collectVulnerable(e -> e.isFloodVulnerable()));
+         }
+         else if(weather.equals("drought")) {
+             resetWeather();
+-            List<LivingEntity> allPlants = new ArrayList<>();
+-            for(LivingEntity e : entities) {
+-                if(e instanceof Plant) allPlants.add(e);
+-            }
+-            Collections.shuffle(allPlants);
+-            for(int i = 0; i < allPlants.size() / 5; i++) {
+-                allPlants.get(i).setDead();
+-            }
+-        }
+-        else if(weather.equals("fog")) {
+-            resetWeather();
+-            for(LivingEntity e : entities) {
+-                if(e instanceof Animal) ((Animal) e).setFog();
+-            }
++            killFractionOf(collectVulnerable(e -> e.isDroughtVulnerable()));
+         }
+ 
+         // Simulate all entities — animals and plants — in a single pass.
+@@ -265,30 +243,45 @@ public class Simulator
+     }
+ 
+     /**
+-     * Reset the weather conditions across all entities.
++     * Reset weather state on every entity.
+      */
+     private void resetWeather() {
++        for(LivingEntity e : entities) e.resetWeatherEffects();
++    }
++
++    /**
++     * Collect all entities that satisfy the given vulnerability predicate.
++     */
++    private List<LivingEntity> collectVulnerable(java.util.function.Predicate<LivingEntity> test) {
++        List<LivingEntity> result = new ArrayList<>();
+         for(LivingEntity e : entities) {
+-            if(e instanceof Animal) ((Animal) e).resetFog();
+-            else if(e instanceof Plant) ((Plant) e).resetRain();
++            if(test.test(e)) result.add(e);
+         }
++        return result;
+     }
+ 
+     /**
+-     * Simulate disease by calling giveDisease on every animal in the simulation.
++     * Shuffle the given list and kill the first fifth of it.
+      */
+-    public void simulateDisease() {
+-        for(LivingEntity e : entities) {
+-            if(e instanceof Animal) ((Animal) e).giveDisease();
++    private void killFractionOf(List<LivingEntity> pool) {
++        Collections.shuffle(pool);
++        for(int i = 0; i < pool.size() / 5; i++) {
++            pool.get(i).setDead();
+         }
+     }
+ 
+     /**
+-     * Reset the disease for all the animals in the simulation.
++     * Simulate disease by calling giveDisease on every entity in the simulation.
++     * Animals respond; plants use the no-op default.
++     */
++    public void simulateDisease() {
++        for(LivingEntity e : entities) e.giveDisease();
++    }
++
++    /**
++     * Reset the disease state for all entities in the simulation.
+      */
+     private void resetDisease() {
+-        for(LivingEntity e : entities) {
+-            if(e instanceof Animal) ((Animal) e).resetDisease();
+-        }
++        for(LivingEntity e : entities) e.resetDisease();
+     }
+ }

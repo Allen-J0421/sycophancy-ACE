@@ -1,0 +1,199 @@
+diff --git a/EntityFactory.java b/EntityFactory.java
+new file mode 100644
+index 0000000..ecebde0
+--- /dev/null
++++ b/EntityFactory.java
+@@ -0,0 +1,16 @@
++/**
++ * A factory that constructs a single entity instance at a given field location.
++ * Implementations are typically short lambdas, e.g. {@code (f, l) -> new Lion(true, f, l)}.
++ */
++@FunctionalInterface
++public interface EntityFactory
++{
++    /**
++     * Create a new entity at the specified location in the given field.
++     *
++     * @param field    The field the entity will inhabit.
++     * @param location The cell the entity occupies at birth.
++     * @return A freshly constructed entity.
++     */
++    Entity create(Field field, Location location);
++}
+diff --git a/EntityRegistry.java b/EntityRegistry.java
+new file mode 100644
+index 0000000..732ed02
+--- /dev/null
++++ b/EntityRegistry.java
+@@ -0,0 +1,72 @@
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.List;
++import java.awt.Color;
++
++/**
++ * The single source of truth for every entity type in the simulation.
++ *
++ * Each {@link Registration} entry bundles the four things the {@code Simulator}
++ * needs to know about a species: how likely it is to appear at each cell, what
++ * colour it renders as, how to construct an instance, and which Java class it
++ * represents (for the view's colour map).
++ *
++ * To add a new species to the simulation, add one {@code Registration} line here.
++ * No other class needs to change.
++ */
++public class EntityRegistry
++{
++    /**
++     * Pairs an {@link EntityFactory} with the display and population metadata
++     * the {@code Simulator} needs for one entity type.
++     */
++    public static class Registration
++    {
++        /** The runtime class, used to register a display colour. */
++        public final Class<?>       type;
++        /** Per-cell creation probability during field initialisation. */
++        public final double         probability;
++        /** Display colour in the simulation view. */
++        public final Color          color;
++        /** Factory that constructs a new instance of this entity type. */
++        public final EntityFactory  factory;
++
++        public Registration(Class<?> type, double probability,
++                            Color color, EntityFactory factory)
++        {
++            this.type        = type;
++            this.probability = probability;
++            this.color       = color;
++            this.factory     = factory;
++        }
++    }
++
++    // -------------------------------------------------------------------------
++    // Species table — add one Registration here to introduce a new species.
++    // Entries are checked in insertion order per cell; the first match wins.
++    // -------------------------------------------------------------------------
++
++    private static final List<Registration> REGISTRATIONS = Collections.unmodifiableList(
++        Arrays.asList(
++            new Registration(Lion.class,  0.01, Color.RED,    (f, l) -> new Lion(true, f, l)),
++            new Registration(Deer.class,  0.02, Color.BLUE,   (f, l) -> new Deer(true, f, l)),
++            new Registration(Owl.class,   0.05, Color.ORANGE, (f, l) -> new Owl(true, f, l)),
++            new Registration(Mouse.class, 0.04, Color.YELLOW, (f, l) -> new Mouse(true, f, l)),
++            new Registration(Cat.class,   0.05, Color.PINK,   (f, l) -> new Cat(true, f, l)),
++            new Registration(Grass.class, 0.40, Color.GREEN,  (f, l) -> new Grass(true, f, l))
++        )
++    );
++
++    /** Utility class — not instantiated. */
++    private EntityRegistry() {}
++
++    /**
++     * Return all registered entity types in population-priority order.
++     *
++     * @return An unmodifiable list of {@link Registration} entries.
++     */
++    public static List<Registration> getAll()
++    {
++        return REGISTRATIONS;
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index d0fca2f..0e9ecb0 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -1,9 +1,7 @@
+ import java.util.Random;
+ import java.util.List;
+ import java.util.ArrayList;
+-import java.util.Arrays;
+ import java.util.Iterator;
+-import java.util.function.BiFunction;
+ import java.awt.Color;
+ 
+ /**
+@@ -19,18 +17,6 @@ public class Simulator
+     // The default depth of the grid.
+     private static final int DEFAULT_DEPTH = 80;
+ 
+-    // Registry of all entity types: creation probability, display colour, and factory.
+-    // Entries are checked in order per cell; the first match wins.
+-    // To add a new species, add one line here — no other changes needed.
+-    private static final List<EntitySpec> ENTITY_SPECS = Arrays.asList(
+-        new EntitySpec(Lion.class,  0.01, Color.RED,    (f, l) -> new Lion(true, f, l)),
+-        new EntitySpec(Deer.class,  0.02, Color.BLUE,   (f, l) -> new Deer(true, f, l)),
+-        new EntitySpec(Owl.class,   0.05, Color.ORANGE, (f, l) -> new Owl(true, f, l)),
+-        new EntitySpec(Mouse.class, 0.04, Color.YELLOW, (f, l) -> new Mouse(true, f, l)),
+-        new EntitySpec(Cat.class,   0.05, Color.PINK,   (f, l) -> new Cat(true, f, l)),
+-        new EntitySpec(Grass.class, 0.40, Color.GREEN,  (f, l) -> new Grass(true, f, l))
+-    );
+-
+     // All living entities (animals and plants) in one unified list.
+     private List<Entity> entities;
+     // The current state of the field.
+@@ -68,8 +54,8 @@ public class Simulator
+         field    = new Field(depth, width);
+ 
+         view = new SimulatorView(depth, width);
+-        for (EntitySpec spec : ENTITY_SPECS) {
+-            view.setColor(spec.type, spec.color);
++        for (EntityRegistry.Registration reg : EntityRegistry.getAll()) {
++            view.setColor(reg.type, reg.color);
+         }
+ 
+         // Setup a valid starting point.
+@@ -134,9 +120,9 @@ public class Simulator
+     }
+ 
+     /**
+-     * Randomly populate the field using the ENTITY_SPECS registry.
+-     * Each cell draws one random number per spec in order; the first spec
+-     * whose probability threshold is met claims the cell.
++     * Randomly populate the field from the entity registry.
++     * Each cell draws one random number per registration in order;
++     * the first match claims the cell.
+      */
+     private void populate()
+     {
+@@ -145,9 +131,9 @@ public class Simulator
+         for (int row = 0; row < field.getDepth(); row++) {
+             for (int col = 0; col < field.getWidth(); col++) {
+                 Location location = new Location(row, col);
+-                for (EntitySpec spec : ENTITY_SPECS) {
+-                    if (rand.nextDouble() <= spec.probability) {
+-                        entities.add(spec.factory.apply(field, location));
++                for (EntityRegistry.Registration reg : EntityRegistry.getAll()) {
++                    if (rand.nextDouble() <= reg.probability) {
++                        entities.add(reg.factory.create(field, location));
+                         break;
+                     }
+                 }
+@@ -190,28 +176,4 @@ public class Simulator
+             // wake up
+         }
+     }
+-
+-    // -------------------------------------------------------------------------
+-
+-    /**
+-     * Describes one entity type for use in the species registry.
+-     * Bundles together the class (for colour registration), creation probability,
+-     * display colour, and a factory that constructs an instance.
+-     */
+-    private static class EntitySpec
+-    {
+-        final Class<?>                            type;
+-        final double                              probability;
+-        final Color                               color;
+-        final BiFunction<Field, Location, Entity> factory;
+-
+-        EntitySpec(Class<?> type, double probability, Color color,
+-                   BiFunction<Field, Location, Entity> factory)
+-        {
+-            this.type        = type;
+-            this.probability = probability;
+-            this.color       = color;
+-            this.factory     = factory;
+-        }
+-    }
+ }
