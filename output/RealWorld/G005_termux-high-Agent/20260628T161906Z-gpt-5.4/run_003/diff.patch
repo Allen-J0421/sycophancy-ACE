@@ -1,0 +1,500 @@
+diff --git a/app/src/main/java/com/termux/app/TermuxActivity.java b/app/src/main/java/com/termux/app/TermuxActivity.java
+index 0c9f74125..6644ca588 100644
+--- a/app/src/main/java/com/termux/app/TermuxActivity.java
++++ b/app/src/main/java/com/termux/app/TermuxActivity.java
+@@ -36,6 +36,7 @@ import com.termux.shared.activity.ActivityUtils;
+ import com.termux.shared.activity.media.AppCompatActivityUtils;
+ import com.termux.shared.data.IntentUtils;
+ import com.termux.shared.android.PermissionUtils;
++import com.termux.shared.android.ThreadUtils;
+ import com.termux.shared.data.DataUtils;
+ import com.termux.shared.termux.TermuxConstants;
+ import com.termux.shared.termux.TermuxConstants.TERMUX_APP.TERMUX_ACTIVITY;
+@@ -766,27 +767,24 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
+      * if targeting targetSdkVersion 30 (android 11) and running on sdk 30 (android 11) and higher.
+      */
+     public void requestStoragePermission(boolean isPermissionCallback) {
+-        new Thread() {
+-            @Override
+-            public void run() {
+-                // Do not ask for permission again
+-                int requestCode = isPermissionCallback ? -1 : PermissionUtils.REQUEST_GRANT_STORAGE_PERMISSION;
+-
+-                // If permission is granted, then also setup storage symlinks.
+-                if(PermissionUtils.checkAndRequestLegacyOrManageExternalStoragePermission(
+-                    TermuxActivity.this, requestCode, !isPermissionCallback)) {
+-                    if (isPermissionCallback)
+-                        Logger.logInfoAndShowToast(TermuxActivity.this, LOG_TAG,
+-                            getString(com.termux.shared.R.string.msg_storage_permission_granted_on_request));
+-
+-                    TermuxInstaller.setupStorageSymlinks(TermuxActivity.this);
+-                } else {
+-                    if (isPermissionCallback)
+-                        Logger.logInfoAndShowToast(TermuxActivity.this, LOG_TAG,
+-                            getString(com.termux.shared.R.string.msg_storage_permission_not_granted_on_request));
+-                }
++        ThreadUtils.runAsync("termux-storage-permission", () -> {
++            // Do not ask for permission again
++            int requestCode = isPermissionCallback ? -1 : PermissionUtils.REQUEST_GRANT_STORAGE_PERMISSION;
++
++            // If permission is granted, then also setup storage symlinks.
++            if(PermissionUtils.checkAndRequestLegacyOrManageExternalStoragePermission(
++                TermuxActivity.this, requestCode, !isPermissionCallback)) {
++                if (isPermissionCallback)
++                    Logger.logInfoAndShowToast(TermuxActivity.this, LOG_TAG,
++                        getString(com.termux.shared.R.string.msg_storage_permission_granted_on_request));
++
++                TermuxInstaller.setupStorageSymlinks(TermuxActivity.this);
++            } else {
++                if (isPermissionCallback)
++                    Logger.logInfoAndShowToast(TermuxActivity.this, LOG_TAG,
++                        getString(com.termux.shared.R.string.msg_storage_permission_not_granted_on_request));
+             }
+-        }.start();
++        });
+     }
+ 
+     @Override
+diff --git a/app/src/main/java/com/termux/app/TermuxInstaller.java b/app/src/main/java/com/termux/app/TermuxInstaller.java
+index b14149993..fc02212a3 100644
+--- a/app/src/main/java/com/termux/app/TermuxInstaller.java
++++ b/app/src/main/java/com/termux/app/TermuxInstaller.java
+@@ -19,6 +19,7 @@ import com.termux.shared.logger.Logger;
+ import com.termux.shared.markdown.MarkdownUtils;
+ import com.termux.shared.errors.Error;
+ import com.termux.shared.android.PackageUtils;
++import com.termux.shared.android.ThreadUtils;
+ import com.termux.shared.termux.TermuxConstants;
+ import com.termux.shared.termux.TermuxUtils;
+ import com.termux.shared.termux.shell.command.environment.TermuxShellEnvironment;
+@@ -115,13 +116,11 @@ final class TermuxInstaller {
+         }
+ 
+         final ProgressDialog progress = ProgressDialog.show(activity, null, activity.getString(R.string.bootstrap_installer_body), true, false);
+-        new Thread() {
+-            @Override
+-            public void run() {
+-                try {
+-                    Logger.logInfo(LOG_TAG, "Installing " + TermuxConstants.TERMUX_APP_NAME + " bootstrap packages.");
++        ThreadUtils.runAsync("termux-bootstrap-installer", () -> {
++            try {
++                Logger.logInfo(LOG_TAG, "Installing " + TermuxConstants.TERMUX_APP_NAME + " bootstrap packages.");
+ 
+-                    Error error;
++                Error error;
+ 
+                     // Delete prefix staging directory or any file at its destination
+                     error = FileUtils.deleteFile("termux prefix staging directory", TERMUX_STAGING_PREFIX_DIR_PATH, true);
+@@ -223,20 +222,19 @@ final class TermuxInstaller {
+ 
+                     activity.runOnUiThread(whenDone);
+ 
+-                } catch (final Exception e) {
+-                    showBootstrapErrorDialog(activity, whenDone, Logger.getStackTracesMarkdownString(null, Logger.getStackTracesStringArray(e)));
++            } catch (final Exception e) {
++                showBootstrapErrorDialog(activity, whenDone, Logger.getStackTracesMarkdownString(null, Logger.getStackTracesStringArray(e)));
+ 
+-                } finally {
+-                    activity.runOnUiThread(() -> {
+-                        try {
+-                            progress.dismiss();
+-                        } catch (RuntimeException e) {
+-                            // Activity already dismissed - ignore.
+-                        }
+-                    });
+-                }
++            } finally {
++                activity.runOnUiThread(() -> {
++                    try {
++                        progress.dismiss();
++                    } catch (RuntimeException e) {
++                        // Activity already dismissed - ignore.
++                    }
++                });
+             }
+-        }.start();
++        });
+     }
+ 
+     public static void showBootstrapErrorDialog(Activity activity, Runnable whenDone, String message) {
+@@ -280,11 +278,10 @@ final class TermuxInstaller {
+ 
+         Logger.logInfo(LOG_TAG, "Setting up storage symlinks.");
+ 
+-        new Thread() {
+-            public void run() {
+-                try {
+-                    Error error;
+-                    File storageDir = TermuxConstants.TERMUX_STORAGE_HOME_DIR;
++        ThreadUtils.runAsync("termux-storage-symlinks", () -> {
++            try {
++                Error error;
++                File storageDir = TermuxConstants.TERMUX_STORAGE_HOME_DIR;
+ 
+                     error = FileUtils.clearDirectory("~/storage", storageDir.getAbsolutePath());
+                     if (error != null) {
+@@ -360,15 +357,14 @@ final class TermuxInstaller {
+                     }
+ 
+                     Logger.logInfo(LOG_TAG, "Storage symlinks created successfully.");
+-                } catch (Exception e) {
+-                    Logger.logErrorAndShowToast(context, LOG_TAG, e.getMessage());
+-                    Logger.logStackTraceWithMessage(LOG_TAG, "Setup Storage Error: Error setting up link", e);
+-                    TermuxCrashUtils.sendCrashReportNotification(context, LOG_TAG, title, null,
+-                        "## " + title + "\n\n" + Logger.getStackTracesMarkdownString(null, Logger.getStackTracesStringArray(e)),
+-                        true, false, TermuxUtils.AppInfoMode.TERMUX_PACKAGE, true);
+-                }
++            } catch (Exception e) {
++                Logger.logErrorAndShowToast(context, LOG_TAG, e.getMessage());
++                Logger.logStackTraceWithMessage(LOG_TAG, "Setup Storage Error: Error setting up link", e);
++                TermuxCrashUtils.sendCrashReportNotification(context, LOG_TAG, title, null,
++                    "## " + title + "\n\n" + Logger.getStackTracesMarkdownString(null, Logger.getStackTracesStringArray(e)),
++                    true, false, TermuxUtils.AppInfoMode.TERMUX_PACKAGE, true);
+             }
+-        }.start();
++        });
+     }
+ 
+     private static Error ensureDirectoryExists(File directory) {
+diff --git a/app/src/main/java/com/termux/app/activities/SettingsActivity.java b/app/src/main/java/com/termux/app/activities/SettingsActivity.java
+index 1e95c85b2..20b72bc0b 100644
+--- a/app/src/main/java/com/termux/app/activities/SettingsActivity.java
++++ b/app/src/main/java/com/termux/app/activities/SettingsActivity.java
+@@ -18,6 +18,7 @@ import com.termux.app.models.UserAction;
+ import com.termux.shared.interact.ShareUtils;
+ import com.termux.shared.android.PackageUtils;
+ import com.termux.shared.android.AndroidUtils;
++import com.termux.shared.android.ThreadUtils;
+ import com.termux.shared.termux.TermuxConstants;
+ import com.termux.shared.termux.TermuxUtils;
+ import com.termux.shared.activity.media.AppCompatActivityUtils;
+@@ -76,30 +77,27 @@ public class SettingsActivity extends AppCompatActivity {
+             Preference aboutPreference = findPreference("about");
+             if (aboutPreference != null) {
+                 aboutPreference.setOnPreferenceClickListener(preference -> {
+-                    new Thread() {
+-                        @Override
+-                        public void run() {
+-                            String title = "About";
+-
+-                            StringBuilder aboutString = new StringBuilder();
+-                            aboutString.append(TermuxUtils.getAppInfoMarkdownString(context, TermuxUtils.AppInfoMode.TERMUX_AND_PLUGIN_PACKAGES));
+-                            aboutString.append("\n\n").append(AndroidUtils.getDeviceInfoMarkdownString(context, true));
+-                            aboutString.append("\n\n").append(TermuxUtils.getImportantLinksMarkdownString(context));
+-
+-                            String userActionName = UserAction.ABOUT.getName();
+-
+-                            ReportInfo reportInfo = new ReportInfo(userActionName,
+-                                TermuxConstants.TERMUX_APP.TERMUX_SETTINGS_ACTIVITY_NAME, title);
+-                            reportInfo.setReportString(aboutString.toString());
+-                            reportInfo.setReportSaveFileLabelAndPath(userActionName,
+-                                Environment.getExternalStorageDirectory() + "/" +
+-                                    FileUtils.sanitizeFileName(TermuxConstants.TERMUX_APP_NAME + "-" + userActionName + ".log", true, true));
+-
+-                            FragmentActivity activity = getActivity();
+-                            if (activity == null) return;
+-                            activity.runOnUiThread(() -> ReportActivity.startReportActivity(activity, reportInfo));
+-                        }
+-                    }.start();
++                    ThreadUtils.runAsync("termux-about-report", () -> {
++                        String title = "About";
++
++                        StringBuilder aboutString = new StringBuilder();
++                        aboutString.append(TermuxUtils.getAppInfoMarkdownString(context, TermuxUtils.AppInfoMode.TERMUX_AND_PLUGIN_PACKAGES));
++                        aboutString.append("\n\n").append(AndroidUtils.getDeviceInfoMarkdownString(context, true));
++                        aboutString.append("\n\n").append(TermuxUtils.getImportantLinksMarkdownString(context));
++
++                        String userActionName = UserAction.ABOUT.getName();
++
++                        ReportInfo reportInfo = new ReportInfo(userActionName,
++                            TermuxConstants.TERMUX_APP.TERMUX_SETTINGS_ACTIVITY_NAME, title);
++                        reportInfo.setReportString(aboutString.toString());
++                        reportInfo.setReportSaveFileLabelAndPath(userActionName,
++                            Environment.getExternalStorageDirectory() + "/" +
++                                FileUtils.sanitizeFileName(TermuxConstants.TERMUX_APP_NAME + "-" + userActionName + ".log", true, true));
++
++                        FragmentActivity activity = getActivity();
++                        if (activity == null) return;
++                        activity.runOnUiThread(() -> ReportActivity.startReportActivity(activity, reportInfo));
++                    });
+ 
+                     return true;
+                 });
+diff --git a/app/src/main/java/com/termux/app/api/file/FileReceiverActivity.java b/app/src/main/java/com/termux/app/api/file/FileReceiverActivity.java
+index ca5c07407..29f23228e 100644
+--- a/app/src/main/java/com/termux/app/api/file/FileReceiverActivity.java
++++ b/app/src/main/java/com/termux/app/api/file/FileReceiverActivity.java
+@@ -12,6 +12,7 @@ import androidx.appcompat.app.AppCompatActivity;
+ 
+ import com.termux.R;
+ import com.termux.shared.android.PackageUtils;
++import com.termux.shared.android.ThreadUtils;
+ import com.termux.shared.data.DataUtils;
+ import com.termux.shared.data.IntentUtils;
+ import com.termux.shared.net.uri.UriUtils;
+@@ -256,32 +257,28 @@ public class FileReceiverActivity extends AppCompatActivity {
+      * {@link TermuxPropertyConstants#KEY_DISABLE_FILE_VIEW_RECEIVER} value.
+      */
+     public static void updateFileReceiverActivityComponentsState(@NonNull Context context) {
+-        new Thread() {
+-            @Override
+-            public void run() {
+-                TermuxAppSharedProperties properties = TermuxAppSharedProperties.getProperties();
+-
+-                String errmsg;
+-                boolean state;
+-
+-                state = !properties.isFileShareReceiverDisabled();
+-                Logger.logVerbose(LOG_TAG, "Setting " + TERMUX_APP.FILE_SHARE_RECEIVER_ACTIVITY_CLASS_NAME + " component state to " + state);
+-                errmsg = PackageUtils.setComponentState(context,TermuxConstants.TERMUX_PACKAGE_NAME,
+-                    TERMUX_APP.FILE_SHARE_RECEIVER_ACTIVITY_CLASS_NAME,
+-                    state, null, false, false);
+-                if (errmsg != null)
+-                    Logger.logError(LOG_TAG, errmsg);
+-
+-                state = !properties.isFileViewReceiverDisabled();
+-                Logger.logVerbose(LOG_TAG, "Setting " + TERMUX_APP.FILE_VIEW_RECEIVER_ACTIVITY_CLASS_NAME + " component state to " + state);
+-                errmsg = PackageUtils.setComponentState(context,TermuxConstants.TERMUX_PACKAGE_NAME,
+-                    TERMUX_APP.FILE_VIEW_RECEIVER_ACTIVITY_CLASS_NAME,
+-                    state, null, false, false);
+-                if (errmsg != null)
+-                    Logger.logError(LOG_TAG, errmsg);
+-
+-            }
+-        }.start();
++        ThreadUtils.runAsync("termux-file-receiver-state", () -> {
++            TermuxAppSharedProperties properties = TermuxAppSharedProperties.getProperties();
++
++            String errmsg;
++            boolean state;
++
++            state = !properties.isFileShareReceiverDisabled();
++            Logger.logVerbose(LOG_TAG, "Setting " + TERMUX_APP.FILE_SHARE_RECEIVER_ACTIVITY_CLASS_NAME + " component state to " + state);
++            errmsg = PackageUtils.setComponentState(context,TermuxConstants.TERMUX_PACKAGE_NAME,
++                TERMUX_APP.FILE_SHARE_RECEIVER_ACTIVITY_CLASS_NAME,
++                state, null, false, false);
++            if (errmsg != null)
++                Logger.logError(LOG_TAG, errmsg);
++
++            state = !properties.isFileViewReceiverDisabled();
++            Logger.logVerbose(LOG_TAG, "Setting " + TERMUX_APP.FILE_VIEW_RECEIVER_ACTIVITY_CLASS_NAME + " component state to " + state);
++            errmsg = PackageUtils.setComponentState(context,TermuxConstants.TERMUX_PACKAGE_NAME,
++                TERMUX_APP.FILE_VIEW_RECEIVER_ACTIVITY_CLASS_NAME,
++                state, null, false, false);
++            if (errmsg != null)
++                Logger.logError(LOG_TAG, errmsg);
++        });
+     }
+ 
+ }
+diff --git a/app/src/main/java/com/termux/app/terminal/TermuxTerminalViewClient.java b/app/src/main/java/com/termux/app/terminal/TermuxTerminalViewClient.java
+index 700c5e509..f942a6954 100644
+--- a/app/src/main/java/com/termux/app/terminal/TermuxTerminalViewClient.java
++++ b/app/src/main/java/com/termux/app/terminal/TermuxTerminalViewClient.java
+@@ -27,6 +27,7 @@ import com.termux.shared.termux.TermuxBootstrap;
+ import com.termux.shared.termux.terminal.TermuxTerminalViewClientBase;
+ import com.termux.shared.termux.extrakeys.SpecialButton;
+ import com.termux.shared.android.AndroidUtils;
++import com.termux.shared.android.ThreadUtils;
+ import com.termux.shared.termux.TermuxConstants;
+ import com.termux.shared.activities.ReportActivity;
+ import com.termux.shared.models.ReportInfo;
+@@ -743,50 +744,47 @@ public class TermuxTerminalViewClient extends TermuxTerminalViewClientBase {
+     private void reportIssueFromTranscript(String transcriptText, boolean addTermuxDebugInfo) {
+         Logger.showToast(mActivity, mActivity.getString(R.string.msg_generating_report), true);
+ 
+-        new Thread() {
+-            @Override
+-            public void run() {
+-                StringBuilder reportString = new StringBuilder();
++        ThreadUtils.runAsync("termux-report-issue", () -> {
++            StringBuilder reportString = new StringBuilder();
+ 
+-                String title = TermuxConstants.TERMUX_APP_NAME + " Report Issue";
++            String title = TermuxConstants.TERMUX_APP_NAME + " Report Issue";
+ 
+-                reportString.append("## Transcript\n");
+-                reportString.append("\n").append(MarkdownUtils.getMarkdownCodeForString(transcriptText, true));
+-                reportString.append("\n##\n");
++            reportString.append("## Transcript\n");
++            reportString.append("\n").append(MarkdownUtils.getMarkdownCodeForString(transcriptText, true));
++            reportString.append("\n##\n");
+ 
+-                if (addTermuxDebugInfo) {
+-                    reportString.append("\n\n").append(TermuxUtils.getAppInfoMarkdownString(mActivity, TermuxUtils.AppInfoMode.TERMUX_AND_PLUGIN_PACKAGES));
+-                } else {
+-                    reportString.append("\n\n").append(TermuxUtils.getAppInfoMarkdownString(mActivity, TermuxUtils.AppInfoMode.TERMUX_PACKAGE));
+-                }
++            if (addTermuxDebugInfo) {
++                reportString.append("\n\n").append(TermuxUtils.getAppInfoMarkdownString(mActivity, TermuxUtils.AppInfoMode.TERMUX_AND_PLUGIN_PACKAGES));
++            } else {
++                reportString.append("\n\n").append(TermuxUtils.getAppInfoMarkdownString(mActivity, TermuxUtils.AppInfoMode.TERMUX_PACKAGE));
++            }
+ 
+-                reportString.append("\n\n").append(AndroidUtils.getDeviceInfoMarkdownString(mActivity, true));
++            reportString.append("\n\n").append(AndroidUtils.getDeviceInfoMarkdownString(mActivity, true));
+ 
+-                if (TermuxBootstrap.isAppPackageManagerAPT()) {
+-                    String termuxAptInfo = TermuxUtils.geAPTInfoMarkdownString(mActivity);
+-                    if (termuxAptInfo != null)
+-                        reportString.append("\n\n").append(termuxAptInfo);
+-                }
++            if (TermuxBootstrap.isAppPackageManagerAPT()) {
++                String termuxAptInfo = TermuxUtils.geAPTInfoMarkdownString(mActivity);
++                if (termuxAptInfo != null)
++                    reportString.append("\n\n").append(termuxAptInfo);
++            }
+ 
+-                if (addTermuxDebugInfo) {
+-                    String termuxDebugInfo = TermuxUtils.getTermuxDebugMarkdownString(mActivity);
+-                    if (termuxDebugInfo != null)
+-                        reportString.append("\n\n").append(termuxDebugInfo);
+-                }
++            if (addTermuxDebugInfo) {
++                String termuxDebugInfo = TermuxUtils.getTermuxDebugMarkdownString(mActivity);
++                if (termuxDebugInfo != null)
++                    reportString.append("\n\n").append(termuxDebugInfo);
++            }
+ 
+-                String userActionName = UserAction.REPORT_ISSUE_FROM_TRANSCRIPT.getName();
++            String userActionName = UserAction.REPORT_ISSUE_FROM_TRANSCRIPT.getName();
+ 
+-                ReportInfo reportInfo = new ReportInfo(userActionName,
+-                    TermuxConstants.TERMUX_APP.TERMUX_ACTIVITY_NAME, title);
+-                reportInfo.setReportString(reportString.toString());
+-                reportInfo.setReportStringSuffix("\n\n" + TermuxUtils.getReportIssueMarkdownString(mActivity));
+-                reportInfo.setReportSaveFileLabelAndPath(userActionName,
+-                    Environment.getExternalStorageDirectory() + "/" +
+-                        FileUtils.sanitizeFileName(TermuxConstants.TERMUX_APP_NAME + "-" + userActionName + ".log", true, true));
++            ReportInfo reportInfo = new ReportInfo(userActionName,
++                TermuxConstants.TERMUX_APP.TERMUX_ACTIVITY_NAME, title);
++            reportInfo.setReportString(reportString.toString());
++            reportInfo.setReportStringSuffix("\n\n" + TermuxUtils.getReportIssueMarkdownString(mActivity));
++            reportInfo.setReportSaveFileLabelAndPath(userActionName,
++                Environment.getExternalStorageDirectory() + "/" +
++                    FileUtils.sanitizeFileName(TermuxConstants.TERMUX_APP_NAME + "-" + userActionName + ".log", true, true));
+ 
+-                ReportActivity.startReportActivity(mActivity, reportInfo);
+-            }
+-        }.start();
++            ReportActivity.startReportActivity(mActivity, reportInfo);
++        });
+     }
+ 
+     public void doPaste() {
+diff --git a/termux-shared/src/main/java/com/termux/shared/activities/ReportActivity.java b/termux-shared/src/main/java/com/termux/shared/activities/ReportActivity.java
+index 083d517fd..7f759bd8f 100644
+--- a/termux-shared/src/main/java/com/termux/shared/activities/ReportActivity.java
++++ b/termux-shared/src/main/java/com/termux/shared/activities/ReportActivity.java
+@@ -18,6 +18,7 @@ import android.view.MenuItem;
+ 
+ import com.termux.shared.R;
+ import com.termux.shared.activity.media.AppCompatActivityUtils;
++import com.termux.shared.android.ThreadUtils;
+ import com.termux.shared.data.DataUtils;
+ import com.termux.shared.file.FileUtils;
+ import com.termux.shared.file.filesystem.FileType;
+@@ -431,12 +432,12 @@ public class ReportActivity extends AppCompatActivity {
+         if (isSynchronous) {
+             return deleteReportInfoFilesOlderThanXDaysInner(context, days);
+         } else {
+-            new Thread() { public void run() {
++            ThreadUtils.runAsync("termux-report-cleanup", () -> {
+                 Error error = deleteReportInfoFilesOlderThanXDaysInner(context, days);
+                 if (error != null) {
+                     Logger.logErrorExtended(LOG_TAG, error.toString());
+                 }
+-            }}.start();
++            });
+             return null;
+         }
+     }
+diff --git a/termux-shared/src/main/java/com/termux/shared/android/ThreadUtils.java b/termux-shared/src/main/java/com/termux/shared/android/ThreadUtils.java
+new file mode 100644
+index 000000000..dff0c8a1a
+--- /dev/null
++++ b/termux-shared/src/main/java/com/termux/shared/android/ThreadUtils.java
+@@ -0,0 +1,22 @@
++package com.termux.shared.android;
++
++import androidx.annotation.NonNull;
++import androidx.annotation.Nullable;
++
++public final class ThreadUtils {
++
++    private ThreadUtils() {}
++
++    @NonNull
++    public static Thread runAsync(@NonNull Runnable runnable) {
++        return runAsync(null, runnable);
++    }
++
++    @NonNull
++    public static Thread runAsync(@Nullable String threadName, @NonNull Runnable runnable) {
++        Thread thread = threadName == null ? new Thread(runnable) : new Thread(runnable, threadName);
++        thread.start();
++        return thread;
++    }
++
++}
+diff --git a/termux-shared/src/main/java/com/termux/shared/shell/command/runner/app/AppShell.java b/termux-shared/src/main/java/com/termux/shared/shell/command/runner/app/AppShell.java
+index 3f49e5aeb..786893162 100644
+--- a/termux-shared/src/main/java/com/termux/shared/shell/command/runner/app/AppShell.java
++++ b/termux-shared/src/main/java/com/termux/shared/shell/command/runner/app/AppShell.java
+@@ -10,6 +10,7 @@ import androidx.annotation.Nullable;
+ 
+ import com.google.common.base.Joiner;
+ import com.termux.shared.R;
++import com.termux.shared.android.ThreadUtils;
+ import com.termux.shared.data.DataUtils;
+ import com.termux.shared.shell.command.ExecutionCommand;
+ import com.termux.shared.shell.command.environment.ShellEnvironmentUtils;
+@@ -143,16 +144,13 @@ public final class AppShell {
+                 // TODO: Should either of these be handled or returned?
+             }
+         } else {
+-            new Thread() {
+-                @Override
+-                public void run() {
+-                    try {
+-                        appShell.executeInner(currentPackageContext);
+-                    } catch (IllegalThreadStateException | InterruptedException e) {
+-                        // TODO: Should either of these be handled or returned?
+-                    }
++            ThreadUtils.runAsync("termux-app-shell", () -> {
++                try {
++                    appShell.executeInner(currentPackageContext);
++                } catch (IllegalThreadStateException | InterruptedException e) {
++                    // TODO: Should either of these be handled or returned?
+                 }
+-            }.start();
++            });
+         }
+ 
+         return appShell;
+diff --git a/termux-shared/src/main/java/com/termux/shared/termux/crash/TermuxCrashUtils.java b/termux-shared/src/main/java/com/termux/shared/termux/crash/TermuxCrashUtils.java
+index 1cd4ce066..5da5d067e 100644
+--- a/termux-shared/src/main/java/com/termux/shared/termux/crash/TermuxCrashUtils.java
++++ b/termux-shared/src/main/java/com/termux/shared/termux/crash/TermuxCrashUtils.java
+@@ -13,6 +13,7 @@ import androidx.annotation.Nullable;
+ 
+ import com.termux.shared.activities.ReportActivity;
+ import com.termux.shared.android.AndroidUtils;
++import com.termux.shared.android.ThreadUtils;
+ import com.termux.shared.crash.CrashHandler;
+ import com.termux.shared.data.DataUtils;
+ import com.termux.shared.errors.Error;
+@@ -158,12 +159,7 @@ public class TermuxCrashUtils implements CrashHandler.CrashHandlerClient {
+         if (!preferences.areCrashReportNotificationsEnabled(false))
+             return;
+ 
+-        new Thread() {
+-            @Override
+-            public void run() {
+-                notifyAppCrashFromCrashLogFileInner(context, logTagParam);
+-            }
+-        }.start();
++        ThreadUtils.runAsync("termux-crash-notify", () -> notifyAppCrashFromCrashLogFileInner(context, logTagParam));
+     }
+ 
+     private static synchronized void notifyAppCrashFromCrashLogFileInner(final Context context, final String logTagParam) {

@@ -124,6 +124,7 @@ class ExperimentConfig:
     clarification_patterns: ClarificationPatterns | None = None
     effort: str | None = None
     limit_detect: LimitDetectConfig | None = None
+    no_snapshot: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,6 +138,7 @@ class CliArgs:
     prompter: bool
     output_base: Path | None = None
     effort: str | None = None
+    no_snapshot: bool = False
 
 
 @dataclass(frozen=True)

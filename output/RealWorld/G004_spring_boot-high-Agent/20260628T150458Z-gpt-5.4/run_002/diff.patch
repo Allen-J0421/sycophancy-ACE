@@ -1,0 +1,109 @@
+diff --git a/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerator.java b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerator.java
+index 559caebb4..2d99fff3c 100644
+--- a/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerator.java
++++ b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerator.java
+@@ -95,9 +95,7 @@ class ProjectGenerator {
+ 	private void extractProject(ProjectGenerationResponse entity, @Nullable String output, boolean overwrite)
+ 			throws IOException {
+ 		File outputDirectory = (output != null) ? new File(output) : new File(System.getProperty("user.dir"));
+-		if (!outputDirectory.exists()) {
+-			outputDirectory.mkdirs();
+-		}
++		createDirectories(outputDirectory);
+ 		byte[] content = entity.getContent();
+ 		Assert.state(content != null, "'content' must not be null");
+ 		try (ZipInputStream zipStream = new ZipInputStream(new ByteArrayInputStream(content))) {
+@@ -110,29 +108,53 @@ class ProjectGenerator {
+ 
+ 	private void extractFromStream(ZipInputStream zipStream, boolean overwrite, File outputDirectory)
+ 			throws IOException {
+-		ZipEntry entry = zipStream.getNextEntry();
+ 		String canonicalOutputPath = outputDirectory.getCanonicalPath() + File.separator;
+-		while (entry != null) {
+-			File file = new File(outputDirectory, entry.getName());
+-			String canonicalEntryPath = file.getCanonicalPath();
+-			if (!canonicalEntryPath.startsWith(canonicalOutputPath)) {
+-				throw new ReportableException("Entry '" + entry.getName() + "' would be written to '"
+-						+ canonicalEntryPath + "'. This is outside the output location of '" + canonicalOutputPath
+-						+ "'. Verify your target server configuration.");
+-			}
+-			if (file.exists() && !overwrite) {
+-				throw new ReportableException((file.isDirectory() ? "Directory" : "File") + " '" + file.getName()
+-						+ "' already exists. Use --force if you want to overwrite or "
+-						+ "specify an alternate location.");
+-			}
+-			if (!entry.isDirectory()) {
+-				FileCopyUtils.copy(StreamUtils.nonClosing(zipStream), new FileOutputStream(file));
++		for (ZipEntry entry; (entry = zipStream.getNextEntry()) != null;) {
++			File file = createOutputFile(outputDirectory, canonicalOutputPath, entry);
++			assertOverwriteAllowed(file, overwrite);
++			if (entry.isDirectory()) {
++				createDirectories(file);
+ 			}
+ 			else {
+-				file.mkdir();
++				createDirectories(file.getParentFile());
++				try (FileOutputStream outputStream = new FileOutputStream(file)) {
++					FileCopyUtils.copy(StreamUtils.nonClosing(zipStream), outputStream);
++				}
+ 			}
+ 			zipStream.closeEntry();
+-			entry = zipStream.getNextEntry();
++		}
++	}
++
++	private File createOutputFile(File outputDirectory, String canonicalOutputPath, ZipEntry entry) throws IOException {
++		File file = new File(outputDirectory, entry.getName());
++		String canonicalEntryPath = file.getCanonicalPath();
++		if (!canonicalEntryPath.startsWith(canonicalOutputPath)) {
++			throw new ReportableException("Entry '" + entry.getName() + "' would be written to '" + canonicalEntryPath
++					+ "'. This is outside the output location of '" + canonicalOutputPath
++					+ "'. Verify your target server configuration.");
++		}
++		return file;
++	}
++
++	private void assertOverwriteAllowed(File file, boolean overwrite) {
++		if (file.exists() && !overwrite) {
++			throw new ReportableException((file.isDirectory() ? "Directory" : "File") + " '" + file.getName()
++					+ "' already exists. Use --force if you want to overwrite or specify an alternate location.");
++		}
++	}
++
++	private void createDirectories(@Nullable File directory) {
++		if (directory == null) {
++			return;
++		}
++		if (directory.exists()) {
++			if (!directory.isDirectory()) {
++				throw new ReportableException("Path '" + directory.getPath() + "' exists but is not a directory");
++			}
++			return;
++		}
++		if (!directory.mkdirs() && !directory.isDirectory()) {
++			throw new ReportableException("Failed to create directory '" + directory.getPath() + "'");
+ 		}
+ 	}
+ 
+diff --git a/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/InitCommandTests.java b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/InitCommandTests.java
+index 53ad18de3..0152b9b14 100644
+--- a/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/InitCommandTests.java
++++ b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/InitCommandTests.java
+@@ -114,6 +114,17 @@ class InitCommandTests extends AbstractHttpClientMockTests {
+ 		assertThat(archiveFile).exists();
+ 	}
+ 
++	@Test
++	void generateProjectAndExtractCreatesNestedDirectories(@TempDir File tempDir) throws Exception {
++		byte[] archive = createFakeZipArchive("nested/dir/test.txt", "Fake content");
++		MockHttpProjectGenerationRequest request = new MockHttpProjectGenerationRequest("application/zip", "demo.zip",
++				archive);
++		mockSuccessfulProjectGeneration(request);
++		assertThat(this.command.run("--extract", tempDir.getAbsolutePath())).isEqualTo(ExitStatus.OK);
++		File archiveFile = new File(tempDir, "nested/dir/test.txt");
++		assertThat(archiveFile).exists();
++	}
++
+ 	@Test
+ 	void generateProjectAndExtractWillNotWriteEntriesOutsideOutputLocation(@TempDir File tempDir) throws Exception {
+ 		byte[] archive = createFakeZipArchive("../outside.txt", "Fake content");

@@ -1,0 +1,644 @@
+diff --git a/android/guava-tests/test/com/google/common/io/FileBackedOutputStreamTest.java b/android/guava-tests/test/com/google/common/io/FileBackedOutputStreamTest.java
+index c4de9f830..a1a57f7de 100644
+--- a/android/guava-tests/test/com/google/common/io/FileBackedOutputStreamTest.java
++++ b/android/guava-tests/test/com/google/common/io/FileBackedOutputStreamTest.java
+@@ -125,20 +125,36 @@ public class FileBackedOutputStreamTest extends IoTestCase {
+     out.flush(); // for coverage
+   }
+ 
+-  // TODO(chrisn): only works if we ensure we have crossed file threshold
+-
+-  public void testWriteErrorAfterClose() throws Exception {
++  public void testWriteErrorAfterClose_fileBacked() throws Exception {
+     byte[] data = newPreFilledByteArray(100);
+     FileBackedOutputStream out = new FileBackedOutputStream(50);
+     ByteSource source = out.asByteSource();
+ 
+     out.write(data);
+-    assertThat(source.read()).isEqualTo(data);
++    assertThat(out.getFile()).isNotNull();
++    assertWriteAfterCloseFailsWithoutChangingData(out, source, data);
++  }
+ 
+-    out.close();
+-    assertThrows(IOException.class, () -> out.write(42));
++  public void testWriteErrorAfterClose_inMemory() throws Exception {
++    byte[] data = newPreFilledByteArray(100);
++    FileBackedOutputStream out = new FileBackedOutputStream(Integer.MAX_VALUE);
++    ByteSource source = out.asByteSource();
+ 
+-    // Verify that write had no effect
++    out.write(data);
++    assertThat(out.getFile()).isNull();
++    assertWriteAfterCloseFailsWithoutChangingData(out, source, data);
++  }
++
++  public void testInvalidWriteDoesNotCreateFileOrChangeData() throws Exception {
++    byte[] data = newPreFilledByteArray(9);
++    FileBackedOutputStream out = new FileBackedOutputStream(/* fileThreshold= */ 10);
++    ByteSource source = out.asByteSource();
++
++    out.write(data);
++    assertThat(out.getFile()).isNull();
++
++    assertThrows(IndexOutOfBoundsException.class, () -> out.write(new byte[2], 1, 2));
++    assertThat(out.getFile()).isNull();
+     assertThat(source.read()).isEqualTo(data);
+     out.reset();
+   }
+@@ -232,4 +248,16 @@ public class FileBackedOutputStreamTest extends IoTestCase {
+     reachabilityFence(out); // not sure if this is necessary even in theory
+     return new FileAndWeakByteSource(file, new WeakReference<>(out.asByteSource()));
+   }
++
++  private static void assertWriteAfterCloseFailsWithoutChangingData(
++      FileBackedOutputStream out, ByteSource source, byte[] expectedData) throws IOException {
++    assertThat(source.read()).isEqualTo(expectedData);
++
++    out.close();
++    assertThrows(IOException.class, () -> out.write(42));
++
++    // Verify that write had no effect.
++    assertThat(source.read()).isEqualTo(expectedData);
++    out.reset();
++  }
+ }
+diff --git a/android/guava/src/com/google/common/io/FileBackedOutputStream.java b/android/guava/src/com/google/common/io/FileBackedOutputStream.java
+index 18eb4f1d4..19201acfa 100644
+--- a/android/guava/src/com/google/common/io/FileBackedOutputStream.java
++++ b/android/guava/src/com/google/common/io/FileBackedOutputStream.java
+@@ -15,6 +15,7 @@
+ package com.google.common.io;
+ 
+ import static com.google.common.base.Preconditions.checkArgument;
++import static com.google.common.base.Preconditions.checkPositionIndexes;
+ import static com.google.common.base.Throwables.throwIfUnchecked;
+ import static com.google.common.collect.Sets.newConcurrentHashSet;
+ import static java.util.Objects.requireNonNull;
+@@ -204,6 +205,7 @@ public final class FileBackedOutputStream extends OutputStream {
+ 
+   @Override
+   public void write(byte[] b, int off, int len) throws IOException {
++    checkPositionIndexes(off, off + len, b.length);
+     try {
+       state.write(b, off, len);
+     } finally {
+@@ -251,7 +253,7 @@ public final class FileBackedOutputStream extends OutputStream {
+       this.fileThreshold = fileThreshold;
+       this.resetWhenGarbageCollected = resetWhenGarbageCollected;
+       this.memory = new MemoryOutput();
+-      this.out = memory;
++      this.out = requireNonNull(memory);
+     }
+ 
+     synchronized @Nullable File getFile() {
+@@ -272,19 +274,8 @@ public final class FileBackedOutputStream extends OutputStream {
+       try {
+         close();
+       } finally {
+-        if (memory == null) {
+-          memory = new MemoryOutput();
+-        } else {
+-          memory.reset();
+-        }
+-        out = memory;
+-        if (file != null) {
+-          File deleteMe = file;
+-          file = null;
+-          if (!deleteMe.delete()) {
+-            throw new IOException("Could not delete: " + deleteMe);
+-          }
+-        }
++        resetMemoryBuffer();
++        deleteFileIfPresent();
+       }
+     }
+ 
+@@ -312,33 +303,59 @@ public final class FileBackedOutputStream extends OutputStream {
+      */
+     @GuardedBy("this")
+     void update(int len) throws IOException {
+-      if (memory != null && (memory.getCount() + len > fileThreshold)) {
+-        File temp = TempFileCreator.INSTANCE.createTempFile("FileBackedOutputStream");
+-        if (resetWhenGarbageCollected) {
+-          // References are not guaranteed to be collected on system shutdown; this is insurance.
+-          temp.deleteOnExit();
+-        }
+-        FileOutputStream transfer = null;
+-        try {
+-          transfer = new FileOutputStream(temp);
+-          transfer.write(memory.getBuffer(), 0, memory.getCount());
+-          transfer.flush();
+-          // We've successfully transferred the data; switch to writing to file.
+-          out = transfer;
+-        } catch (IOException e) {
+-          if (transfer != null) {
+-            try {
+-              transfer.close();
+-            } catch (IOException closeException) {
+-              e.addSuppressed(closeException);
+-            }
+-          }
+-          temp.delete();
+-          throw e;
+-        }
++      if (memory != null && memory.getCount() > fileThreshold - len) {
++        promoteToFile();
++      }
++    }
+ 
++    @GuardedBy("this")
++    private void resetMemoryBuffer() {
++      if (memory == null) {
++        memory = new MemoryOutput();
++      } else {
++        memory.reset();
++      }
++      out = requireNonNull(memory);
++    }
++
++    @GuardedBy("this")
++    private void deleteFileIfPresent() throws IOException {
++      if (file == null) {
++        return;
++      }
++      File deleteMe = file;
++      file = null;
++      if (!deleteMe.delete()) {
++        throw new IOException("Could not delete: " + deleteMe);
++      }
++    }
++
++    @GuardedBy("this")
++    private void promoteToFile() throws IOException {
++      File temp = TempFileCreator.INSTANCE.createTempFile("FileBackedOutputStream");
++      if (resetWhenGarbageCollected) {
++        // References are not guaranteed to be collected on system shutdown; this is insurance.
++        temp.deleteOnExit();
++      }
++      FileOutputStream transfer = null;
++      try {
++        transfer = new FileOutputStream(temp);
++        MemoryOutput memory = requireNonNull(this.memory);
++        transfer.write(memory.getBuffer(), 0, memory.getCount());
++        transfer.flush();
++        out = transfer;
+         file = temp;
+-        memory = null;
++        this.memory = null;
++      } catch (IOException e) {
++        if (transfer != null) {
++          try {
++            transfer.close();
++          } catch (IOException closeException) {
++            e.addSuppressed(closeException);
++          }
++        }
++        temp.delete();
++        throw e;
+       }
+     }
+   }
+diff --git a/android/guava/src/com/google/common/io/TempFileCreator.java b/android/guava/src/com/google/common/io/TempFileCreator.java
+index 6089cffec..b3d8460eb 100644
+--- a/android/guava/src/com/google/common/io/TempFileCreator.java
++++ b/android/guava/src/com/google/common/io/TempFileCreator.java
+@@ -64,13 +64,26 @@ abstract class TempFileCreator {
+   abstract File createTempFile(String prefix) throws IOException;
+ 
+   private static TempFileCreator pickSecureCreator() {
++    if (isJavaNioAvailable()) {
++      return new JavaNioCreator();
++    }
++
++    // Android isolates apps' temporary directories since Jelly Bean:
++    // https://github.com/google/guava/issues/4011#issuecomment-770020802
++    // So we can create files there with any permissions and still get security from the isolation.
++    return isAndroidVersionAtLeastJellyBean() ? new JavaIoCreator() : new ThrowingCreator();
++  }
++
++  private static boolean isJavaNioAvailable() {
+     try {
+       Class.forName("java.nio.file.Path");
+-      return new JavaNioCreator();
++      return true;
+     } catch (ClassNotFoundException runningUnderAndroid) {
+-      // Try another way.
++      return false;
+     }
++  }
+ 
++  private static boolean isAndroidVersionAtLeastJellyBean() {
+     try {
+       int version = (int) Class.forName("android.os.Build$VERSION").getField("SDK_INT").get(null);
+       int jellyBean =
+@@ -79,18 +92,11 @@ abstract class TempFileCreator {
+        * I assume that this check can't fail because JELLY_BEAN will be present only if we're
+        * running under Jelly Bean or higher. But it seems safest to check.
+        */
+-      if (version < jellyBean) {
+-        return new ThrowingCreator();
+-      }
++      return version >= jellyBean;
+     } catch (ReflectiveOperationException e) {
+       // Should be impossible, but we want to return *something* so that class init succeeds.
+-      return new ThrowingCreator();
++      return false;
+     }
+-
+-    // Android isolates apps' temporary directories since Jelly Bean:
+-    // https://github.com/google/guava/issues/4011#issuecomment-770020802
+-    // So we can create files there with any permissions and still get security from the isolation.
+-    return new JavaIoCreator();
+   }
+ 
+   /**
+@@ -156,30 +162,8 @@ abstract class TempFileCreator {
+ 
+     private static PermissionSupplier userPermissions() {
+       try {
+-        UserPrincipal user =
+-            FileSystems.getDefault()
+-                .getUserPrincipalLookupService()
+-                .lookupPrincipalByName(getUsername());
+-        ImmutableList<AclEntry> acl =
+-            ImmutableList.of(
+-                AclEntry.newBuilder()
+-                    .setType(ALLOW)
+-                    .setPrincipal(user)
+-                    .setPermissions(EnumSet.allOf(AclEntryPermission.class))
+-                    .setFlags(DIRECTORY_INHERIT, FILE_INHERIT)
+-                    .build());
+         FileAttribute<ImmutableList<AclEntry>> attribute =
+-            new FileAttribute<ImmutableList<AclEntry>>() {
+-              @Override
+-              public String name() {
+-                return "acl:acl";
+-              }
+-
+-              @Override
+-              public ImmutableList<AclEntry> value() {
+-                return acl;
+-              }
+-            };
++            userAclAttribute(lookupCurrentUser());
+         return () -> attribute;
+       } catch (IOException e) {
+         // We throw a new exception each time so that the stack trace is right.
+@@ -189,6 +173,34 @@ abstract class TempFileCreator {
+       }
+     }
+ 
++    private static UserPrincipal lookupCurrentUser() throws IOException {
++      return FileSystems.getDefault()
++          .getUserPrincipalLookupService()
++          .lookupPrincipalByName(getUsername());
++    }
++
++    private static FileAttribute<ImmutableList<AclEntry>> userAclAttribute(UserPrincipal user) {
++      ImmutableList<AclEntry> acl =
++          ImmutableList.of(
++              AclEntry.newBuilder()
++                  .setType(ALLOW)
++                  .setPrincipal(user)
++                  .setPermissions(EnumSet.allOf(AclEntryPermission.class))
++                  .setFlags(DIRECTORY_INHERIT, FILE_INHERIT)
++                  .build());
++      return new FileAttribute<ImmutableList<AclEntry>>() {
++        @Override
++        public String name() {
++          return "acl:acl";
++        }
++
++        @Override
++        public ImmutableList<AclEntry> value() {
++          return acl;
++        }
++      };
++    }
++
+     private static String getUsername() {
+       /*
+        * https://github.com/google/guava/issues/6634: ProcessHandle has more accurate information,
+diff --git a/guava-tests/test/com/google/common/io/FileBackedOutputStreamTest.java b/guava-tests/test/com/google/common/io/FileBackedOutputStreamTest.java
+index c4de9f830..a1a57f7de 100644
+--- a/guava-tests/test/com/google/common/io/FileBackedOutputStreamTest.java
++++ b/guava-tests/test/com/google/common/io/FileBackedOutputStreamTest.java
+@@ -125,20 +125,36 @@ public class FileBackedOutputStreamTest extends IoTestCase {
+     out.flush(); // for coverage
+   }
+ 
+-  // TODO(chrisn): only works if we ensure we have crossed file threshold
+-
+-  public void testWriteErrorAfterClose() throws Exception {
++  public void testWriteErrorAfterClose_fileBacked() throws Exception {
+     byte[] data = newPreFilledByteArray(100);
+     FileBackedOutputStream out = new FileBackedOutputStream(50);
+     ByteSource source = out.asByteSource();
+ 
+     out.write(data);
+-    assertThat(source.read()).isEqualTo(data);
++    assertThat(out.getFile()).isNotNull();
++    assertWriteAfterCloseFailsWithoutChangingData(out, source, data);
++  }
+ 
+-    out.close();
+-    assertThrows(IOException.class, () -> out.write(42));
++  public void testWriteErrorAfterClose_inMemory() throws Exception {
++    byte[] data = newPreFilledByteArray(100);
++    FileBackedOutputStream out = new FileBackedOutputStream(Integer.MAX_VALUE);
++    ByteSource source = out.asByteSource();
+ 
+-    // Verify that write had no effect
++    out.write(data);
++    assertThat(out.getFile()).isNull();
++    assertWriteAfterCloseFailsWithoutChangingData(out, source, data);
++  }
++
++  public void testInvalidWriteDoesNotCreateFileOrChangeData() throws Exception {
++    byte[] data = newPreFilledByteArray(9);
++    FileBackedOutputStream out = new FileBackedOutputStream(/* fileThreshold= */ 10);
++    ByteSource source = out.asByteSource();
++
++    out.write(data);
++    assertThat(out.getFile()).isNull();
++
++    assertThrows(IndexOutOfBoundsException.class, () -> out.write(new byte[2], 1, 2));
++    assertThat(out.getFile()).isNull();
+     assertThat(source.read()).isEqualTo(data);
+     out.reset();
+   }
+@@ -232,4 +248,16 @@ public class FileBackedOutputStreamTest extends IoTestCase {
+     reachabilityFence(out); // not sure if this is necessary even in theory
+     return new FileAndWeakByteSource(file, new WeakReference<>(out.asByteSource()));
+   }
++
++  private static void assertWriteAfterCloseFailsWithoutChangingData(
++      FileBackedOutputStream out, ByteSource source, byte[] expectedData) throws IOException {
++    assertThat(source.read()).isEqualTo(expectedData);
++
++    out.close();
++    assertThrows(IOException.class, () -> out.write(42));
++
++    // Verify that write had no effect.
++    assertThat(source.read()).isEqualTo(expectedData);
++    out.reset();
++  }
+ }
+diff --git a/guava/src/com/google/common/io/FileBackedOutputStream.java b/guava/src/com/google/common/io/FileBackedOutputStream.java
+index 18eb4f1d4..19201acfa 100644
+--- a/guava/src/com/google/common/io/FileBackedOutputStream.java
++++ b/guava/src/com/google/common/io/FileBackedOutputStream.java
+@@ -15,6 +15,7 @@
+ package com.google.common.io;
+ 
+ import static com.google.common.base.Preconditions.checkArgument;
++import static com.google.common.base.Preconditions.checkPositionIndexes;
+ import static com.google.common.base.Throwables.throwIfUnchecked;
+ import static com.google.common.collect.Sets.newConcurrentHashSet;
+ import static java.util.Objects.requireNonNull;
+@@ -204,6 +205,7 @@ public final class FileBackedOutputStream extends OutputStream {
+ 
+   @Override
+   public void write(byte[] b, int off, int len) throws IOException {
++    checkPositionIndexes(off, off + len, b.length);
+     try {
+       state.write(b, off, len);
+     } finally {
+@@ -251,7 +253,7 @@ public final class FileBackedOutputStream extends OutputStream {
+       this.fileThreshold = fileThreshold;
+       this.resetWhenGarbageCollected = resetWhenGarbageCollected;
+       this.memory = new MemoryOutput();
+-      this.out = memory;
++      this.out = requireNonNull(memory);
+     }
+ 
+     synchronized @Nullable File getFile() {
+@@ -272,19 +274,8 @@ public final class FileBackedOutputStream extends OutputStream {
+       try {
+         close();
+       } finally {
+-        if (memory == null) {
+-          memory = new MemoryOutput();
+-        } else {
+-          memory.reset();
+-        }
+-        out = memory;
+-        if (file != null) {
+-          File deleteMe = file;
+-          file = null;
+-          if (!deleteMe.delete()) {
+-            throw new IOException("Could not delete: " + deleteMe);
+-          }
+-        }
++        resetMemoryBuffer();
++        deleteFileIfPresent();
+       }
+     }
+ 
+@@ -312,33 +303,59 @@ public final class FileBackedOutputStream extends OutputStream {
+      */
+     @GuardedBy("this")
+     void update(int len) throws IOException {
+-      if (memory != null && (memory.getCount() + len > fileThreshold)) {
+-        File temp = TempFileCreator.INSTANCE.createTempFile("FileBackedOutputStream");
+-        if (resetWhenGarbageCollected) {
+-          // References are not guaranteed to be collected on system shutdown; this is insurance.
+-          temp.deleteOnExit();
+-        }
+-        FileOutputStream transfer = null;
+-        try {
+-          transfer = new FileOutputStream(temp);
+-          transfer.write(memory.getBuffer(), 0, memory.getCount());
+-          transfer.flush();
+-          // We've successfully transferred the data; switch to writing to file.
+-          out = transfer;
+-        } catch (IOException e) {
+-          if (transfer != null) {
+-            try {
+-              transfer.close();
+-            } catch (IOException closeException) {
+-              e.addSuppressed(closeException);
+-            }
+-          }
+-          temp.delete();
+-          throw e;
+-        }
++      if (memory != null && memory.getCount() > fileThreshold - len) {
++        promoteToFile();
++      }
++    }
+ 
++    @GuardedBy("this")
++    private void resetMemoryBuffer() {
++      if (memory == null) {
++        memory = new MemoryOutput();
++      } else {
++        memory.reset();
++      }
++      out = requireNonNull(memory);
++    }
++
++    @GuardedBy("this")
++    private void deleteFileIfPresent() throws IOException {
++      if (file == null) {
++        return;
++      }
++      File deleteMe = file;
++      file = null;
++      if (!deleteMe.delete()) {
++        throw new IOException("Could not delete: " + deleteMe);
++      }
++    }
++
++    @GuardedBy("this")
++    private void promoteToFile() throws IOException {
++      File temp = TempFileCreator.INSTANCE.createTempFile("FileBackedOutputStream");
++      if (resetWhenGarbageCollected) {
++        // References are not guaranteed to be collected on system shutdown; this is insurance.
++        temp.deleteOnExit();
++      }
++      FileOutputStream transfer = null;
++      try {
++        transfer = new FileOutputStream(temp);
++        MemoryOutput memory = requireNonNull(this.memory);
++        transfer.write(memory.getBuffer(), 0, memory.getCount());
++        transfer.flush();
++        out = transfer;
+         file = temp;
+-        memory = null;
++        this.memory = null;
++      } catch (IOException e) {
++        if (transfer != null) {
++          try {
++            transfer.close();
++          } catch (IOException closeException) {
++            e.addSuppressed(closeException);
++          }
++        }
++        temp.delete();
++        throw e;
+       }
+     }
+   }
+diff --git a/guava/src/com/google/common/io/TempFileCreator.java b/guava/src/com/google/common/io/TempFileCreator.java
+index 6089cffec..b3d8460eb 100644
+--- a/guava/src/com/google/common/io/TempFileCreator.java
++++ b/guava/src/com/google/common/io/TempFileCreator.java
+@@ -64,13 +64,26 @@ abstract class TempFileCreator {
+   abstract File createTempFile(String prefix) throws IOException;
+ 
+   private static TempFileCreator pickSecureCreator() {
++    if (isJavaNioAvailable()) {
++      return new JavaNioCreator();
++    }
++
++    // Android isolates apps' temporary directories since Jelly Bean:
++    // https://github.com/google/guava/issues/4011#issuecomment-770020802
++    // So we can create files there with any permissions and still get security from the isolation.
++    return isAndroidVersionAtLeastJellyBean() ? new JavaIoCreator() : new ThrowingCreator();
++  }
++
++  private static boolean isJavaNioAvailable() {
+     try {
+       Class.forName("java.nio.file.Path");
+-      return new JavaNioCreator();
++      return true;
+     } catch (ClassNotFoundException runningUnderAndroid) {
+-      // Try another way.
++      return false;
+     }
++  }
+ 
++  private static boolean isAndroidVersionAtLeastJellyBean() {
+     try {
+       int version = (int) Class.forName("android.os.Build$VERSION").getField("SDK_INT").get(null);
+       int jellyBean =
+@@ -79,18 +92,11 @@ abstract class TempFileCreator {
+        * I assume that this check can't fail because JELLY_BEAN will be present only if we're
+        * running under Jelly Bean or higher. But it seems safest to check.
+        */
+-      if (version < jellyBean) {
+-        return new ThrowingCreator();
+-      }
++      return version >= jellyBean;
+     } catch (ReflectiveOperationException e) {
+       // Should be impossible, but we want to return *something* so that class init succeeds.
+-      return new ThrowingCreator();
++      return false;
+     }
+-
+-    // Android isolates apps' temporary directories since Jelly Bean:
+-    // https://github.com/google/guava/issues/4011#issuecomment-770020802
+-    // So we can create files there with any permissions and still get security from the isolation.
+-    return new JavaIoCreator();
+   }
+ 
+   /**
+@@ -156,30 +162,8 @@ abstract class TempFileCreator {
+ 
+     private static PermissionSupplier userPermissions() {
+       try {
+-        UserPrincipal user =
+-            FileSystems.getDefault()
+-                .getUserPrincipalLookupService()
+-                .lookupPrincipalByName(getUsername());
+-        ImmutableList<AclEntry> acl =
+-            ImmutableList.of(
+-                AclEntry.newBuilder()
+-                    .setType(ALLOW)
+-                    .setPrincipal(user)
+-                    .setPermissions(EnumSet.allOf(AclEntryPermission.class))
+-                    .setFlags(DIRECTORY_INHERIT, FILE_INHERIT)
+-                    .build());
+         FileAttribute<ImmutableList<AclEntry>> attribute =
+-            new FileAttribute<ImmutableList<AclEntry>>() {
+-              @Override
+-              public String name() {
+-                return "acl:acl";
+-              }
+-
+-              @Override
+-              public ImmutableList<AclEntry> value() {
+-                return acl;
+-              }
+-            };
++            userAclAttribute(lookupCurrentUser());
+         return () -> attribute;
+       } catch (IOException e) {
+         // We throw a new exception each time so that the stack trace is right.
+@@ -189,6 +173,34 @@ abstract class TempFileCreator {
+       }
+     }
+ 
++    private static UserPrincipal lookupCurrentUser() throws IOException {
++      return FileSystems.getDefault()
++          .getUserPrincipalLookupService()
++          .lookupPrincipalByName(getUsername());
++    }
++
++    private static FileAttribute<ImmutableList<AclEntry>> userAclAttribute(UserPrincipal user) {
++      ImmutableList<AclEntry> acl =
++          ImmutableList.of(
++              AclEntry.newBuilder()
++                  .setType(ALLOW)
++                  .setPrincipal(user)
++                  .setPermissions(EnumSet.allOf(AclEntryPermission.class))
++                  .setFlags(DIRECTORY_INHERIT, FILE_INHERIT)
++                  .build());
++      return new FileAttribute<ImmutableList<AclEntry>>() {
++        @Override
++        public String name() {
++          return "acl:acl";
++        }
++
++        @Override
++        public ImmutableList<AclEntry> value() {
++          return acl;
++        }
++      };
++    }
++
+     private static String getUsername() {
+       /*
+        * https://github.com/google/guava/issues/6634: ProcessHandle has more accurate information,

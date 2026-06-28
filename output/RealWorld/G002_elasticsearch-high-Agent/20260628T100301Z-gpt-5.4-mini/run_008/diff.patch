@@ -1,0 +1,140 @@
+diff --git a/server/src/main/java/org/elasticsearch/action/search/AbstractSearchAsyncAction.java b/server/src/main/java/org/elasticsearch/action/search/AbstractSearchAsyncAction.java
+index ec8a71848..2c0900182 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/AbstractSearchAsyncAction.java
++++ b/server/src/main/java/org/elasticsearch/action/search/AbstractSearchAsyncAction.java
+@@ -676,7 +676,7 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
+         }
+         var storeMetrics = directoryMetrics.metrics(StoreMetrics.NAME);
+         if (storeMetrics != null) {
+-            searchResponseMetrics.recordStoreBytesRead(storeMetrics.cast(StoreMetrics.class).getBytesRead(), telemetryContext.attributes());
++            searchResponseMetrics.recordStoreBytesRead(storeMetrics.cast(StoreMetrics.class).getBytesRead(), telemetryContext);
+         }
+     }
+ 
+@@ -823,7 +823,7 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
+      * @see #onShardResult(SearchPhaseResult)
+      */
+     private void onPhaseDone() {  // as a tribute to @kimchy aka. finishHim()
+-        searchResponseMetrics.recordSearchPhaseDuration(getName(), System.nanoTime() - phaseStartTimeInNanos, telemetryContext.attributes());
++        searchResponseMetrics.recordSearchPhaseDuration(getName(), System.nanoTime() - phaseStartTimeInNanos, telemetryContext);
+         executeNextPhase(getName(), this::getNextPhase);
+     }
+ 
+diff --git a/server/src/main/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhase.java b/server/src/main/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhase.java
+index 66cc448b4..297826112 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhase.java
++++ b/server/src/main/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhase.java
+@@ -175,7 +175,7 @@ final class CanMatchPreFilterSearchPhase {
+                 searchResponseMetrics.recordSearchPhaseDuration(
+                     PHASE_NAME,
+                     System.nanoTime() - phaseStartTimeInNanos,
+-                    telemetryContext.attributes()
++                    telemetryContext
+                 );
+             }
+ 
+diff --git a/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java b/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java
+index 1763a6eee..5fd0efc1b 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java
++++ b/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java
+@@ -2682,8 +2682,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+                 searchResponseMetrics.recordTookTime(
+                     searchResponse.getTookInMillis(),
+                     searchResponse.getTimeRangeFilterFromMillis(),
+-                    telemetryContext.absoluteStartMillis(),
+-                    telemetryContext.attributes()
++                    telemetryContext
+                 );
+                 SearchResponseMetrics.ResponseCountTotalStatus responseCountTotalStatus =
+                     SearchResponseMetrics.ResponseCountTotalStatus.SUCCESS;
+@@ -2702,7 +2701,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+                         }
+                     }
+                 }
+-                searchResponseMetrics.incrementResponseCount(responseCountTotalStatus, telemetryContext.attributes());
++                searchResponseMetrics.incrementResponseCount(responseCountTotalStatus, telemetryContext);
+ 
+                 if (collectCCSTelemetry) {
+                     extractCCSTelemetry(searchResponse);
+@@ -2718,7 +2717,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+ 
+         @Override
+         public void onFailure(Exception e) {
+-            searchResponseMetrics.incrementResponseCount(SearchResponseMetrics.ResponseCountTotalStatus.FAILURE, telemetryContext.attributes());
++            searchResponseMetrics.incrementResponseCount(SearchResponseMetrics.ResponseCountTotalStatus.FAILURE, telemetryContext);
+             if (collectCCSTelemetry) {
+                 usageBuilder.setFailure(e);
+                 recordTelemetry();
+diff --git a/server/src/main/java/org/elasticsearch/rest/action/search/SearchResponseMetrics.java b/server/src/main/java/org/elasticsearch/rest/action/search/SearchResponseMetrics.java
+index eefd1771d..f205a4d77 100644
+--- a/server/src/main/java/org/elasticsearch/rest/action/search/SearchResponseMetrics.java
++++ b/server/src/main/java/org/elasticsearch/rest/action/search/SearchResponseMetrics.java
+@@ -10,6 +10,7 @@
+ package org.elasticsearch.rest.action.search;
+ 
+ import org.elasticsearch.action.search.SearchRequestAttributesExtractor;
++import org.elasticsearch.action.search.SearchTelemetryContext;
+ import org.elasticsearch.telemetry.metric.LongCounter;
+ import org.elasticsearch.telemetry.metric.LongHistogram;
+ import org.elasticsearch.telemetry.metric.MeterRegistry;
+@@ -121,6 +122,19 @@ public class SearchResponseMetrics {
+         return recordTookDuration(tookTime, attributes);
+     }
+ 
++    /**
++     * Records the response took time using the immutable telemetry bundle threaded through the search pipeline.
++     */
++    public long recordTookTime(long tookTime, Long timeRangeFilterFromMillis, SearchTelemetryContext telemetryContext) {
++        Map<String, Object> attributes = telemetryContext.attributes();
++        SearchRequestAttributesExtractor.addTimeRangeAttribute(
++            timeRangeFilterFromMillis,
++            telemetryContext.absoluteStartMillis(),
++            attributes
++        );
++        return recordTookDuration(tookTime, attributes);
++    }
++
+     public void incrementResponseCount(ResponseCountTotalStatus responseCountTotalStatus) {
+         responseCountTotalCounter.incrementBy(
+             1L,
+@@ -132,16 +146,40 @@ public class SearchResponseMetrics {
+         responseCountTotalCounter.incrementBy(1L, attributesWithStatus(responseCountTotalStatus, attributes));
+     }
+ 
++    /**
++     * Records response count metrics using the immutable telemetry bundle threaded through the search pipeline.
++     */
++    public void incrementResponseCount(ResponseCountTotalStatus responseCountTotalStatus, SearchTelemetryContext telemetryContext) {
++        Map<String, Object> attributes = telemetryContext.attributes();
++        responseCountTotalCounter.incrementBy(1L, attributesWithStatus(responseCountTotalStatus, attributes));
++    }
++
+     public void recordSearchPhaseDuration(String phaseName, long tookInNanos, Map<String, Object> attributes) {
+         LongHistogram queryPhaseDurationHistogram = phaseNameToDurationHistogram.get(phaseName);
+         assert queryPhaseDurationHistogram != null;
+         queryPhaseDurationHistogram.record(TimeUnit.NANOSECONDS.toMillis(tookInNanos), attributes);
+     }
+ 
++    /**
++     * Records phase duration metrics using the immutable telemetry bundle threaded through the search pipeline.
++     */
++    public void recordSearchPhaseDuration(String phaseName, long tookInNanos, SearchTelemetryContext telemetryContext) {
++        LongHistogram queryPhaseDurationHistogram = phaseNameToDurationHistogram.get(phaseName);
++        assert queryPhaseDurationHistogram != null;
++        queryPhaseDurationHistogram.record(TimeUnit.NANOSECONDS.toMillis(tookInNanos), telemetryContext.attributes());
++    }
++
+     public void recordStoreBytesRead(long bytesRead, Map<String, Object> attributes) {
+         storeBytesReadHistogram.record(bytesRead, attributes);
+     }
+ 
++    /**
++     * Records store bytes read using the immutable telemetry bundle threaded through the search pipeline.
++     */
++    public void recordStoreBytesRead(long bytesRead, SearchTelemetryContext telemetryContext) {
++        storeBytesReadHistogram.record(bytesRead, telemetryContext.attributes());
++    }
++
+     private long recordTookDuration(long tookTime, Map<String, Object> attributes) {
+         tookDurationTotalMillisHistogram.record(tookTime, attributes);
+         return tookTime;

@@ -1,0 +1,223 @@
+diff --git a/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/InitializrServiceMetadata.java b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/InitializrServiceMetadata.java
+index 1577a9446..edd6c360f 100644
+--- a/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/InitializrServiceMetadata.java
++++ b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/InitializrServiceMetadata.java
+@@ -52,6 +52,8 @@ class InitializrServiceMetadata {
+ 
+ 	private static final String DEFAULT_ATTRIBUTE = "default";
+ 
++	private static final String TAGS_ELEMENT = "tags";
++
+ 	private final Map<String, Dependency> dependencies;
+ 
+ 	private final MetadataHolder<String, ProjectType> projectTypes;
+@@ -74,7 +76,7 @@ class InitializrServiceMetadata {
+ 		this.projectTypes = new MetadataHolder<>();
+ 		this.projectTypes.getContent().put(defaultProjectType.getId(), defaultProjectType);
+ 		this.projectTypes.setDefaultItem(defaultProjectType);
+-		this.defaults = new HashMap<>();
++		this.defaults = Collections.emptyMap();
+ 	}
+ 
+ 	/**
+@@ -82,7 +84,7 @@ class InitializrServiceMetadata {
+ 	 * @return the supported dependencies
+ 	 */
+ 	Collection<Dependency> getDependencies() {
+-		return this.dependencies.values();
++		return Collections.unmodifiableCollection(this.dependencies.values());
+ 	}
+ 
+ 	/**
+@@ -100,7 +102,7 @@ class InitializrServiceMetadata {
+ 	 * @return the supported project types
+ 	 */
+ 	Map<String, ProjectType> getProjectTypes() {
+-		return this.projectTypes.getContent();
++		return Collections.unmodifiableMap(this.projectTypes.getContent());
+ 	}
+ 
+ 	/**
+@@ -200,7 +202,7 @@ class InitializrServiceMetadata {
+ 		boolean defaultType = id.equals(defaultId);
+ 		Map<String, String> tags = new HashMap<>();
+ 		if (object.has("tags")) {
+-			JSONObject jsonTags = object.getJSONObject("tags");
++			JSONObject jsonTags = object.getJSONObject(TAGS_ELEMENT);
+ 			tags.putAll(parseStringItems(jsonTags));
+ 		}
+ 		Assert.state(name != null, "'name' must not be null");
+diff --git a/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerationRequest.java b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerationRequest.java
+index 3bf4dc98d..c070246ec 100644
+--- a/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerationRequest.java
++++ b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerationRequest.java
+@@ -305,55 +305,21 @@ class ProjectGenerationRequest {
+ 	URI generateUrl(InitializrServiceMetadata metadata) {
+ 		try {
+ 			URIBuilder builder = new URIBuilder(this.serviceUrl);
+-			StringBuilder sb = new StringBuilder();
+-			if (builder.getPath() != null) {
+-				sb.append(builder.getPath());
+-			}
+-
+ 			ProjectType projectType = determineProjectType(metadata);
+-			this.type = projectType.getId();
+-			sb.append(projectType.getAction());
+-			builder.setPath(sb.toString());
+-
+-			if (!this.dependencies.isEmpty()) {
+-				builder.setParameter("dependencies", StringUtils.collectionToCommaDelimitedString(this.dependencies));
+-			}
+-
+-			if (this.groupId != null) {
+-				builder.setParameter("groupId", this.groupId);
+-			}
+-			String resolvedArtifactId = resolveArtifactId();
+-			if (resolvedArtifactId != null) {
+-				builder.setParameter("artifactId", resolvedArtifactId);
+-			}
+-			if (this.version != null) {
+-				builder.setParameter("version", this.version);
+-			}
+-			if (this.name != null) {
+-				builder.setParameter("name", this.name);
+-			}
+-			if (this.description != null) {
+-				builder.setParameter("description", this.description);
+-			}
+-			if (this.packageName != null) {
+-				builder.setParameter("packageName", this.packageName);
+-			}
+-			if (this.type != null) {
+-				builder.setParameter("type", projectType.getId());
+-			}
+-			if (this.packaging != null) {
+-				builder.setParameter("packaging", this.packaging);
+-			}
+-			if (this.javaVersion != null) {
+-				builder.setParameter("javaVersion", this.javaVersion);
+-			}
+-			if (this.language != null) {
+-				builder.setParameter("language", this.language);
+-			}
+-			if (this.bootVersion != null) {
+-				builder.setParameter("bootVersion", this.bootVersion);
+-			}
+-
++			builder.setPath(resolvePath(builder.getPath(), projectType.getAction()));
++			setParameter(builder, "dependencies", this.dependencies.isEmpty()
++					? null : StringUtils.collectionToCommaDelimitedString(this.dependencies));
++			setParameter(builder, "groupId", this.groupId);
++			setParameter(builder, "artifactId", resolveArtifactId());
++			setParameter(builder, "version", this.version);
++			setParameter(builder, "name", this.name);
++			setParameter(builder, "description", this.description);
++			setParameter(builder, "packageName", this.packageName);
++			builder.setParameter("type", projectType.getId());
++			setParameter(builder, "packaging", this.packaging);
++			setParameter(builder, "javaVersion", this.javaVersion);
++			setParameter(builder, "language", this.language);
++			setParameter(builder, "bootVersion", this.bootVersion);
+ 			return builder.build();
+ 		}
+ 		catch (URISyntaxException ex) {
+@@ -370,7 +336,7 @@ class ProjectGenerationRequest {
+ 			}
+ 			return result;
+ 		}
+-		else if (isDetectType()) {
++		if (isDetectType()) {
+ 			Map<String, ProjectType> types = new HashMap<>(metadata.getProjectTypes());
+ 			if (this.build != null) {
+ 				filter(types, "build", this.build);
+@@ -381,23 +347,19 @@ class ProjectGenerationRequest {
+ 			if (types.size() == 1) {
+ 				return types.values().iterator().next();
+ 			}
+-			else if (types.isEmpty()) {
++			if (types.isEmpty()) {
+ 				throw new ReportableException("No type found with build '" + this.build + "' and format '" + this.format
+ 						+ "' check the service capabilities (--list)");
+ 			}
+-			else {
+-				throw new ReportableException("Multiple types found with build '" + this.build + "' and format '"
+-						+ this.format + "' use --type with a more specific value " + types.keySet());
+-			}
++			throw new ReportableException("Multiple types found with build '" + this.build + "' and format '"
++					+ this.format + "' use --type with a more specific value " + types.keySet());
+ 		}
+-		else {
+-			ProjectType defaultType = metadata.getDefaultType();
+-			if (defaultType == null) {
+-				throw new ReportableException(("No project type is set and no default is defined. "
+-						+ "Check the service capabilities (--list)"));
+-			}
+-			return defaultType;
++		ProjectType defaultType = metadata.getDefaultType();
++		if (defaultType == null) {
++			throw new ReportableException(("No project type is set and no default is defined. "
++					+ "Check the service capabilities (--list)"));
+ 		}
++		return defaultType;
+ 	}
+ 
+ 	/**
+@@ -419,4 +381,19 @@ class ProjectGenerationRequest {
+ 		projects.entrySet().removeIf((entry) -> !tagValue.equals(entry.getValue().getTags().get(tag)));
+ 	}
+ 
++	private String resolvePath(@Nullable String path, String action) {
++		StringBuilder resolvedPath = new StringBuilder();
++		if (path != null) {
++			resolvedPath.append(path);
++		}
++		resolvedPath.append(action);
++		return resolvedPath.toString();
++	}
++
++	private void setParameter(URIBuilder builder, String name, @Nullable String value) {
++		if (value != null) {
++			builder.setParameter(name, value);
++		}
++	}
++
+ }
+diff --git a/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/InitializrServiceMetadataTests.java b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/InitializrServiceMetadataTests.java
+index 6394e4420..734a7747a 100644
+--- a/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/InitializrServiceMetadataTests.java
++++ b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/InitializrServiceMetadataTests.java
+@@ -87,6 +87,17 @@ class InitializrServiceMetadataTests {
+ 		assertThat(projectType.getTags()).containsEntry("format", "project");
+ 	}
+ 
++	@Test
++	void exposeReadOnlyViews() throws Exception {
++		InitializrServiceMetadata metadata = createInstance("2.0.0");
++		assertThatExceptionOfType(UnsupportedOperationException.class)
++			.isThrownBy(() -> metadata.getDependencies().clear());
++		assertThatExceptionOfType(UnsupportedOperationException.class)
++			.isThrownBy(() -> metadata.getProjectTypes().clear());
++		assertThatExceptionOfType(UnsupportedOperationException.class)
++			.isThrownBy(() -> metadata.getDefaults().put("foo", "bar"));
++	}
++
+ 	private static InitializrServiceMetadata createInstance(String version) throws JSONException {
+ 		try {
+ 			return new InitializrServiceMetadata(readJson(version));
+diff --git a/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/ProjectGenerationRequestTests.java b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/ProjectGenerationRequestTests.java
+index 9614a1106..81c9b7232 100644
+--- a/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/ProjectGenerationRequestTests.java
++++ b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/ProjectGenerationRequestTests.java
+@@ -52,6 +52,12 @@ class ProjectGenerationRequestTests {
+ 		assertThat(this.request.generateUrl(createDefaultMetadata())).isEqualTo(createDefaultUrl("?type=test-type"));
+ 	}
+ 
++	@Test
++	void generateUrlDoesNotMutateType() {
++		this.request.generateUrl(createDefaultMetadata());
++		assertThat(this.request.getType()).isNull();
++	}
++
+ 	@Test
+ 	void customServer() throws URISyntaxException {
+ 		String customServerUrl = "https://foo:8080/initializr";

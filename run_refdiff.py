@@ -145,8 +145,8 @@ def seed_babel_parser() -> bool:
 
 
 def detect_repo_language(repo: Path) -> str | None:
-    has_java = bool(list(repo.rglob("*.java")))
-    has_js = bool(list(repo.rglob("*.js"))) or bool(list(repo.rglob("*.jsx")))
+    has_java = bool(next(repo.rglob("*.java"), None))
+    has_js = bool(next(repo.rglob("*.js"), None)) or bool(next(repo.rglob("*.jsx"), None))
     if has_java and has_js:
         return None
     if has_java:
@@ -154,6 +154,25 @@ def detect_repo_language(repo: Path) -> str | None:
     if has_js:
         return "js"
     return None
+
+
+def resolve_repo_language(repo: Path, lang: str | None) -> tuple[str | None, str | None]:
+    """Return (language, error_message). *lang* overrides auto-detect when set."""
+    if lang is not None:
+        if lang not in ("java", "js"):
+            return None, f"invalid --lang {lang!r}; must be java or js"
+        return lang, None
+    detected = detect_repo_language(repo)
+    if detected is not None:
+        return detected, None
+    has_java = bool(next(repo.rglob("*.java"), None))
+    has_js = bool(next(repo.rglob("*.js"), None)) or bool(next(repo.rglob("*.jsx"), None))
+    if has_java and has_js:
+        return None, (
+            "repo contains both .java and .js/.jsx files; "
+            "pass --lang java or --lang js"
+        )
+    return None, "repo contains no .java, .js, or .jsx source files"
 
 
 def is_java_experiment(exp_name: str, repo: Path) -> bool:
@@ -432,11 +451,12 @@ def process_experiment_dir(
     git_dir: Path,
     lang: str,
     env: dict[str, str],
+    scoped: bool = False,
 ) -> tuple[int, int] | None:
     """Process one result/<experiment>/ folder. Returns None if skipped."""
     exp_name = exp_dir.name
 
-    if not experiment_matches_language(exp_name, repo, lang):
+    if not scoped and not experiment_matches_language(exp_name, repo, lang):
         eprint(f"[skip] {exp_name}: not a {lang} experiment")
         return None
 
@@ -476,6 +496,16 @@ def main(argv: list[str] | None = None) -> int:
         default=_RESULT_DIR,
         help="Base dir holding experiment folders (default: <repo>/result).",
     )
+    parser.add_argument(
+        "--exp",
+        metavar="FOLDER",
+        help="Process only this experiment folder under --output-base (e.g. G001_dbeaver-high-Agent).",
+    )
+    parser.add_argument(
+        "--lang",
+        choices=("java", "js"),
+        help="Language plugin for RefDiff (overrides auto-detect; required for polyglot repos).",
+    )
     args = parser.parse_args(argv)
     result_base = args.output_base.resolve()
 
@@ -499,23 +529,29 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     git_dir = Path(gd_proc.stdout.strip())
 
-    lang = detect_repo_language(repo)
+    lang, lang_err = resolve_repo_language(repo, args.lang)
     if lang is None:
-        has_java = bool(list(repo.rglob("*.java")))
-        has_js = bool(list(repo.rglob("*.js"))) or bool(list(repo.rglob("*.jsx")))
-        if has_java and has_js:
-            eprint(
-                "error: repo contains both .java and .js/.jsx files; "
-                "RefDiff auto-detect requires a single language"
-            )
-        else:
-            eprint("error: repo contains no .java, .js, or .jsx source files")
+        eprint(f"error: {lang_err}")
         return 2
-    eprint(f"[info] repo language: {lang}")
+    if args.lang:
+        eprint(f"[info] repo language: {lang} (--lang override)")
+    else:
+        eprint(f"[info] repo language: {lang}")
 
-    exp_dirs = experiment_dirs_with_logs(result_base)
+    scoped = bool(args.exp)
+    if args.exp:
+        exp_dir = result_base / args.exp
+        if not exp_dir.is_dir():
+            eprint(f"error: experiment directory not found: {exp_dir}")
+            return 2
+        exp_dirs = [exp_dir] if exp_dir_has_logs(exp_dir) else []
+    else:
+        exp_dirs = experiment_dirs_with_logs(result_base)
     if not exp_dirs:
-        eprint(f"error: no experiment directories with *-log.csv in {result_base}")
+        if args.exp:
+            eprint(f"error: no *-log.csv in {result_base / args.exp}")
+        else:
+            eprint(f"error: no experiment directories with *-log.csv in {result_base}")
         return 2
 
     env = os.environ.copy()
@@ -535,6 +571,7 @@ def main(argv: list[str] | None = None) -> int:
             git_dir=git_dir,
             lang=lang,
             env=env,
+            scoped=scoped,
         )
         if outcome is None:
             continue

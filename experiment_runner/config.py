@@ -123,6 +123,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Use a Gemini user agent to generate vague refactoring prompts each turn.",
     )
     p.add_argument(
+        "--no-snapshot",
+        action="store_true",
+        help=(
+            "Do not feed the baseline codebase snapshot into the prompter's "
+            "first-turn context. Use for large real-world repos whose full "
+            "snapshot would overflow the prompter model's context window."
+        ),
+    )
+    p.add_argument(
         "--effort",
         type=str,
         default=None,
@@ -174,6 +183,7 @@ def parse_args(argv: list[str] | None = None) -> CliArgs:
         prompter=bool(namespace.prompter),
         output_base=namespace.output_base,
         effort=effort,
+        no_snapshot=bool(namespace.no_snapshot),
     )
 
 
@@ -228,6 +238,7 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
         clarification_patterns=clarification_patterns,
         effort=args.effort,
         limit_detect=limit_detect,
+        no_snapshot=args.no_snapshot,
     )
 
 
@@ -241,6 +252,8 @@ def eprint_setup(config: ExperimentConfig) -> None:
         eprint(f"[setup] Effort:             {config.effort}")
     if config.prompter and config.prompter_config:
         eprint(f"[setup] Prompter mode:      Gemini ({config.prompter_config.model})")
+        if config.no_snapshot:
+            eprint("[setup] Codebase snapshot:  disabled (--no-snapshot)")
 
 
 def build_coding_agent(config: ExperimentConfig) -> CodingAgent:

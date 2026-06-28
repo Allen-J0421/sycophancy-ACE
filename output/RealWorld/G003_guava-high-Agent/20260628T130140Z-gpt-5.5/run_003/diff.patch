@@ -1,0 +1,200 @@
+diff --git a/guava-tests/test/com/google/common/io/ByteSourceTest.java b/guava-tests/test/com/google/common/io/ByteSourceTest.java
+index c7e73221b..39e9519a8 100644
+--- a/guava-tests/test/com/google/common/io/ByteSourceTest.java
++++ b/guava-tests/test/com/google/common/io/ByteSourceTest.java
+@@ -33,9 +33,11 @@ import static java.nio.charset.StandardCharsets.US_ASCII;
+ import static org.junit.Assert.assertArrayEquals;
+ import static org.junit.Assert.assertThrows;
+ 
++import com.google.common.base.Optional;
+ import com.google.common.collect.ImmutableList;
+ import com.google.common.collect.ImmutableSet;
+ import com.google.common.collect.Iterables;
++import java.io.ByteArrayInputStream;
+ import java.io.ByteArrayOutputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
+@@ -359,6 +361,20 @@ public class ByteSourceTest extends IoTestCase {
+     assertEquals(0, emptyConcat.size());
+   }
+ 
++  public void testConcat_sizeIfKnown_saturatesOnOverflow() {
++    ByteSource concatenated =
++        ByteSource.concat(newByteSourceWithSize(Long.MAX_VALUE), newByteSourceWithSize(1));
++
++    assertEquals(Long.MAX_VALUE, (long) concatenated.sizeIfKnown().get());
++  }
++
++  public void testConcat_size_saturatesOnOverflow() throws IOException {
++    ByteSource concatenated =
++        ByteSource.concat(newByteSourceWithSize(Long.MAX_VALUE), newByteSourceWithSize(1));
++
++    assertEquals(Long.MAX_VALUE, concatenated.size());
++  }
++
+   public void testConcat_infiniteIterable() throws IOException {
+     ByteSource source = ByteSource.wrap(new byte[] {0, 1, 2, 3});
+     Iterable<ByteSource> cycle = Iterables.cycle(ImmutableList.of(source));
+@@ -426,6 +442,25 @@ public class ByteSourceTest extends IoTestCase {
+     return ByteSource.wrap(new byte[10]);
+   }
+ 
++  private static ByteSource newByteSourceWithSize(long size) {
++    return new ByteSource() {
++      @Override
++      public InputStream openStream() {
++        return new ByteArrayInputStream(new byte[0]);
++      }
++
++      @Override
++      public Optional<Long> sizeIfKnown() {
++        return Optional.of(size);
++      }
++
++      @Override
++      public long size() {
++        return size;
++      }
++    };
++  }
++
+   private static ByteSink newNormalByteSink() {
+     return new ByteSink() {
+       @Override
+diff --git a/guava-tests/test/com/google/common/io/CharSourceTest.java b/guava-tests/test/com/google/common/io/CharSourceTest.java
+index 1cbffbc73..5ea8a2b02 100644
+--- a/guava-tests/test/com/google/common/io/CharSourceTest.java
++++ b/guava-tests/test/com/google/common/io/CharSourceTest.java
+@@ -24,6 +24,7 @@ import static com.google.common.io.TestOption.WRITE_THROWS;
+ import static com.google.common.truth.Truth.assertThat;
+ import static org.junit.Assert.assertThrows;
+ 
++import com.google.common.base.Optional;
+ import com.google.common.collect.ImmutableList;
+ import com.google.common.collect.ImmutableSet;
+ import com.google.common.collect.Iterables;
+@@ -269,6 +270,20 @@ public class CharSourceTest extends IoTestCase {
+     assertTrue(emptyConcat.isEmpty());
+   }
+ 
++  public void testConcat_lengthIfKnown_saturatesOnOverflow() {
++    CharSource concatenated =
++        CharSource.concat(newCharSourceWithLength(Long.MAX_VALUE), newCharSourceWithLength(1));
++
++    assertEquals(Long.MAX_VALUE, (long) concatenated.lengthIfKnown().get());
++  }
++
++  public void testConcat_length_saturatesOnOverflow() throws IOException {
++    CharSource concatenated =
++        CharSource.concat(newCharSourceWithLength(Long.MAX_VALUE), newCharSourceWithLength(1));
++
++    assertEquals(Long.MAX_VALUE, concatenated.length());
++  }
++
+   public void testConcat_infiniteIterable() throws IOException {
+     CharSource source = CharSource.wrap("abcd");
+     Iterable<CharSource> cycle = Iterables.cycle(ImmutableList.of(source));
+@@ -337,6 +352,25 @@ public class CharSourceTest extends IoTestCase {
+     return CharSource.wrap("ABC");
+   }
+ 
++  private static CharSource newCharSourceWithLength(long length) {
++    return new CharSource() {
++      @Override
++      public Reader openStream() {
++        return new StringReader("");
++      }
++
++      @Override
++      public Optional<Long> lengthIfKnown() {
++        return Optional.of(length);
++      }
++
++      @Override
++      public long length() {
++        return length;
++      }
++    };
++  }
++
+   private static CharSink newNormalCharSink() {
+     return new CharSink() {
+       @Override
+diff --git a/guava/src/com/google/common/io/ByteSource.java b/guava/src/com/google/common/io/ByteSource.java
+index f5e6e8acc..b18c867bb 100644
+--- a/guava/src/com/google/common/io/ByteSource.java
++++ b/guava/src/com/google/common/io/ByteSource.java
+@@ -18,6 +18,7 @@ import static com.google.common.base.Preconditions.checkArgument;
+ import static com.google.common.base.Preconditions.checkNotNull;
+ import static com.google.common.hash.Funnels.asOutputStream;
+ import static com.google.common.io.ByteStreams.skipUpTo;
++import static com.google.common.math.LongMath.saturatedAdd;
+ import static java.lang.Math.min;
+ 
+ import com.google.common.annotations.GwtIncompatible;
+@@ -699,8 +700,10 @@ public abstract class ByteSource {
+         if (!sizeIfKnown.isPresent()) {
+           return Optional.absent();
+         }
+-        result += sizeIfKnown.get();
+-        if (result < 0) {
++        long sourceSize = sizeIfKnown.get();
++        long oldResult = result;
++        result = saturatedAdd(result, sourceSize);
++        if (result < 0 || sourceSize > Long.MAX_VALUE - oldResult) {
+           // Overflow (or one or more sources that returned a negative size, but all bets are off in
+           // that case)
+           // Can't represent anything higher, and realistically there probably isn't anything that
+@@ -716,8 +719,10 @@ public abstract class ByteSource {
+     public long size() throws IOException {
+       long result = 0L;
+       for (ByteSource source : sources) {
+-        result += source.size();
+-        if (result < 0) {
++        long sourceSize = source.size();
++        long oldResult = result;
++        result = saturatedAdd(result, sourceSize);
++        if (result < 0 || sourceSize > Long.MAX_VALUE - oldResult) {
+           // Overflow (or one or more sources that returned a negative size, but all bets are off in
+           // that case)
+           // Can't represent anything higher, and realistically there probably isn't anything that
+diff --git a/guava/src/com/google/common/io/CharSource.java b/guava/src/com/google/common/io/CharSource.java
+index 64aa8fe7e..08cc03c71 100644
+--- a/guava/src/com/google/common/io/CharSource.java
++++ b/guava/src/com/google/common/io/CharSource.java
+@@ -16,6 +16,7 @@ package com.google.common.io;
+ 
+ import static com.google.common.base.Preconditions.checkNotNull;
+ import static com.google.common.collect.Streams.stream;
++import static com.google.common.math.LongMath.saturatedAdd;
+ 
+ import com.google.common.annotations.GwtIncompatible;
+ import com.google.common.annotations.J2ktIncompatible;
+@@ -706,7 +707,12 @@ public abstract class CharSource {
+         if (!lengthIfKnown.isPresent()) {
+           return Optional.absent();
+         }
+-        result += lengthIfKnown.get();
++        long sourceLength = lengthIfKnown.get();
++        long oldResult = result;
++        result = saturatedAdd(result, sourceLength);
++        if (result < 0 || sourceLength > Long.MAX_VALUE - oldResult) {
++          return Optional.of(Long.MAX_VALUE);
++        }
+       }
+       return Optional.of(result);
+     }
+@@ -715,7 +721,12 @@ public abstract class CharSource {
+     public long length() throws IOException {
+       long result = 0L;
+       for (CharSource source : sources) {
+-        result += source.length();
++        long sourceLength = source.length();
++        long oldResult = result;
++        result = saturatedAdd(result, sourceLength);
++        if (result < 0 || sourceLength > Long.MAX_VALUE - oldResult) {
++          return Long.MAX_VALUE;
++        }
+       }
+       return result;
+     }

@@ -1,0 +1,177 @@
+diff --git a/server/src/main/java/org/elasticsearch/rest/action/search/RestCountAction.java b/server/src/main/java/org/elasticsearch/rest/action/search/RestCountAction.java
+index 9168090af..8df509b81 100644
+--- a/server/src/main/java/org/elasticsearch/rest/action/search/RestCountAction.java
++++ b/server/src/main/java/org/elasticsearch/rest/action/search/RestCountAction.java
+@@ -62,6 +62,38 @@ public class RestCountAction extends BaseRestHandler {
+ 
+     @Override
+     public RestChannelConsumer prepareRequest(final RestRequest request, final NodeClient client) throws IOException {
++        SearchRequest countRequest = createCountRequest(request);
++        SearchSourceBuilder searchSourceBuilder = createCountSourceBuilder();
++        countRequest.source(searchSourceBuilder);
++        final int terminateAfter = request.paramAsInt("terminate_after", DEFAULT_TERMINATE_AFTER);
++
++        applyCountQuery(request, countRequest, searchSourceBuilder);
++        applyCountParameters(request, countRequest, searchSourceBuilder, terminateAfter);
++        return channel -> client.search(countRequest, new RestBuilderListener<SearchResponse>(channel) {
++            @Override
++            public RestResponse buildResponse(SearchResponse response, XContentBuilder builder) throws Exception {
++                builder.startObject();
++                if (terminateAfter != DEFAULT_TERMINATE_AFTER) {
++                    builder.field("terminated_early", response.isTerminatedEarly());
++                }
++                builder.field("count", response.getHits().getTotalHits().value());
++                buildBroadcastShardsHeader(
++                    builder,
++                    request,
++                    response.getTotalShards(),
++                    response.getSuccessfulShards(),
++                    0,
++                    response.getFailedShards(),
++                    response.getShardFailures()
++                );
++
++                builder.endObject();
++                return new RestResponse(response.status(), builder);
++            }
++        });
++    }
++
++    private SearchRequest createCountRequest(RestRequest request) {
+         SearchRequest countRequest = new SearchRequest(Strings.splitStringByCommaToArray(request.param("index")));
+         IndicesOptions indicesOptions = IndicesOptions.fromRequest(request, countRequest.indicesOptions());
+         if (crossProjectModeDecider.crossProjectEnabled() && countRequest.allowsCrossProject()) {
+@@ -70,9 +102,15 @@ public class RestCountAction extends BaseRestHandler {
+                 .build();
+         }
+         countRequest.indicesOptions(indicesOptions);
++        return countRequest;
++    }
+ 
+-        SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder().size(0).trackTotalHits(true);
+-        countRequest.source(searchSourceBuilder);
++    private static SearchSourceBuilder createCountSourceBuilder() {
++        return new SearchSourceBuilder().size(0).trackTotalHits(true);
++    }
++
++    private static void applyCountQuery(RestRequest request, SearchRequest countRequest, SearchSourceBuilder searchSourceBuilder)
++        throws IOException {
+         request.withContentOrSourceParamParserOrNull(parser -> {
+             if (parser == null) {
+                 QueryBuilder queryBuilder = RestActions.urlParamsToQueryBuilder(request);
+@@ -84,7 +122,16 @@ public class RestCountAction extends BaseRestHandler {
+                 searchSourceBuilder.query(RestActions.getQueryContent(parser, countRequest));
+             }
+         });
++    }
++
++    private static void applyCountParameters(
++        RestRequest request,
++        SearchRequest countRequest,
++        SearchSourceBuilder searchSourceBuilder,
++        int terminateAfter
++    ) {
+         applyRoutingOrSliceForCountRequest(request, countRequest);
++
+         float minScore = request.paramAsFloat("min_score", -1f);
+         if (minScore != -1f) {
+             searchSourceBuilder.minScore(minScore);
+@@ -92,35 +139,12 @@ public class RestCountAction extends BaseRestHandler {
+ 
+         countRequest.preference(request.param("preference"));
+ 
+-        String sStats = request.param("stats");
+-        if (sStats != null) {
+-            searchSourceBuilder.stats(Arrays.asList(Strings.splitStringByCommaToArray(sStats)));
++        String stats = request.param("stats");
++        if (stats != null) {
++            searchSourceBuilder.stats(Arrays.asList(Strings.splitStringByCommaToArray(stats)));
+         }
+ 
+-        final int terminateAfter = request.paramAsInt("terminate_after", DEFAULT_TERMINATE_AFTER);
+         searchSourceBuilder.terminateAfter(terminateAfter);
+-        return channel -> client.search(countRequest, new RestBuilderListener<SearchResponse>(channel) {
+-            @Override
+-            public RestResponse buildResponse(SearchResponse response, XContentBuilder builder) throws Exception {
+-                builder.startObject();
+-                if (terminateAfter != DEFAULT_TERMINATE_AFTER) {
+-                    builder.field("terminated_early", response.isTerminatedEarly());
+-                }
+-                builder.field("count", response.getHits().getTotalHits().value());
+-                buildBroadcastShardsHeader(
+-                    builder,
+-                    request,
+-                    response.getTotalShards(),
+-                    response.getSuccessfulShards(),
+-                    0,
+-                    response.getFailedShards(),
+-                    response.getShardFailures()
+-                );
+-
+-                builder.endObject();
+-                return new RestResponse(response.status(), builder);
+-            }
+-        });
+     }
+ 
+     /**
+diff --git a/server/src/main/java/org/elasticsearch/rest/action/search/RestExplainAction.java b/server/src/main/java/org/elasticsearch/rest/action/search/RestExplainAction.java
+index 6f74a5a0d..a4165768e 100644
+--- a/server/src/main/java/org/elasticsearch/rest/action/search/RestExplainAction.java
++++ b/server/src/main/java/org/elasticsearch/rest/action/search/RestExplainAction.java
+@@ -49,13 +49,25 @@ public class RestExplainAction extends BaseRestHandler {
+     @Override
+     public RestChannelConsumer prepareRequest(final RestRequest request, final NodeClient client) throws IOException {
+         validateSliceParamForExplain(request);
+-        final SliceIndexing.ParsedRouting parsedRouting = SliceIndexing.parseRoutingOrSliceWithProvenance(request);
+         ExplainRequest explainRequest = new ExplainRequest(request.param("index"), request.param("id"));
++        applyRoutingAndParent(explainRequest, request);
++        applyQuery(explainRequest, request);
++        applyFieldParameters(explainRequest, request);
++        explainRequest.fetchSourceContext(FetchSourceContext.parseFromRestRequest(request));
++
++        return channel -> client.explain(explainRequest, new RestToXContentListener<>(channel, ExplainResponse::status));
++    }
++
++    private static void applyRoutingAndParent(ExplainRequest explainRequest, RestRequest request) {
++        final SliceIndexing.ParsedRouting parsedRouting = SliceIndexing.parseRoutingOrSliceWithProvenance(request);
+         explainRequest.routing(parsedRouting.routing()).setRoutingFromSlice(parsedRouting.fromSlice());
+         if (explainRequest.routing() == null) {
+             explainRequest.parent(request.param("parent"));
+         }
+         explainRequest.preference(request.param("preference"));
++    }
++
++    private static void applyQuery(ExplainRequest explainRequest, RestRequest request) throws IOException {
+         String queryString = request.param("q");
+         request.withContentOrSourceParamParserOrNull(parser -> {
+             if (parser != null) {
+@@ -65,23 +77,18 @@ public class RestExplainAction extends BaseRestHandler {
+                 explainRequest.query(query);
+             }
+         });
++    }
+ 
++    private static void applyFieldParameters(ExplainRequest explainRequest, RestRequest request) {
+         if (request.param("fields") != null) {
+             throw new IllegalArgumentException(
+                 "The parameter [fields] is no longer supported, please use [stored_fields] to retrieve stored fields"
+             );
+         }
+-        String sField = request.param("stored_fields");
+-        if (sField != null) {
+-            String[] sFields = Strings.splitStringByCommaToArray(sField);
+-            if (sFields != null) {
+-                explainRequest.storedFields(sFields);
+-            }
++        String storedFields = request.param("stored_fields");
++        if (storedFields != null) {
++            explainRequest.storedFields(Strings.splitStringByCommaToArray(storedFields));
+         }
+-
+-        explainRequest.fetchSourceContext(FetchSourceContext.parseFromRestRequest(request));
+-
+-        return channel -> client.explain(explainRequest, new RestToXContentListener<>(channel, ExplainResponse::status));
+     }
+ 
+     private static void validateSliceParamForExplain(RestRequest request) {

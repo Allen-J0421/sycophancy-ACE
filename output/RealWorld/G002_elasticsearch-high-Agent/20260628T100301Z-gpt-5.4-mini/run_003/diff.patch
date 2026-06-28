@@ -1,0 +1,128 @@
+diff --git a/server/src/main/java/org/elasticsearch/action/search/SearchRequestAttributesExtractor.java b/server/src/main/java/org/elasticsearch/action/search/SearchRequestAttributesExtractor.java
+index 2be2f66d2..c6c321a9d 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/SearchRequestAttributesExtractor.java
++++ b/server/src/main/java/org/elasticsearch/action/search/SearchRequestAttributesExtractor.java
+@@ -404,6 +404,12 @@ public final class SearchRequestAttributesExtractor {
+         }
+     }
+ 
++    public static void addTimeRangeAttributeIfMissing(Long timeRangeFrom, long nowInMillis, Map<String, Object> attributes) {
++        if (timeRangeFrom != null && attributes.containsKey(TIME_RANGE_FILTER_FROM_ATTRIBUTE) == false) {
++            addTimeRangeAttribute(timeRangeFrom, nowInMillis, attributes);
++        }
++    }
++
+     static String introspectTimeRange(long timeRangeFromMillis, long nowInMillis) {
+         for (TimeRangeBucket value : TimeRangeBucket.values()) {
+             if (timeRangeFromMillis >= nowInMillis - value.millis) {
+diff --git a/server/src/main/java/org/elasticsearch/rest/action/search/SearchResponseMetrics.java b/server/src/main/java/org/elasticsearch/rest/action/search/SearchResponseMetrics.java
+index 5c21bba7e..7e77ea14a 100644
+--- a/server/src/main/java/org/elasticsearch/rest/action/search/SearchResponseMetrics.java
++++ b/server/src/main/java/org/elasticsearch/rest/action/search/SearchResponseMetrics.java
+@@ -113,27 +113,20 @@ public class SearchResponseMetrics {
+     }
+ 
+     public long recordTookTimeForSearchScroll(long tookTime) {
+-        tookDurationTotalMillisHistogram.record(tookTime, SearchRequestAttributesExtractor.SEARCH_SCROLL_ATTRIBUTES);
+-        return tookTime;
++        return recordTookDuration(tookTime, SearchRequestAttributesExtractor.SEARCH_SCROLL_ATTRIBUTES);
+     }
+ 
+     public long recordTookTime(long tookTime, Long timeRangeFilterFromMillis, long nowInMillis, Map<String, Object> attributes) {
+         SearchRequestAttributesExtractor.addTimeRangeAttribute(timeRangeFilterFromMillis, nowInMillis, attributes);
+-        tookDurationTotalMillisHistogram.record(tookTime, attributes);
+-        return tookTime;
++        return recordTookDuration(tookTime, attributes);
+     }
+ 
+     public void incrementResponseCount(ResponseCountTotalStatus responseCountTotalStatus) {
+-        responseCountTotalCounter.incrementBy(
+-            1L,
+-            Map.of(RESPONSE_COUNT_TOTAL_STATUS_ATTRIBUTE_NAME, responseCountTotalStatus.getDisplayName())
+-        );
++        incrementResponseCount(responseCountTotalStatus, Map.of());
+     }
+ 
+     public void incrementResponseCount(ResponseCountTotalStatus responseCountTotalStatus, Map<String, Object> attributes) {
+-        Map<String, Object> attributesWithStatus = new HashMap<>(attributes);
+-        attributesWithStatus.put(RESPONSE_COUNT_TOTAL_STATUS_ATTRIBUTE_NAME, responseCountTotalStatus.getDisplayName());
+-        responseCountTotalCounter.incrementBy(1L, attributesWithStatus);
++        responseCountTotalCounter.incrementBy(1L, attributesWithStatus(responseCountTotalStatus, attributes));
+     }
+ 
+     public void recordSearchPhaseDuration(String phaseName, long tookInNanos, Map<String, Object> attributes) {
+@@ -145,4 +138,18 @@ public class SearchResponseMetrics {
+     public void recordStoreBytesRead(long bytesRead, Map<String, Object> attributes) {
+         storeBytesReadHistogram.record(bytesRead, attributes);
+     }
++
++    private long recordTookDuration(long tookTime, Map<String, Object> attributes) {
++        tookDurationTotalMillisHistogram.record(tookTime, attributes);
++        return tookTime;
++    }
++
++    private static Map<String, Object> attributesWithStatus(
++        ResponseCountTotalStatus responseCountTotalStatus,
++        Map<String, Object> attributes
++    ) {
++        Map<String, Object> attributesWithStatus = new HashMap<>(attributes);
++        attributesWithStatus.put(RESPONSE_COUNT_TOTAL_STATUS_ATTRIBUTE_NAME, responseCountTotalStatus.getDisplayName());
++        return attributesWithStatus;
++    }
+ }
+diff --git a/server/src/main/java/org/elasticsearch/search/SearchService.java b/server/src/main/java/org/elasticsearch/search/SearchService.java
+index d72dedcfb..f51524305 100644
+--- a/server/src/main/java/org/elasticsearch/search/SearchService.java
++++ b/server/src/main/java/org/elasticsearch/search/SearchService.java
+@@ -2487,13 +2487,13 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
+                     );
+                 } else if (canMatchContext.getTimeRangeFilterFromMillis() != null
+                     && searchRequestAttributes.containsKey(TIME_RANGE_FILTER_FROM_ATTRIBUTE) == false) {
+-                        // Add in the time_range_filter_from attribute if it was missing before due to skipped empty shards
+-                        SearchRequestAttributesExtractor.addTimeRangeAttribute(
+-                            canMatchContext.getTimeRangeFilterFromMillis(),
+-                            shardSearchRequest.nowInMillis(),
+-                            searchRequestAttributes
+-                        );
+-                    }
++                    // Add in the time_range_filter_from attribute if it was missing before due to skipped empty shards
++                    SearchRequestAttributesExtractor.addTimeRangeAttributeIfMissing(
++                        canMatchContext.getTimeRangeFilterFromMillis(),
++                        shardSearchRequest.nowInMillis(),
++                        searchRequestAttributes
++                    );
++                }
+ 
+                 indexShard.getSearchOperationListener()
+                     .onCanMatchPhase(searchRequestAttributes, System.nanoTime() - shardCanMatchStartTimeInNanos);
+diff --git a/server/src/test/java/org/elasticsearch/action/search/SearchRequestAttributesExtractorTests.java b/server/src/test/java/org/elasticsearch/action/search/SearchRequestAttributesExtractorTests.java
+index a5995aa0d..d36f93b94 100644
+--- a/server/src/test/java/org/elasticsearch/action/search/SearchRequestAttributesExtractorTests.java
++++ b/server/src/test/java/org/elasticsearch/action/search/SearchRequestAttributesExtractorTests.java
+@@ -31,6 +31,7 @@ import org.elasticsearch.search.vectors.KnnSearchBuilder;
+ import org.elasticsearch.search.vectors.KnnVectorQueryBuilder;
+ import org.elasticsearch.test.ESTestCase;
+ 
++import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+ 
+@@ -524,4 +525,18 @@ public class SearchRequestAttributesExtractorTests extends ESTestCase {
+             SearchRequestAttributesExtractor.introspectTimeRange(randomLongBetween(0, fourteenDaysAgo), nowInMillis)
+         );
+     }
++
++    public void testAddTimeRangeAttributeIfMissing() {
++        long nowInMillis = System.currentTimeMillis();
++        long fifteenMinutesAgo = nowInMillis - (15 * 60 * 1000);
++
++        Map<String, Object> attributes = new HashMap<>();
++        SearchRequestAttributesExtractor.addTimeRangeAttributeIfMissing(fifteenMinutesAgo, nowInMillis, attributes);
++        assertEquals("15_minutes", attributes.get(SearchRequestAttributesExtractor.TIME_RANGE_FILTER_FROM_ATTRIBUTE));
++
++        Map<String, Object> existingAttributes = new HashMap<>(attributes);
++        existingAttributes.put(SearchRequestAttributesExtractor.TIME_RANGE_FILTER_FROM_ATTRIBUTE, "existing");
++        SearchRequestAttributesExtractor.addTimeRangeAttributeIfMissing(fifteenMinutesAgo, nowInMillis, existingAttributes);
++        assertEquals("existing", existingAttributes.get(SearchRequestAttributesExtractor.TIME_RANGE_FILTER_FROM_ATTRIBUTE));
++    }
+ }

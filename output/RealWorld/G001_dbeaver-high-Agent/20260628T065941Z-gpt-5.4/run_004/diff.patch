@@ -1,0 +1,240 @@
+diff --git a/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java b/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java
+index 7eb0710d4..74876e2e5 100644
+--- a/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java
++++ b/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java
+@@ -25,12 +25,11 @@ import org.jkiss.dbeaver.model.runtime.VoidProgressMonitor;
+ import org.jkiss.dbeaver.model.sql.SQLCompletionEngineDecider;
+ import org.jkiss.dbeaver.model.sql.SQLScriptElement;
+ import org.jkiss.dbeaver.model.sql.completion.CompletionProposalBase;
+-import org.jkiss.dbeaver.model.sql.completion.SQLCompletionAnalyzer;
++import org.jkiss.dbeaver.model.sql.completion.SQLCompletionAnalyzerSupport;
+ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionContext;
+ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionRequest;
+ import org.jkiss.dbeaver.model.sql.parser.SQLParserContext;
+ import org.jkiss.dbeaver.model.sql.parser.SQLScriptParser;
+-import org.jkiss.dbeaver.model.sql.semantics.completion.SQLQueryCompletionAnalyzer;
+ import org.jkiss.dbeaver.model.sql.semantics.completion.SQLQueryCompletionContextProvider;
+ import org.jkiss.dbeaver.runtime.DBWorkbench;
+ 
+@@ -103,7 +102,8 @@ public class LspSQLCompletionContextParser {
+         @NotNull SQLCompletionRequest request,
+         @NotNull List<CompletionProposalBase> proposals
+     ) throws InterruptedException, InvocationTargetException, DBException {
+-        SQLQueryCompletionAnalyzer analyzer = new SQLQueryCompletionAnalyzer(
++        proposals.addAll(SQLCompletionAnalyzerSupport.collectSemanticProposals(
++            new VoidProgressMonitor(),
+             monitor -> SQLQueryCompletionContextProvider.prepareCompletionContext(
+                 monitor,
+                 request,
+@@ -112,18 +112,17 @@ public class LspSQLCompletionContextParser {
+             ),
+             request,
+             request::getDocumentOffset
+-        );
+-        analyzer.run(new VoidProgressMonitor());
+-        proposals.addAll(analyzer.getResult());
++        ));
+     }
+ 
+     private static void collectLegacyCompletionProposals(
+         @NotNull SQLCompletionRequest request,
+         @NotNull List<CompletionProposalBase> proposals
+-    ) {
+-        SQLCompletionAnalyzer analyzer = new SQLCompletionAnalyzer(request);
+-        analyzer.setCheckNavigatorNodes(false);
+-        analyzer.runAnalyzer(new VoidProgressMonitor());
+-        proposals.addAll(analyzer.getProposals());
++    ) throws DBException {
++        proposals.addAll(SQLCompletionAnalyzerSupport.collectLegacyProposals(
++            new VoidProgressMonitor(),
++            request,
++            false
++        ));
+     }
+ }
+diff --git a/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/completion/SQLCompletionAnalyzerSupport.java b/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/completion/SQLCompletionAnalyzerSupport.java
+new file mode 100644
+index 000000000..f20a72686
+--- /dev/null
++++ b/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/completion/SQLCompletionAnalyzerSupport.java
+@@ -0,0 +1,85 @@
++/*
++ * DBeaver - Universal Database Manager
++ * Copyright (C) 2010-2026 DBeaver Corp and others
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.jkiss.dbeaver.model.sql.completion;
++
++import org.jkiss.code.NotNull;
++import org.jkiss.dbeaver.DBException;
++import org.jkiss.dbeaver.model.runtime.DBRProgressMonitor;
++import org.jkiss.dbeaver.model.sql.semantics.completion.SQLQueryCompletionAnalyzer;
++import org.jkiss.dbeaver.model.sql.semantics.completion.SQLQueryCompletionContext;
++import org.jkiss.dbeaver.model.sql.semantics.completion.SQLQueryCompletionProposal;
++
++import java.lang.reflect.InvocationTargetException;
++import java.util.List;
++import java.util.function.Function;
++import java.util.function.Supplier;
++
++public final class SQLCompletionAnalyzerSupport {
++
++    private SQLCompletionAnalyzerSupport() {
++    }
++
++    @NotNull
++    public static SQLCompletionAnalyzer createLegacyAnalyzer(
++        @NotNull SQLCompletionRequest request,
++        boolean checkNavigatorNodes
++    ) {
++        SQLCompletionAnalyzer analyzer = new SQLCompletionAnalyzer(request);
++        analyzer.setCheckNavigatorNodes(checkNavigatorNodes);
++        return analyzer;
++    }
++
++    @NotNull
++    public static List<SQLCompletionProposalBase> collectLegacyProposals(
++        @NotNull DBRProgressMonitor monitor,
++        @NotNull SQLCompletionRequest request,
++        boolean checkNavigatorNodes
++    ) throws DBException {
++        SQLCompletionAnalyzer analyzer = createLegacyAnalyzer(request, checkNavigatorNodes);
++        analyzer.runAnalyzer(monitor);
++        return analyzer.getProposals();
++    }
++
++    @NotNull
++    public static SQLQueryCompletionAnalyzer createSemanticAnalyzer(
++        @NotNull Function<DBRProgressMonitor, SQLQueryCompletionContext> completionContextSupplier,
++        @NotNull SQLCompletionRequest request,
++        @NotNull Supplier<Integer> currentCompletionOffsetSupplier
++    ) {
++        return new SQLQueryCompletionAnalyzer(
++            completionContextSupplier,
++            request,
++            currentCompletionOffsetSupplier
++        );
++    }
++
++    @NotNull
++    public static List<? extends SQLQueryCompletionProposal> collectSemanticProposals(
++        @NotNull DBRProgressMonitor monitor,
++        @NotNull Function<DBRProgressMonitor, SQLQueryCompletionContext> completionContextSupplier,
++        @NotNull SQLCompletionRequest request,
++        @NotNull Supplier<Integer> currentCompletionOffsetSupplier
++    ) throws InvocationTargetException, InterruptedException {
++        SQLQueryCompletionAnalyzer analyzer = createSemanticAnalyzer(
++            completionContextSupplier,
++            request,
++            currentCompletionOffsetSupplier
++        );
++        analyzer.run(monitor);
++        return analyzer.getResult();
++    }
++}
+diff --git a/plugins/org.jkiss.dbeaver.ui.editors.sql/src/org/jkiss/dbeaver/ui/editors/sql/syntax/SQLCompletionProcessor.java b/plugins/org.jkiss.dbeaver.ui.editors.sql/src/org/jkiss/dbeaver/ui/editors/sql/syntax/SQLCompletionProcessor.java
+index 992dcbc3e..463b7865b 100644
+--- a/plugins/org.jkiss.dbeaver.ui.editors.sql/src/org/jkiss/dbeaver/ui/editors/sql/syntax/SQLCompletionProcessor.java
++++ b/plugins/org.jkiss.dbeaver.ui.editors.sql/src/org/jkiss/dbeaver/ui/editors/sql/syntax/SQLCompletionProcessor.java
+@@ -33,6 +33,7 @@ import org.jkiss.dbeaver.model.preferences.DBPPreferenceStore;
+ import org.jkiss.dbeaver.model.runtime.AbstractJob;
+ import org.jkiss.dbeaver.model.runtime.DBRProgressMonitor;
+ import org.jkiss.dbeaver.model.runtime.DBRRunnableParametrized;
++import org.jkiss.dbeaver.model.sql.completion.SQLCompletionAnalyzerSupport;
+ import org.jkiss.dbeaver.model.sql.SQLCompletionEngineDecider;
+ import org.jkiss.dbeaver.model.sql.SQLScriptElement;
+ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionActivityTracker;
+@@ -206,7 +207,7 @@ public class SQLCompletionProcessor implements IContentAssistProcessor {
+                         if (dataSource != null) {
+                             completionJobSuppliers.add(() -> {
+                                 // old analyzer is not reusable, but it doesn't matter because see the next comment below
+-                                SQLCompletionAnalyzer analyzer = new SQLCompletionAnalyzer(request);
++                                SQLCompletionAnalyzer analyzer = SQLCompletionAnalyzerSupport.createLegacyAnalyzer(request, false);
+                                 return new ProposalsComputationJobHolder(new ProposalSearchJob(analyzer)) {
+                                     @Override
+                                     public List<?> getProposals() {
+diff --git a/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/analyzer/builder/request/RequestResult.java b/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/analyzer/builder/request/RequestResult.java
+index 665ee6333..8606d9698 100644
+--- a/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/analyzer/builder/request/RequestResult.java
++++ b/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/analyzer/builder/request/RequestResult.java
+@@ -29,13 +29,12 @@ import org.jkiss.dbeaver.model.exec.DBCExecutionContext;
+ import org.jkiss.dbeaver.model.runtime.DBRProgressMonitor;
+ import org.jkiss.dbeaver.model.runtime.VoidProgressMonitor;
+ import org.jkiss.dbeaver.model.sql.SQLQuery;
++import org.jkiss.dbeaver.model.sql.completion.SQLCompletionAnalyzerSupport;
+ import org.jkiss.dbeaver.model.sql.SQLSyntaxManager;
+-import org.jkiss.dbeaver.model.sql.completion.SQLCompletionAnalyzer;
+ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionContext;
+ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionProposalBase;
+ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionRequest;
+ import org.jkiss.dbeaver.model.sql.parser.SQLRuleManager;
+-import org.jkiss.dbeaver.model.sql.semantics.completion.SQLQueryCompletionAnalyzer;
+ import org.jkiss.dbeaver.model.sql.semantics.completion.SQLQueryCompletionContextProvider;
+ import org.jkiss.dbeaver.model.sql.semantics.completion.SQLQueryCompletionProposal;
+ import org.jkiss.utils.Pair;
+@@ -64,11 +63,7 @@ public class RequestResult {
+     @NotNull
+     public List<SQLCompletionProposalBase> request(@NotNull String sql, boolean simpleMode) throws DBException {
+         final SQLCompletionRequest request = prepareCompletionRequest(sql, simpleMode);
+-
+-        final SQLCompletionAnalyzer analyzer = new SQLCompletionAnalyzer(request);
+-        analyzer.setCheckNavigatorNodes(false);
+-        analyzer.runAnalyzer(new VoidProgressMonitor());
+-        return analyzer.getProposals();
++        return SQLCompletionAnalyzerSupport.collectLegacyProposals(new VoidProgressMonitor(), request, false);
+     }
+ 
+     /**
+@@ -109,27 +104,24 @@ public class RequestResult {
+     ) throws DBException {
+         final SQLCompletionRequest request = prepareCompletionRequest(sql, simpleMode);
+         final DBRProgressMonitor monitor = new VoidProgressMonitor();
+-        final SQLQueryCompletionAnalyzer analyzer = getSqlQueryCompletionAnalyzer(request);
+         try {
+-            analyzer.run(monitor);
++            return Pair.of(
++                request,
++                SQLCompletionAnalyzerSupport.collectSemanticProposals(
++                    monitor,
++                    progressMonitor -> SQLQueryCompletionContextProvider.prepareCompletionContext(
++                        progressMonitor,
++                        request,
++                        request.getDocument().get(),
++                        request.getDocumentOffset()
++                    ),
++                    request,
++                    request::getDocumentOffset
++                )
++            );
+         } catch (InvocationTargetException | InterruptedException e) {
+             throw new DBException("Error while preparing completion proposals", e);
+         }
+-        return Pair.of(request, analyzer.getResult());
+-    }
+-
+-    @NotNull
+-    private static SQLQueryCompletionAnalyzer getSqlQueryCompletionAnalyzer(SQLCompletionRequest request) {
+-        return new SQLQueryCompletionAnalyzer(
+-            monitor -> SQLQueryCompletionContextProvider.prepareCompletionContext(
+-                monitor,
+-                request,
+-                request.getDocument().get(),
+-                request.getDocumentOffset()
+-            ),
+-            request,
+-            request::getDocumentOffset
+-        );
+     }
+ 
+     @NotNull

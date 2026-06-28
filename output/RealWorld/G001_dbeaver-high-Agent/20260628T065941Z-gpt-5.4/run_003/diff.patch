@@ -1,0 +1,234 @@
+diff --git a/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java b/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java
+index 53653ef5f..7eb0710d4 100644
+--- a/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java
++++ b/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java
+@@ -20,8 +20,9 @@ import org.eclipse.jface.text.Document;
+ import org.eclipse.lsp4j.CompletionItem;
+ import org.jkiss.code.NotNull;
+ import org.jkiss.dbeaver.DBException;
++import org.jkiss.dbeaver.model.DBPDataSource;
+ import org.jkiss.dbeaver.model.runtime.VoidProgressMonitor;
+-import org.jkiss.dbeaver.model.sql.SQLCompletionMode;
++import org.jkiss.dbeaver.model.sql.SQLCompletionEngineDecider;
+ import org.jkiss.dbeaver.model.sql.SQLScriptElement;
+ import org.jkiss.dbeaver.model.sql.completion.CompletionProposalBase;
+ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionAnalyzer;
+@@ -78,16 +79,22 @@ public class LspSQLCompletionContextParser {
+         @NotNull SQLCompletionRequest request
+     ) throws InterruptedException, InvocationTargetException, DBException {
+         List<CompletionProposalBase> proposals = new ArrayList<>();
+-        if (useLegacyCompletionEngine()) {
+-            collectLegacyCompletionProposals(request, proposals);
+-        } else {
++        SQLCompletionEngineDecider.Decision engineDecision = resolveCompletionEngines(document.getDataSource());
++        if (engineDecision.semanticEnabled()) {
+             collectSemanticCompletionProposals(document, offset, request, proposals);
+         }
++        if (engineDecision.legacyEnabled() && (!engineDecision.legacyRequiresWordPart() || request.getWordPart() != null)) {
++            collectLegacyCompletionProposals(request, proposals);
++        }
+         return proposals;
+     }
+ 
+-    private static boolean useLegacyCompletionEngine() {
+-        return !SQLCompletionMode.fromPreferences(DBWorkbench.getPlatform().getPreferenceStore()).usesSemanticAnalyzer();
++    @NotNull
++    private static SQLCompletionEngineDecider.Decision resolveCompletionEngines(@NotNull DBPDataSource dataSource) {
++        return SQLCompletionEngineDecider.resolve(
++            DBWorkbench.getPlatform().getPreferenceStore(),
++            dataSource
++        );
+     }
+ 
+     private static void collectSemanticCompletionProposals(
+diff --git a/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/SQLCompletionEngineDecider.java b/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/SQLCompletionEngineDecider.java
+new file mode 100644
+index 000000000..d8b6f8504
+--- /dev/null
++++ b/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/SQLCompletionEngineDecider.java
+@@ -0,0 +1,45 @@
++/*
++ * DBeaver - Universal Database Manager
++ * Copyright (C) 2010-2026 DBeaver Corp and others
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.jkiss.dbeaver.model.sql;
++
++import org.jkiss.code.NotNull;
++import org.jkiss.code.Nullable;
++import org.jkiss.dbeaver.model.DBPDataSource;
++import org.jkiss.dbeaver.model.impl.sql.BasicSQLDialect;
++import org.jkiss.dbeaver.model.preferences.DBPPreferenceStore;
++
++public final class SQLCompletionEngineDecider {
++
++    private SQLCompletionEngineDecider() {
++    }
++
++    @NotNull
++    public static Decision resolve(@NotNull DBPPreferenceStore preferenceStore, @Nullable DBPDataSource dataSource) {
++        SQLCompletionMode mode = SQLCompletionMode.fromPreferences(preferenceStore);
++        boolean semanticEnabled = mode.usesSemanticAnalyzer()
++            && preferenceStore.getBoolean(SQLModelPreferences.ADVANCED_HIGHLIGHTING_ENABLE)
++            && preferenceStore.getBoolean(SQLModelPreferences.READ_METADATA_FOR_SEMANTIC_ANALYSIS)
++            && dataSource != null
++            && dataSource.getSQLDialect() instanceof BasicSQLDialect;
++        boolean legacyEnabled = dataSource != null && (mode.usesLegacyAnalyzer() || !semanticEnabled);
++        boolean legacyRequiresWordPart = semanticEnabled && mode.usesLegacyAnalyzer();
++        return new Decision(legacyEnabled, semanticEnabled, legacyRequiresWordPart);
++    }
++
++    public record Decision(boolean legacyEnabled, boolean semanticEnabled, boolean legacyRequiresWordPart) {
++    }
++}
+diff --git a/plugins/org.jkiss.dbeaver.ui.editors.sql/src/org/jkiss/dbeaver/ui/editors/sql/syntax/SQLCompletionProcessor.java b/plugins/org.jkiss.dbeaver.ui.editors.sql/src/org/jkiss/dbeaver/ui/editors/sql/syntax/SQLCompletionProcessor.java
+index b30a7ad30..992dcbc3e 100644
+--- a/plugins/org.jkiss.dbeaver.ui.editors.sql/src/org/jkiss/dbeaver/ui/editors/sql/syntax/SQLCompletionProcessor.java
++++ b/plugins/org.jkiss.dbeaver.ui.editors.sql/src/org/jkiss/dbeaver/ui/editors/sql/syntax/SQLCompletionProcessor.java
+@@ -29,12 +29,11 @@ import org.jkiss.code.Nullable;
+ import org.jkiss.dbeaver.Log;
+ import org.jkiss.dbeaver.model.DBPDataSource;
+ import org.jkiss.dbeaver.model.exec.DBExecUtils;
+-import org.jkiss.dbeaver.model.impl.sql.BasicSQLDialect;
+ import org.jkiss.dbeaver.model.preferences.DBPPreferenceStore;
+ import org.jkiss.dbeaver.model.runtime.AbstractJob;
+ import org.jkiss.dbeaver.model.runtime.DBRProgressMonitor;
+ import org.jkiss.dbeaver.model.runtime.DBRRunnableParametrized;
+-import org.jkiss.dbeaver.model.sql.SQLCompletionMode;
++import org.jkiss.dbeaver.model.sql.SQLCompletionEngineDecider;
+ import org.jkiss.dbeaver.model.sql.SQLScriptElement;
+ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionActivityTracker;
+ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionAnalyzer;
+@@ -177,17 +176,13 @@ public class SQLCompletionProcessor implements IContentAssistProcessor {
+                     DBPDataSource dataSource = editor.getDataSource();
+ 
+                     DBPPreferenceStore store = this.editor.getActivePreferenceStore();
+-                    SQLCompletionMode mode = SQLCompletionMode.fromPreferences(store);
+-                    boolean useNewCompletionEngine = mode.usesSemanticAnalyzer()
+-                        && store.getBoolean(SQLPreferenceConstants.ADVANCED_HIGHLIGHTING_ENABLE)
+-                        && store.getBoolean(SQLPreferenceConstants.READ_METADATA_FOR_SEMANTIC_ANALYSIS)
+-                        && dataSource != null && dataSource.getSQLDialect() instanceof BasicSQLDialect;
++                    SQLCompletionEngineDecider.Decision engineDecision = SQLCompletionEngineDecider.resolve(store, dataSource);
+ 
+                     // UIUtils.waitJobCompletion(..) uses job.isFinished() which is not dropped on reschedule,
+                     // so we should be able to recreate the whole job object including all its non-reusable dependencies.
+                     List<Supplier<ProposalsComputationJobHolder>> completionJobSuppliers = new ArrayList<>();
+ 
+-                    if (useNewCompletionEngine) {
++                    if (engineDecision.semanticEnabled()) {
+                         // new analyzer is reusable
+                         SQLEditorQueryCompletionAnalyzer newAnalyzer = new SQLEditorQueryCompletionAnalyzer(
+                             monitor -> this.editor.obtainCompletionContext(monitor, completionRequestPosition),
+@@ -207,7 +202,7 @@ public class SQLCompletionProcessor implements IContentAssistProcessor {
+                         });
+                     }
+ 
+-                    if ((request.getWordPart() != null && mode.usesLegacyAnalyzer()) || !useNewCompletionEngine) {
++                    if (engineDecision.legacyEnabled() && (!engineDecision.legacyRequiresWordPart() || request.getWordPart() != null)) {
+                         if (dataSource != null) {
+                             completionJobSuppliers.add(() -> {
+                                 // old analyzer is not reusable, but it doesn't matter because see the next comment below
+diff --git a/test/org.jkiss.dbeaver.model.sql.test/src/org/jkiss/dbeaver/model/sql/SQLCompletionEngineDeciderTest.java b/test/org.jkiss.dbeaver.model.sql.test/src/org/jkiss/dbeaver/model/sql/SQLCompletionEngineDeciderTest.java
+new file mode 100644
+index 000000000..bdf64dee5
+--- /dev/null
++++ b/test/org.jkiss.dbeaver.model.sql.test/src/org/jkiss/dbeaver/model/sql/SQLCompletionEngineDeciderTest.java
+@@ -0,0 +1,87 @@
++/*
++ * DBeaver - Universal Database Manager
++ * Copyright (C) 2010-2026 DBeaver Corp and others
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.jkiss.dbeaver.model.sql;
++
++import org.jkiss.code.NotNull;
++import org.jkiss.dbeaver.model.DBPDataSource;
++import org.jkiss.dbeaver.model.impl.sql.BasicSQLDialect;
++import org.jkiss.dbeaver.model.preferences.DBPPreferenceStore;
++import org.jkiss.junit.DBeaverUnitTest;
++import org.junit.jupiter.api.Assertions;
++import org.junit.jupiter.api.Test;
++
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++
++public class SQLCompletionEngineDeciderTest extends DBeaverUnitTest {
++
++    @Test
++    public void newModeShouldFallbackToLegacyWhenSemanticAnalyzerUnavailable() {
++        DBPPreferenceStore store = mockStore(SQLCompletionMode.NEW, true, false);
++        DBPDataSource dataSource = mockDataSource();
++
++        SQLCompletionEngineDecider.Decision decision = SQLCompletionEngineDecider.resolve(store, dataSource);
++
++        Assertions.assertTrue(decision.legacyEnabled());
++        Assertions.assertFalse(decision.semanticEnabled());
++        Assertions.assertFalse(decision.legacyRequiresWordPart());
++    }
++
++    @Test
++    public void combinedModeShouldEnableBothAnalyzersWhenSemanticAnalyzerAvailable() {
++        DBPPreferenceStore store = mockStore(SQLCompletionMode.COMBINED, true, true);
++        DBPDataSource dataSource = mockDataSource();
++
++        SQLCompletionEngineDecider.Decision decision = SQLCompletionEngineDecider.resolve(store, dataSource);
++
++        Assertions.assertTrue(decision.legacyEnabled());
++        Assertions.assertTrue(decision.semanticEnabled());
++        Assertions.assertTrue(decision.legacyRequiresWordPart());
++    }
++
++    @Test
++    public void defaultModeShouldUseLegacyAnalyzerOnly() {
++        DBPPreferenceStore store = mockStore(SQLCompletionMode.DEFAULT, true, true);
++        DBPDataSource dataSource = mockDataSource();
++
++        SQLCompletionEngineDecider.Decision decision = SQLCompletionEngineDecider.resolve(store, dataSource);
++
++        Assertions.assertTrue(decision.legacyEnabled());
++        Assertions.assertFalse(decision.semanticEnabled());
++        Assertions.assertFalse(decision.legacyRequiresWordPart());
++    }
++
++    @NotNull
++    private static DBPPreferenceStore mockStore(
++        @NotNull SQLCompletionMode mode,
++        boolean advancedHighlightingEnabled,
++        boolean metadataReadEnabled
++    ) {
++        DBPPreferenceStore store = mock(DBPPreferenceStore.class);
++        when(store.getString(SQLModelPreferences.AUTOCOMPLETION_MODE)).thenReturn(mode.getPreferenceValue());
++        when(store.getBoolean(SQLModelPreferences.ADVANCED_HIGHLIGHTING_ENABLE)).thenReturn(advancedHighlightingEnabled);
++        when(store.getBoolean(SQLModelPreferences.READ_METADATA_FOR_SEMANTIC_ANALYSIS)).thenReturn(metadataReadEnabled);
++        return store;
++    }
++
++    @NotNull
++    private static DBPDataSource mockDataSource() {
++        DBPDataSource dataSource = mock(DBPDataSource.class);
++        when(dataSource.getSQLDialect()).thenReturn(BasicSQLDialect.INSTANCE);
++        return dataSource;
++    }
++}

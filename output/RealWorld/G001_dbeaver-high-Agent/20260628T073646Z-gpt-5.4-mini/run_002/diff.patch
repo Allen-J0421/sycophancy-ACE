@@ -1,0 +1,183 @@
+diff --git a/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/semantics/SQLQueryLexicalScope.java b/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/semantics/SQLQueryLexicalScope.java
+index e688d856d..408aecb9a 100644
+--- a/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/semantics/SQLQueryLexicalScope.java
++++ b/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/semantics/SQLQueryLexicalScope.java
+@@ -24,7 +24,6 @@ import org.jkiss.dbeaver.model.stm.STMTreeNode;
+ import org.jkiss.utils.Pair;
+ 
+ import java.util.*;
+-import java.util.stream.Stream;
+ 
+ public class SQLQueryLexicalScope {
+ 
+@@ -69,20 +68,24 @@ public class SQLQueryLexicalScope {
+     @NotNull
+     public Interval getInterval() {
+         if (this.interval == null) {
+-    
+-            int a = Stream.concat(
+-                items.stream().map(x -> x.getSyntaxNode().getRealInterval().a),
+-                syntaxNodes.stream().map(x -> x.getRealInterval().a)
+-            ).mapToInt(x -> x).min().orElse(0);
++            int start = Integer.MAX_VALUE;
++            int end = Integer.MIN_VALUE;
+ 
+-            int b = Stream.concat(
+-                items.stream().map(x -> { Interval r = x.getSyntaxNode().getRealInterval(); return r.b + r.length(); }),
+-                syntaxNodes.stream().map(x -> { Interval r = x.getRealInterval(); return r.b + r.length(); })
+-            ).mapToInt(x -> x).max().orElse(Integer.MAX_VALUE);
++            for (SQLQueryLexicalScopeItem item : items) {
++                Interval itemInterval = item.getSyntaxNode().getRealInterval();
++                start = Math.min(start, itemInterval.a);
++                end = Math.max(end, itemInterval.b + itemInterval.length());
++            }
+ 
+-            this.interval = Interval.of(a, b);
++            for (STMTreeNode syntaxNode : syntaxNodes) {
++                Interval nodeInterval = syntaxNode.getRealInterval();
++                start = Math.min(start, nodeInterval.a);
++                end = Math.max(end, nodeInterval.b + nodeInterval.length());
++            }
++
++            this.interval = Interval.of(start == Integer.MAX_VALUE ? 0 : start, end == Integer.MIN_VALUE ? Integer.MAX_VALUE : end);
+         }
+-        
++
+         return this.interval;
+     }
+ 
+@@ -122,8 +125,8 @@ public class SQLQueryLexicalScope {
+     @Nullable
+     public SQLQueryLexicalScopeItem findItem(int position) {
+         return this.items.stream()
+-           .filter(t -> t.getSyntaxNode().getRealInterval().properlyContains(Interval.of(position, position)))
+-           .min(Comparator.comparingInt(t -> t.getSyntaxNode().getRealInterval().a))
++           .filter(item -> containsPosition(item.getSyntaxNode().getRealInterval(), position))
++           .min(Comparator.comparingInt(item -> item.getSyntaxNode().getRealInterval().a))
+            .orElse(null);
+     }
+ 
+@@ -132,7 +135,7 @@ public class SQLQueryLexicalScope {
+         ArrayList<Pair<SQLQueryLexicalScopeItem, Interval>> candidates = new ArrayList<>(this.items.size());
+         for (SQLQueryLexicalScopeItem item : this.items) {
+             Interval interval = item.getSyntaxNode().getRealInterval();
+-            if (interval.a < position && interval.b + 1 >= position) {
++            if (coversPosition(interval, position)) {
+                 candidates.add(Pair.of(item, interval));
+             }
+         }
+@@ -144,6 +147,14 @@ public class SQLQueryLexicalScope {
+         }
+     }
+ 
++    private static boolean containsPosition(@NotNull Interval interval, int position) {
++        return interval.properlyContains(Interval.of(position, position));
++    }
++
++    private static boolean coversPosition(@NotNull Interval interval, int position) {
++        return interval.a < position && interval.b + 1 >= position;
++    }
++
+     private static int getLexicalItemPriority(@NotNull SQLQueryLexicalScopeItem item) {
+         if (item instanceof SQLQueryMemberAccessEntry) {
+             return 0;
+@@ -153,4 +164,4 @@ public class SQLQueryLexicalScope {
+             return Integer.MAX_VALUE;
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/test/org.jkiss.dbeaver.model.sql.test/src/org/jkiss/dbeaver/model/sql/semantics/SQLQueryLexicalScopeTest.java b/test/org.jkiss.dbeaver.model.sql.test/src/org/jkiss/dbeaver/model/sql/semantics/SQLQueryLexicalScopeTest.java
+new file mode 100644
+index 000000000..5086aedce
+--- /dev/null
++++ b/test/org.jkiss.dbeaver.model.sql.test/src/org/jkiss/dbeaver/model/sql/semantics/SQLQueryLexicalScopeTest.java
+@@ -0,0 +1,87 @@
++/*
++ * DBeaver - Universal Database Manager
++ * Copyright (C) 2010-2026 DBeaver Corp and others
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.jkiss.dbeaver.model.sql.semantics;
++
++import org.antlr.v4.runtime.misc.Interval;
++import org.jkiss.code.NotNull;
++import org.jkiss.code.Nullable;
++import org.jkiss.dbeaver.model.stm.STMTreeNode;
++import org.jkiss.junit.DBeaverUnitTest;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertSame;
++
++public class SQLQueryLexicalScopeTest extends DBeaverUnitTest {
++
++    @Test
++    public void getIntervalShouldIncludeRegisteredItemsAndSyntaxNodes() {
++        SQLQueryLexicalScope scope = new SQLQueryLexicalScope();
++        scope.registerItem(new TestItem(syntaxNode(10, 12), SQLQuerySymbolClass.COLUMN));
++        scope.registerSyntaxNode(syntaxNode(2, 4));
++
++        Interval interval = scope.getInterval();
++
++        assertEquals(2, interval.a);
++        assertEquals(15, interval.b);
++    }
++
++    @Test
++    public void findItemShouldReturnTheContainingItemWithSmallestStart() {
++        SQLQueryLexicalScope scope = new SQLQueryLexicalScope();
++        TestItem outer = new TestItem(syntaxNode(2, 20), SQLQuerySymbolClass.COLUMN);
++        TestItem inner = new TestItem(syntaxNode(8, 12), SQLQuerySymbolClass.COLUMN);
++        scope.registerItem(outer);
++        scope.registerItem(inner);
++
++        assertSame(inner, scope.findItem(10));
++    }
++
++    @Test
++    public void findNearestItemShouldPreferTheTightestMatchingItem() {
++        SQLQueryLexicalScope scope = new SQLQueryLexicalScope();
++        TestItem wide = new TestItem(syntaxNode(2, 20), SQLQuerySymbolClass.COLUMN);
++        TestItem narrow = new TestItem(syntaxNode(8, 12), SQLQuerySymbolClass.COLUMN);
++        scope.registerItem(wide);
++        scope.registerItem(narrow);
++
++        assertSame(narrow, scope.findNearestItem(10));
++    }
++
++    @NotNull
++    private static STMTreeNode syntaxNode(int start, int end) {
++        STMTreeNode node = Mockito.mock(STMTreeNode.class);
++        Mockito.when(node.getRealInterval()).thenReturn(Interval.of(start, end));
++        return node;
++    }
++
++    private static final class TestItem extends SQLQueryLexicalScopeItem {
++        private final SQLQuerySymbolClass symbolClass;
++
++        private TestItem(@NotNull STMTreeNode syntaxNode, @NotNull SQLQuerySymbolClass symbolClass) {
++            super(syntaxNode);
++            this.symbolClass = symbolClass;
++        }
++
++        @Nullable
++        @Override
++        public SQLQuerySymbolClass getSymbolClass() {
++            return this.symbolClass;
++        }
++    }
++}

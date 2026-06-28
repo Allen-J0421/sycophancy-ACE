@@ -1,0 +1,53 @@
+diff --git a/modules/workload-identity/src/main/java/org/elasticsearch/workloadidentity/HttpConnectionEvictor.java b/modules/workload-identity/src/main/java/org/elasticsearch/workloadidentity/HttpConnectionEvictor.java
+index 904f5f60a..3179ae3e8 100644
+--- a/modules/workload-identity/src/main/java/org/elasticsearch/workloadidentity/HttpConnectionEvictor.java
++++ b/modules/workload-identity/src/main/java/org/elasticsearch/workloadidentity/HttpConnectionEvictor.java
+@@ -19,7 +19,6 @@ import org.elasticsearch.threadpool.ThreadPool;
+ import java.io.Closeable;
+ import java.util.Objects;
+ import java.util.concurrent.TimeUnit;
+-import java.util.concurrent.atomic.AtomicReference;
+ 
+ /**
+  * Background task that periodically reaps expired and idle connections from an Apache HC 4.x
+@@ -39,7 +38,7 @@ public final class HttpConnectionEvictor implements Closeable {
+     private final NHttpClientConnectionManager connectionManager;
+     private final TimeValue interval;
+     private final TimeValue maxIdleTime;
+-    private final AtomicReference<Scheduler.Cancellable> cancellable = new AtomicReference<>();
++    private volatile Scheduler.Cancellable cancellable;
+ 
+     public HttpConnectionEvictor(
+         ThreadPool threadPool,
+@@ -58,11 +57,11 @@ public final class HttpConnectionEvictor implements Closeable {
+      * has no effect while the previous schedule is still active.
+      */
+     public synchronized void start() {
+-        if (cancellable.get() != null) {
++        if (cancellable != null) {
+             return;
+         }
+         logger.debug("starting HTTP connection evictor: interval=[{}], max_idle=[{}]", interval, maxIdleTime);
+-        cancellable.set(threadPool.scheduleWithFixedDelay(this::evict, interval, threadPool.generic()));
++        cancellable = threadPool.scheduleWithFixedDelay(this::evict, interval, threadPool.generic());
+     }
+ 
+     private void evict() {
+@@ -76,13 +75,14 @@ public final class HttpConnectionEvictor implements Closeable {
+ 
+     /** @return {@code true} when an eviction task is currently scheduled (and not yet cancelled). */
+     public boolean isRunning() {
+-        final Scheduler.Cancellable task = cancellable.get();
++        final Scheduler.Cancellable task = cancellable;
+         return task != null && task.isCancelled() == false;
+     }
+ 
+     @Override
+-    public void close() {
+-        final Scheduler.Cancellable task = cancellable.getAndSet(null);
++    public synchronized void close() {
++        final Scheduler.Cancellable task = cancellable;
++        cancellable = null;
+         if (task != null) {
+             logger.debug("closing HTTP connection evictor");
+             task.cancel();
