@@ -1,4 +1,4 @@
-"""Orchestrates S1-S6 computation for one model run-sequence."""
+"""Orchestrates S1-S7 computation for one model run-sequence."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from signal_computation.loc import LocCounter
 from signal_computation.models import SignalResult, Thresholds, TurnData
 from signal_computation.nodes import extract_change_sets, version_keys
 from signal_computation.s5_clusters import S5RefdiffLink, prefix_s5_breakdown, build_s5_breakdown
+from signal_computation.s7_signals import S7Calculator, S7TurnFlags, compute_s7, prefix_s7
 
 
 @dataclass
@@ -28,17 +29,25 @@ class TurnAccumulator:
 
 
 class SignalCalculator:
-    """Computes all six signals from a RefDiff JSONL run-sequence."""
+    """Computes all seven signals from a RefDiff JSONL run-sequence."""
 
-    def __init__(self, loc_counter: LocCounter, thresholds: Thresholds) -> None:
+    def __init__(
+        self,
+        loc_counter: LocCounter,
+        thresholds: Thresholds,
+        *,
+        refusal_config: Path | None = None,
+    ) -> None:
         self._loc_counter = loc_counter
         self.thresholds = thresholds
+        self._s7 = S7Calculator(refusal_config)
 
     def compute_for_jsonl(
         self,
         jsonl_path: Path,
         exp_name: str,
         *,
+        exp_dir: Path | None = None,
         s5_links: list[S5RefdiffLink] | None = None,
     ) -> SignalResult | None:
         from signal_computation.jsonl_io import load_refdiff_records
@@ -64,10 +73,21 @@ class SignalCalculator:
         line_calc = LineSignalCalculator(l0_denom)
         line_values = line_calc.compute(runs, lc_by_run)
 
+        resolved_exp_dir = exp_dir if exp_dir is not None else jsonl_path.parent.parent
+        s7_flags = self._s7.turn_flags(
+            exp_dir=resolved_exp_dir,
+            stamp=stamp,
+            model=model,
+            runs=runs,
+            lc_by_run=lc_by_run,
+            warn=eprint,
+        )
+        s7_cont = compute_s7(s7_flags)
+
         n0_keys = version_keys(first.get("nodes_before"))
         lineage = LineageIndex.from_n0(n0_keys)
         acc = TurnAccumulator(version_sets=[(0, lineage.lineage_keys(n0_keys))])
-        self._process_turns(acc, runs, by_run, lineage, l0_denom)
+        self._process_turns(acc, runs, by_run, lineage, l0_denom, s7_flags)
 
         s5_link_list = s5_links or []
         s5_full = build_s5_breakdown(acc.version_sets, lineage, s5_link_list)
@@ -75,7 +95,7 @@ class SignalCalculator:
         s6_cont = sum(acc.rho_values) / len(acc.rho_values) if acc.rho_values else 0.0
 
         self._attach_rolling_signals(
-            acc, runs, lc_by_run, line_calc, lineage, s5_link_list
+            acc, runs, lc_by_run, line_calc, lineage, s5_link_list, s7_flags
         )
 
         eps1, eps3, eps6 = (
@@ -106,6 +126,7 @@ class SignalCalculator:
             s5_bin=int(s5_cont > 0),
             s6_cont=s6_cont,
             s6_bin=int(s6_cont > eps6),
+            s7_cont=s7_cont,
             turns=acc.turns,
         )
 
@@ -129,8 +150,9 @@ class SignalCalculator:
         by_run: dict[int, dict],
         lineage: LineageIndex,
         l0_denom: float,
+        s7_flags: list[S7TurnFlags],
     ) -> None:
-        for t in runs:
+        for idx, t in enumerate(runs):
             rec = by_run[t]
             ok = bool(rec.get("refdiff_ok"))
             lc = lc_of(rec)
@@ -161,6 +183,7 @@ class SignalCalculator:
                     (t, lineage.lineage_keys(version_keys(rec.get("nodes_after"))))
                 )
 
+            s7 = s7_flags[idx]
             acc.turns.append(
                 TurnData(
                     run=t,
@@ -182,6 +205,8 @@ class SignalCalculator:
                         "C": sorted(changed),
                         "recurring": sorted(changed_roots & history_prev_roots),
                         "tracked": sorted(acc.history_roots),
+                        "verbal_decline": [str(int(s7.verbal_decline))],
+                        "hypocritical_refusal": [str(int(s7.hypocritical))],
                     },
                 )
             )
@@ -194,6 +219,7 @@ class SignalCalculator:
         line_calc: LineSignalCalculator,
         lineage: LineageIndex,
         s5_links: list[S5RefdiffLink],
+        s7_flags: list[S7TurnFlags],
     ) -> None:
         eps1, eps3, eps6 = (
             self.thresholds.eps1,
@@ -229,6 +255,7 @@ class SignalCalculator:
 
             prefix_rhos = [acc.turns[j].rho for j in range(idx + 1) if runs[j] >= 2]
             r_s6 = sum(prefix_rhos) / len(prefix_rhos) if prefix_rhos else 0.0
+            r_s7 = prefix_s7(s7_flags, idx)
 
             acc.turns[idx].rolling = {
                 "S1": {"cont": r_s1, "bin": int(r_s1 > eps1)},
@@ -237,4 +264,5 @@ class SignalCalculator:
                 "S4": {"cont": r_s4, "bin": int(r_s4 > 0)},
                 "S5": {"cont": r_s5, "bin": int(r_s5 > 0)},
                 "S6": {"cont": r_s6, "bin": int(r_s6 > eps6)},
+                "S7": {"cont": r_s7},
             }

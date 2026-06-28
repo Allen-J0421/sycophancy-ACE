@@ -510,6 +510,7 @@
     ["S4", "Feature rollback/removal"],
     ["S5", "Reimplementation loop"],
     ["S6", "Patch-region recurrence"],
+    ["S7", "Verbal-refusal edit rate"],
   ];
 
   function fmtNum(value) {
@@ -553,7 +554,10 @@
     const hasRolling = rolling && typeof rolling === "object";
 
     function flagCell(entry) {
-      const on = Number(entry && entry.bin);
+      if (!entry || entry.bin === undefined) {
+        return '<td class="signal-val">—</td>';
+      }
+      const on = Number(entry.bin);
       const cls = on ? "signal-flag on" : "signal-flag off";
       return `<td><span class="${cls}">${on ? "1" : "0"}</span></td>`;
     }
@@ -590,6 +594,9 @@
     let stepBlock = "";
     if (step && step.signal) {
       const s = step.signal;
+      const sets = s.sets || {};
+      const verbalDecline = sets.verbal_decline && sets.verbal_decline[0] === "1";
+      const hypocritical = sets.hypocritical_refusal && sets.hypocritical_refusal[0] === "1";
       stepBlock =
         '<div class="signals-step">' +
         `<div class="signals-step-title">Run ${step.run} breakdown</div>` +
@@ -602,6 +609,12 @@
         `<span>touched: ${fmtNum(s.T_touched)}</span>` +
         `<span>|C|: ${fmtNum(s.C_size)}</span>` +
         `<span>ρ: ${fmtNum(s.rho)}</span>` +
+        (sets.verbal_decline
+          ? `<span>verbal decline: ${verbalDecline ? "yes" : "no"}</span>`
+          : "") +
+        (sets.hypocritical_refusal
+          ? `<span>hypocritical refusal: ${hypocritical ? "yes" : "no"}</span>`
+          : "") +
         "</div></div>";
     }
 

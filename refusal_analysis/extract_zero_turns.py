@@ -16,65 +16,22 @@ the same layout (e.g. ``output/RealWorld``).
 """
 import argparse, csv, glob, json, os, re
 from collections import Counter
+from pathlib import Path
+
+from agent_text import claude_extract, codex_extract, load_jsonl
+
+__all__ = ["claude_extract", "codex_extract", "prompter_prompt", "build"]
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def load_jsonl(path):
-    out = []
-    if not os.path.exists(path):
-        return out
-    with open(path, encoding='utf-8', errors='replace') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(json.loads(line))
-            except Exception:
-                continue
-    return out
 
 
 def prompter_prompt(rundir):
     """User (prompter) message text for the turn."""
     txt = []
-    for o in load_jsonl(os.path.join(rundir, 'prompter.jsonl')):
-        if o.get('event') == 'prompt_out' and o.get('text'):
-            txt.append(o['text'].strip())
+    for o in load_jsonl(Path(rundir) / "prompter.jsonl"):
+        if o.get("event") == "prompt_out" and o.get("text"):
+            txt.append(o["text"].strip())
     return "\n".join(txt)
-
-
-def claude_extract(rundir):
-    """Return (thinking_blocks, message_texts) for a claude run.
-    Thinking blocks are captured when the API preserved them; redacted
-    (signature-only) blocks come through blank and are dropped."""
-    thinking, texts = [], []
-    for o in load_jsonl(os.path.join(rundir, 'claude.jsonl')):
-        if not isinstance(o, dict) or o.get('type') != 'assistant':
-            continue
-        for b in o.get('message', {}).get('content', []):
-            bt = b.get('type')
-            if bt == 'thinking' and b.get('thinking'):
-                thinking.append(b['thinking'].strip())
-            elif bt == 'text' and b.get('text'):
-                texts.append(b['text'].strip())
-    return thinking, texts
-
-
-def codex_extract(rundir):
-    """Return (thinking_blocks, message_texts) for a codex/gpt run.
-    Codex CLI does not emit reasoning text (only reasoning token counts), so
-    thinking is always empty; agent_message items are the agent's messages."""
-    texts = []
-    for o in load_jsonl(os.path.join(rundir, 'codex.jsonl')):
-        if not isinstance(o, dict):
-            continue
-        if o.get('type') == 'item.completed':
-            it = o.get('item', {})
-            if it.get('type') == 'agent_message' and it.get('text'):
-                texts.append(it['text'].strip())
-    return [], texts
 
 
 def build(dataset_dir):
@@ -92,7 +49,7 @@ def build(dataset_dir):
                 continue
             run = int(r['run'])
             rundir = os.path.join(rundirbase, f'run_{run:03d}')
-            thinking, texts = (claude_extract if is_claude else codex_extract)(rundir)
+            thinking, texts = (claude_extract if is_claude else codex_extract)(Path(rundir))
             records.append({
                 'codebase': cb, 'model': model, 'stamp': stamp, 'turn': run,
                 'rundir': os.path.relpath(rundir, dataset_dir),

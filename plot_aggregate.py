@@ -9,8 +9,8 @@ Aggregation design:
              codebase's baseline LOC ``L0`` (raw line counts scale with codebase
              size, so we MUST divide by L0 before averaging). We then average the
              normalized series across codebases, per model, with a ±SEM band.
-  * SIGNALS- plain mean of each continuous S1..S6 across codebases, per model.
-             (S1/S2/S3 are already ÷L0 and S6 is a bounded ratio; S4/S5 are raw
+  * SIGNALS- plain mean of each continuous S1..S7 across codebases, per model.
+             (S1/S2/S3 are already ÷L0; S6/S7 are bounded ratios; S4/S5 are raw
              counts and are meaned as-is per project direction.)
   * REFDIFF- plain mean of each RefDiff relationship-type count across codebases,
              per model.
@@ -60,7 +60,14 @@ import matplotlib.gridspec as gridspec  # noqa: E402
 import matplotlib.patches as patches  # noqa: E402
 import matplotlib.ticker as ticker  # noqa: E402
 
-from style_config import COLORS, LABELS  # noqa: E402
+from style_config import (  # noqa: E402
+    COLORS,
+    LABELS,
+    RATIO_SIGNAL_IDS,
+    SIGNAL_GRID_COLS,
+    SIGNAL_IDS,
+    SIGNAL_TITLES_AGG,
+)
 from plot_lines import resolve_styles  # noqa: E402
 from plot_refdiff import (  # noqa: E402
     BatchSummary,
@@ -88,16 +95,13 @@ plt.rcParams.update(
     }
 )
 
-SIGNAL_IDS = ("S1", "S2", "S3", "S4", "S5", "S6")
-SIGNAL_TITLES = {
-    "S1": "S1 Pre-conv churn (÷L0)",
-    "S2": "S2 Post-conv mod (÷L0)",
-    "S3": "S3 Volatility (÷L0)",
-    "S4": "S4 Feature rollback (count)",
-    "S5": "S5 Reimpl. loop (count)",
-    "S6": "S6 Patch recurrence (ratio)",
-}
 BUCKETS = CATEGORIES  # ("Matching", "Non-Matching", "No Relationship")
+
+
+def _signal_bar_ylim(sid: str, top: float) -> tuple[float, float]:
+    if sid in RATIO_SIGNAL_IDS:
+        return 0.0, min(1.0, max(top * 1.12, 0.1))
+    return 0.0, top * 1.15 if top > 0 else 1.0
 
 
 # --------------------------------------------------------------------------- #
@@ -306,10 +310,11 @@ def plot_signals_agg(cont, coverage, suite, out_dir):
     labels = [LABELS.get(m, m) for m in models]
     styles = resolve_styles(models)
     x = np.arange(len(models))
-    fig = plt.figure(figsize=(max(11.0, 1.7 * len(models) + 6.0), 7.0))
-    grid = fig.add_gridspec(2, 3, hspace=0.6, wspace=0.28)
+    n_rows = (len(SIGNAL_IDS) + SIGNAL_GRID_COLS - 1) // SIGNAL_GRID_COLS
+    fig = plt.figure(figsize=(max(12.0, 1.7 * len(models) + 6.0), 2.8 * n_rows + 1.5))
+    grid = fig.add_gridspec(n_rows, SIGNAL_GRID_COLS, hspace=0.6, wspace=0.28)
     for idx, sid in enumerate(SIGNAL_IDS):
-        ax = fig.add_subplot(grid[idx // 3, idx % 3])
+        ax = fig.add_subplot(grid[idx // SIGNAL_GRID_COLS, idx % SIGNAL_GRID_COLS])
         means, sems = [], []
         for m in models:
             arr = np.array(cont[m][sid], dtype=float)
@@ -317,13 +322,12 @@ def plot_signals_agg(cont, coverage, suite, out_dir):
             sems.append(float(arr.std(ddof=1) / np.sqrt(len(arr))) if len(arr) > 1 else 0.0)
         ax.bar(x, means, yerr=sems, color=[styles[m][0] for m in models],
                edgecolor="white", linewidth=0.6, capsize=3)
-        ax.set_title(SIGNAL_TITLES[sid], fontsize=9)
+        ax.set_title(SIGNAL_TITLES_AGG[sid], fontsize=9)
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=7)
         ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
-        # headroom must clear the error-bar tops (mean + sem), not just the bars
         top = max([m + s for m, s in zip(means, sems)] + [0.0])
-        ax.set_ylim(0, top * 1.15 if top > 0 else 1.0)
+        ax.set_ylim(*_signal_bar_ylim(sid, top))
     fig.suptitle(f"Aggregate sycophancy signals (mean ± SEM) — {suite} "
                  f"({len(experiment_set(coverage))} codebases)", fontsize=13)
     fig.subplots_adjust(left=0.07, right=0.97, top=0.9, bottom=0.1)

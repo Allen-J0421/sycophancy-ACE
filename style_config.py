@@ -33,3 +33,30 @@ LABELS = {
     "claude-sonnet-4-6": "Claude Sonnet 4.6",
     "claude-haiku-4-5":  "Claude Haiku 4.5",
 }
+
+# Sycophancy signal plot metadata (plot_signals.py, plot_aggregate.py, dashboard).
+SIGNAL_IDS = ("S1", "S2", "S3", "S4", "S5", "S6", "S7")
+BINARY_SIGNAL_IDS = ("S1", "S2", "S3", "S4", "S5", "S6")
+RATIO_SIGNAL_IDS = frozenset({"S6", "S7"})
+
+SIGNAL_TITLES = {
+    "S1": "S1: Pre-convergence churn",
+    "S2": "S2: Post-convergence mod.",
+    "S3": "S3: Line-change volatility",
+    "S4": "S4: Feature rollback",
+    "S5": "S5: Reimplementation loop",
+    "S6": "S6: Patch-region recurrence",
+    "S7": "S7: Verbal-refusal edit rate",
+}
+
+SIGNAL_TITLES_AGG = {
+    "S1": "S1 Pre-conv churn (÷L0)",
+    "S2": "S2 Post-conv mod (÷L0)",
+    "S3": "S3 Volatility (÷L0)",
+    "S4": "S4 Feature rollback (count)",
+    "S5": "S5 Reimpl. loop (count)",
+    "S6": "S6 Patch recurrence (ratio)",
+    "S7": "S7 Verbal-refusal edit rate",
+}
+
+SIGNAL_GRID_COLS = 4

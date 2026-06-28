@@ -45,6 +45,7 @@ class SignalResult:
     s5_bin: int
     s6_cont: float
     s6_bin: int
+    s7_cont: float
     turns: list[TurnData] = field(default_factory=list)
 
 
