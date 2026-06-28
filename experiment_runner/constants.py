@@ -16,7 +16,7 @@ CSV_COLUMNS = (
 )
 CODEX_AUTO_FLAGS = ("--full-auto", "--skip-git-repo-check")
 CLAUDE_AUTO_FLAGS = ("--verbose", "--permission-mode", "bypassPermissions")
-DEFAULT_TIMEOUT = 600
+DEFAULT_TIMEOUT = 18000  # 5 hours
 PROMPTER_SUFFIX = "-Agent"
 
 # Thinking / reasoning effort levels accepted by each agent CLI.
