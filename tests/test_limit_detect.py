@@ -28,6 +28,7 @@ from experiment_runner.limit_detect import (  # noqa: E402
     detect_gemini_limit,
     detect_limit,
     parse_claude_reset,
+    parse_codex_reset,
 )
 from experiment_runner.limit_marker import (  # noqa: E402
     stderr_marker_line,
@@ -134,6 +135,57 @@ def test_codex_custom_pattern_override():
     cfg = LimitDetectConfig(codex_patterns=(re.compile(r"quota exceeded", re.I),))
     hit = detect_codex_limit("error: monthly quota exceeded", cfg)
     assert hit is not None and hit.kind == SPEND_CAP
+
+
+# Real captured codex.jsonl error/turn.failed events for the usage-limit case.
+_CODEX_USAGE_LIMIT_JSONL = "\n".join([
+    json.dumps({"type": "thread.started", "thread_id": "t-1"}),
+    json.dumps({"type": "turn.started"}),
+    json.dumps({
+        "type": "error",
+        "message": ("You've hit your usage limit. Upgrade to Pro "
+                    "(https://chatgpt.com/explore/pro), visit "
+                    "https://chatgpt.com/codex/settings/usage to purchase more "
+                    "credits or try again at 4:21 PM."),
+    }),
+    json.dumps({
+        "type": "turn.failed",
+        "error": {"message": "You've hit your usage limit. ... try again at 4:21 PM."},
+    }),
+])
+
+
+def test_codex_usage_limit_positive_with_reset():
+    hit = detect_codex_limit(_CODEX_USAGE_LIMIT_JSONL, DEFAULT, now=NOW)
+    assert hit is not None and hit.provider == "codex"
+    # A usage limit is a quota, not a spend cap.
+    assert hit.kind == QUOTA
+    # "try again at 4:21 PM" -> 16:21 local (after 8 AM now -> same day).
+    assert hit.reset_dt == datetime(2026, 6, 25, 16, 21, tzinfo=LA)
+
+
+def test_codex_usage_limit_via_dispatcher():
+    hit = detect_limit(provider="codex", jsonl_text=_CODEX_USAGE_LIMIT_JSONL,
+                       cfg=DEFAULT, now=NOW)
+    assert hit is not None and hit.kind == QUOTA
+
+
+def test_codex_spend_cap_owner_message_positive():
+    jsonl = json.dumps({
+        "type": "error",
+        "message": "You hit your spend cap set by the owner of your workspace.",
+    })
+    hit = detect_codex_limit(jsonl, DEFAULT, now=NOW)
+    assert hit is not None and hit.kind == SPEND_CAP and hit.reset_dt is None
+
+
+def test_parse_codex_reset():
+    assert parse_codex_reset("try again at 4:21 PM", now=NOW) == datetime(
+        2026, 6, 25, 16, 21, tzinfo=LA)
+    # 3 AM is before 8 AM now -> tomorrow.
+    assert parse_codex_reset("try again at 3 AM", now=NOW) == datetime(
+        2026, 6, 26, 3, 0, tzinfo=LA)
+    assert parse_codex_reset("no reset clause here", now=NOW) is None
 
 
 # --------------------------------------------------------------------------- #

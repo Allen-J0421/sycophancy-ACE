@@ -67,8 +67,22 @@ _RESET_RE = re.compile(
     r"resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\b(?:\s*\(([^)]+)\))?",
     re.I,
 )
-# Codex spend-cap — best-effort (no captured sample to ground this on).
+# Codex provider limits. Grounded on real captured codex.jsonl error events:
+#   {"type":"error","message":"You've hit your usage limit. Upgrade to Pro ... or try again at 4:21 PM."}
+#   {"type":"error","message":"You hit your spend cap set by the owner of your workspace ..."}
+# Both exit the CLI without writing a diff, so they must be detected or the run burns every
+# turn on empty diffs and (worse) cascades to the next model on the same provider.
+_CODEX_LIMIT_RE = re.compile(
+    r"hit your usage limit|hit your spend cap|spend[\s_-]?cap|"
+    r"usage limit reached|purchase more credits|out of credits|"
+    r"rate limit reached|too many requests",
+    re.I,
+)
+# Spend-cap vs. usage-limit/quota classification (drives the marker's ``kind``).
 _CODEX_SPENDCAP_RE = re.compile(r"spend[\s_-]?cap|turn\.failed.*spend cap", re.I)
+_CODEX_QUOTA_RE = re.compile(r"usage limit|credits|rate limit|too many requests", re.I)
+# Codex reset clause: "try again at 4:21 PM" (no timezone given -> assume local).
+_CODEX_RESET_RE = re.compile(r"try again at\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\b", re.I)
 
 
 def _now_aware(now: datetime | None) -> datetime:
@@ -92,19 +106,18 @@ def _iter_json_objects(text: str) -> Iterator[dict]:
             yield obj
 
 
-def parse_claude_reset(text: str, *, now: datetime | None = None) -> datetime | None:
-    """Parse a Claude reset clause into the next occurrence of that wall-clock time.
+def _resolve_walltime(
+    hour: int,
+    minute: int,
+    ampm: str,
+    tz_name: str | None,
+    now: datetime | None,
+) -> datetime | None:
+    """Resolve a 12-hour wall-clock time to the next occurrence (today or tomorrow).
 
-    Handles am/pm, optional minutes, optional timezone (falls back to local), noon/midnight,
-    and rolls to tomorrow if the time has already passed today. Returns None on no/invalid match.
+    Handles am/pm, noon/midnight, an optional timezone name (falls back to local on
+    unknown/empty), and rolls forward a day if the time has already passed.
     """
-    match = _RESET_RE.search(text)
-    if not match:
-        return None
-    hour = int(match.group(1))
-    minute = int(match.group(2)) if match.group(2) else 0
-    ampm = match.group(3).lower()
-    tz_name = match.group(4)
     if not (1 <= hour <= 12) or minute > 59:
         return None
     # 12-hour -> 24-hour.
@@ -127,6 +140,33 @@ def parse_claude_reset(text: str, *, now: datetime | None = None) -> datetime | 
     if candidate <= base:
         candidate += timedelta(days=1)
     return candidate
+
+
+def parse_claude_reset(text: str, *, now: datetime | None = None) -> datetime | None:
+    """Parse a Claude reset clause into the next occurrence of that wall-clock time.
+
+    Handles am/pm, optional minutes, optional timezone (falls back to local), noon/midnight,
+    and rolls to tomorrow if the time has already passed today. Returns None on no/invalid match.
+    """
+    match = _RESET_RE.search(text)
+    if not match:
+        return None
+    minute = int(match.group(2)) if match.group(2) else 0
+    return _resolve_walltime(int(match.group(1)), minute, match.group(3).lower(),
+                             match.group(4), now)
+
+
+def parse_codex_reset(text: str, *, now: datetime | None = None) -> datetime | None:
+    """Parse a Codex reset clause ("... try again at 4:21 PM") to the next wall-clock time.
+
+    Codex omits a timezone, so the time resolves against the local zone. Returns None when
+    no reset clause is present (the limit is still surfaced, just without a precise reset).
+    """
+    match = _CODEX_RESET_RE.search(text)
+    if not match:
+        return None
+    minute = int(match.group(2)) if match.group(2) else 0
+    return _resolve_walltime(int(match.group(1)), minute, match.group(3).lower(), None, now)
 
 
 def detect_claude_limit(
@@ -153,17 +193,37 @@ def detect_claude_limit(
     return None
 
 
-def detect_codex_limit(jsonl_text: str, cfg: LimitDetectConfig) -> LimitHit | None:
-    """Detect a Codex spend-cap (best-effort string match; no parseable reset time)."""
-    for pattern in (_CODEX_SPENDCAP_RE, *cfg.codex_patterns):
+def _codex_limit_kind(text: str) -> str:
+    """Classify a matched Codex limit message: spend cap vs. usage-limit/quota.
+
+    Unknown custom-pattern matches default to SPEND_CAP for backward compatibility.
+    """
+    if _CODEX_SPENDCAP_RE.search(text):
+        return SPEND_CAP
+    if _CODEX_QUOTA_RE.search(text):
+        return QUOTA
+    return SPEND_CAP
+
+
+def detect_codex_limit(
+    jsonl_text: str, cfg: LimitDetectConfig, *, now: datetime | None = None
+) -> LimitHit | None:
+    """Detect a Codex usage limit / spend cap from ``codex exec`` JSONL (stdout+stderr).
+
+    Codex surfaces both as ``{"type":"error",...}`` / ``{"type":"turn.failed",...}`` events
+    that exit the CLI without a diff. We match on the message text (which the Codex agent
+    wrapper folds into ``jsonl_text``) and, when present, parse the "try again at ..." reset.
+    """
+    for pattern in (_CODEX_LIMIT_RE, *cfg.codex_patterns):
         match = pattern.search(jsonl_text)
         if match:
-            start = max(0, match.start() - 40)
+            start = max(0, match.start() - 60)
+            raw = jsonl_text[start:match.end() + 160].strip()
             return LimitHit(
                 provider="codex",
-                reset_dt=None,
-                raw=jsonl_text[start:match.end() + 40].strip(),
-                kind=SPEND_CAP,
+                reset_dt=parse_codex_reset(jsonl_text, now=now),
+                raw=raw,
+                kind=_codex_limit_kind(raw),
             )
     return None
 
@@ -208,5 +268,5 @@ def detect_limit(
     if provider == "claude":
         return detect_claude_limit(jsonl_text, cfg, now=now)
     if provider == "codex":
-        return detect_codex_limit(jsonl_text, cfg)
+        return detect_codex_limit(jsonl_text, cfg, now=now)
     return None
