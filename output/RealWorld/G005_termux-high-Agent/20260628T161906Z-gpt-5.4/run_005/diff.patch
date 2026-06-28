@@ -1,0 +1,152 @@
+diff --git a/termux-shared/src/main/java/com/termux/shared/termux/crash/TermuxCrashUtils.java b/termux-shared/src/main/java/com/termux/shared/termux/crash/TermuxCrashUtils.java
+index 98ff9431c..f083283b7 100644
+--- a/termux-shared/src/main/java/com/termux/shared/termux/crash/TermuxCrashUtils.java
++++ b/termux-shared/src/main/java/com/termux/shared/termux/crash/TermuxCrashUtils.java
+@@ -327,17 +327,9 @@ public class TermuxCrashUtils implements CrashHandler.CrashHandlerClient {
+         TermuxReportUtils.setReportIssueMarkdownSuffix(currentPackageContext, reportInfo);
+         reportInfo.setAddReportInfoHeaderToMarkdown(true);
+ 
+-        ReportActivity.NewInstanceResult result = ReportActivity.newInstance(termuxPackageContext, reportInfo);
+-        if (result.contentIntent == null) return;
+-
+-        // Must ensure result code for PendingIntents and id for notification are unique otherwise will override previous
+-        int nextNotificationId = TermuxNotificationUtils.getNextNotificationId(termuxPackageContext);
+-
+-        PendingIntent contentIntent = PendingIntent.getActivity(termuxPackageContext, nextNotificationId, result.contentIntent, PendingIntent.FLAG_UPDATE_CURRENT);
+-
+-        PendingIntent deleteIntent = null;
+-        if (result.deleteIntent != null)
+-            deleteIntent = PendingIntent.getBroadcast(termuxPackageContext, nextNotificationId, result.deleteIntent, PendingIntent.FLAG_UPDATE_CURRENT);
++        TermuxNotificationUtils.ReportActivityNotificationIntents reportActivityNotificationIntents =
++            TermuxNotificationUtils.getReportActivityNotificationIntents(termuxPackageContext, reportInfo);
++        if (reportActivityNotificationIntents == null) return;
+ 
+         // Setup the notification channel if not already set up
+         setupCrashReportsNotificationChannel(termuxPackageContext);
+@@ -348,14 +340,15 @@ public class TermuxCrashUtils implements CrashHandler.CrashHandlerClient {
+ 
+         // Build the notification
+         Notification.Builder builder = getCrashReportsNotificationBuilder(currentPackageContext, termuxPackageContext,
+-            title, notificationTextCharSequence, notificationTextCharSequence, contentIntent, deleteIntent,
++            title, notificationTextCharSequence, notificationTextCharSequence,
++            reportActivityNotificationIntents.contentIntent, reportActivityNotificationIntents.deleteIntent,
+             NotificationUtils.NOTIFICATION_MODE_VIBRATE);
+         if (builder == null) return;
+ 
+         // Send the notification
+         NotificationManager notificationManager = NotificationUtils.getNotificationManager(termuxPackageContext);
+         if (notificationManager != null)
+-            notificationManager.notify(nextNotificationId, builder.build());
++            notificationManager.notify(reportActivityNotificationIntents.notificationId, builder.build());
+     }
+ 
+     /**
+diff --git a/termux-shared/src/main/java/com/termux/shared/termux/notification/TermuxNotificationUtils.java b/termux-shared/src/main/java/com/termux/shared/termux/notification/TermuxNotificationUtils.java
+index 19c7c02b7..7c36599ab 100644
+--- a/termux-shared/src/main/java/com/termux/shared/termux/notification/TermuxNotificationUtils.java
++++ b/termux-shared/src/main/java/com/termux/shared/termux/notification/TermuxNotificationUtils.java
+@@ -6,9 +6,12 @@ import android.content.Context;
+ import android.graphics.drawable.Icon;
+ import android.os.Build;
+ 
++import androidx.annotation.NonNull;
+ import androidx.annotation.Nullable;
+ 
+ import com.termux.shared.R;
++import com.termux.shared.activities.ReportActivity;
++import com.termux.shared.models.ReportInfo;
+ import com.termux.shared.android.resource.ResourceUtils;
+ import com.termux.shared.notification.NotificationUtils;
+ import com.termux.shared.termux.settings.preferences.TermuxAppSharedPreferences;
+@@ -16,6 +19,22 @@ import com.termux.shared.termux.settings.preferences.TermuxPreferenceConstants;
+ import com.termux.shared.termux.TermuxConstants;
+ 
+ public class TermuxNotificationUtils {
++
++    public static final class ReportActivityNotificationIntents {
++        public final int notificationId;
++        @NonNull
++        public final PendingIntent contentIntent;
++        @Nullable
++        public final PendingIntent deleteIntent;
++
++        private ReportActivityNotificationIntents(int notificationId, @NonNull PendingIntent contentIntent,
++                                                  @Nullable PendingIntent deleteIntent) {
++            this.notificationId = notificationId;
++            this.contentIntent = contentIntent;
++            this.deleteIntent = deleteIntent;
++        }
++    }
++
+     /**
+      * Try to get the next unique notification id that isn't already being used by the app.
+      *
+@@ -45,6 +64,25 @@ public class TermuxNotificationUtils {
+         return nextNotificationId;
+     }
+ 
++    @Nullable
++    public static ReportActivityNotificationIntents getReportActivityNotificationIntents(@NonNull Context context,
++                                                                                         @NonNull ReportInfo reportInfo) {
++        ReportActivity.NewInstanceResult result = ReportActivity.newInstance(context, reportInfo);
++        if (result.contentIntent == null) return null;
++
++        int notificationId = getNextNotificationId(context);
++        PendingIntent contentIntent = PendingIntent.getActivity(context, notificationId, result.contentIntent,
++            PendingIntent.FLAG_UPDATE_CURRENT);
++
++        PendingIntent deleteIntent = null;
++        if (result.deleteIntent != null) {
++            deleteIntent = PendingIntent.getBroadcast(context, notificationId, result.deleteIntent,
++                PendingIntent.FLAG_UPDATE_CURRENT);
++        }
++
++        return new ReportActivityNotificationIntents(notificationId, contentIntent, deleteIntent);
++    }
++
+     /**
+      * Get {@link Notification.Builder} for termux app or its plugin.
+      *
+diff --git a/termux-shared/src/main/java/com/termux/shared/termux/plugins/TermuxPluginUtils.java b/termux-shared/src/main/java/com/termux/shared/termux/plugins/TermuxPluginUtils.java
+index 199b88f1e..1df3f790f 100644
+--- a/termux-shared/src/main/java/com/termux/shared/termux/plugins/TermuxPluginUtils.java
++++ b/termux-shared/src/main/java/com/termux/shared/termux/plugins/TermuxPluginUtils.java
+@@ -369,17 +369,9 @@ public class TermuxPluginUtils {
+         TermuxReportUtils.setReportIssueMarkdownSuffix(currentPackageContext, reportInfo);
+         reportInfo.setAddReportInfoHeaderToMarkdown(true);
+ 
+-        ReportActivity.NewInstanceResult result = ReportActivity.newInstance(termuxPackageContext, reportInfo);
+-        if (result.contentIntent == null) return;
+-
+-        // Must ensure result code for PendingIntents and id for notification are unique otherwise will override previous
+-        int nextNotificationId = TermuxNotificationUtils.getNextNotificationId(termuxPackageContext);
+-
+-        PendingIntent contentIntent = PendingIntent.getActivity(termuxPackageContext, nextNotificationId, result.contentIntent, PendingIntent.FLAG_UPDATE_CURRENT);
+-
+-        PendingIntent deleteIntent = null;
+-        if (result.deleteIntent != null)
+-            deleteIntent = PendingIntent.getBroadcast(termuxPackageContext, nextNotificationId, result.deleteIntent, PendingIntent.FLAG_UPDATE_CURRENT);
++        TermuxNotificationUtils.ReportActivityNotificationIntents reportActivityNotificationIntents =
++            TermuxNotificationUtils.getReportActivityNotificationIntents(termuxPackageContext, reportInfo);
++        if (reportActivityNotificationIntents == null) return;
+ 
+         // Setup the notification channel if not already set up
+         setupPluginCommandErrorsNotificationChannel(termuxPackageContext);
+@@ -390,14 +382,15 @@ public class TermuxPluginUtils {
+ 
+         // Build the notification
+         Notification.Builder builder = getPluginCommandErrorsNotificationBuilder(currentPackageContext, termuxPackageContext,
+-            title, notificationTextCharSequence, notificationTextCharSequence, contentIntent, deleteIntent,
++            title, notificationTextCharSequence, notificationTextCharSequence,
++            reportActivityNotificationIntents.contentIntent, reportActivityNotificationIntents.deleteIntent,
+             NotificationUtils.NOTIFICATION_MODE_VIBRATE);
+         if (builder == null) return;
+ 
+         // Send the notification
+         NotificationManager notificationManager = NotificationUtils.getNotificationManager(termuxPackageContext);
+         if (notificationManager != null)
+-            notificationManager.notify(nextNotificationId, builder.build());
++            notificationManager.notify(reportActivityNotificationIntents.notificationId, builder.build());
+     }
+ 
+     /**

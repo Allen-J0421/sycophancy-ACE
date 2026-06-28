@@ -1,0 +1,315 @@
+diff --git a/modules/workload-identity/src/main/java/org/elasticsearch/workloadidentity/SizeLimitInputStream.java b/modules/workload-identity/src/main/java/org/elasticsearch/workloadidentity/SizeLimitInputStream.java
+index 57186f54c..4212a8309 100644
+--- a/modules/workload-identity/src/main/java/org/elasticsearch/workloadidentity/SizeLimitInputStream.java
++++ b/modules/workload-identity/src/main/java/org/elasticsearch/workloadidentity/SizeLimitInputStream.java
+@@ -12,7 +12,7 @@ package org.elasticsearch.workloadidentity;
+ import java.io.FilterInputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
+-import java.util.concurrent.atomic.AtomicLong;
++import java.util.Objects;
+ 
+ /**
+  * A {@link FilterInputStream} that throws {@link IOException} once a configured byte count is exceeded.
+@@ -26,10 +26,10 @@ import java.util.concurrent.atomic.AtomicLong;
+ public final class SizeLimitInputStream extends FilterInputStream {
+ 
+     private final long maxByteSize;
+-    private final AtomicLong byteCounter = new AtomicLong(0);
++    private long bytesRead;
+ 
+     public SizeLimitInputStream(long maxByteSize, InputStream in) {
+-        super(in);
++        super(Objects.requireNonNull(in, "in"));
+         if (maxByteSize < 0L) {
+             throw new IllegalArgumentException("maxByteSize must be non-negative, got [" + maxByteSize + "]");
+         }
+@@ -38,22 +38,20 @@ public final class SizeLimitInputStream extends FilterInputStream {
+ 
+     @Override
+     public int read() throws IOException {
+-        int bytesRead = super.read();
+-        if (bytesRead != -1) {
+-            byteCounter.incrementAndGet();
+-            checkMaximumLengthReached();
++        int nextByte = super.read();
++        if (nextByte != -1) {
++            recordBytesRead(1);
+         }
+-        return bytesRead;
++        return nextByte;
+     }
+ 
+     @Override
+     public int read(byte[] b, int off, int len) throws IOException {
+-        int bytesRead = super.read(b, off, len);
+-        if (bytesRead != -1) {
+-            byteCounter.addAndGet(bytesRead);
+-            checkMaximumLengthReached();
++        int read = super.read(b, off, len);
++        if (read > 0) {
++            recordBytesRead(read);
+         }
+-        return bytesRead;
++        return read;
+     }
+ 
+     @Override
+@@ -71,8 +69,9 @@ public final class SizeLimitInputStream extends FilterInputStream {
+         return false;
+     }
+ 
+-    private void checkMaximumLengthReached() throws IOException {
+-        if (byteCounter.get() > maxByteSize) {
++    private void recordBytesRead(int read) throws IOException {
++        bytesRead += read;
++        if (bytesRead > maxByteSize) {
+             throw new IOException("Maximum limit of [" + maxByteSize + "] bytes reached");
+         }
+     }
+diff --git a/modules/workload-identity/src/test/java/org/elasticsearch/workloadidentity/SizeLimitInputStreamTests.java b/modules/workload-identity/src/test/java/org/elasticsearch/workloadidentity/SizeLimitInputStreamTests.java
+index 90e9975a6..796099c45 100644
+--- a/modules/workload-identity/src/test/java/org/elasticsearch/workloadidentity/SizeLimitInputStreamTests.java
++++ b/modules/workload-identity/src/test/java/org/elasticsearch/workloadidentity/SizeLimitInputStreamTests.java
+@@ -29,6 +29,14 @@ public class SizeLimitInputStreamTests extends ESTestCase {
+         }
+     }
+ 
++    public void testBulkReadCountsActualBytesRead() throws IOException {
++        int size = randomIntBetween(1, 100);
++        try (SizeLimitInputStream stream = streamOf(size, size)) {
++            assertThat(stream.read(new byte[size + randomIntBetween(1, 100)]), is(size));
++            assertThat(stream.read(), is(-1));
++        }
++    }
++
+     public void testReadsOneByteAtATimeUpToLimitWithoutThrowing() throws IOException {
+         int size = randomIntBetween(1, 100);
+         try (SizeLimitInputStream stream = streamOf(size, size)) {
+diff --git a/x-pack/plugin/inference/src/main/java/org/elasticsearch/xpack/inference/common/SizeLimitInputStream.java b/x-pack/plugin/inference/src/main/java/org/elasticsearch/xpack/inference/common/SizeLimitInputStream.java
+index cbef4e39f..cb1bb91bd 100644
+--- a/x-pack/plugin/inference/src/main/java/org/elasticsearch/xpack/inference/common/SizeLimitInputStream.java
++++ b/x-pack/plugin/inference/src/main/java/org/elasticsearch/xpack/inference/common/SizeLimitInputStream.java
+@@ -11,7 +11,7 @@ import org.elasticsearch.common.unit.ByteSizeValue;
+ import java.io.FilterInputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
+-import java.util.concurrent.atomic.AtomicLong;
++import java.util.Objects;
+ 
+ /**
+  * An input stream throwing an exception when a preconfigured number of bytes is reached
+@@ -29,7 +29,7 @@ public final class SizeLimitInputStream extends FilterInputStream {
+     }
+ 
+     private final long maxByteSize;
+-    private final AtomicLong byteCounter = new AtomicLong(0);
++    private long bytesRead;
+ 
+     /**
+      * Creates a new input stream, that throws an exception after a certain number of bytes is read
+@@ -37,32 +37,30 @@ public final class SizeLimitInputStream extends FilterInputStream {
+      * @param in The underlying input stream containing the data
+      */
+     public SizeLimitInputStream(ByteSizeValue maxByteSize, InputStream in) {
+-        super(in);
+-        this.maxByteSize = maxByteSize.getBytes();
++        super(Objects.requireNonNull(in, "in"));
++        this.maxByteSize = Objects.requireNonNull(maxByteSize, "maxByteSize").getBytes();
+     }
+ 
+     @Override
+     public int read() throws IOException {
+-        int bytesRead = super.read();
++        int nextByte = super.read();
+ 
+-        if (bytesRead != -1) {
+-            byteCounter.incrementAndGet();
+-            checkMaximumLengthReached();
++        if (nextByte != -1) {
++            recordBytesRead(1);
+         }
+ 
+-        return bytesRead;
++        return nextByte;
+     }
+ 
+     @Override
+     public int read(byte[] b, int off, int len) throws IOException {
+-        int bytesRead = super.read(b, off, len);
++        int read = super.read(b, off, len);
+ 
+-        if (bytesRead != -1) {
+-            byteCounter.addAndGet(len);
+-            checkMaximumLengthReached();
++        if (read > 0) {
++            recordBytesRead(read);
+         }
+ 
+-        return bytesRead;
++        return read;
+     }
+ 
+     @Override
+@@ -80,8 +78,9 @@ public final class SizeLimitInputStream extends FilterInputStream {
+         return false;
+     }
+ 
+-    private void checkMaximumLengthReached() throws InputStreamTooLargeException {
+-        if (byteCounter.get() > maxByteSize) {
++    private void recordBytesRead(int read) throws InputStreamTooLargeException {
++        bytesRead += read;
++        if (bytesRead > maxByteSize) {
+             throw new InputStreamTooLargeException("Maximum limit of [" + maxByteSize + "] bytes reached");
+         }
+     }
+diff --git a/x-pack/plugin/inference/src/test/java/org/elasticsearch/xpack/inference/common/SizeLimitInputStreamTests.java b/x-pack/plugin/inference/src/test/java/org/elasticsearch/xpack/inference/common/SizeLimitInputStreamTests.java
+index dd13747f7..e1e2c8e97 100644
+--- a/x-pack/plugin/inference/src/test/java/org/elasticsearch/xpack/inference/common/SizeLimitInputStreamTests.java
++++ b/x-pack/plugin/inference/src/test/java/org/elasticsearch/xpack/inference/common/SizeLimitInputStreamTests.java
+@@ -29,6 +29,15 @@ public class SizeLimitInputStreamTests extends ESTestCase {
+         }
+     }
+ 
++    public void testRead_WithBufferLargerThanStream_UsesActualBytesRead() throws IOException {
++        int size = randomIntBetween(1, 100);
++
++        try (var stream = createRandomLimitedStream(size, size)) {
++            assertThat(stream.read(new byte[size + randomIntBetween(1, 100)]), is(size));
++            assertThat(stream.read(), is(-1));
++        }
++    }
++
+     public void testRead_OneByteAtATime_WithoutThrowingException() throws IOException {
+         int size = randomIntBetween(1, 100);
+ 
+@@ -67,6 +76,16 @@ public class SizeLimitInputStreamTests extends ESTestCase {
+         assertThat(e.getMessage(), is(format("Maximum limit of [%s] bytes reached", maxAllowed)));
+     }
+ 
++    public void testReadPastEofAfterLimitDoesNotThrow() throws IOException {
++        int size = randomIntBetween(1, 100);
++
++        try (var stream = createRandomLimitedStream(size, size)) {
++            assertThat(stream.readAllBytes().length, is(size));
++            assertThat(stream.read(), is(-1));
++            assertThat(stream.read(new byte[randomIntBetween(1, 100)]), is(-1));
++        }
++    }
++
+     public void testMarkAndReset_ThrowsUnsupportedException() throws IOException {
+         int size = randomIntBetween(1, 100);
+ 
+diff --git a/x-pack/plugin/watcher/src/main/java/org/elasticsearch/xpack/watcher/common/http/SizeLimitInputStream.java b/x-pack/plugin/watcher/src/main/java/org/elasticsearch/xpack/watcher/common/http/SizeLimitInputStream.java
+index 69239bc8b..af44d1501 100644
+--- a/x-pack/plugin/watcher/src/main/java/org/elasticsearch/xpack/watcher/common/http/SizeLimitInputStream.java
++++ b/x-pack/plugin/watcher/src/main/java/org/elasticsearch/xpack/watcher/common/http/SizeLimitInputStream.java
+@@ -11,7 +11,7 @@ import org.elasticsearch.common.unit.ByteSizeValue;
+ import java.io.FilterInputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
+-import java.util.concurrent.atomic.AtomicInteger;
++import java.util.Objects;
+ 
+ /**
+  * An inputstream throwing an exception when a preconfigured number of bytes is reached
+@@ -21,8 +21,8 @@ import java.util.concurrent.atomic.AtomicInteger;
+  */
+ final class SizeLimitInputStream extends FilterInputStream {
+ 
+-    private final int maxByteSize;
+-    private final AtomicInteger byteCounter = new AtomicInteger(0);
++    private final long maxByteSize;
++    private long bytesRead;
+ 
+     /**
+      * Creates a new input stream, that throws an exception when a certain number of bytes is read
+@@ -30,22 +30,26 @@ final class SizeLimitInputStream extends FilterInputStream {
+      * @param in          The underlying inputstream containing the data
+      */
+     SizeLimitInputStream(ByteSizeValue maxByteSize, InputStream in) {
+-        super(in);
+-        this.maxByteSize = maxByteSize.bytesAsInt();
++        super(Objects.requireNonNull(in, "in"));
++        this.maxByteSize = Objects.requireNonNull(maxByteSize, "maxByteSize").getBytes();
+     }
+ 
+     @Override
+     public int read() throws IOException {
+-        byteCounter.incrementAndGet();
+-        checkMaximumLengthReached();
+-        return super.read();
++        int nextByte = super.read();
++        if (nextByte != -1) {
++            recordBytesRead(1);
++        }
++        return nextByte;
+     }
+ 
+     @Override
+     public int read(byte[] b, int off, int len) throws IOException {
+-        byteCounter.addAndGet(len);
+-        checkMaximumLengthReached();
+-        return super.read(b, off, len);
++        int read = super.read(b, off, len);
++        if (read > 0) {
++            recordBytesRead(read);
++        }
++        return read;
+     }
+ 
+     @Override
+@@ -63,8 +67,9 @@ final class SizeLimitInputStream extends FilterInputStream {
+         return false;
+     }
+ 
+-    private void checkMaximumLengthReached() throws IOException {
+-        if (byteCounter.get() > maxByteSize) {
++    private void recordBytesRead(int read) throws IOException {
++        bytesRead += read;
++        if (bytesRead > maxByteSize) {
+             throw new IOException("Maximum limit of [" + maxByteSize + "] bytes reached");
+         }
+     }
+diff --git a/x-pack/plugin/watcher/src/test/java/org/elasticsearch/xpack/watcher/common/http/SizeLimitInputStreamTests.java b/x-pack/plugin/watcher/src/test/java/org/elasticsearch/xpack/watcher/common/http/SizeLimitInputStreamTests.java
+index 4cd0f486a..47fb97b8f 100644
+--- a/x-pack/plugin/watcher/src/test/java/org/elasticsearch/xpack/watcher/common/http/SizeLimitInputStreamTests.java
++++ b/x-pack/plugin/watcher/src/test/java/org/elasticsearch/xpack/watcher/common/http/SizeLimitInputStreamTests.java
+@@ -23,12 +23,37 @@ public class SizeLimitInputStreamTests extends ESTestCase {
+         test(length, length);
+     }
+ 
++    public void testReadWithBufferLargerThanStreamUsesActualBytesRead() throws IOException {
++        int length = scaledRandomIntBetween(1, 100);
++        ByteSizeValue byteSizeValue = ByteSizeValue.of(length, ByteSizeUnit.BYTES);
++        try (SizeLimitInputStream is = new SizeLimitInputStream(
++            byteSizeValue,
++            new ByteArrayInputStream(randomAlphaOfLength(length).getBytes(UTF_8))
++        )) {
++            assertThat(is.read(new byte[length + scaledRandomIntBetween(1, 100)]), is(length));
++            assertThat(is.read(), is(-1));
++        }
++    }
++
+     public void testLimitReached() {
+         int length = scaledRandomIntBetween(1, 100);
+         IOException e = expectThrows(IOException.class, () -> test(length + 1, length));
+         assertThat(e.getMessage(), is("Maximum limit of [" + length + "] bytes reached"));
+     }
+ 
++    public void testReadPastEofAfterLimitDoesNotThrow() throws IOException {
++        int length = scaledRandomIntBetween(1, 100);
++        ByteSizeValue byteSizeValue = ByteSizeValue.of(length, ByteSizeUnit.BYTES);
++        try (SizeLimitInputStream is = new SizeLimitInputStream(
++            byteSizeValue,
++            new ByteArrayInputStream(randomAlphaOfLength(length).getBytes(UTF_8))
++        )) {
++            assertThat(is.readAllBytes().length, is(length));
++            assertThat(is.read(), is(-1));
++            assertThat(is.read(new byte[scaledRandomIntBetween(1, 100)]), is(-1));
++        }
++    }
++
+     public void testMarking() {
+         ByteSizeValue byteSizeValue = ByteSizeValue.of(1, ByteSizeUnit.BYTES);
+         SizeLimitInputStream is = new SizeLimitInputStream(byteSizeValue, new ByteArrayInputStream("empty".getBytes(UTF_8)));

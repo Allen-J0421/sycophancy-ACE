@@ -1,0 +1,125 @@
+diff --git a/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerationRequest.java b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerationRequest.java
+index 6cbc90819..652258f94 100644
+--- a/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerationRequest.java
++++ b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerationRequest.java
+@@ -22,6 +22,7 @@ import java.util.ArrayList;
+ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
++import java.util.TreeSet;
+ 
+ import org.apache.hc.core5.net.URIBuilder;
+ import org.jspecify.annotations.Nullable;
+@@ -365,7 +366,8 @@ class ProjectGenerationRequest {
+ 			}
+ 			else {
+ 				throw new ReportableException("Multiple types found with build '" + this.build + "' and format '"
+-						+ this.format + "' use --type with a more specific value " + types.keySet());
++						+ this.format + "' use --type with a more specific value "
++						+ List.copyOf(new TreeSet<>(types.keySet())));
+ 			}
+ 		}
+ 		else {
+diff --git a/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ServiceCapabilitiesReportGenerator.java b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ServiceCapabilitiesReportGenerator.java
+index 34c57184a..a41d976da 100644
+--- a/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ServiceCapabilitiesReportGenerator.java
++++ b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ServiceCapabilitiesReportGenerator.java
+@@ -115,11 +115,12 @@ class ServiceCapabilitiesReportGenerator {
+ 	}
+ 
+ 	private void reportTags(StringBuilder report, ProjectType type) {
+-		Map<String, String> tags = type.getTags();
+-		Iterator<Map.Entry<String, String>> iterator = tags.entrySet().iterator();
++		List<Entry<String, String>> entries = new ArrayList<>(type.getTags().entrySet());
++		entries.sort(Entry.comparingByKey());
++		Iterator<Entry<String, String>> iterator = entries.iterator();
+ 		report.append(" [");
+ 		while (iterator.hasNext()) {
+-			Map.Entry<String, String> entry = iterator.next();
++			Entry<String, String> entry = iterator.next();
+ 			report.append(entry.getKey()).append(":").append(entry.getValue());
+ 			if (iterator.hasNext()) {
+ 				report.append(", ");
+diff --git a/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/ProjectGenerationRequestTests.java b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/ProjectGenerationRequestTests.java
+index 0f4a39467..e3aa48489 100644
+--- a/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/ProjectGenerationRequestTests.java
++++ b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/ProjectGenerationRequestTests.java
+@@ -178,6 +178,40 @@ class ProjectGenerationRequestTests {
+ 			.withMessageContaining("gradle-project-2");
+ 	}
+ 
++	@Test
++	void buildMultipleMatchMessageIsSorted() throws Exception {
++		InitializrServiceMetadata metadata = new InitializrServiceMetadata(new JSONObject("""
++				{
++				  "type": {
++				    "values": [
++				      {
++				        "id": "alpha",
++				        "name": "Alpha",
++				        "action": "/alpha",
++				        "tags": {
++				          "build": "gradle",
++				          "format": "project"
++				        }
++				      },
++				      {
++				        "id": "epsilon",
++				        "name": "Epsilon",
++				        "action": "/epsilon",
++				        "tags": {
++				          "build": "gradle",
++				          "format": "project"
++				        }
++				      }
++				    ]
++				  }
++				}
++				"""));
++		setBuildAndFormat("gradle", "project");
++		assertThatExceptionOfType(ReportableException.class).isThrownBy(() -> this.request.generateUrl(metadata))
++			.withMessage("Multiple types found with build 'gradle' and format 'project' use --type "
++					+ "with a more specific value [alpha, epsilon]");
++	}
++
+ 	@Test
+ 	void buildOneMatch() throws Exception {
+ 		InitializrServiceMetadata metadata = readMetadata();
+diff --git a/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/ServiceCapabilitiesReportGeneratorTests.java b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/ServiceCapabilitiesReportGeneratorTests.java
+index dd4dab3e8..62cbebd6c 100644
+--- a/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/ServiceCapabilitiesReportGeneratorTests.java
++++ b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/ServiceCapabilitiesReportGeneratorTests.java
+@@ -17,6 +17,8 @@
+ package org.springframework.boot.cli.command.init;
+ 
+ import java.io.IOException;
++import java.util.HashMap;
++import java.util.Map;
+ 
+ import org.junit.jupiter.api.Test;
+ 
+@@ -52,6 +54,24 @@ class ServiceCapabilitiesReportGeneratorTests extends AbstractHttpClientMockTest
+ 		doTestGenerateCapabilitiesFromJson();
+ 	}
+ 
++	@Test
++	void listMetadataSortsProjectTypeTags() throws IOException {
++		Map<String, String> tags = new HashMap<>();
++		tags.put("zeta", "1");
++		tags.put("alpha", "2");
++		tags.put("beta", "3");
++		ServiceCapabilitiesReportGenerator generator = new ServiceCapabilitiesReportGenerator(new InitializrService() {
++
++			@Override
++			Object loadServiceCapabilities(String serviceUrl) {
++				return new InitializrServiceMetadata(new ProjectType("custom", "Custom", "/custom", true, tags));
++			}
++
++		});
++		String content = generator.generate("http://localhost");
++		assertThat(content).contains("custom -  Custom [alpha:2, beta:3, zeta:1] (default)");
++	}
++
+ 	private void doTestGenerateCapabilitiesFromJson() throws IOException {
+ 		String content = this.command.generate("http://localhost");
+ 		assertThat(content).contains("aop - AOP");

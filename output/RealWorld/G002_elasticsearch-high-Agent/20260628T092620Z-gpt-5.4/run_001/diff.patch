@@ -1,0 +1,390 @@
+diff --git a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/AbstractReindexManagementRestHandler.java b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/AbstractReindexManagementRestHandler.java
+new file mode 100644
+index 000000000..d59c775c2
+--- /dev/null
++++ b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/AbstractReindexManagementRestHandler.java
+@@ -0,0 +1,61 @@
++/*
++ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
++ * or more contributor license agreements. Licensed under the "Elastic License
++ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
++ * Public License v 1"; you may not use this file except in compliance with, at
++ * your election, the "Elastic License 2.0", the "GNU Affero General Public
++ * License v 3.0 only", or the "Server Side Public License, v 1".
++ */
++
++package org.elasticsearch.reindex.management;
++
++import org.elasticsearch.client.internal.node.NodeClient;
++import org.elasticsearch.features.NodeFeature;
++import org.elasticsearch.rest.BaseRestHandler;
++import org.elasticsearch.rest.RestRequest;
++import org.elasticsearch.tasks.TaskId;
++
++import java.io.IOException;
++import java.util.Objects;
++import java.util.Set;
++import java.util.function.Predicate;
++
++import static org.elasticsearch.reindex.management.ReindexManagementPlugin.CAPABILITY_REINDEX_MANAGEMENT_API;
++
++/**
++ * Shared REST handler base for reindex-management endpoints that all require the same cluster feature gate and capability declaration.
++ */
++abstract class AbstractReindexManagementRestHandler extends BaseRestHandler {
++
++    private final Predicate<NodeFeature> clusterSupportsFeature;
++
++    AbstractReindexManagementRestHandler(final Predicate<NodeFeature> clusterSupportsFeature) {
++        this.clusterSupportsFeature = Objects.requireNonNull(clusterSupportsFeature);
++    }
++
++    @Override
++    protected final RestChannelConsumer prepareRequest(final RestRequest request, final NodeClient client) throws IOException {
++        ensureEndpointSupported();
++        return innerPrepareRequest(request, client);
++    }
++
++    /**
++     * Prepares the endpoint-specific request once the cluster-wide compatibility checks have passed.
++     */
++    protected abstract RestChannelConsumer innerPrepareRequest(RestRequest request, NodeClient client) throws IOException;
++
++    protected final TaskId taskId(final RestRequest request) {
++        return new TaskId(request.param("task_id"));
++    }
++
++    @Override
++    public final Set<String> supportedCapabilities() {
++        return Set.of(CAPABILITY_REINDEX_MANAGEMENT_API);
++    }
++
++    private void ensureEndpointSupported() {
++        if (clusterSupportsFeature.test(ReindexManagementFeatures.NEW_ENDPOINTS) == false) {
++            throw new IllegalArgumentException("endpoint not supported on all nodes in the cluster");
++        }
++    }
++}
+diff --git a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/RestCancelReindexAction.java b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/RestCancelReindexAction.java
+index 7bfe8700d..58617d57d 100644
+--- a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/RestCancelReindexAction.java
++++ b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/RestCancelReindexAction.java
+@@ -11,29 +11,24 @@ package org.elasticsearch.reindex.management;
+ 
+ import org.elasticsearch.client.internal.node.NodeClient;
+ import org.elasticsearch.features.NodeFeature;
+-import org.elasticsearch.rest.BaseRestHandler;
+ import org.elasticsearch.rest.RestRequest;
+ import org.elasticsearch.rest.Scope;
+ import org.elasticsearch.rest.ServerlessScope;
+ import org.elasticsearch.rest.action.RestToXContentListener;
+ import org.elasticsearch.tasks.TaskId;
+ 
++import java.io.IOException;
+ import java.util.List;
+-import java.util.Objects;
+-import java.util.Set;
+ import java.util.function.Predicate;
+ 
+-import static org.elasticsearch.reindex.management.ReindexManagementPlugin.CAPABILITY_REINDEX_MANAGEMENT_API;
+ import static org.elasticsearch.rest.RestRequest.Method.POST;
+ 
+ /** REST handler for cancelling an ongoing reindex task. */
+ @ServerlessScope(Scope.PUBLIC)
+-public class RestCancelReindexAction extends BaseRestHandler {
+-
+-    private final Predicate<NodeFeature> clusterSupportsFeature;
++public class RestCancelReindexAction extends AbstractReindexManagementRestHandler {
+ 
+     public RestCancelReindexAction(final Predicate<NodeFeature> clusterSupportsFeature) {
+-        this.clusterSupportsFeature = Objects.requireNonNull(clusterSupportsFeature);
++        super(clusterSupportsFeature);
+     }
+ 
+     @Override
+@@ -47,12 +42,9 @@ public class RestCancelReindexAction extends BaseRestHandler {
+     }
+ 
+     @Override
+-    protected RestChannelConsumer prepareRequest(final RestRequest request, final NodeClient client) {
+-        if (clusterSupportsFeature.test(ReindexManagementFeatures.NEW_ENDPOINTS) == false) {
+-            throw new IllegalArgumentException("endpoint not supported on all nodes in the cluster");
+-        }
++    protected RestChannelConsumer innerPrepareRequest(final RestRequest request, final NodeClient client) throws IOException {
+         final String taskIdParam = request.param("task_id");
+-        final TaskId taskId = new TaskId(taskIdParam);
++        final TaskId taskId = taskId(request);
+         if (taskId.isSet() == false) {
+             throw new IllegalArgumentException("invalid taskId provided: " + taskIdParam);
+         }
+@@ -62,9 +54,4 @@ public class RestCancelReindexAction extends BaseRestHandler {
+ 
+         return channel -> client.execute(TransportCancelReindexAction.TYPE, cancelRequest, new RestToXContentListener<>(channel));
+     }
+-
+-    @Override
+-    public Set<String> supportedCapabilities() {
+-        return Set.of(CAPABILITY_REINDEX_MANAGEMENT_API);
+-    }
+ }
+diff --git a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/RestGetReindexAction.java b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/RestGetReindexAction.java
+index 85d9952ae..5d8311a3a 100644
+--- a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/RestGetReindexAction.java
++++ b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/RestGetReindexAction.java
+@@ -12,29 +12,24 @@ package org.elasticsearch.reindex.management;
+ import org.elasticsearch.client.internal.node.NodeClient;
+ import org.elasticsearch.core.TimeValue;
+ import org.elasticsearch.features.NodeFeature;
+-import org.elasticsearch.rest.BaseRestHandler;
+ import org.elasticsearch.rest.RestRequest;
+ import org.elasticsearch.rest.RestUtils;
+ import org.elasticsearch.rest.ServerlessScope;
+ import org.elasticsearch.rest.action.RestToXContentListener;
+ import org.elasticsearch.tasks.TaskId;
+ 
++import java.io.IOException;
+ import java.util.List;
+-import java.util.Objects;
+-import java.util.Set;
+ import java.util.function.Predicate;
+ 
+-import static org.elasticsearch.reindex.management.ReindexManagementPlugin.CAPABILITY_REINDEX_MANAGEMENT_API;
+ import static org.elasticsearch.rest.RestRequest.Method.GET;
+ import static org.elasticsearch.rest.Scope.PUBLIC;
+ 
+ @ServerlessScope(PUBLIC)
+-public class RestGetReindexAction extends BaseRestHandler {
+-
+-    private final Predicate<NodeFeature> clusterSupportsFeature;
++public class RestGetReindexAction extends AbstractReindexManagementRestHandler {
+ 
+     RestGetReindexAction(final Predicate<NodeFeature> clusterSupportsFeature) {
+-        this.clusterSupportsFeature = Objects.requireNonNull(clusterSupportsFeature);
++        super(clusterSupportsFeature);
+     }
+ 
+     @Override
+@@ -48,12 +43,8 @@ public class RestGetReindexAction extends BaseRestHandler {
+     }
+ 
+     @Override
+-    protected RestChannelConsumer prepareRequest(RestRequest request, NodeClient client) {
+-        if (clusterSupportsFeature.test(ReindexManagementFeatures.NEW_ENDPOINTS) == false) {
+-            throw new IllegalArgumentException("endpoint not supported on all nodes in the cluster");
+-        }
+-
+-        TaskId taskId = new TaskId(request.param("task_id"));
++    protected RestChannelConsumer innerPrepareRequest(RestRequest request, NodeClient client) throws IOException {
++        TaskId taskId = taskId(request);
+         boolean waitForCompletion = request.paramAsBoolean("wait_for_completion", false);
+         TimeValue timeout = RestUtils.getTimeout(request);
+         GetReindexRequest getReindexRequest = new GetReindexRequest(taskId, waitForCompletion, timeout);
+@@ -61,9 +52,4 @@ public class RestGetReindexAction extends BaseRestHandler {
+         return channel -> client.execute(TransportGetReindexAction.TYPE, getReindexRequest, new RestToXContentListener<>(channel));
+     }
+ 
+-    @Override
+-    public Set<String> supportedCapabilities() {
+-        return Set.of(CAPABILITY_REINDEX_MANAGEMENT_API);
+-    }
+-
+ }
+diff --git a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/RestListReindexAction.java b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/RestListReindexAction.java
+index e8d5b435c..bee12c308 100644
+--- a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/RestListReindexAction.java
++++ b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/RestListReindexAction.java
+@@ -11,17 +11,14 @@ package org.elasticsearch.reindex.management;
+ 
+ import org.elasticsearch.client.internal.node.NodeClient;
+ import org.elasticsearch.features.NodeFeature;
+-import org.elasticsearch.rest.BaseRestHandler;
+ import org.elasticsearch.rest.RestRequest;
+ import org.elasticsearch.rest.ServerlessScope;
+ import org.elasticsearch.rest.action.RestChunkedToXContentListener;
+ 
++import java.io.IOException;
+ import java.util.List;
+-import java.util.Objects;
+-import java.util.Set;
+ import java.util.function.Predicate;
+ 
+-import static org.elasticsearch.reindex.management.ReindexManagementPlugin.CAPABILITY_REINDEX_MANAGEMENT_API;
+ import static org.elasticsearch.rest.RestRequest.Method.GET;
+ import static org.elasticsearch.rest.Scope.PUBLIC;
+ 
+@@ -29,12 +26,10 @@ import static org.elasticsearch.rest.Scope.PUBLIC;
+  * REST handler for listing all running reindex tasks.
+  */
+ @ServerlessScope(PUBLIC)
+-public class RestListReindexAction extends BaseRestHandler {
+-
+-    private final Predicate<NodeFeature> clusterSupportsFeature;
++public class RestListReindexAction extends AbstractReindexManagementRestHandler {
+ 
+     RestListReindexAction(final Predicate<NodeFeature> clusterSupportsFeature) {
+-        this.clusterSupportsFeature = Objects.requireNonNull(clusterSupportsFeature);
++        super(clusterSupportsFeature);
+     }
+ 
+     @Override
+@@ -48,16 +43,8 @@ public class RestListReindexAction extends BaseRestHandler {
+     }
+ 
+     @Override
+-    protected RestChannelConsumer prepareRequest(RestRequest request, NodeClient client) {
+-        if (clusterSupportsFeature.test(ReindexManagementFeatures.NEW_ENDPOINTS) == false) {
+-            throw new IllegalArgumentException("endpoint not supported on all nodes in the cluster");
+-        }
++    protected RestChannelConsumer innerPrepareRequest(RestRequest request, NodeClient client) throws IOException {
+         ListReindexRequest listReindexRequest = new ListReindexRequest(request.paramAsBoolean("detailed", false));
+         return channel -> client.execute(TransportListReindexAction.TYPE, listReindexRequest, new RestChunkedToXContentListener<>(channel));
+     }
+-
+-    @Override
+-    public Set<String> supportedCapabilities() {
+-        return Set.of(CAPABILITY_REINDEX_MANAGEMENT_API);
+-    }
+ }
+diff --git a/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/ReindexManagementRestActionsTests.java b/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/ReindexManagementRestActionsTests.java
+new file mode 100644
+index 000000000..c9b6b3e41
+--- /dev/null
++++ b/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/ReindexManagementRestActionsTests.java
+@@ -0,0 +1,137 @@
++/*
++ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
++ * or more contributor license agreements. Licensed under the "Elastic License
++ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
++ * Public License v 1"; you may not use this file except in compliance with, at
++ * your election, the "Elastic License 2.0", the "GNU Affero General Public
++ * License v 3.0 only", or the "Server Side Public License, v 1".
++ */
++
++package org.elasticsearch.reindex.management;
++
++import org.elasticsearch.action.ActionRequest;
++import org.elasticsearch.action.ActionType;
++import org.elasticsearch.core.TimeValue;
++import org.elasticsearch.index.reindex.ReindexAction;
++import org.elasticsearch.rest.RestRequest;
++import org.elasticsearch.tasks.TaskId;
++import org.elasticsearch.tasks.TaskInfo;
++import org.elasticsearch.tasks.TaskResult;
++import org.elasticsearch.test.rest.FakeRestRequest;
++import org.elasticsearch.test.rest.RestActionTestCase;
++
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++
++import static org.hamcrest.Matchers.equalTo;
++import static org.hamcrest.Matchers.instanceOf;
++
++public class ReindexManagementRestActionsTests extends RestActionTestCase {
++
++    public void testHandlersRejectUnsupportedClusters() {
++        IllegalArgumentException listFailure = expectUnsupportedEndpoint(new RestListReindexAction(feature -> false), listRequest(Map.of()));
++        IllegalArgumentException getFailure = expectUnsupportedEndpoint(
++            new RestGetReindexAction(feature -> false),
++            getRequest(validTaskId().toString(), Map.of())
++        );
++        IllegalArgumentException cancelFailure = expectUnsupportedEndpoint(
++            new RestCancelReindexAction(feature -> false),
++            cancelRequest(validTaskId().toString(), Map.of())
++        );
++
++        assertThat(listFailure.getMessage(), equalTo("endpoint not supported on all nodes in the cluster"));
++        assertThat(getFailure.getMessage(), equalTo("endpoint not supported on all nodes in the cluster"));
++        assertThat(cancelFailure.getMessage(), equalTo("endpoint not supported on all nodes in the cluster"));
++    }
++
++    public void testListRequestDispatchesDetailedFlag() throws Exception {
++        RestListReindexAction action = new RestListReindexAction(feature -> true);
++        controller().registerHandler(action);
++        verifyingClient.setExecuteVerifier((ActionType<ListReindexResponse> actionType, ActionRequest actionRequest) -> {
++            assertSame(TransportListReindexAction.TYPE, actionType);
++            assertThat(actionRequest, instanceOf(ListReindexRequest.class));
++            ListReindexRequest request = (ListReindexRequest) actionRequest;
++            assertTrue(request.getDetailed());
++            return new ListReindexResponse(List.of(), List.of(), List.of());
++        });
++
++        dispatchRequest(listRequest(Map.of("detailed", "true")));
++    }
++
++    public void testGetRequestDispatchesTaskIdWaitForCompletionAndTimeout() throws Exception {
++        TaskId taskId = validTaskId();
++        RestGetReindexAction action = new RestGetReindexAction(feature -> true);
++        controller().registerHandler(action);
++        verifyingClient.setExecuteVerifier((ActionType<GetReindexResponse> actionType, ActionRequest actionRequest) -> {
++            assertSame(TransportGetReindexAction.TYPE, actionType);
++            assertThat(actionRequest, instanceOf(GetReindexRequest.class));
++            GetReindexRequest request = (GetReindexRequest) actionRequest;
++            assertEquals(taskId, request.getTaskId());
++            assertTrue(request.getWaitForCompletion());
++            assertEquals(TimeValue.timeValueSeconds(15), request.getTimeout());
++            return new GetReindexResponse(new TaskResult(false, reindexTaskInfo(taskId)));
++        });
++
++        dispatchRequest(getRequest(taskId.toString(), Map.of("wait_for_completion", "true", "timeout", "15s")));
++    }
++
++    public void testCancelRejectsInvalidTaskIdBeforeDispatch() {
++        RestCancelReindexAction action = new RestCancelReindexAction(feature -> true);
++        controller().registerHandler(action);
++
++        IllegalArgumentException error = expectThrows(IllegalArgumentException.class, () -> dispatchRequest(cancelRequest("unset", Map.of())));
++
++        assertEquals("invalid taskId provided: unset", error.getMessage());
++    }
++
++    public void testCancelRequestDefaultsWaitForCompletionToTrue() throws Exception {
++        TaskId taskId = validTaskId();
++        RestCancelReindexAction action = new RestCancelReindexAction(feature -> true);
++        controller().registerHandler(action);
++        verifyingClient.setExecuteVerifier((ActionType<CancelReindexResponse> actionType, ActionRequest actionRequest) -> {
++            assertSame(TransportCancelReindexAction.TYPE, actionType);
++            assertThat(actionRequest, instanceOf(CancelReindexRequest.class));
++            CancelReindexRequest request = (CancelReindexRequest) actionRequest;
++            assertEquals(taskId, request.getTaskId());
++            assertTrue(request.waitForCompletion());
++            return new CancelReindexResponse(null);
++        });
++
++        dispatchRequest(cancelRequest(taskId.toString(), Map.of()));
++    }
++
++    private IllegalArgumentException expectUnsupportedEndpoint(AbstractReindexManagementRestHandler action, RestRequest request) {
++        controller().registerHandler(action);
++        return expectThrows(IllegalArgumentException.class, () -> dispatchRequest(request));
++    }
++
++    private FakeRestRequest listRequest(Map<String, String> params) {
++        return new FakeRestRequest.Builder(xContentRegistry()).withMethod(RestRequest.Method.GET)
++            .withPath("/_reindex")
++            .withParams(params)
++            .build();
++    }
++
++    private FakeRestRequest getRequest(String taskId, Map<String, String> params) {
++        return request(RestRequest.Method.GET, "/_reindex/" + taskId, taskId, params);
++    }
++
++    private FakeRestRequest cancelRequest(String taskId, Map<String, String> params) {
++        return request(RestRequest.Method.POST, "/_reindex/" + taskId + "/_cancel", taskId, params);
++    }
++
++    private FakeRestRequest request(RestRequest.Method method, String path, String taskId, Map<String, String> params) {
++        Map<String, String> allParams = new HashMap<>(params);
++        allParams.put("task_id", taskId);
++        return new FakeRestRequest.Builder(xContentRegistry()).withMethod(method).withPath(path).withParams(allParams).build();
++    }
++
++    private TaskId validTaskId() {
++        return new TaskId(randomAlphaOfLength(8), randomLongBetween(1, 1_000));
++    }
++
++    private TaskInfo reindexTaskInfo(TaskId taskId) {
++        return new TaskInfo(taskId, "transport", taskId.getNodeId(), ReindexAction.NAME, "reindex", null, 0L, 0L, true, false, TaskId.EMPTY_TASK_ID, Map.of());
++    }
++}

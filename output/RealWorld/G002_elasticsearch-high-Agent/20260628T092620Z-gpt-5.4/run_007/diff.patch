@@ -1,0 +1,176 @@
+diff --git a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/AbstractReindexTransportAction.java b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/AbstractReindexTransportAction.java
+new file mode 100644
+index 000000000..3d73d4a50
+--- /dev/null
++++ b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/AbstractReindexTransportAction.java
+@@ -0,0 +1,47 @@
++/*
++ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
++ * or more contributor license agreements. Licensed under the "Elastic License
++ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
++ * Public License v 1"; you may not use this file except in compliance with, at
++ * your election, the "Elastic License 2.0", the "GNU Affero General Public
++ * License v 3.0 only", or the "Server Side Public License, v 1".
++ */
++
++package org.elasticsearch.reindex.management;
++
++import org.elasticsearch.action.ActionRequest;
++import org.elasticsearch.action.ActionResponse;
++import org.elasticsearch.action.ActionType;
++import org.elasticsearch.action.support.ActionFilters;
++import org.elasticsearch.action.support.HandledTransportAction;
++import org.elasticsearch.client.internal.Client;
++import org.elasticsearch.client.internal.OriginSettingClient;
++import org.elasticsearch.common.io.stream.Writeable;
++import org.elasticsearch.transport.TransportService;
++
++import java.util.Objects;
++import java.util.concurrent.Executor;
++
++import static org.elasticsearch.action.admin.cluster.node.tasks.get.TransportGetTaskAction.TASKS_ORIGIN;
++
++/**
++ * Shared transport-action base for reindex-management APIs that execute via the tasks origin.
++ */
++abstract class AbstractReindexTransportAction<Request extends ActionRequest, Response extends ActionResponse> extends HandledTransportAction<
++    Request,
++    Response> {
++
++    protected final Client client;
++
++    AbstractReindexTransportAction(
++        final ActionType<Response> actionType,
++        final TransportService transportService,
++        final ActionFilters actionFilters,
++        final Writeable.Reader<Request> reader,
++        final Executor executor,
++        final Client client
++    ) {
++        super(actionType.name(), transportService, actionFilters, reader, executor);
++        this.client = new OriginSettingClient(Objects.requireNonNull(client), TASKS_ORIGIN);
++    }
++}
+diff --git a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportCancelReindexAction.java b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportCancelReindexAction.java
+index 968eb43ca..225082967 100644
+--- a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportCancelReindexAction.java
++++ b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportCancelReindexAction.java
+@@ -14,9 +14,7 @@ import org.elasticsearch.action.ActionType;
+ import org.elasticsearch.action.admin.cluster.node.tasks.cancel.CancelTasksRequest;
+ import org.elasticsearch.action.admin.cluster.node.tasks.cancel.TransportCancelTasksAction;
+ import org.elasticsearch.action.support.ActionFilters;
+-import org.elasticsearch.action.support.HandledTransportAction;
+ import org.elasticsearch.client.internal.Client;
+-import org.elasticsearch.client.internal.OriginSettingClient;
+ import org.elasticsearch.index.reindex.ReindexAction;
+ import org.elasticsearch.injection.guice.Inject;
+ import org.elasticsearch.logging.LogManager;
+@@ -26,29 +24,23 @@ import org.elasticsearch.tasks.TaskId;
+ import org.elasticsearch.threadpool.ThreadPool;
+ import org.elasticsearch.transport.TransportService;
+ 
+-import java.util.Objects;
+-
+-import static org.elasticsearch.action.admin.cluster.node.tasks.get.TransportGetTaskAction.TASKS_ORIGIN;
+-
+ /** Transport action that cancels an in-flight reindex task and its descendants. */
+-public class TransportCancelReindexAction extends HandledTransportAction<CancelReindexRequest, CancelReindexResponse> {
++public class TransportCancelReindexAction extends AbstractReindexTransportAction<CancelReindexRequest, CancelReindexResponse> {
+ 
+     public static final ActionType<CancelReindexResponse> TYPE = new ActionType<>("cluster:admin/reindex/cancel");
+ 
+     private static final Logger logger = LogManager.getLogger(TransportCancelReindexAction.class);
+ 
+-    private final Client client;
+-
+     @Inject
+     public TransportCancelReindexAction(final TransportService transportService, final ActionFilters actionFilters, final Client client) {
+         super(
+-            TYPE.name(),
++            TYPE,
+             transportService,
+             actionFilters,
+             CancelReindexRequest::new,
+-            transportService.getThreadPool().executor(ThreadPool.Names.GENERIC)
++            transportService.getThreadPool().executor(ThreadPool.Names.GENERIC),
++            client
+         );
+-        this.client = new OriginSettingClient(Objects.requireNonNull(client), TASKS_ORIGIN);
+     }
+ 
+     @Override
+diff --git a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportGetReindexAction.java b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportGetReindexAction.java
+index b1c4b68d9..91b2bb0ac 100644
+--- a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportGetReindexAction.java
++++ b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportGetReindexAction.java
+@@ -12,29 +12,25 @@ package org.elasticsearch.reindex.management;
+ import org.elasticsearch.action.ActionListener;
+ import org.elasticsearch.action.ActionType;
+ import org.elasticsearch.action.support.ActionFilters;
+-import org.elasticsearch.action.support.HandledTransportAction;
+ import org.elasticsearch.client.internal.Client;
+-import org.elasticsearch.client.internal.OriginSettingClient;
+ import org.elasticsearch.common.util.concurrent.EsExecutors;
+ import org.elasticsearch.injection.guice.Inject;
+ import org.elasticsearch.tasks.Task;
+ import org.elasticsearch.transport.TransportService;
+ 
+-import static org.elasticsearch.action.admin.cluster.node.tasks.get.TransportGetTaskAction.TASKS_ORIGIN;
+-
+ /**
+  * Transport action for getting a reindex task. Validates that the requested task is a reindex parent task,
+  * then delegates to the relocation-aware Get Task API which transparently follows any relocation chain.
+  */
+-public class TransportGetReindexAction extends HandledTransportAction<GetReindexRequest, GetReindexResponse> {
++public class TransportGetReindexAction extends AbstractReindexTransportAction<GetReindexRequest, GetReindexResponse> {
+     public static final ActionType<GetReindexResponse> TYPE = new ActionType<>("cluster:monitor/reindex/get");
+ 
+     private final ReindexTaskLookup taskLookup;
+ 
+     @Inject
+     public TransportGetReindexAction(TransportService transportService, ActionFilters actionFilters, Client client) {
+-        super(TYPE.name(), transportService, actionFilters, GetReindexRequest::new, EsExecutors.DIRECT_EXECUTOR_SERVICE);
+-        this.taskLookup = new ReindexTaskLookup(new OriginSettingClient(client, TASKS_ORIGIN));
++        super(TYPE, transportService, actionFilters, GetReindexRequest::new, EsExecutors.DIRECT_EXECUTOR_SERVICE, client);
++        this.taskLookup = new ReindexTaskLookup(this.client);
+     }
+ 
+     @Override
+diff --git a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportListReindexAction.java b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportListReindexAction.java
+index 939844958..c5393b27c 100644
+--- a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportListReindexAction.java
++++ b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportListReindexAction.java
+@@ -13,31 +13,22 @@ import org.elasticsearch.action.ActionListener;
+ import org.elasticsearch.action.ActionType;
+ import org.elasticsearch.action.admin.cluster.node.tasks.list.TransportListTasksAction;
+ import org.elasticsearch.action.support.ActionFilters;
+-import org.elasticsearch.action.support.HandledTransportAction;
+ import org.elasticsearch.client.internal.Client;
+-import org.elasticsearch.client.internal.OriginSettingClient;
+ import org.elasticsearch.common.util.concurrent.EsExecutors;
+ import org.elasticsearch.injection.guice.Inject;
+ import org.elasticsearch.tasks.Task;
+ import org.elasticsearch.transport.TransportService;
+ 
+-import java.util.Objects;
+-
+-import static org.elasticsearch.action.admin.cluster.node.tasks.get.TransportGetTaskAction.TASKS_ORIGIN;
+-
+ /// Transport action for listing all running reindex tasks.
+ /// Delegates to {@link TransportListTasksAction} to fan out to all nodes (which handles deduplication if we list a non-relocated and
+ /// relocated task), then filters for reindex parent tasks and rewrites task identity to reflect the original (pre-relocation) task.
+-public class TransportListReindexAction extends HandledTransportAction<ListReindexRequest, ListReindexResponse> {
++public class TransportListReindexAction extends AbstractReindexTransportAction<ListReindexRequest, ListReindexResponse> {
+ 
+     public static final ActionType<ListReindexResponse> TYPE = new ActionType<>("cluster:monitor/reindex/list");
+ 
+-    private final Client client;
+-
+     @Inject
+     public TransportListReindexAction(final TransportService transportService, final ActionFilters actionFilters, final Client client) {
+-        super(TYPE.name(), transportService, actionFilters, ListReindexRequest::new, EsExecutors.DIRECT_EXECUTOR_SERVICE);
+-        this.client = new OriginSettingClient(Objects.requireNonNull(client), TASKS_ORIGIN);
++        super(TYPE, transportService, actionFilters, ListReindexRequest::new, EsExecutors.DIRECT_EXECUTOR_SERVICE, client);
+     }
+ 
+     @Override

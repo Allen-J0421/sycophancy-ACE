@@ -1,0 +1,124 @@
+diff --git a/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/CommandRunner.java b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/CommandRunner.java
+index 643f47fcc..3d09f8994 100644
+--- a/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/CommandRunner.java
++++ b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/CommandRunner.java
+@@ -166,23 +166,42 @@ public class CommandRunner implements Iterable<Command> {
+ 	public int runAndHandleErrors(String... args) {
+ 		String[] argsWithoutDebugFlags = removeDebugFlags(args);
+ 		boolean debug = argsWithoutDebugFlags.length != args.length;
+-		if (debug) {
+-			System.setProperty("debug", "true");
+-		}
++		String previousDebug = System.getProperty("debug");
++		applyDebugSetting(debug);
+ 		try {
+-			ExitStatus result = run(argsWithoutDebugFlags);
+-			// The caller will hang up if it gets a non-zero status
+-			if (result != null && result.isHangup()) {
+-				return (result.getCode() > 0) ? result.getCode() : 0;
++			try {
++				ExitStatus result = run(argsWithoutDebugFlags);
++				// The caller will hang up if it gets a non-zero status
++				if (result != null && result.isHangup()) {
++					return (result.getCode() > 0) ? result.getCode() : 0;
++				}
++				return 0;
++			}
++			catch (NoArgumentsException ex) {
++				showUsage();
++				return 1;
++			}
++			catch (Exception ex) {
++				return handleError(debug, ex);
+ 			}
+-			return 0;
+ 		}
+-		catch (NoArgumentsException ex) {
+-			showUsage();
+-			return 1;
++		finally {
++			restoreDebugSetting(previousDebug);
++		}
++	}
++
++	private void applyDebugSetting(boolean debug) {
++		if (debug) {
++			System.setProperty("debug", "true");
++		}
++	}
++
++	private void restoreDebugSetting(@Nullable String previousDebug) {
++		if (previousDebug != null) {
++			System.setProperty("debug", previousDebug);
+ 		}
+-		catch (Exception ex) {
+-			return handleError(debug, ex);
++		else {
++			System.clearProperty("debug");
+ 		}
+ 	}
+ 
+diff --git a/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/CommandRunnerIntegrationTests.java b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/CommandRunnerIntegrationTests.java
+index 5609e1607..eb8ede6a7 100644
+--- a/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/CommandRunnerIntegrationTests.java
++++ b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/CommandRunnerIntegrationTests.java
+@@ -44,7 +44,8 @@ class CommandRunnerIntegrationTests {
+ 		runner.addCommand(command);
+ 		runner.runAndHandleErrors("args", "samples/app.groovy", "--debug");
+ 		assertThat(command.args).containsExactly("samples/app.groovy");
+-		assertThat(System.getProperty("debug")).isEqualTo("true");
++		assertThat(command.debug).isEqualTo("true");
++		assertThat(System.getProperty("debug")).isNull();
+ 	}
+ 
+ 	@Test
+@@ -54,6 +55,19 @@ class CommandRunnerIntegrationTests {
+ 		runner.addCommand(command);
+ 		runner.runAndHandleErrors("args", "samples/app.groovy", "--", "--debug");
+ 		assertThat(command.args).containsExactly("samples/app.groovy", "--", "--debug");
++		assertThat(command.debug).isNull();
++		assertThat(System.getProperty("debug")).isNull();
++	}
++
++	@Test
++	void debugDoesNotLeakBetweenRuns() {
++		CommandRunner runner = new CommandRunner("spring");
++		ArgHandlingCommand command = new ArgHandlingCommand();
++		runner.addCommand(command);
++		runner.runAndHandleErrors("args", "--debug");
++		assertThat(command.debug).isEqualTo("true");
++		runner.runAndHandleErrors("args");
++		assertThat(command.debug).isNull();
+ 		assertThat(System.getProperty("debug")).isNull();
+ 	}
+ 
+@@ -61,6 +75,8 @@ class CommandRunnerIntegrationTests {
+ 
+ 		private String @Nullable [] args;
+ 
++		private @Nullable String debug;
++
+ 		ArgHandlingCommand() {
+ 			super("args", "");
+ 		}
+@@ -68,6 +84,7 @@ class CommandRunnerIntegrationTests {
+ 		@Override
+ 		public ExitStatus run(String... args) throws Exception {
+ 			this.args = args;
++			this.debug = System.getProperty("debug");
+ 			return ExitStatus.OK;
+ 		}
+ 
+diff --git a/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/CommandRunnerTests.java b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/CommandRunnerTests.java
+index 418b961b1..1fcf78baf 100644
+--- a/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/CommandRunnerTests.java
++++ b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/CommandRunnerTests.java
+@@ -155,7 +155,7 @@ class CommandRunnerTests {
+ 	void handlesExceptionWithDashDashDebug() throws Exception {
+ 		willThrow(new RuntimeException()).given(this.regularCommand).run();
+ 		int status = this.commandRunner.runAndHandleErrors("command", "--debug");
+-		assertThat(System.getProperty("debug")).isEqualTo("true");
++		assertThat(System.getProperty("debug")).isNull();
+ 		assertThat(status).isOne();
+ 		assertThat(this.calls).containsOnly(Call.ERROR_MESSAGE, Call.PRINT_STACK_TRACE);
+ 	}

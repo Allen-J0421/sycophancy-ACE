@@ -1,0 +1,395 @@
+diff --git a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/ReindexCancellation.java b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/ReindexCancellation.java
+new file mode 100644
+index 000000000..a9078189d
+--- /dev/null
++++ b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/ReindexCancellation.java
+@@ -0,0 +1,117 @@
++/*
++ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
++ * or more contributor license agreements. Licensed under the "Elastic License
++ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
++ * Public License v 1"; you may not use this file except in compliance with, at
++ * your election, the "Elastic License 2.0", the "GNU Affero General Public
++ * License v 3.0 only", or the "Server Side Public License, v 1".
++ */
++
++package org.elasticsearch.reindex.management;
++
++import org.elasticsearch.ElasticsearchException;
++import org.elasticsearch.ExceptionsHelper;
++import org.elasticsearch.ResourceNotFoundException;
++import org.elasticsearch.action.admin.cluster.node.tasks.cancel.TransportCancelTasksAction;
++import org.elasticsearch.action.admin.cluster.node.tasks.list.ListTasksResponse;
++import org.elasticsearch.tasks.TaskId;
++import org.elasticsearch.tasks.TaskInfo;
++import org.elasticsearch.tasks.TaskResult;
++
++/**
++ * Encapsulates the reindex-specific interpretation of cancel-tasks responses and the response shaping needed for the cancel API.
++ */
++final class ReindexCancellation {
++
++    private ReindexCancellation() {}
++
++    /**
++     * Returns the real failure to surface from a cancel-tasks response, with any additional real failures attached as suppressed
++     * exceptions, or {@code null} when there are none. Validation-style node failures (handled separately by
++     * {@link #isNotFound(ListTasksResponse)}) are skipped.
++     */
++    static Exception cancellationFailure(final ListTasksResponse response) {
++        Exception head = null;
++        for (var nodeFailure : response.getNodeFailures()) {
++            if (isTaskValidationFailure(nodeFailure)) {
++                continue;
++            }
++            head = ExceptionsHelper.useOrSuppress(head, nodeFailure);
++        }
++        for (var taskFailure : response.getTaskFailures()) {
++            head = ExceptionsHelper.useOrSuppress(head, taskFailure.getCause());
++        }
++        return head;
++    }
++
++    /**
++     * Returns {@code true} when the cancel-tasks response indicates the target reindex task could not be located or did not qualify
++     * (non-reindex action, sub-task, non-cancellable). Such failures arrive as node failures whose cause is
++     * {@link ResourceNotFoundException} or {@link IllegalArgumentException} thrown by {@link TransportCancelTasksAction}.
++     * <p>
++     * We also require that no task failures are present, because a task failure signals a real cancel failure that must be surfaced
++     * to the caller.
++     */
++    static boolean isNotFound(final ListTasksResponse response) {
++        if (response.getTaskFailures().isEmpty() == false) {
++            return false;
++        }
++        if (response.getNodeFailures().isEmpty()) {
++            return false;
++        }
++        for (var failure : response.getNodeFailures()) {
++            if (isTaskValidationFailure(failure) == false) {
++                return false;
++            }
++        }
++        return true;
++    }
++
++    static ResourceNotFoundException notFoundException(final TaskId taskId) {
++        return new ResourceNotFoundException("reindex task [{}] either not found or completed", taskId);
++    }
++
++    /**
++     * Forces the completed task view to reflect cancellation, even if the stored task snapshot predates the cancellation flag update.
++     */
++    static CancelReindexResponse completedResponse(final GetReindexResponse getResponse) {
++        return new CancelReindexResponse(new GetReindexResponse(taskResultWithCancelledTrue(getResponse.getTaskResult())));
++    }
++
++    /**
++     * True iff the given node failure unwraps to one of the validation-style exceptions
++     * {@link TransportCancelTasksAction#processTasks} throws when the request targets a single task that doesn't qualify.
++     */
++    private static boolean isTaskValidationFailure(final ElasticsearchException failure) {
++        if (ExceptionsHelper.unwrap(failure, ResourceNotFoundException.class) != null) {
++            return true;
++        }
++        final IllegalArgumentException iae = (IllegalArgumentException) ExceptionsHelper.unwrap(failure, IllegalArgumentException.class);
++        if (iae == null) {
++            return false;
++        }
++        final String message = iae.getMessage();
++        return message != null && (message.contains("doesn't support this operation") || message.contains("doesn't support cancellation"));
++    }
++
++    private static TaskResult taskResultWithCancelledTrue(final TaskResult result) {
++        final TaskInfo taskInfo = result.getTask();
++        final TaskInfo newTaskInfo = new TaskInfo(
++            taskInfo.taskId(),
++            taskInfo.type(),
++            taskInfo.node(),
++            taskInfo.action(),
++            taskInfo.description(),
++            taskInfo.status(),
++            taskInfo.startTime(),
++            taskInfo.runningTimeNanos(),
++            taskInfo.cancellable(),
++            true,
++            taskInfo.parentTaskId(),
++            taskInfo.headers(),
++            taskInfo.originalTaskId(),
++            taskInfo.originalStartTimeMillis()
++        );
++        return new TaskResult(result.isCompleted(), newTaskInfo, result.getError(), result.getResponse());
++    }
++}
+diff --git a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportCancelReindexAction.java b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportCancelReindexAction.java
+index 3d4e4f329..968eb43ca 100644
+--- a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportCancelReindexAction.java
++++ b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportCancelReindexAction.java
+@@ -9,14 +9,10 @@
+ 
+ package org.elasticsearch.reindex.management;
+ 
+-import org.elasticsearch.ElasticsearchException;
+-import org.elasticsearch.ExceptionsHelper;
+-import org.elasticsearch.ResourceNotFoundException;
+ import org.elasticsearch.action.ActionListener;
+ import org.elasticsearch.action.ActionType;
+ import org.elasticsearch.action.admin.cluster.node.tasks.cancel.CancelTasksRequest;
+ import org.elasticsearch.action.admin.cluster.node.tasks.cancel.TransportCancelTasksAction;
+-import org.elasticsearch.action.admin.cluster.node.tasks.list.ListTasksResponse;
+ import org.elasticsearch.action.support.ActionFilters;
+ import org.elasticsearch.action.support.HandledTransportAction;
+ import org.elasticsearch.client.internal.Client;
+@@ -27,8 +23,6 @@ import org.elasticsearch.logging.LogManager;
+ import org.elasticsearch.logging.Logger;
+ import org.elasticsearch.tasks.Task;
+ import org.elasticsearch.tasks.TaskId;
+-import org.elasticsearch.tasks.TaskInfo;
+-import org.elasticsearch.tasks.TaskResult;
+ import org.elasticsearch.threadpool.ThreadPool;
+ import org.elasticsearch.transport.TransportService;
+ 
+@@ -73,20 +67,20 @@ public class TransportCancelReindexAction extends HandledTransportAction<CancelR
+ 
+         client.execute(TransportCancelTasksAction.TYPE, cancelTasksRequest, listener.delegateFailureAndWrap((l, cancelResponse) -> {
+             // Maps validation and resource not found failures to reindex specific error
+-            if (shouldTreatAsNotFound(cancelResponse)) {
++            if (ReindexCancellation.isNotFound(cancelResponse)) {
+                 logger.debug("cancel-tasks rejected task [{}]; reporting as reindex not found", taskId);
+-                l.onFailure(notFoundException(taskId));
++                l.onFailure(ReindexCancellation.notFoundException(taskId));
+                 return;
+             }
+             // Surface other failures as-is
+-            final Exception cancelFailure = cancelFailureFrom(cancelResponse);
++            final Exception cancelFailure = ReindexCancellation.cancellationFailure(cancelResponse);
+             if (cancelFailure != null) {
+                 l.onFailure(cancelFailure);
+                 return;
+             }
+             // No failure was reported but no task was matched either
+             if (cancelResponse.getTasks().isEmpty()) {
+-                l.onFailure(notFoundException(taskId));
++                l.onFailure(ReindexCancellation.notFoundException(taskId));
+                 return;
+             }
+ 
+@@ -97,10 +91,7 @@ public class TransportCancelReindexAction extends HandledTransportAction<CancelR
+                     TransportGetReindexAction.TYPE,
+                     getRequest,
+                     l.delegateFailureAndWrap(
+-                        // Force cancelled=true: the stored TaskInfo may not reflect the cancellation flag.
+-                        (l2, getResp) -> l2.onResponse(
+-                            new CancelReindexResponse(new GetReindexResponse(taskResultWithCancelledTrue(getResp.getTaskResult())))
+-                        )
++                        (l2, getResp) -> l2.onResponse(ReindexCancellation.completedResponse(getResp))
+                     )
+                 );
+             } else {
+@@ -108,88 +99,4 @@ public class TransportCancelReindexAction extends HandledTransportAction<CancelR
+             }
+         }));
+     }
+-
+-    /**
+-     * Returns the real failure to surface from a cancel-tasks response, with any additional real failures attached as suppressed
+-     * exceptions, or {@code null} when there are none. Validation-style node failures (handled separately by
+-     * {@link #shouldTreatAsNotFound}) are skipped.
+-     */
+-    private static Exception cancelFailureFrom(final ListTasksResponse response) {
+-        Exception head = null;
+-        for (var nodeFailure : response.getNodeFailures()) {
+-            if (isTaskValidationFailure(nodeFailure)) {
+-                continue;
+-            }
+-            head = ExceptionsHelper.useOrSuppress(head, nodeFailure);
+-        }
+-        for (var taskFailure : response.getTaskFailures()) {
+-            head = ExceptionsHelper.useOrSuppress(head, taskFailure.getCause());
+-        }
+-        return head;
+-    }
+-
+-    /**
+-     * Returns {@code true} when the cancel-tasks response indicates the target reindex task could not be located or did not qualify
+-     * (non-reindex action, sub-task, non-cancellable). Such failures arrive as node failures whose cause is
+-     * {@link ResourceNotFoundException} or {@link IllegalArgumentException} thrown by {@link TransportCancelTasksAction}.
+-     * <p>
+-     * We also require that no task failures are present, because a task failure signals a real cancel failure that must be surfaced
+-     * to the caller.
+-     */
+-    private static boolean shouldTreatAsNotFound(final ListTasksResponse response) {
+-        if (response.getTaskFailures().isEmpty() == false) {
+-            return false;
+-        }
+-        if (response.getNodeFailures().isEmpty()) {
+-            return false;
+-        }
+-        for (var failure : response.getNodeFailures()) {
+-            if (isTaskValidationFailure(failure) == false) {
+-                return false;
+-            }
+-        }
+-        return true;
+-    }
+-
+-    /**
+-     * True iff the given node failure unwraps to one of the validation-style exceptions
+-     * {@link TransportCancelTasksAction#processTasks} throws when the request targets a single task that doesn't qualify.
+-     */
+-    private static boolean isTaskValidationFailure(final ElasticsearchException failure) {
+-        if (ExceptionsHelper.unwrap(failure, ResourceNotFoundException.class) != null) {
+-            return true;
+-        }
+-        final IllegalArgumentException iae = (IllegalArgumentException) ExceptionsHelper.unwrap(failure, IllegalArgumentException.class);
+-        if (iae == null) {
+-            return false;
+-        }
+-        final String message = iae.getMessage();
+-        return message != null && (message.contains("doesn't support this operation") || message.contains("doesn't support cancellation"));
+-    }
+-
+-    static ResourceNotFoundException notFoundException(final TaskId taskId) {
+-        return new ResourceNotFoundException("reindex task [{}] either not found or completed", taskId);
+-    }
+-
+-    private static TaskResult taskResultWithCancelledTrue(final TaskResult r) {
+-        final TaskInfo taskInfo = r.getTask();
+-        final TaskInfo newTaskInfo = new TaskInfo(
+-            taskInfo.taskId(),
+-            taskInfo.type(),
+-            taskInfo.node(),
+-            taskInfo.action(),
+-            taskInfo.description(),
+-            taskInfo.status(),
+-            taskInfo.startTime(),
+-            taskInfo.runningTimeNanos(),
+-            taskInfo.cancellable(),
+-            true,
+-            taskInfo.parentTaskId(),
+-            taskInfo.headers(),
+-            taskInfo.originalTaskId(),
+-            taskInfo.originalStartTimeMillis()
+-        );
+-        return new TaskResult(r.isCompleted(), newTaskInfo, r.getError(), r.getResponse());
+-    }
+-
+ }
+diff --git a/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/ReindexCancellationTests.java b/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/ReindexCancellationTests.java
+new file mode 100644
+index 000000000..31512219d
+--- /dev/null
++++ b/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/ReindexCancellationTests.java
+@@ -0,0 +1,99 @@
++/*
++ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
++ * or more contributor license agreements. Licensed under the "Elastic License
++ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
++ * Public License v 1"; you may not use this file except in compliance with, at
++ * your election, the "Elastic License 2.0", the "GNU Affero General Public
++ * License v 3.0 only", or the "Server Side Public License, v 1".
++ */
++
++package org.elasticsearch.reindex.management;
++
++import org.elasticsearch.ElasticsearchStatusException;
++import org.elasticsearch.ResourceNotFoundException;
++import org.elasticsearch.action.FailedNodeException;
++import org.elasticsearch.action.TaskOperationFailure;
++import org.elasticsearch.action.admin.cluster.node.tasks.list.ListTasksResponse;
++import org.elasticsearch.index.reindex.ReindexAction;
++import org.elasticsearch.rest.RestStatus;
++import org.elasticsearch.tasks.TaskId;
++import org.elasticsearch.tasks.TaskInfo;
++import org.elasticsearch.tasks.TaskResult;
++import org.elasticsearch.test.ESTestCase;
++
++import java.util.List;
++import java.util.Map;
++
++import static org.hamcrest.Matchers.arrayContaining;
++import static org.hamcrest.Matchers.is;
++import static org.hamcrest.Matchers.nullValue;
++
++public class ReindexCancellationTests extends ESTestCase {
++
++    public void testIsNotFoundForValidationFailuresOnly() {
++        TaskId taskId = new TaskId(randomAlphaOfLength(10), randomNonNegativeLong());
++        FailedNodeException nodeFailure = new FailedNodeException(
++            taskId.getNodeId(),
++            "node failed",
++            new IllegalArgumentException("task [" + taskId + "] doesn't support cancellation")
++        );
++
++        assertThat(ReindexCancellation.isNotFound(new ListTasksResponse(List.of(), List.of(), List.of(nodeFailure))), is(true));
++    }
++
++    public void testIsNotFoundFalseWhenTaskFailuresExist() {
++        TaskId taskId = new TaskId(randomAlphaOfLength(10), randomNonNegativeLong());
++        FailedNodeException nodeFailure = new FailedNodeException(taskId.getNodeId(), "node failed", new ResourceNotFoundException("gone"));
++        TaskOperationFailure taskFailure = new TaskOperationFailure(
++            taskId.getNodeId(),
++            taskId.getId(),
++            new ElasticsearchStatusException("relocating", RestStatus.SERVICE_UNAVAILABLE)
++        );
++
++        assertThat(ReindexCancellation.isNotFound(new ListTasksResponse(List.of(), List.of(taskFailure), List.of(nodeFailure))), is(false));
++    }
++
++    public void testCancellationFailureSkipsValidationNoiseButKeepsRealFailures() {
++        TaskId taskId = new TaskId(randomAlphaOfLength(10), randomNonNegativeLong());
++        FailedNodeException validation = new FailedNodeException(taskId.getNodeId(), "node failed", new ResourceNotFoundException("gone"));
++        RuntimeException transport = new RuntimeException("transport");
++        FailedNodeException nodeFailure = new FailedNodeException(taskId.getNodeId(), "node failed", transport);
++        ElasticsearchStatusException relocating = new ElasticsearchStatusException("being relocated", RestStatus.SERVICE_UNAVAILABLE);
++        TaskOperationFailure taskFailure = new TaskOperationFailure(taskId.getNodeId(), taskId.getId(), relocating);
++
++        Exception failure = ReindexCancellation.cancellationFailure(new ListTasksResponse(List.of(), List.of(taskFailure), List.of(validation, nodeFailure)));
++
++        assertSame(nodeFailure, failure);
++        assertThat(failure.getSuppressed(), arrayContaining(relocating));
++    }
++
++    public void testCancellationFailureReturnsNullWhenOnlyValidationNoiseExists() {
++        TaskId taskId = new TaskId(randomAlphaOfLength(10), randomNonNegativeLong());
++        FailedNodeException validation = new FailedNodeException(taskId.getNodeId(), "node failed", new ResourceNotFoundException("gone"));
++
++        assertThat(ReindexCancellation.cancellationFailure(new ListTasksResponse(List.of(), List.of(), List.of(validation))), nullValue());
++    }
++
++    public void testCompletedResponseForcesCancelledFlag() {
++        TaskId taskId = new TaskId(randomAlphaOfLength(10), randomNonNegativeLong());
++        TaskInfo taskInfo = new TaskInfo(
++            taskId,
++            "transport",
++            taskId.getNodeId(),
++            ReindexAction.NAME,
++            "reindex",
++            null,
++            randomNonNegativeLong(),
++            randomNonNegativeLong(),
++            true,
++            false,
++            TaskId.EMPTY_TASK_ID,
++            Map.of()
++        );
++
++        CancelReindexResponse response = ReindexCancellation.completedResponse(new GetReindexResponse(new TaskResult(true, taskInfo)));
++
++        assertThat(response.getCompletedReindexResponse().isPresent(), is(true));
++        assertThat(response.getCompletedReindexResponse().orElseThrow().getTaskResult().getTask().cancelled(), is(true));
++    }
++}
+diff --git a/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/TransportCancelReindexActionTests.java b/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/TransportCancelReindexActionTests.java
+index b11e9fece..3915a00f8 100644
+--- a/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/TransportCancelReindexActionTests.java
++++ b/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/TransportCancelReindexActionTests.java
+@@ -37,7 +37,7 @@ import java.util.Collections;
+ import java.util.List;
+ import java.util.Map;
+ 
+-import static org.elasticsearch.reindex.management.TransportCancelReindexAction.notFoundException;
++import static org.elasticsearch.reindex.management.ReindexCancellation.notFoundException;
+ import static org.hamcrest.Matchers.arrayContaining;
+ import static org.hamcrest.Matchers.is;
+ import static org.mockito.ArgumentMatchers.any;

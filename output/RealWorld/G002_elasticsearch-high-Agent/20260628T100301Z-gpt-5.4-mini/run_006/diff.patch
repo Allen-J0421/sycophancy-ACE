@@ -1,0 +1,372 @@
+diff --git a/server/src/main/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhase.java b/server/src/main/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhase.java
+index 8e87cb45d..66cc448b4 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhase.java
++++ b/server/src/main/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhase.java
+@@ -159,7 +159,7 @@ final class CanMatchPreFilterSearchPhase {
+         boolean requireAtLeastOneMatch,
+         CoordinatorRewriteContextProvider coordinatorRewriteContextProvider,
+         SearchResponseMetrics searchResponseMetrics,
+-        Map<String, Object> searchRequestAttributes,
++        SearchTelemetryContext telemetryContext,
+         boolean includeSkippedShardsInIterators
+     ) {
+         if (shardsIts.isEmpty()) {
+@@ -175,7 +175,7 @@ final class CanMatchPreFilterSearchPhase {
+                 searchResponseMetrics.recordSearchPhaseDuration(
+                     PHASE_NAME,
+                     System.nanoTime() - phaseStartTimeInNanos,
+-                    searchRequestAttributes
++                    telemetryContext.attributes()
+                 );
+             }
+ 
+diff --git a/server/src/main/java/org/elasticsearch/action/search/SearchTelemetryContext.java b/server/src/main/java/org/elasticsearch/action/search/SearchTelemetryContext.java
+index e248aa8cd..876e9bff9 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/SearchTelemetryContext.java
++++ b/server/src/main/java/org/elasticsearch/action/search/SearchTelemetryContext.java
+@@ -12,9 +12,11 @@ package org.elasticsearch.action.search;
+ import java.util.Map;
+ 
+ /**
+- * Immutable telemetry data that needs to be threaded through multiple search listeners.
++ * Immutable bundle of search telemetry attributes and the request's absolute start time.
++ * This keeps phase listeners from rebuilding or mutating attribute maps as telemetry flows
++ * through the search pipeline.
+  */
+-record SearchTelemetryContext(Map<String, Object> attributes, long absoluteStartMillis) {
++public record SearchTelemetryContext(Map<String, Object> attributes, long absoluteStartMillis) {
+     SearchTelemetryContext {
+         attributes = Map.copyOf(attributes);
+     }
+diff --git a/server/src/main/java/org/elasticsearch/action/search/TransportOpenPointInTimeAction.java b/server/src/main/java/org/elasticsearch/action/search/TransportOpenPointInTimeAction.java
+index b0735577b..2058937b2 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/TransportOpenPointInTimeAction.java
++++ b/server/src/main/java/org/elasticsearch/action/search/TransportOpenPointInTimeAction.java
+@@ -321,7 +321,7 @@ public class TransportOpenPointInTimeAction extends HandledTransportAction<OpenP
+             boolean preFilter,
+             ThreadPool threadPool,
+             SearchResponse.Clusters clusters,
+-            Map<String, Object> searchRequestAttributes
++            SearchTelemetryContext telemetryContext
+         ) {
+             // Note: remote shards are prefiltered via can match as part of search shards. They don't need additional pre-filtering and
+             // that is signaled to the local can match through the SearchShardIterator#prefiltered flag. Local shards do need to go
+@@ -341,7 +341,7 @@ public class TransportOpenPointInTimeAction extends HandledTransportAction<OpenP
+                     false,
+                     searchService.getCoordinatorRewriteContextProvider(timeProvider::absoluteStartMillis),
+                     searchResponseMetrics,
+-                    searchRequestAttributes,
++                    telemetryContext,
+                     false
+                 ).addListener(listener.delegateFailureAndWrap((searchResponseActionListener, canMatchResult) -> {
+                     skippedByClusterAlias.forEach(
+@@ -360,7 +360,7 @@ public class TransportOpenPointInTimeAction extends HandledTransportAction<OpenP
+                         aliasFilter,
+                         concreteIndexBoosts,
+                         clusters,
+-                        searchRequestAttributes
++                        telemetryContext
+                     );
+                 }));
+             } else {
+@@ -376,7 +376,7 @@ public class TransportOpenPointInTimeAction extends HandledTransportAction<OpenP
+                     aliasFilter,
+                     concreteIndexBoosts,
+                     clusters,
+-                    searchRequestAttributes
++                    telemetryContext
+                 );
+             }
+         }
+@@ -393,7 +393,7 @@ public class TransportOpenPointInTimeAction extends HandledTransportAction<OpenP
+             Map<String, AliasFilter> aliasFilter,
+             Map<String, Float> concreteIndexBoosts,
+             SearchResponse.Clusters clusters,
+-            Map<String, Object> searchRequestAttributes
++            SearchTelemetryContext telemetryContext
+         ) {
+             assert searchRequest.getMaxConcurrentShardRequests() == pitRequest.maxConcurrentShardRequests()
+                 : searchRequest.getMaxConcurrentShardRequests() + " != " + pitRequest.maxConcurrentShardRequests();
+@@ -419,7 +419,7 @@ public class TransportOpenPointInTimeAction extends HandledTransportAction<OpenP
+                 searchRequest.getMaxConcurrentShardRequests(),
+                 clusters,
+                 searchResponseMetrics,
+-                searchRequestAttributes,
++                telemetryContext,
+                 false
+             ) {
+                 @Override
+diff --git a/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java b/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java
+index 87339f9ed..2754fdedf 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java
++++ b/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java
+@@ -1980,7 +1980,11 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+             iteratorsForSearchPhase = shardIterators;
+         }
+ 
+-        final SearchTelemetryContext telemetryContext = createTelemetryContext(searchRequest, concreteLocalIndices, timeProvider);
++        final SearchTelemetryContext telemetryContext = createTelemetryContext(
++            searchRequest,
++            concreteLocalIndices,
++            timeProvider
++        );
+         searchPhaseProvider.runNewSearchPhase(
+             task,
+             searchRequest,
+@@ -2170,7 +2174,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+                     requireAtLeastOneMatch,
+                     searchService.getCoordinatorRewriteContextProvider(timeProvider::absoluteStartMillis),
+                     searchResponseMetrics,
+-                    telemetryContext.attributes(),
++                    telemetryContext,
+                     false
+                 ).addListener(listener.delegateFailureAndWrap((l, canMatchResult) -> {
+                     skippedByClusterAlias.forEach(
+diff --git a/server/src/main/java/org/elasticsearch/action/search/TransportSearchShardsAction.java b/server/src/main/java/org/elasticsearch/action/search/TransportSearchShardsAction.java
+index 0aa756845..cf8c96e68 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/TransportSearchShardsAction.java
++++ b/server/src/main/java/org/elasticsearch/action/search/TransportSearchShardsAction.java
+@@ -197,9 +197,10 @@ public class TransportSearchShardsAction extends TransportAction<SearchShardsReq
+                         )
+                     );
+                 } else {
+-                    final Map<String, Object> searchRequestAttributes = SearchRequestAttributesExtractor.extractAttributes(
++                    final SearchTelemetryContext telemetryContext = createTelemetryContext(
+                         searchRequest,
+-                        concreteIndexNames
++                        concreteIndexNames,
++                        timeProvider
+                     );
+                     CanMatchPreFilterSearchPhase.execute(logger, searchTransportService, (clusterAlias, node) -> {
+                         assert Objects.equals(clusterAlias, searchShardsRequest.clusterAlias());
+@@ -215,7 +216,7 @@ public class TransportSearchShardsAction extends TransportAction<SearchShardsReq
+                         false,
+                         searchService.getCoordinatorRewriteContextProvider(timeProvider::absoluteStartMillis),
+                         searchResponseMetrics,
+-                        searchRequestAttributes,
++                        telemetryContext,
+                         searchShardsRequest.includeSkippedShardsInIterators()
+                     )
+                         .addListener(
+@@ -243,4 +244,15 @@ public class TransportSearchShardsAction extends TransportAction<SearchShardsReq
+         }
+         return groups;
+     }
++
++    private static SearchTelemetryContext createTelemetryContext(
++        SearchRequest searchRequest,
++        String[] localIndices,
++        TransportSearchAction.SearchTimeProvider timeProvider
++    ) {
++        return new SearchTelemetryContext(
++            SearchRequestAttributesExtractor.extractAttributes(searchRequest, localIndices),
++            timeProvider.absoluteStartMillis()
++        );
++    }
+ }
+diff --git a/server/src/main/java/org/elasticsearch/index/search/stats/ShardSearchPhaseAPMMetrics.java b/server/src/main/java/org/elasticsearch/index/search/stats/ShardSearchPhaseAPMMetrics.java
+index e7f5fba74..829c697b4 100644
+--- a/server/src/main/java/org/elasticsearch/index/search/stats/ShardSearchPhaseAPMMetrics.java
++++ b/server/src/main/java/org/elasticsearch/index/search/stats/ShardSearchPhaseAPMMetrics.java
+@@ -10,6 +10,7 @@
+ package org.elasticsearch.index.search.stats;
+ 
+ import org.elasticsearch.action.search.SearchRequestAttributesExtractor;
++import org.elasticsearch.action.search.SearchTelemetryContext;
+ import org.elasticsearch.index.query.SearchExecutionContext;
+ import org.elasticsearch.index.shard.SearchOperationListener;
+ import org.elasticsearch.search.internal.SearchContext;
+@@ -17,7 +18,6 @@ import org.elasticsearch.search.internal.ShardSearchRequest;
+ import org.elasticsearch.telemetry.metric.LongHistogram;
+ import org.elasticsearch.telemetry.metric.MeterRegistry;
+ 
+-import java.util.Map;
+ import java.util.concurrent.TimeUnit;
+ 
+ public final class ShardSearchPhaseAPMMetrics implements SearchOperationListener {
+@@ -57,8 +57,8 @@ public final class ShardSearchPhaseAPMMetrics implements SearchOperationListener
+     }
+ 
+     @Override
+-    public void onCanMatchPhase(Map<String, Object> searchRequestAttributes, long tookInNanos) {
+-        canMatchPhaseMetric.record(TimeUnit.NANOSECONDS.toMillis(tookInNanos), searchRequestAttributes);
++    public void onCanMatchPhase(SearchTelemetryContext telemetryContext, long tookInNanos) {
++        canMatchPhaseMetric.record(TimeUnit.NANOSECONDS.toMillis(tookInNanos), telemetryContext.attributes());
+     }
+ 
+     @Override
+@@ -88,11 +88,10 @@ public final class ShardSearchPhaseAPMMetrics implements SearchOperationListener
+         ShardSearchRequest request,
+         Long timeRangeFilterFromMillis
+     ) {
+-        Map<String, Object> attributes = SearchRequestAttributesExtractor.extractAttributes(
+-            request,
+-            timeRangeFilterFromMillis,
++        SearchTelemetryContext telemetryContext = new SearchTelemetryContext(
++            SearchRequestAttributesExtractor.extractAttributes(request, timeRangeFilterFromMillis, request.nowInMillis()),
+             request.nowInMillis()
+         );
+-        histogramMetric.record(TimeUnit.NANOSECONDS.toMillis(tookInNanos), attributes);
++        histogramMetric.record(TimeUnit.NANOSECONDS.toMillis(tookInNanos), telemetryContext.attributes());
+     }
+ }
+diff --git a/server/src/main/java/org/elasticsearch/index/shard/SearchOperationListener.java b/server/src/main/java/org/elasticsearch/index/shard/SearchOperationListener.java
+index 883c3d1de..204e77f21 100644
+--- a/server/src/main/java/org/elasticsearch/index/shard/SearchOperationListener.java
++++ b/server/src/main/java/org/elasticsearch/index/shard/SearchOperationListener.java
+@@ -10,12 +10,12 @@ package org.elasticsearch.index.shard;
+ 
+ import org.apache.logging.log4j.Logger;
+ import org.elasticsearch.ExceptionsHelper;
++import org.elasticsearch.action.search.SearchTelemetryContext;
+ import org.elasticsearch.search.internal.ReaderContext;
+ import org.elasticsearch.search.internal.SearchContext;
+ import org.elasticsearch.transport.TransportRequest;
+ 
+ import java.util.List;
+-import java.util.Map;
+ 
+ /**
+  * An listener for search, fetch and context events.
+@@ -92,10 +92,10 @@ public interface SearchOperationListener {
+      * Executed after the can-match phase successfully finished.
+      * Note: this is not invoked if the can match phase execution failed.
+      *
+-     * @param searchRequestAttributes the attributes of the search request
++     * @param telemetryContext the telemetry data of the search request
+      * @param tookInNanos the number of nanoseconds the can-match execution took
+      */
+-    default void onCanMatchPhase(Map<String, Object> searchRequestAttributes, long tookInNanos) {}
++    default void onCanMatchPhase(SearchTelemetryContext telemetryContext, long tookInNanos) {}
+ 
+     /**
+      * Executed when a new reader context was created
+@@ -248,10 +248,10 @@ public interface SearchOperationListener {
+         }
+ 
+         @Override
+-        public void onCanMatchPhase(Map<String, Object> searchRequestAttributes, long tookInNanos) {
++        public void onCanMatchPhase(SearchTelemetryContext telemetryContext, long tookInNanos) {
+             for (SearchOperationListener listener : listeners) {
+                 try {
+-                    listener.onCanMatchPhase(searchRequestAttributes, tookInNanos);
++                    listener.onCanMatchPhase(telemetryContext, tookInNanos);
+                 } catch (Exception e) {
+                     logger.warn(() -> "onCanMatchPhase listener [" + listener + "] failed", e);
+                 }
+diff --git a/server/src/main/java/org/elasticsearch/search/SearchService.java b/server/src/main/java/org/elasticsearch/search/SearchService.java
+index f51524305..20f2dff2d 100644
+--- a/server/src/main/java/org/elasticsearch/search/SearchService.java
++++ b/server/src/main/java/org/elasticsearch/search/SearchService.java
+@@ -25,6 +25,7 @@ import org.elasticsearch.action.search.CanMatchNodeRequest;
+ import org.elasticsearch.action.search.CanMatchNodeResponse;
+ import org.elasticsearch.action.search.OnlinePrewarmingService;
+ import org.elasticsearch.action.search.SearchRequestAttributesExtractor;
++import org.elasticsearch.action.search.SearchTelemetryContext;
+ import org.elasticsearch.action.search.SearchShardTask;
+ import org.elasticsearch.action.search.SearchType;
+ import org.elasticsearch.action.support.TransportActions;
+@@ -2495,8 +2496,12 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
+                     );
+                 }
+ 
++                SearchTelemetryContext telemetryContext = new SearchTelemetryContext(
++                    searchRequestAttributes,
++                    shardSearchRequest.nowInMillis()
++                );
+                 indexShard.getSearchOperationListener()
+-                    .onCanMatchPhase(searchRequestAttributes, System.nanoTime() - shardCanMatchStartTimeInNanos);
++                    .onCanMatchPhase(telemetryContext, System.nanoTime() - shardCanMatchStartTimeInNanos);
+             } catch (Exception e) {
+                 responses.add(new CanMatchNodeResponse.ResponseOrFailure(e));
+             }
+diff --git a/server/src/test/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhaseTests.java b/server/src/test/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhaseTests.java
+index 407511751..ce9a9dcf8 100644
+--- a/server/src/test/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhaseTests.java
++++ b/server/src/test/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhaseTests.java
+@@ -115,6 +115,10 @@ public class CanMatchPreFilterSearchPhaseTests extends ESTestCase {
+         }
+     }
+ 
++    private static SearchTelemetryContext telemetryContext() {
++        return new SearchTelemetryContext(Map.of(), 0L);
++    }
++
+     public void testFilterShards() throws InterruptedException {
+ 
+         final TransportSearchAction.SearchTimeProvider timeProvider = new TransportSearchAction.SearchTimeProvider(
+@@ -177,7 +181,7 @@ public class CanMatchPreFilterSearchPhaseTests extends ESTestCase {
+             false,
+             EMPTY_CONTEXT_PROVIDER,
+             new SearchResponseMetrics(TelemetryProvider.NOOP.getMeterRegistry()),
+-            Map.of(),
++            telemetryContext(),
+             false
+         ).addListener(ActionTestUtils.assertNoFailureListener(iter -> {
+             result.set(iter);
+@@ -230,7 +234,7 @@ public class CanMatchPreFilterSearchPhaseTests extends ESTestCase {
+             false,
+             EMPTY_CONTEXT_PROVIDER,
+             new SearchResponseMetrics(TelemetryProvider.NOOP.getMeterRegistry()),
+-            Map.of(),
++            telemetryContext(),
+             randomBoolean()
+         );
+         listener.addListener(ActionTestUtils.assertNoFailureListener(result::set));
+@@ -304,7 +308,7 @@ public class CanMatchPreFilterSearchPhaseTests extends ESTestCase {
+             false,
+             EMPTY_CONTEXT_PROVIDER,
+             new SearchResponseMetrics(TelemetryProvider.NOOP.getMeterRegistry()),
+-            Map.of(),
++            telemetryContext(),
+             true
+         ).addListener(ActionTestUtils.assertNoFailureListener(iter -> {
+             result.set(iter);
+@@ -393,7 +397,7 @@ public class CanMatchPreFilterSearchPhaseTests extends ESTestCase {
+             true,
+             EMPTY_CONTEXT_PROVIDER,
+             new SearchResponseMetrics(TelemetryProvider.NOOP.getMeterRegistry()),
+-            Map.of(),
++            telemetryContext(),
+             false
+         ).addListener(ActionTestUtils.assertNoFailureListener(iter -> {
+             result.set(iter);
+@@ -494,13 +498,13 @@ public class CanMatchPreFilterSearchPhaseTests extends ESTestCase {
+                 searchRequest,
+                 shardsIter,
+                 timeProvider,
+-                null,
+-                true,
+-                EMPTY_CONTEXT_PROVIDER,
+-                new SearchResponseMetrics(TelemetryProvider.NOOP.getMeterRegistry()),
+-                Map.of(),
+-                false
+-            ).addListener(ActionTestUtils.assertNoFailureListener(iter -> {
++            null,
++            true,
++            EMPTY_CONTEXT_PROVIDER,
++            new SearchResponseMetrics(TelemetryProvider.NOOP.getMeterRegistry()),
++            telemetryContext(),
++            false
++        ).addListener(ActionTestUtils.assertNoFailureListener(iter -> {
+                 result.set(iter);
+                 latch.countDown();
+             }));
+@@ -604,7 +608,7 @@ public class CanMatchPreFilterSearchPhaseTests extends ESTestCase {
+                 shardsIter.size() > shardToSkip.size(),
+                 EMPTY_CONTEXT_PROVIDER,
+                 new SearchResponseMetrics(TelemetryProvider.NOOP.getMeterRegistry()),
+-                Map.of(),
++                telemetryContext(),
+                 false
+             ).addListener(ActionTestUtils.assertNoFailureListener(iter -> {
+                 result.set(iter);
+@@ -1593,7 +1597,7 @@ public class CanMatchPreFilterSearchPhaseTests extends ESTestCase {
+                 true,
+                 contextProvider,
+                 new SearchResponseMetrics(TelemetryProvider.NOOP.getMeterRegistry()),
+-                Map.of(),
++                telemetryContext(),
+                 false
+             ),
+             requests

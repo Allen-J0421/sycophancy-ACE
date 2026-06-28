@@ -1,0 +1,173 @@
+diff --git a/guava-tests/test/com/google/common/io/CharSourceTest.java b/guava-tests/test/com/google/common/io/CharSourceTest.java
+index 2123e542e..1cbffbc73 100644
+--- a/guava-tests/test/com/google/common/io/CharSourceTest.java
++++ b/guava-tests/test/com/google/common/io/CharSourceTest.java
+@@ -28,8 +28,10 @@ import com.google.common.collect.ImmutableList;
+ import com.google.common.collect.ImmutableSet;
+ import com.google.common.collect.Iterables;
+ import java.io.BufferedReader;
++import java.io.FilterReader;
+ import java.io.IOException;
+ import java.io.Reader;
++import java.io.StringReader;
+ import java.io.StringWriter;
+ import java.io.Writer;
+ import java.util.ArrayList;
+@@ -202,6 +204,23 @@ public class CharSourceTest extends IoTestCase {
+     assertTrue(source.wasStreamClosed());
+   }
+ 
++  public void testLength_withReaderThatDoesNotSkip() throws IOException {
++    CharSource source =
++        new CharSource() {
++          @Override
++          public Reader openStream() {
++            return new FilterReader(new StringReader(STRING)) {
++              @Override
++              public long skip(long n) {
++                return 0;
++              }
++            };
++          }
++        };
++
++    assertEquals(STRING.length(), source.length());
++  }
++
+   public void testCopyToAppendable_doesNotCloseIfWriter() throws IOException {
+     TestWriter writer = new TestWriter();
+     assertFalse(writer.closed());
+diff --git a/guava-tests/test/com/google/common/io/CharStreamsTest.java b/guava-tests/test/com/google/common/io/CharStreamsTest.java
+index a433716cd..44a23be69 100644
+--- a/guava-tests/test/com/google/common/io/CharStreamsTest.java
++++ b/guava-tests/test/com/google/common/io/CharStreamsTest.java
+@@ -140,6 +140,14 @@ public class CharStreamsTest extends IoTestCase {
+     assertEquals(-1, reader.read());
+   }
+ 
++  public void testSkipFully_withReaderThatDoesNotSkip() throws IOException {
++    String testString = "abcdef";
++    Reader reader = newZeroSkippingReader(new StringReader(testString));
++
++    CharStreams.skipFully(reader, 3);
++    assertEquals(testString.charAt(3), reader.read());
++  }
++
+   public void testAsWriter() {
+     // Should wrap Appendable in a new object
+     Appendable plainAppendable = new StringBuilder();
+@@ -301,6 +309,15 @@ public class CharStreamsTest extends IoTestCase {
+     };
+   }
+ 
++  private static Reader newZeroSkippingReader(Reader reader) {
++    return new FilterReader(reader) {
++      @Override
++      public long skip(long n) {
++        return 0;
++      }
++    };
++  }
++
+   /** Wrap an appendable in an appendable to defeat any type specific optimizations. */
+   private static Appendable wrapAsGenericAppendable(Appendable a) {
+     return new Appendable() {
+diff --git a/guava/src/com/google/common/io/CharSource.java b/guava/src/com/google/common/io/CharSource.java
+index 14085264f..64aa8fe7e 100644
+--- a/guava/src/com/google/common/io/CharSource.java
++++ b/guava/src/com/google/common/io/CharSource.java
+@@ -219,7 +219,7 @@ public abstract class CharSource {
+     Closer closer = Closer.create();
+     try {
+       Reader reader = closer.register(openStream());
+-      return countBySkipping(reader);
++      return CharStreams.skipUpTo(reader, Long.MAX_VALUE);
+     } catch (Throwable e) {
+       throw closer.rethrow(e);
+     } finally {
+@@ -227,15 +227,6 @@ public abstract class CharSource {
+     }
+   }
+ 
+-  private static long countBySkipping(Reader reader) throws IOException {
+-    long count = 0;
+-    long read;
+-    while ((read = reader.skip(Long.MAX_VALUE)) != 0) {
+-      count += read;
+-    }
+-    return count;
+-  }
+-
+   /**
+    * Appends the contents of this source to the given {@link Appendable} (such as a {@link Writer}).
+    * Does not close {@code appendable} if it is {@code Closeable}.
+diff --git a/guava/src/com/google/common/io/CharStreams.java b/guava/src/com/google/common/io/CharStreams.java
+index f6686e1e9..e2b540e5e 100644
+--- a/guava/src/com/google/common/io/CharStreams.java
++++ b/guava/src/com/google/common/io/CharStreams.java
+@@ -16,6 +16,7 @@ package com.google.common.io;
+ 
+ import static com.google.common.base.Preconditions.checkNotNull;
+ import static com.google.common.base.Preconditions.checkPositionIndexes;
++import static java.lang.Math.min;
+ 
+ import com.google.common.annotations.GwtIncompatible;
+ import com.google.common.annotations.J2ktIncompatible;
+@@ -259,6 +260,41 @@ public final class CharStreams {
+     return total;
+   }
+ 
++  /**
++   * Discards up to {@code n} characters of data from the reader. This method will block until
++   * either the full amount has been skipped or until the end of the stream is reached, whichever
++   * happens first. Returns the total number of characters skipped.
++   */
++  static long skipUpTo(Reader reader, long n) throws IOException {
++    long totalSkipped = 0;
++    // A buffer is allocated if skip does not skip any characters.
++    char[] buf = null;
++
++    while (totalSkipped < n) {
++      long remaining = n - totalSkipped;
++      long skipped = reader.skip(remaining);
++
++      if (skipped == 0) {
++        // Do a buffered read since skip could return 0 repeatedly, for example if the Reader
++        // implementation does not support skipping.
++        int skip = (int) min(remaining, DEFAULT_BUF_SIZE);
++        if (buf == null) {
++          // Allocate a buffer bounded by the maximum size that can be requested, for example an
++          // array of DEFAULT_BUF_SIZE is unnecessary when the value of remaining is smaller.
++          buf = new char[skip];
++        }
++        if ((skipped = reader.read(buf, 0, skip)) == -1) {
++          // Reached EOF.
++          break;
++        }
++      }
++
++      totalSkipped += skipped;
++    }
++
++    return totalSkipped;
++  }
++
+   /**
+    * Discards {@code n} characters of data from the reader. This method will block until the full
+    * amount has been skipped. Does not close the reader.
+@@ -270,12 +306,9 @@ public final class CharStreams {
+    */
+   public static void skipFully(Reader reader, long n) throws IOException {
+     checkNotNull(reader);
+-    while (n > 0) {
+-      long amt = reader.skip(n);
+-      if (amt == 0) {
+-        throw new EOFException();
+-      }
+-      n -= amt;
++    long skipped = skipUpTo(reader, n);
++    if (skipped < n) {
++      throw new EOFException();
+     }
+   }
+ 

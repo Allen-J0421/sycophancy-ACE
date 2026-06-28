@@ -1,0 +1,416 @@
+diff --git a/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java b/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java
+index 585b00675..b1ec6c380 100644
+--- a/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java
++++ b/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java
+@@ -20,7 +20,6 @@ import org.eclipse.jface.text.Document;
+ import org.eclipse.lsp4j.CompletionItem;
+ import org.jkiss.code.NotNull;
+ import org.jkiss.dbeaver.DBException;
+-import org.jkiss.dbeaver.model.runtime.DBRProgressMonitor;
+ import org.jkiss.dbeaver.model.runtime.VoidProgressMonitor;
+ import org.jkiss.dbeaver.model.sql.SQLModelPreferences;
+ import org.jkiss.dbeaver.model.sql.SQLScriptElement;
+@@ -30,12 +29,8 @@ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionContext;
+ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionRequest;
+ import org.jkiss.dbeaver.model.sql.parser.SQLParserContext;
+ import org.jkiss.dbeaver.model.sql.parser.SQLScriptParser;
+-import org.jkiss.dbeaver.model.sql.semantics.SQLDocumentSyntaxContext;
+-import org.jkiss.dbeaver.model.sql.semantics.SQLQueryModelRecognizer;
+-import org.jkiss.dbeaver.model.sql.semantics.SQLQueryRecognitionContext;
+-import org.jkiss.dbeaver.model.sql.semantics.SQLScriptItemAtOffset;
+ import org.jkiss.dbeaver.model.sql.semantics.completion.SQLQueryCompletionAnalyzer;
+-import org.jkiss.dbeaver.model.sql.semantics.completion.SQLQueryCompletionContext;
++import org.jkiss.dbeaver.model.sql.semantics.completion.SQLQueryCompletionContextProvider;
+ import org.jkiss.dbeaver.runtime.DBWorkbench;
+ 
+ import java.lang.reflect.InvocationTargetException;
+@@ -45,65 +40,8 @@ import java.util.List;
+ public class LspSQLCompletionContextParser {
+ 
+     private static final String DEFAULT_ENGINE_COMPLETION = "DEFAULT";
++    private static final int MAX_RESULTS = 200;
+ 
+-    // FIXME: Mostly copy-pasted from WebSQLCompletionContextScriptParser.obtainCompletionContext
+-    @NotNull
+-    public static SQLQueryCompletionContext obtainCompletionContext(
+-        @NotNull DBRProgressMonitor monitor,
+-        @NotNull String query,
+-        int position,
+-        SQLCompletionRequest request
+-    ) {
+-        Document document = new Document(query);
+-        SQLDocumentSyntaxContext syntaxContext = new SQLDocumentSyntaxContext();
+-        SQLParserContext parserContext = new SQLParserContext(
+-            request.getContext().getDataSource(),
+-            request.getContext().getSyntaxManager(),
+-            request.getContext().getRuleManager(),
+-            document
+-        );
+-        var scriptItems = SQLScriptParser.parseScript(
+-            parserContext.getDataSource(),
+-            parserContext.getDialect(),
+-            parserContext.getPreferenceStore(),
+-            document.get()
+-        );
+-        for (var item : scriptItems) {
+-            var model = SQLQueryModelRecognizer.recognizeQuery(
+-                new SQLQueryRecognitionContext(
+-                    monitor,
+-                    request.getContext().getExecutionContext(),
+-                    true,
+-                    DBWorkbench.getPlatform().getPreferenceStore().getBoolean(SQLModelPreferences.VALIDATE_FUNCTIONS),
+-                    request.getContext().getSyntaxManager(),
+-                    request.getContext().getDataSource().getSQLDialect()
+-                ),
+-                item.getOriginalText()
+-            );
+-            syntaxContext.registerScriptItemContext(
+-                item.getOriginalText(),
+-                model,
+-                item.getOffset(),
+-                item.getLength(),
+-                true
+-            );
+-        }
+-
+-        SQLScriptItemAtOffset scriptItem = syntaxContext.findScriptItem(position);
+-        if (scriptItem != null) {
+-            scriptItem.item.setHasContextBoundaryAtLength(false);
+-            return SQLQueryCompletionContext.prepareCompletionContext(
+-                scriptItem,
+-                position,
+-                request.getContext().getExecutionContext(),
+-                request.getContext().getDataSource().getSQLDialect()
+-            );
+-        } else {
+-            return SQLQueryCompletionContext.prepareOffquery(0, position);
+-        }
+-    }
+-
+-    // FIXME: Mostly copy-pasted from WebServiceSQL.getCompletionProposals
+     @NotNull
+     public static List<CompletionItem> createCompletionsList(
+         @NotNull ContextAwareDocument document,
+@@ -127,35 +65,62 @@ public class LspSQLCompletionContextParser {
+             false
+         );
+ 
+-        List<CompletionProposalBase> proposals = new ArrayList<>();
+-        boolean useDefaultCompletionEngine = DEFAULT_ENGINE_COMPLETION.equalsIgnoreCase(DBWorkbench.getPlatform().getPreferenceStore()
+-            .getString(SQLModelPreferences.AUTOCOMPLETION_MODE));
+-        if (!useDefaultCompletionEngine) {
+-            SQLQueryCompletionAnalyzer analyzer = new SQLQueryCompletionAnalyzer(
+-                m -> LspSQLCompletionContextParser.obtainCompletionContext(
+-                    new VoidProgressMonitor(),
+-                    document.getText(),
+-                    offset,
+-                    request
+-                ),
+-                request,
+-                request::getDocumentOffset
+-            );
+-            analyzer.run(new VoidProgressMonitor());
+-            proposals.addAll(analyzer.getResult());
+-        } else {
+-            SQLCompletionAnalyzer analyzer = new SQLCompletionAnalyzer(request);
+-            analyzer.setCheckNavigatorNodes(false);
+-            analyzer.runAnalyzer(new VoidProgressMonitor());
+-            proposals.addAll(analyzer.getProposals());
+-        }
+-        int maxResults = 200;
+-        if (proposals.size() > maxResults) {
+-            proposals = proposals.subList(0, maxResults);
+-        }
++        List<CompletionProposalBase> proposals = collectCompletionProposals(document, offset, request);
+ 
+         return proposals.stream()
++            .limit(MAX_RESULTS)
+             .map(p -> new CompletionItem(p.getReplacementString()))
+             .toList();
+     }
++
++    @NotNull
++    private static List<CompletionProposalBase> collectCompletionProposals(
++        @NotNull ContextAwareDocument document,
++        int offset,
++        @NotNull SQLCompletionRequest request
++    ) throws InterruptedException, InvocationTargetException, DBException {
++        List<CompletionProposalBase> proposals = new ArrayList<>();
++        if (useLegacyCompletionEngine()) {
++            collectLegacyCompletionProposals(request, proposals);
++        } else {
++            collectSemanticCompletionProposals(document, offset, request, proposals);
++        }
++        return proposals;
++    }
++
++    private static boolean useLegacyCompletionEngine() {
++        return DEFAULT_ENGINE_COMPLETION.equalsIgnoreCase(
++            DBWorkbench.getPlatform().getPreferenceStore().getString(SQLModelPreferences.AUTOCOMPLETION_MODE)
++        );
++    }
++
++    private static void collectSemanticCompletionProposals(
++        @NotNull ContextAwareDocument document,
++        int offset,
++        @NotNull SQLCompletionRequest request,
++        @NotNull List<CompletionProposalBase> proposals
++    ) throws InterruptedException, InvocationTargetException, DBException {
++        SQLQueryCompletionAnalyzer analyzer = new SQLQueryCompletionAnalyzer(
++            monitor -> SQLQueryCompletionContextProvider.prepareCompletionContext(
++                monitor,
++                request,
++                document.getText(),
++                offset
++            ),
++            request,
++            request::getDocumentOffset
++        );
++        analyzer.run(new VoidProgressMonitor());
++        proposals.addAll(analyzer.getResult());
++    }
++
++    private static void collectLegacyCompletionProposals(
++        @NotNull SQLCompletionRequest request,
++        @NotNull List<CompletionProposalBase> proposals
++    ) {
++        SQLCompletionAnalyzer analyzer = new SQLCompletionAnalyzer(request);
++        analyzer.setCheckNavigatorNodes(false);
++        analyzer.runAnalyzer(new VoidProgressMonitor());
++        proposals.addAll(analyzer.getProposals());
++    }
+ }
+diff --git a/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/semantics/completion/SQLQueryCompletionContextProvider.java b/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/semantics/completion/SQLQueryCompletionContextProvider.java
+new file mode 100644
+index 000000000..3e9224d64
+--- /dev/null
++++ b/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/semantics/completion/SQLQueryCompletionContextProvider.java
+@@ -0,0 +1,102 @@
++/*
++ * DBeaver - Universal Database Manager
++ * Copyright (C) 2010-2026 DBeaver Corp and others
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.jkiss.dbeaver.model.sql.semantics.completion;
++
++import org.eclipse.jface.text.Document;
++import org.jkiss.code.NotNull;
++import org.jkiss.dbeaver.model.runtime.DBRProgressMonitor;
++import org.jkiss.dbeaver.model.sql.SQLModelPreferences;
++import org.jkiss.dbeaver.model.sql.completion.SQLCompletionRequest;
++import org.jkiss.dbeaver.model.sql.parser.SQLParserContext;
++import org.jkiss.dbeaver.model.sql.parser.SQLScriptParser;
++import org.jkiss.dbeaver.model.sql.semantics.SQLDocumentSyntaxContext;
++import org.jkiss.dbeaver.model.sql.semantics.SQLQueryModelRecognizer;
++import org.jkiss.dbeaver.model.sql.semantics.SQLQueryRecognitionContext;
++import org.jkiss.dbeaver.model.sql.semantics.SQLScriptItemAtOffset;
++import org.jkiss.dbeaver.runtime.DBWorkbench;
++
++public final class SQLQueryCompletionContextProvider {
++
++    private SQLQueryCompletionContextProvider() {
++    }
++
++    @NotNull
++    public static SQLQueryCompletionContext prepareCompletionContext(
++        @NotNull DBRProgressMonitor monitor,
++        @NotNull SQLCompletionRequest request,
++        @NotNull String scriptText,
++        int position
++    ) {
++        SQLDocumentSyntaxContext syntaxContext = prepareDocumentSyntaxContext(monitor, request, scriptText);
++        SQLScriptItemAtOffset scriptItem = syntaxContext.findScriptItem(position);
++        if (scriptItem == null) {
++            return SQLQueryCompletionContext.prepareOffquery(0, position);
++        }
++
++        scriptItem.item.setHasContextBoundaryAtLength(false);
++        return SQLQueryCompletionContext.prepareCompletionContext(
++            scriptItem,
++            position,
++            request.getContext().getExecutionContext(),
++            request.getContext().getDataSource().getSQLDialect()
++        );
++    }
++
++    @NotNull
++    public static SQLDocumentSyntaxContext prepareDocumentSyntaxContext(
++        @NotNull DBRProgressMonitor monitor,
++        @NotNull SQLCompletionRequest request,
++        @NotNull String scriptText
++    ) {
++        Document document = new Document(scriptText);
++        SQLParserContext parserContext = new SQLParserContext(
++            request.getContext().getDataSource(),
++            request.getContext().getSyntaxManager(),
++            request.getContext().getRuleManager(),
++            document
++        );
++
++        SQLQueryRecognitionContext recognitionContext = new SQLQueryRecognitionContext(
++            monitor,
++            request.getContext().getExecutionContext(),
++            true,
++            DBWorkbench.getPlatform().getPreferenceStore().getBoolean(SQLModelPreferences.VALIDATE_FUNCTIONS),
++            request.getContext().getSyntaxManager(),
++            request.getContext().getDataSource().getSQLDialect()
++        );
++
++        SQLDocumentSyntaxContext syntaxContext = new SQLDocumentSyntaxContext();
++        var scriptItems = SQLScriptParser.parseScript(
++            parserContext.getDataSource(),
++            parserContext.getDialect(),
++            parserContext.getPreferenceStore(),
++            document.get()
++        );
++        for (var item : scriptItems) {
++            recognitionContext.reset();
++            var model = SQLQueryModelRecognizer.recognizeQuery(recognitionContext, item.getOriginalText());
++            syntaxContext.registerScriptItemContext(
++                item.getOriginalText(),
++                model,
++                item.getOffset(),
++                item.getLength(),
++                true
++            );
++        }
++        return syntaxContext;
++    }
++}
+diff --git a/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/analyzer/SQLQueryCompletionAnalyzerTest.java b/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/analyzer/SQLQueryCompletionAnalyzerTest.java
+index 311aa17ac..0fffa4a57 100644
+--- a/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/analyzer/SQLQueryCompletionAnalyzerTest.java
++++ b/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/analyzer/SQLQueryCompletionAnalyzerTest.java
+@@ -93,6 +93,37 @@ public class SQLQueryCompletionAnalyzerTest extends DBeaverUnitTest {
+         }
+     }
+ 
++    @Test
++    public void testMultiStatementCompletionContext() throws DBException {
++        final RequestResult request = RequestBuilder
++            .tables(s -> {
++                s.table("Table1", t -> {
++                    t.attribute("Col1");
++                    t.attribute("Col2");
++                });
++                s.table("Table2", t -> {
++                    t.attribute("Col3");
++                    t.attribute("Col4");
++                });
++            })
++            .prepare();
++
++        {
++            final Set<String> proposals = request.requestNewStrings("SELECT * FROM Table1; |");
++
++            Assertions.assertTrue(proposals.contains("SELECT"));
++        }
++
++        {
++            final Set<String> proposals = request.requestNewStrings("SELECT * FROM Table1; SELECT | FROM Table2");
++
++            Assertions.assertTrue(proposals.contains("Col3"));
++            Assertions.assertTrue(proposals.contains("Col4"));
++            Assertions.assertFalse(proposals.contains("Col1"));
++            Assertions.assertFalse(proposals.contains("Col2"));
++        }
++    }
++
+     @Test
+     public void testColumnNamesCompletion() throws DBException {
+         final RequestResult request = RequestBuilder
+diff --git a/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/analyzer/builder/request/RequestResult.java b/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/analyzer/builder/request/RequestResult.java
+index 86ff13828..665ee6333 100644
+--- a/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/analyzer/builder/request/RequestResult.java
++++ b/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/analyzer/builder/request/RequestResult.java
+@@ -35,16 +35,10 @@ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionContext;
+ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionProposalBase;
+ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionRequest;
+ import org.jkiss.dbeaver.model.sql.parser.SQLRuleManager;
+-import org.jkiss.dbeaver.model.sql.semantics.SQLDocumentScriptItemSyntaxContext;
+-import org.jkiss.dbeaver.model.sql.semantics.SQLQueryModelRecognizer;
+-import org.jkiss.dbeaver.model.sql.semantics.SQLQueryRecognitionContext;
+-import org.jkiss.dbeaver.model.sql.semantics.SQLScriptItemAtOffset;
+ import org.jkiss.dbeaver.model.sql.semantics.completion.SQLQueryCompletionAnalyzer;
+-import org.jkiss.dbeaver.model.sql.semantics.completion.SQLQueryCompletionContext;
++import org.jkiss.dbeaver.model.sql.semantics.completion.SQLQueryCompletionContextProvider;
+ import org.jkiss.dbeaver.model.sql.semantics.completion.SQLQueryCompletionProposal;
+-import org.jkiss.dbeaver.model.sql.semantics.model.SQLQueryModel;
+ import org.jkiss.utils.Pair;
+-import org.junit.jupiter.api.Assertions;
+ 
+ import java.lang.reflect.InvocationTargetException;
+ import java.util.List;
+@@ -114,22 +108,8 @@ public class RequestResult {
+         boolean simpleMode
+     ) throws DBException {
+         final SQLCompletionRequest request = prepareCompletionRequest(sql, simpleMode);
+-        final String queryText = request.getActiveQuery().getText();
+         final DBRProgressMonitor monitor = new VoidProgressMonitor();
+-
+-        SQLQueryRecognitionContext recognitionContext = new SQLQueryRecognitionContext(
+-            monitor,
+-            request.getContext().getExecutionContext(),
+-            true,
+-            true,
+-            request.getContext().getSyntaxManager(),
+-            request.getContext().getDataSource().getSQLDialect()
+-        );
+-        recognitionContext.reset();
+-        SQLQueryModel queryModel = SQLQueryModelRecognizer.recognizeQuery(recognitionContext, queryText);
+-        Assertions.assertNotNull(queryModel);
+-
+-        final SQLQueryCompletionAnalyzer analyzer = getSqlQueryCompletionAnalyzer(queryText, queryModel, request);
++        final SQLQueryCompletionAnalyzer analyzer = getSqlQueryCompletionAnalyzer(request);
+         try {
+             analyzer.run(monitor);
+         } catch (InvocationTargetException | InterruptedException e) {
+@@ -139,30 +119,17 @@ public class RequestResult {
+     }
+ 
+     @NotNull
+-    private static SQLQueryCompletionAnalyzer getSqlQueryCompletionAnalyzer(
+-        String queryText,
+-        SQLQueryModel queryModel,
+-        SQLCompletionRequest request
+-    ) {
+-        SQLDocumentScriptItemSyntaxContext scriptItemContext = new SQLDocumentScriptItemSyntaxContext(
+-            0,
+-            queryText,
+-            queryModel,
+-            queryText.length()
+-        );
+-        scriptItemContext.setHasContextBoundaryAtLength(false);
+-
+-        final SQLQueryCompletionAnalyzer analyzer = new SQLQueryCompletionAnalyzer(
+-            m -> SQLQueryCompletionContext.prepareCompletionContext(
+-                new SQLScriptItemAtOffset(0, scriptItemContext),
+-                request.getDocumentOffset(),
+-                request.getContext().getExecutionContext(),
+-                request.getContext().getDataSource().getSQLDialect()
++    private static SQLQueryCompletionAnalyzer getSqlQueryCompletionAnalyzer(SQLCompletionRequest request) {
++        return new SQLQueryCompletionAnalyzer(
++            monitor -> SQLQueryCompletionContextProvider.prepareCompletionContext(
++                monitor,
++                request,
++                request.getDocument().get(),
++                request.getDocumentOffset()
+             ),
+             request,
+             request::getDocumentOffset
+         );
+-        return analyzer;
+     }
+ 
+     @NotNull

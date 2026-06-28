@@ -1,0 +1,337 @@
+diff --git a/server/src/main/java/org/elasticsearch/action/search/AbstractSearchAsyncAction.java b/server/src/main/java/org/elasticsearch/action/search/AbstractSearchAsyncAction.java
+index 8ed279091..ec8a71848 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/AbstractSearchAsyncAction.java
++++ b/server/src/main/java/org/elasticsearch/action/search/AbstractSearchAsyncAction.java
+@@ -49,7 +49,6 @@ import org.elasticsearch.transport.Transport;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Collection;
+-import java.util.Collections;
+ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+@@ -113,7 +112,7 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
+     private final int skippedCount;
+     private final TransportVersion mintransportVersion;
+     protected final SearchResponseMetrics searchResponseMetrics;
+-    protected final Map<String, Object> searchRequestAttributes;
++    protected final SearchTelemetryContext telemetryContext;
+     private final boolean isPitRelocationEnabled;
+     protected long phaseStartTimeInNanos;
+     private final AtomicReference<DirectoryMetrics> mergedDirectoryMetrics = new AtomicReference<>(DirectoryMetrics.EMPTY);
+@@ -143,7 +142,7 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
+         int maxConcurrentRequestsPerNode,
+         SearchResponse.Clusters clusters,
+         SearchResponseMetrics searchResponseMetrics,
+-        Map<String, Object> searchRequestAttributes,
++        SearchTelemetryContext telemetryContext,
+         boolean pitRelocationEnabled
+     ) {
+         super(name);
+@@ -180,7 +179,7 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
+         addReleasable(resultConsumer);
+         this.clusters = clusters;
+         this.searchResponseMetrics = searchResponseMetrics;
+-        this.searchRequestAttributes = searchRequestAttributes;
++        this.telemetryContext = telemetryContext;
+         this.isPitRelocationEnabled = pitRelocationEnabled;
+     }
+ 
+@@ -677,7 +676,7 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
+         }
+         var storeMetrics = directoryMetrics.metrics(StoreMetrics.NAME);
+         if (storeMetrics != null) {
+-            searchResponseMetrics.recordStoreBytesRead(storeMetrics.cast(StoreMetrics.class).getBytesRead(), searchRequestAttributes);
++            searchResponseMetrics.recordStoreBytesRead(storeMetrics.cast(StoreMetrics.class).getBytesRead(), telemetryContext.attributes());
+         }
+     }
+ 
+@@ -824,7 +823,7 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
+      * @see #onShardResult(SearchPhaseResult)
+      */
+     private void onPhaseDone() {  // as a tribute to @kimchy aka. finishHim()
+-        searchResponseMetrics.recordSearchPhaseDuration(getName(), System.nanoTime() - phaseStartTimeInNanos, searchRequestAttributes);
++        searchResponseMetrics.recordSearchPhaseDuration(getName(), System.nanoTime() - phaseStartTimeInNanos, telemetryContext.attributes());
+         executeNextPhase(getName(), this::getNextPhase);
+     }
+ 
+@@ -854,7 +853,7 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
+      * Returns search request attributes used to record attributes for search phase timings in an immutable map.
+      */
+     public Map<String, Object> getSearchRequestAttributes() {
+-        return Collections.unmodifiableMap(searchRequestAttributes);
++        return telemetryContext.attributes();
+     }
+ 
+     public final void execute(Runnable command) {
+diff --git a/server/src/main/java/org/elasticsearch/action/search/SearchDfsQueryThenFetchAsyncAction.java b/server/src/main/java/org/elasticsearch/action/search/SearchDfsQueryThenFetchAsyncAction.java
+index 38b01a316..76ee2a979 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/SearchDfsQueryThenFetchAsyncAction.java
++++ b/server/src/main/java/org/elasticsearch/action/search/SearchDfsQueryThenFetchAsyncAction.java
+@@ -68,7 +68,7 @@ class SearchDfsQueryThenFetchAsyncAction extends AbstractSearchAsyncAction<DfsSe
+         SearchResponse.Clusters clusters,
+         Client client,
+         SearchResponseMetrics searchResponseMetrics,
+-        Map<String, Object> searchRequestAttributes,
++        SearchTelemetryContext telemetryContext,
+         boolean pitRelocationEnabled
+     ) {
+         super(
+@@ -92,7 +92,7 @@ class SearchDfsQueryThenFetchAsyncAction extends AbstractSearchAsyncAction<DfsSe
+             request.getMaxConcurrentShardRequests(),
+             clusters,
+             searchResponseMetrics,
+-            searchRequestAttributes,
++            telemetryContext,
+             pitRelocationEnabled
+         );
+         this.queryPhaseResultConsumer = queryPhaseResultConsumer;
+diff --git a/server/src/main/java/org/elasticsearch/action/search/SearchQueryThenFetchAsyncAction.java b/server/src/main/java/org/elasticsearch/action/search/SearchQueryThenFetchAsyncAction.java
+index 500516025..babdbdbc6 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/SearchQueryThenFetchAsyncAction.java
++++ b/server/src/main/java/org/elasticsearch/action/search/SearchQueryThenFetchAsyncAction.java
+@@ -122,7 +122,7 @@ public class SearchQueryThenFetchAsyncAction extends AbstractSearchAsyncAction<S
+         boolean batchQueryPhase,
+         boolean pitRelocationEnabled,
+         SearchResponseMetrics searchResponseMetrics,
+-        Map<String, Object> searchRequestAttributes
++        SearchTelemetryContext telemetryContext
+     ) {
+         super(
+             "query",
+@@ -145,7 +145,7 @@ public class SearchQueryThenFetchAsyncAction extends AbstractSearchAsyncAction<S
+             request.getMaxConcurrentShardRequests(),
+             clusters,
+             searchResponseMetrics,
+-            searchRequestAttributes,
++            telemetryContext,
+             pitRelocationEnabled
+         );
+         this.topDocsSize = getTopDocsSize(request);
+diff --git a/server/src/main/java/org/elasticsearch/action/search/SearchTelemetryContext.java b/server/src/main/java/org/elasticsearch/action/search/SearchTelemetryContext.java
+new file mode 100644
+index 000000000..e248aa8cd
+--- /dev/null
++++ b/server/src/main/java/org/elasticsearch/action/search/SearchTelemetryContext.java
+@@ -0,0 +1,21 @@
++/*
++ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
++ * or more contributor license agreements. Licensed under the "Elastic License
++ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
++ * Public License v1"; you may not use this file except in compliance with, at
++ * your election, the "Elastic License 2.0", the "GNU Affero General Public
++ * License v3.0 only", or the "Server Side Public License, v 1".
++ */
++
++package org.elasticsearch.action.search;
++
++import java.util.Map;
++
++/**
++ * Immutable telemetry data that needs to be threaded through multiple search listeners.
++ */
++record SearchTelemetryContext(Map<String, Object> attributes, long absoluteStartMillis) {
++    SearchTelemetryContext {
++        attributes = Map.copyOf(attributes);
++    }
++}
+diff --git a/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java b/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java
+index 5314128b3..87339f9ed 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java
++++ b/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java
+@@ -513,16 +513,16 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+ 
+             final ActionListener<SearchResponse> searchResponseActionListener;
+             if (collectSearchTelemetry) {
+-                Map<String, Object> searchRequestAttributes = SearchRequestAttributesExtractor.extractAttributes(
++                SearchTelemetryContext telemetryContext = createTelemetryContext(
+                     original,
+-                    Arrays.stream(resolvedIndices.getConcreteLocalIndices()).map(Index::getName).toArray(String[]::new)
++                    Arrays.stream(resolvedIndices.getConcreteLocalIndices()).map(Index::getName).toArray(String[]::new),
++                    timeProvider
+                 );
+                 if (collectCCSTelemetry == false || resolvedIndices.getRemoteClusterIndices().isEmpty()) {
+                     searchResponseActionListener = new SearchTelemetryListener(
+                         delegate,
+                         searchResponseMetrics,
+-                        searchRequestAttributes,
+-                        timeProvider.absoluteStartMillis()
++                        telemetryContext
+                     );
+                 } else {
+                     CCSUsage.Builder usageBuilder = new CCSUsage.Builder();
+@@ -551,8 +551,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+                     searchResponseActionListener = new SearchTelemetryListener(
+                         delegate,
+                         searchResponseMetrics,
+-                        searchRequestAttributes,
+-                        timeProvider.absoluteStartMillis(),
++                        telemetryContext,
+                         usageService,
+                         usageBuilder
+                     );
+@@ -1981,10 +1980,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+             iteratorsForSearchPhase = shardIterators;
+         }
+ 
+-        final Map<String, Object> searchRequestAttributes = SearchRequestAttributesExtractor.extractAttributes(
+-            searchRequest,
+-            concreteLocalIndices
+-        );
++        final SearchTelemetryContext telemetryContext = createTelemetryContext(searchRequest, concreteLocalIndices, timeProvider);
+         searchPhaseProvider.runNewSearchPhase(
+             task,
+             searchRequest,
+@@ -1999,7 +1995,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+             preFilterSearchShards,
+             threadPool,
+             clusters,
+-            searchRequestAttributes
++            telemetryContext
+         );
+     }
+ 
+@@ -2074,6 +2070,17 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+         return preFilterShardSize < numShards && (SearchService.canRewriteToMatchNone(source) || hasPrimaryFieldSort(source));
+     }
+ 
++    private static SearchTelemetryContext createTelemetryContext(
++        SearchRequest searchRequest,
++        String[] localIndices,
++        SearchTimeProvider timeProvider
++    ) {
++        return new SearchTelemetryContext(
++            SearchRequestAttributesExtractor.extractAttributes(searchRequest, localIndices),
++            timeProvider.absoluteStartMillis()
++        );
++    }
++
+     private static boolean hasReadOnlyIndices(String[] indices, ProjectState projectState) {
+         var blocks = projectState.blocks();
+         if (blocks.global(projectState.projectId()).isEmpty() && blocks.indices(projectState.projectId()).isEmpty()) {
+@@ -2118,7 +2125,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+             boolean preFilter,
+             ThreadPool threadPool,
+             SearchResponse.Clusters clusters,
+-            Map<String, Object> searchRequestAttributes
++            SearchTelemetryContext telemetryContext
+         );
+     }
+ 
+@@ -2144,7 +2151,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+             boolean preFilter,
+             ThreadPool threadPool,
+             SearchResponse.Clusters clusters,
+-            Map<String, Object> searchRequestAttributes
++            SearchTelemetryContext telemetryContext
+         ) {
+             if (preFilter) {
+                 // only for aggs we need to contact shards even if there are no matches
+@@ -2163,7 +2170,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+                     requireAtLeastOneMatch,
+                     searchService.getCoordinatorRewriteContextProvider(timeProvider::absoluteStartMillis),
+                     searchResponseMetrics,
+-                    searchRequestAttributes,
++                    telemetryContext.attributes(),
+                     false
+                 ).addListener(listener.delegateFailureAndWrap((l, canMatchResult) -> {
+                     skippedByClusterAlias.forEach(
+@@ -2183,7 +2190,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+                         false,
+                         threadPool,
+                         clusters,
+-                        searchRequestAttributes
++                        telemetryContext
+                     );
+                 }));
+                 return;
+@@ -2229,7 +2236,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+                         clusters,
+                         client,
+                         searchResponseMetrics,
+-                        searchRequestAttributes,
++                        telemetryContext,
+                         searchService.isPitRelocationEnabled()
+                     );
+                 } else {
+@@ -2256,7 +2263,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+                         searchService.batchQueryPhase(),
+                         searchService.isPitRelocationEnabled(),
+                         searchResponseMetrics,
+-                        searchRequestAttributes
++                        telemetryContext
+                     );
+                 }
+                 success = true;
+@@ -2644,23 +2651,20 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+     private static class SearchTelemetryListener extends DelegatingActionListener<SearchResponse, SearchResponse> {
+         private final CCSUsage.Builder usageBuilder;
+         private final SearchResponseMetrics searchResponseMetrics;
+-        private final long nowInMillis;
++        private final SearchTelemetryContext telemetryContext;
+         private final UsageService usageService;
+         private final boolean collectCCSTelemetry;
+-        private final Map<String, Object> searchRequestAttributes;
+ 
+         SearchTelemetryListener(
+             ActionListener<SearchResponse> listener,
+             SearchResponseMetrics searchResponseMetrics,
+-            Map<String, Object> searchRequestAttributes,
+-            long nowInMillis,
++            SearchTelemetryContext telemetryContext,
+             UsageService usageService,
+             CCSUsage.Builder usageBuilder
+         ) {
+             super(listener);
+             this.searchResponseMetrics = searchResponseMetrics;
+-            this.searchRequestAttributes = searchRequestAttributes;
+-            this.nowInMillis = nowInMillis;
++            this.telemetryContext = telemetryContext;
+             this.collectCCSTelemetry = true;
+             this.usageService = usageService;
+             this.usageBuilder = usageBuilder;
+@@ -2669,13 +2673,11 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+         SearchTelemetryListener(
+             ActionListener<SearchResponse> listener,
+             SearchResponseMetrics searchResponseMetrics,
+-            Map<String, Object> searchRequestAttributes,
+-            long nowInMillis
++            SearchTelemetryContext telemetryContext
+         ) {
+             super(listener);
+             this.searchResponseMetrics = searchResponseMetrics;
+-            this.searchRequestAttributes = searchRequestAttributes;
+-            this.nowInMillis = nowInMillis;
++            this.telemetryContext = telemetryContext;
+             this.collectCCSTelemetry = false;
+             this.usageService = null;
+             this.usageBuilder = null;
+@@ -2687,8 +2689,8 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+                 searchResponseMetrics.recordTookTime(
+                     searchResponse.getTookInMillis(),
+                     searchResponse.getTimeRangeFilterFromMillis(),
+-                    nowInMillis,
+-                    searchRequestAttributes
++                    telemetryContext.absoluteStartMillis(),
++                    telemetryContext.attributes()
+                 );
+                 SearchResponseMetrics.ResponseCountTotalStatus responseCountTotalStatus =
+                     SearchResponseMetrics.ResponseCountTotalStatus.SUCCESS;
+@@ -2707,7 +2709,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+                         }
+                     }
+                 }
+-                searchResponseMetrics.incrementResponseCount(responseCountTotalStatus, searchRequestAttributes);
++                searchResponseMetrics.incrementResponseCount(responseCountTotalStatus, telemetryContext.attributes());
+ 
+                 if (collectCCSTelemetry) {
+                     extractCCSTelemetry(searchResponse);
+@@ -2723,7 +2725,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+ 
+         @Override
+         public void onFailure(Exception e) {
+-            searchResponseMetrics.incrementResponseCount(SearchResponseMetrics.ResponseCountTotalStatus.FAILURE, searchRequestAttributes);
++            searchResponseMetrics.incrementResponseCount(SearchResponseMetrics.ResponseCountTotalStatus.FAILURE, telemetryContext.attributes());
+             if (collectCCSTelemetry) {
+                 usageBuilder.setFailure(e);
+                 recordTelemetry();

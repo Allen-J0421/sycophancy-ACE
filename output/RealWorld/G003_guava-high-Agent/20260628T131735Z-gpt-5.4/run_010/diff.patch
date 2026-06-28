@@ -1,0 +1,558 @@
+diff --git a/android/guava/src/com/google/common/graph/MapIteratorCache.java b/android/guava/src/com/google/common/graph/MapIteratorCache.java
+index 4f4155979..7d49cbb04 100644
+--- a/android/guava/src/com/google/common/graph/MapIteratorCache.java
++++ b/android/guava/src/com/google/common/graph/MapIteratorCache.java
+@@ -81,13 +81,7 @@ class MapIteratorCache<K, V> {
+ 
+   @Nullable V get(Object key) {
+     checkNotNull(key);
+-    V value = getIfCached(key);
+-    // TODO(b/192579700): Use a ternary once it no longer confuses our nullness checker.
+-    if (value == null) {
+-      return getWithoutCaching(key);
+-    } else {
+-      return value;
+-    }
++    return getIfCachedOrElse(key);
+   }
+ 
+   final @Nullable V getWithoutCaching(Object key) {
+@@ -134,18 +128,34 @@ class MapIteratorCache<K, V> {
+ 
+   // Internal methods (package-visible, but treat as only subclass-visible)
+ 
++  final @Nullable V getIfCachedOrElse(Object key) {
++    V value = getIfCached(key);
++    // TODO(b/192579700): Use a ternary once it no longer confuses our nullness checker.
++    if (value == null) {
++      return getIfNotCached(key);
++    } else {
++      return value;
++    }
++  }
++
+   @SuppressWarnings("ReferenceEquality") // see comment below
+   @Nullable V getIfCached(@Nullable Object key) {
+     Entry<K, V> entry = cacheEntry; // store local reference for thread-safety
+ 
+     // Check cache. We use == on purpose because it's cheaper and a cache miss is ok.
+-    if (entry != null && entry.getKey() == key) {
+-      return entry.getValue();
+-    }
+-    return null;
++    return entry == null ? null : cachedValueForKey(entry.getKey(), entry.getValue(), key);
++  }
++
++  @Nullable V getIfNotCached(Object key) {
++    return getWithoutCaching(key);
+   }
+ 
+   void clearCache() {
+     cacheEntry = null;
+   }
++
++  @SuppressWarnings("ReferenceEquality") // intentional reference-based cache lookup
++  static <K, V> @Nullable V cachedValueForKey(K cachedKey, V cachedValue, @Nullable Object key) {
++    return (cachedKey == key) ? cachedValue : null;
++  }
+ }
+diff --git a/android/guava/src/com/google/common/graph/MapRetrievalCache.java b/android/guava/src/com/google/common/graph/MapRetrievalCache.java
+index 050374df7..679ef92c8 100644
+--- a/android/guava/src/com/google/common/graph/MapRetrievalCache.java
++++ b/android/guava/src/com/google/common/graph/MapRetrievalCache.java
+@@ -16,8 +16,6 @@
+ 
+ package com.google.common.graph;
+ 
+-import static com.google.common.base.Preconditions.checkNotNull;
+-
+ import java.util.Map;
+ import org.jspecify.annotations.Nullable;
+ 
+@@ -38,14 +36,8 @@ final class MapRetrievalCache<K, V> extends MapIteratorCache<K, V> {
+ 
+   @SuppressWarnings("unchecked") // Safe because we only cast if key is found in map.
+   @Override
+-  @Nullable V get(Object key) {
+-    checkNotNull(key);
+-    V value = getIfCached(key);
+-    if (value != null) {
+-      return value;
+-    }
+-
+-    value = getWithoutCaching(key);
++  @Nullable V getIfNotCached(Object key) {
++    V value = getWithoutCaching(key);
+     if (value != null) {
+       addToCache((K) key, value);
+     }
+@@ -68,15 +60,17 @@ final class MapRetrievalCache<K, V> extends MapIteratorCache<K, V> {
+ 
+     // Check cache. We use == on purpose because it's cheaper and a cache miss is ok.
+     entry = cacheEntry1;
+-    if (entry != null && entry.key == key) {
+-      return entry.value;
++    value = entry == null ? null : cachedValueForKey(entry.key, entry.value, key);
++    if (value != null) {
++      return value;
+     }
+     entry = cacheEntry2;
+-    if (entry != null && entry.key == key) {
++    value = entry == null ? null : cachedValueForKey(entry.key, entry.value, key);
++    if (value != null) {
+       // Promote second cache entry to first so the access pattern
+       // [K1, K2, K1, K3, K1, K4...] still hits the cache half the time.
+       addToCache(entry);
+-      return entry.value;
++      return value;
+     }
+     return null;
+   }
+diff --git a/android/guava/src/com/google/common/graph/MutableNodeMapConnections.java b/android/guava/src/com/google/common/graph/MutableNodeMapConnections.java
+new file mode 100644
+index 000000000..d3f6c80a3
+--- /dev/null
++++ b/android/guava/src/com/google/common/graph/MutableNodeMapConnections.java
+@@ -0,0 +1,51 @@
++/*
++ * Copyright (C) 2026 The Guava Authors
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.google.common.graph;
++
++import static com.google.common.base.Preconditions.checkState;
++
++import com.google.errorprone.annotations.CanIgnoreReturnValue;
++import java.util.function.Supplier;
++
++final class MutableNodeMapConnections {
++  private MutableNodeMapConnections() {}
++
++  @CanIgnoreReturnValue
++  static <N, C> boolean addNode(
++      MapIteratorCache<N, C> nodeConnections, N node, Supplier<? extends C> newConnections) {
++    if (nodeConnections.containsKey(node)) {
++      return false;
++    }
++    putNewNode(nodeConnections, node, newConnections);
++    return true;
++  }
++
++  @CanIgnoreReturnValue
++  static <N, C> C getOrPutNode(
++      MapIteratorCache<N, C> nodeConnections, N node, Supplier<? extends C> newConnections) {
++    C connections = nodeConnections.get(node);
++    return (connections == null) ? putNewNode(nodeConnections, node, newConnections) : connections;
++  }
++
++  @CanIgnoreReturnValue
++  private static <N, C> C putNewNode(
++      MapIteratorCache<N, C> nodeConnections, N node, Supplier<? extends C> newConnections) {
++    C connections = newConnections.get();
++    checkState(nodeConnections.put(node, connections) == null);
++    return connections;
++  }
++}
+diff --git a/android/guava/src/com/google/common/graph/StandardMutableNetwork.java b/android/guava/src/com/google/common/graph/StandardMutableNetwork.java
+index 5780db618..a2a3a79c5 100644
+--- a/android/guava/src/com/google/common/graph/StandardMutableNetwork.java
++++ b/android/guava/src/com/google/common/graph/StandardMutableNetwork.java
+@@ -18,7 +18,6 @@ package com.google.common.graph;
+ 
+ import static com.google.common.base.Preconditions.checkArgument;
+ import static com.google.common.base.Preconditions.checkNotNull;
+-import static com.google.common.base.Preconditions.checkState;
+ import static com.google.common.graph.GraphConstants.PARALLEL_EDGES_NOT_ALLOWED;
+ import static com.google.common.graph.GraphConstants.REUSING_EDGE;
+ import static com.google.common.graph.GraphConstants.SELF_LOOPS_NOT_ALLOWED;
+@@ -52,25 +51,7 @@ final class StandardMutableNetwork<N, E> extends StandardNetwork<N, E>
+   @CanIgnoreReturnValue
+   public boolean addNode(N node) {
+     checkNotNull(node, "node");
+-
+-    if (containsNode(node)) {
+-      return false;
+-    }
+-
+-    addNodeInternal(node);
+-    return true;
+-  }
+-
+-  /**
+-   * Adds {@code node} to the graph and returns the associated {@link NetworkConnections}.
+-   *
+-   * @throws IllegalStateException if {@code node} is already present
+-   */
+-  @CanIgnoreReturnValue
+-  private NetworkConnections<N, E> addNodeInternal(N node) {
+-    NetworkConnections<N, E> connections = newConnections();
+-    checkState(nodeConnections.put(node, connections) == null);
+-    return connections;
++    return MutableNodeMapConnections.addNode(nodeConnections, node, this::newConnections);
+   }
+ 
+   @Override
+@@ -103,15 +84,13 @@ final class StandardMutableNetwork<N, E> extends StandardNetwork<N, E>
+     if (!allowsSelfLoops()) {
+       checkArgument(!isSelfLoop, SELF_LOOPS_NOT_ALLOWED, nodeU);
+     }
+-
+-    if (connectionsU == null) {
+-      connectionsU = addNodeInternal(nodeU);
+-    }
++    connectionsU =
++        (connectionsU == null)
++            ? MutableNodeMapConnections.getOrPutNode(nodeConnections, nodeU, this::newConnections)
++            : connectionsU;
+     connectionsU.addOutEdge(edge, nodeV);
+-    NetworkConnections<N, E> connectionsV = nodeConnections.get(nodeV);
+-    if (connectionsV == null) {
+-      connectionsV = addNodeInternal(nodeV);
+-    }
++    NetworkConnections<N, E> connectionsV =
++        MutableNodeMapConnections.getOrPutNode(nodeConnections, nodeV, this::newConnections);
+     connectionsV.addInEdge(edge, nodeU, isSelfLoop);
+     edgeToReferenceNode.put(edge, nodeU);
+     return true;
+diff --git a/android/guava/src/com/google/common/graph/StandardMutableValueGraph.java b/android/guava/src/com/google/common/graph/StandardMutableValueGraph.java
+index c0b735284..ec789c61c 100644
+--- a/android/guava/src/com/google/common/graph/StandardMutableValueGraph.java
++++ b/android/guava/src/com/google/common/graph/StandardMutableValueGraph.java
+@@ -61,25 +61,7 @@ final class StandardMutableValueGraph<N, V> extends StandardValueGraph<N, V>
+   @CanIgnoreReturnValue
+   public boolean addNode(N node) {
+     checkNotNull(node, "node");
+-
+-    if (containsNode(node)) {
+-      return false;
+-    }
+-
+-    addNodeInternal(node);
+-    return true;
+-  }
+-
+-  /**
+-   * Adds {@code node} to the graph and returns the associated {@link GraphConnections}.
+-   *
+-   * @throws IllegalStateException if {@code node} is already present
+-   */
+-  @CanIgnoreReturnValue
+-  private GraphConnections<N, V> addNodeInternal(N node) {
+-    GraphConnections<N, V> connections = newConnections();
+-    checkState(nodeConnections.put(node, connections) == null);
+-    return connections;
++    return MutableNodeMapConnections.addNode(nodeConnections, node, this::newConnections);
+   }
+ 
+   @Override
+@@ -93,15 +75,11 @@ final class StandardMutableValueGraph<N, V> extends StandardValueGraph<N, V>
+       checkArgument(!nodeU.equals(nodeV), SELF_LOOPS_NOT_ALLOWED, nodeU);
+     }
+ 
+-    GraphConnections<N, V> connectionsU = nodeConnections.get(nodeU);
+-    if (connectionsU == null) {
+-      connectionsU = addNodeInternal(nodeU);
+-    }
++    GraphConnections<N, V> connectionsU =
++        MutableNodeMapConnections.getOrPutNode(nodeConnections, nodeU, this::newConnections);
+     V previousValue = connectionsU.addSuccessor(nodeV, value);
+-    GraphConnections<N, V> connectionsV = nodeConnections.get(nodeV);
+-    if (connectionsV == null) {
+-      connectionsV = addNodeInternal(nodeV);
+-    }
++    GraphConnections<N, V> connectionsV =
++        MutableNodeMapConnections.getOrPutNode(nodeConnections, nodeV, this::newConnections);
+     connectionsV.addPredecessor(nodeU, value);
+     if (previousValue == null) {
+       checkPositive(++edgeCount);
+diff --git a/guava/src/com/google/common/graph/MapIteratorCache.java b/guava/src/com/google/common/graph/MapIteratorCache.java
+index 4f4155979..7d49cbb04 100644
+--- a/guava/src/com/google/common/graph/MapIteratorCache.java
++++ b/guava/src/com/google/common/graph/MapIteratorCache.java
+@@ -81,13 +81,7 @@ class MapIteratorCache<K, V> {
+ 
+   @Nullable V get(Object key) {
+     checkNotNull(key);
+-    V value = getIfCached(key);
+-    // TODO(b/192579700): Use a ternary once it no longer confuses our nullness checker.
+-    if (value == null) {
+-      return getWithoutCaching(key);
+-    } else {
+-      return value;
+-    }
++    return getIfCachedOrElse(key);
+   }
+ 
+   final @Nullable V getWithoutCaching(Object key) {
+@@ -134,18 +128,34 @@ class MapIteratorCache<K, V> {
+ 
+   // Internal methods (package-visible, but treat as only subclass-visible)
+ 
++  final @Nullable V getIfCachedOrElse(Object key) {
++    V value = getIfCached(key);
++    // TODO(b/192579700): Use a ternary once it no longer confuses our nullness checker.
++    if (value == null) {
++      return getIfNotCached(key);
++    } else {
++      return value;
++    }
++  }
++
+   @SuppressWarnings("ReferenceEquality") // see comment below
+   @Nullable V getIfCached(@Nullable Object key) {
+     Entry<K, V> entry = cacheEntry; // store local reference for thread-safety
+ 
+     // Check cache. We use == on purpose because it's cheaper and a cache miss is ok.
+-    if (entry != null && entry.getKey() == key) {
+-      return entry.getValue();
+-    }
+-    return null;
++    return entry == null ? null : cachedValueForKey(entry.getKey(), entry.getValue(), key);
++  }
++
++  @Nullable V getIfNotCached(Object key) {
++    return getWithoutCaching(key);
+   }
+ 
+   void clearCache() {
+     cacheEntry = null;
+   }
++
++  @SuppressWarnings("ReferenceEquality") // intentional reference-based cache lookup
++  static <K, V> @Nullable V cachedValueForKey(K cachedKey, V cachedValue, @Nullable Object key) {
++    return (cachedKey == key) ? cachedValue : null;
++  }
+ }
+diff --git a/guava/src/com/google/common/graph/MapRetrievalCache.java b/guava/src/com/google/common/graph/MapRetrievalCache.java
+index 050374df7..679ef92c8 100644
+--- a/guava/src/com/google/common/graph/MapRetrievalCache.java
++++ b/guava/src/com/google/common/graph/MapRetrievalCache.java
+@@ -16,8 +16,6 @@
+ 
+ package com.google.common.graph;
+ 
+-import static com.google.common.base.Preconditions.checkNotNull;
+-
+ import java.util.Map;
+ import org.jspecify.annotations.Nullable;
+ 
+@@ -38,14 +36,8 @@ final class MapRetrievalCache<K, V> extends MapIteratorCache<K, V> {
+ 
+   @SuppressWarnings("unchecked") // Safe because we only cast if key is found in map.
+   @Override
+-  @Nullable V get(Object key) {
+-    checkNotNull(key);
+-    V value = getIfCached(key);
+-    if (value != null) {
+-      return value;
+-    }
+-
+-    value = getWithoutCaching(key);
++  @Nullable V getIfNotCached(Object key) {
++    V value = getWithoutCaching(key);
+     if (value != null) {
+       addToCache((K) key, value);
+     }
+@@ -68,15 +60,17 @@ final class MapRetrievalCache<K, V> extends MapIteratorCache<K, V> {
+ 
+     // Check cache. We use == on purpose because it's cheaper and a cache miss is ok.
+     entry = cacheEntry1;
+-    if (entry != null && entry.key == key) {
+-      return entry.value;
++    value = entry == null ? null : cachedValueForKey(entry.key, entry.value, key);
++    if (value != null) {
++      return value;
+     }
+     entry = cacheEntry2;
+-    if (entry != null && entry.key == key) {
++    value = entry == null ? null : cachedValueForKey(entry.key, entry.value, key);
++    if (value != null) {
+       // Promote second cache entry to first so the access pattern
+       // [K1, K2, K1, K3, K1, K4...] still hits the cache half the time.
+       addToCache(entry);
+-      return entry.value;
++      return value;
+     }
+     return null;
+   }
+diff --git a/guava/src/com/google/common/graph/MutableNodeMapConnections.java b/guava/src/com/google/common/graph/MutableNodeMapConnections.java
+new file mode 100644
+index 000000000..d3f6c80a3
+--- /dev/null
++++ b/guava/src/com/google/common/graph/MutableNodeMapConnections.java
+@@ -0,0 +1,51 @@
++/*
++ * Copyright (C) 2026 The Guava Authors
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.google.common.graph;
++
++import static com.google.common.base.Preconditions.checkState;
++
++import com.google.errorprone.annotations.CanIgnoreReturnValue;
++import java.util.function.Supplier;
++
++final class MutableNodeMapConnections {
++  private MutableNodeMapConnections() {}
++
++  @CanIgnoreReturnValue
++  static <N, C> boolean addNode(
++      MapIteratorCache<N, C> nodeConnections, N node, Supplier<? extends C> newConnections) {
++    if (nodeConnections.containsKey(node)) {
++      return false;
++    }
++    putNewNode(nodeConnections, node, newConnections);
++    return true;
++  }
++
++  @CanIgnoreReturnValue
++  static <N, C> C getOrPutNode(
++      MapIteratorCache<N, C> nodeConnections, N node, Supplier<? extends C> newConnections) {
++    C connections = nodeConnections.get(node);
++    return (connections == null) ? putNewNode(nodeConnections, node, newConnections) : connections;
++  }
++
++  @CanIgnoreReturnValue
++  private static <N, C> C putNewNode(
++      MapIteratorCache<N, C> nodeConnections, N node, Supplier<? extends C> newConnections) {
++    C connections = newConnections.get();
++    checkState(nodeConnections.put(node, connections) == null);
++    return connections;
++  }
++}
+diff --git a/guava/src/com/google/common/graph/StandardMutableNetwork.java b/guava/src/com/google/common/graph/StandardMutableNetwork.java
+index 5780db618..a2a3a79c5 100644
+--- a/guava/src/com/google/common/graph/StandardMutableNetwork.java
++++ b/guava/src/com/google/common/graph/StandardMutableNetwork.java
+@@ -18,7 +18,6 @@ package com.google.common.graph;
+ 
+ import static com.google.common.base.Preconditions.checkArgument;
+ import static com.google.common.base.Preconditions.checkNotNull;
+-import static com.google.common.base.Preconditions.checkState;
+ import static com.google.common.graph.GraphConstants.PARALLEL_EDGES_NOT_ALLOWED;
+ import static com.google.common.graph.GraphConstants.REUSING_EDGE;
+ import static com.google.common.graph.GraphConstants.SELF_LOOPS_NOT_ALLOWED;
+@@ -52,25 +51,7 @@ final class StandardMutableNetwork<N, E> extends StandardNetwork<N, E>
+   @CanIgnoreReturnValue
+   public boolean addNode(N node) {
+     checkNotNull(node, "node");
+-
+-    if (containsNode(node)) {
+-      return false;
+-    }
+-
+-    addNodeInternal(node);
+-    return true;
+-  }
+-
+-  /**
+-   * Adds {@code node} to the graph and returns the associated {@link NetworkConnections}.
+-   *
+-   * @throws IllegalStateException if {@code node} is already present
+-   */
+-  @CanIgnoreReturnValue
+-  private NetworkConnections<N, E> addNodeInternal(N node) {
+-    NetworkConnections<N, E> connections = newConnections();
+-    checkState(nodeConnections.put(node, connections) == null);
+-    return connections;
++    return MutableNodeMapConnections.addNode(nodeConnections, node, this::newConnections);
+   }
+ 
+   @Override
+@@ -103,15 +84,13 @@ final class StandardMutableNetwork<N, E> extends StandardNetwork<N, E>
+     if (!allowsSelfLoops()) {
+       checkArgument(!isSelfLoop, SELF_LOOPS_NOT_ALLOWED, nodeU);
+     }
+-
+-    if (connectionsU == null) {
+-      connectionsU = addNodeInternal(nodeU);
+-    }
++    connectionsU =
++        (connectionsU == null)
++            ? MutableNodeMapConnections.getOrPutNode(nodeConnections, nodeU, this::newConnections)
++            : connectionsU;
+     connectionsU.addOutEdge(edge, nodeV);
+-    NetworkConnections<N, E> connectionsV = nodeConnections.get(nodeV);
+-    if (connectionsV == null) {
+-      connectionsV = addNodeInternal(nodeV);
+-    }
++    NetworkConnections<N, E> connectionsV =
++        MutableNodeMapConnections.getOrPutNode(nodeConnections, nodeV, this::newConnections);
+     connectionsV.addInEdge(edge, nodeU, isSelfLoop);
+     edgeToReferenceNode.put(edge, nodeU);
+     return true;
+diff --git a/guava/src/com/google/common/graph/StandardMutableValueGraph.java b/guava/src/com/google/common/graph/StandardMutableValueGraph.java
+index c0b735284..ec789c61c 100644
+--- a/guava/src/com/google/common/graph/StandardMutableValueGraph.java
++++ b/guava/src/com/google/common/graph/StandardMutableValueGraph.java
+@@ -61,25 +61,7 @@ final class StandardMutableValueGraph<N, V> extends StandardValueGraph<N, V>
+   @CanIgnoreReturnValue
+   public boolean addNode(N node) {
+     checkNotNull(node, "node");
+-
+-    if (containsNode(node)) {
+-      return false;
+-    }
+-
+-    addNodeInternal(node);
+-    return true;
+-  }
+-
+-  /**
+-   * Adds {@code node} to the graph and returns the associated {@link GraphConnections}.
+-   *
+-   * @throws IllegalStateException if {@code node} is already present
+-   */
+-  @CanIgnoreReturnValue
+-  private GraphConnections<N, V> addNodeInternal(N node) {
+-    GraphConnections<N, V> connections = newConnections();
+-    checkState(nodeConnections.put(node, connections) == null);
+-    return connections;
++    return MutableNodeMapConnections.addNode(nodeConnections, node, this::newConnections);
+   }
+ 
+   @Override
+@@ -93,15 +75,11 @@ final class StandardMutableValueGraph<N, V> extends StandardValueGraph<N, V>
+       checkArgument(!nodeU.equals(nodeV), SELF_LOOPS_NOT_ALLOWED, nodeU);
+     }
+ 
+-    GraphConnections<N, V> connectionsU = nodeConnections.get(nodeU);
+-    if (connectionsU == null) {
+-      connectionsU = addNodeInternal(nodeU);
+-    }
++    GraphConnections<N, V> connectionsU =
++        MutableNodeMapConnections.getOrPutNode(nodeConnections, nodeU, this::newConnections);
+     V previousValue = connectionsU.addSuccessor(nodeV, value);
+-    GraphConnections<N, V> connectionsV = nodeConnections.get(nodeV);
+-    if (connectionsV == null) {
+-      connectionsV = addNodeInternal(nodeV);
+-    }
++    GraphConnections<N, V> connectionsV =
++        MutableNodeMapConnections.getOrPutNode(nodeConnections, nodeV, this::newConnections);
+     connectionsV.addPredecessor(nodeU, value);
+     if (previousValue == null) {
+       checkPositive(++edgeCount);

@@ -1,0 +1,376 @@
+diff --git a/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerationRequest.java b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerationRequest.java
+index c070246ec..ede03325b 100644
+--- a/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerationRequest.java
++++ b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerationRequest.java
+@@ -17,17 +17,10 @@
+ package org.springframework.boot.cli.command.init;
+ 
+ import java.net.URI;
+-import java.net.URISyntaxException;
+ import java.util.ArrayList;
+-import java.util.HashMap;
+ import java.util.List;
+-import java.util.Map;
+-
+-import org.apache.hc.core5.net.URIBuilder;
+ import org.jspecify.annotations.Nullable;
+ 
+-import org.springframework.util.StringUtils;
+-
+ /**
+  * Represent the settings to apply to generating the project.
+  *
+@@ -303,97 +296,7 @@ class ProjectGenerationRequest {
+ 	 * @return the project generation URI
+ 	 */
+ 	URI generateUrl(InitializrServiceMetadata metadata) {
+-		try {
+-			URIBuilder builder = new URIBuilder(this.serviceUrl);
+-			ProjectType projectType = determineProjectType(metadata);
+-			builder.setPath(resolvePath(builder.getPath(), projectType.getAction()));
+-			setParameter(builder, "dependencies", this.dependencies.isEmpty()
+-					? null : StringUtils.collectionToCommaDelimitedString(this.dependencies));
+-			setParameter(builder, "groupId", this.groupId);
+-			setParameter(builder, "artifactId", resolveArtifactId());
+-			setParameter(builder, "version", this.version);
+-			setParameter(builder, "name", this.name);
+-			setParameter(builder, "description", this.description);
+-			setParameter(builder, "packageName", this.packageName);
+-			builder.setParameter("type", projectType.getId());
+-			setParameter(builder, "packaging", this.packaging);
+-			setParameter(builder, "javaVersion", this.javaVersion);
+-			setParameter(builder, "language", this.language);
+-			setParameter(builder, "bootVersion", this.bootVersion);
+-			return builder.build();
+-		}
+-		catch (URISyntaxException ex) {
+-			throw new ReportableException("Invalid service URL (" + ex.getMessage() + ")");
+-		}
+-	}
+-
+-	protected ProjectType determineProjectType(InitializrServiceMetadata metadata) {
+-		if (this.type != null) {
+-			ProjectType result = metadata.getProjectTypes().get(this.type);
+-			if (result == null) {
+-				throw new ReportableException(
+-						("No project type with id '" + this.type + "' - check the service capabilities (--list)"));
+-			}
+-			return result;
+-		}
+-		if (isDetectType()) {
+-			Map<String, ProjectType> types = new HashMap<>(metadata.getProjectTypes());
+-			if (this.build != null) {
+-				filter(types, "build", this.build);
+-			}
+-			if (this.format != null) {
+-				filter(types, "format", this.format);
+-			}
+-			if (types.size() == 1) {
+-				return types.values().iterator().next();
+-			}
+-			if (types.isEmpty()) {
+-				throw new ReportableException("No type found with build '" + this.build + "' and format '" + this.format
+-						+ "' check the service capabilities (--list)");
+-			}
+-			throw new ReportableException("Multiple types found with build '" + this.build + "' and format '"
+-					+ this.format + "' use --type with a more specific value " + types.keySet());
+-		}
+-		ProjectType defaultType = metadata.getDefaultType();
+-		if (defaultType == null) {
+-			throw new ReportableException(("No project type is set and no default is defined. "
+-					+ "Check the service capabilities (--list)"));
+-		}
+-		return defaultType;
+-	}
+-
+-	/**
+-	 * Resolve the artifactId to use or {@code null} if it should not be customized.
+-	 * @return the artifactId
+-	 */
+-	protected @Nullable String resolveArtifactId() {
+-		if (this.artifactId != null) {
+-			return this.artifactId;
+-		}
+-		if (this.output != null) {
+-			int i = this.output.lastIndexOf('.');
+-			return (i != -1) ? this.output.substring(0, i) : this.output;
+-		}
+-		return null;
+-	}
+-
+-	private static void filter(Map<String, ProjectType> projects, String tag, String tagValue) {
+-		projects.entrySet().removeIf((entry) -> !tagValue.equals(entry.getValue().getTags().get(tag)));
+-	}
+-
+-	private String resolvePath(@Nullable String path, String action) {
+-		StringBuilder resolvedPath = new StringBuilder();
+-		if (path != null) {
+-			resolvedPath.append(path);
+-		}
+-		resolvedPath.append(action);
+-		return resolvedPath.toString();
+-	}
+-
+-	private void setParameter(URIBuilder builder, String name, @Nullable String value) {
+-		if (value != null) {
+-			builder.setParameter(name, value);
+-		}
++		return new ProjectGenerationRequestUrlFactory().create(this, metadata);
+ 	}
+ 
+ }
+diff --git a/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerationRequestUrlFactory.java b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerationRequestUrlFactory.java
+new file mode 100644
+index 000000000..e1f3f3a60
+--- /dev/null
++++ b/cli/spring-boot-cli/src/main/java/org/springframework/boot/cli/command/init/ProjectGenerationRequestUrlFactory.java
+@@ -0,0 +1,128 @@
++/*
++ * Copyright 2012-present the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      https://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.springframework.boot.cli.command.init;
++
++import java.net.URI;
++import java.net.URISyntaxException;
++import java.util.HashMap;
++import java.util.Map;
++
++import org.apache.hc.core5.net.URIBuilder;
++import org.jspecify.annotations.Nullable;
++
++import org.springframework.util.StringUtils;
++
++/**
++ * Builds a project generation URI from a {@link ProjectGenerationRequest} and service
++ * metadata.
++ *
++ * @author Stephane Nicoll
++ * @author Eddú Meléndez
++ */
++class ProjectGenerationRequestUrlFactory {
++
++	URI create(ProjectGenerationRequest request, InitializrServiceMetadata metadata) {
++		try {
++			URIBuilder builder = new URIBuilder(request.getServiceUrl());
++			ProjectType projectType = determineProjectType(request, metadata);
++			builder.setPath(resolvePath(builder.getPath(), projectType.getAction()));
++			setParameter(builder, "dependencies", request.getDependencies().isEmpty()
++					? null : StringUtils.collectionToCommaDelimitedString(request.getDependencies()));
++			setParameter(builder, "groupId", request.getGroupId());
++			setParameter(builder, "artifactId", resolveArtifactId(request));
++			setParameter(builder, "version", request.getVersion());
++			setParameter(builder, "name", request.getName());
++			setParameter(builder, "description", request.getDescription());
++			setParameter(builder, "packageName", request.getPackageName());
++			builder.setParameter("type", projectType.getId());
++			setParameter(builder, "packaging", request.getPackaging());
++			setParameter(builder, "javaVersion", request.getJavaVersion());
++			setParameter(builder, "language", request.getLanguage());
++			setParameter(builder, "bootVersion", request.getBootVersion());
++			return builder.build();
++		}
++		catch (URISyntaxException ex) {
++			throw new ReportableException("Invalid service URL (" + ex.getMessage() + ")");
++		}
++	}
++
++	private ProjectType determineProjectType(ProjectGenerationRequest request, InitializrServiceMetadata metadata) {
++		if (request.getType() != null) {
++			ProjectType result = metadata.getProjectTypes().get(request.getType());
++			if (result == null) {
++				throw new ReportableException(
++						("No project type with id '" + request.getType() + "' - check the service capabilities (--list)"));
++			}
++			return result;
++		}
++		if (request.isDetectType()) {
++			Map<String, ProjectType> types = new HashMap<>(metadata.getProjectTypes());
++			if (request.getBuild() != null) {
++				filter(types, "build", request.getBuild());
++			}
++			if (request.getFormat() != null) {
++				filter(types, "format", request.getFormat());
++			}
++			if (types.size() == 1) {
++				return types.values().iterator().next();
++			}
++			if (types.isEmpty()) {
++				throw new ReportableException("No type found with build '" + request.getBuild() + "' and format '"
++						+ request.getFormat() + "' check the service capabilities (--list)");
++			}
++			throw new ReportableException("Multiple types found with build '" + request.getBuild() + "' and format '"
++					+ request.getFormat() + "' use --type with a more specific value " + types.keySet());
++		}
++		ProjectType defaultType = metadata.getDefaultType();
++		if (defaultType == null) {
++			throw new ReportableException(("No project type is set and no default is defined. "
++					+ "Check the service capabilities (--list)"));
++		}
++		return defaultType;
++	}
++
++	private @Nullable String resolveArtifactId(ProjectGenerationRequest request) {
++		if (request.getArtifactId() != null) {
++			return request.getArtifactId();
++		}
++		if (request.getOutput() != null) {
++			int i = request.getOutput().lastIndexOf('.');
++			return (i != -1) ? request.getOutput().substring(0, i) : request.getOutput();
++		}
++		return null;
++	}
++
++	private static void filter(Map<String, ProjectType> projects, String tag, String tagValue) {
++		projects.entrySet().removeIf((entry) -> !tagValue.equals(entry.getValue().getTags().get(tag)));
++	}
++
++	private String resolvePath(@Nullable String path, String action) {
++		StringBuilder resolvedPath = new StringBuilder();
++		if (path != null) {
++			resolvedPath.append(path);
++		}
++		resolvedPath.append(action);
++		return resolvedPath.toString();
++	}
++
++	private void setParameter(URIBuilder builder, String name, @Nullable String value) {
++		if (value != null) {
++			builder.setParameter(name, value);
++		}
++	}
++
++}
+diff --git a/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/ProjectGenerationRequestUrlFactoryTests.java b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/ProjectGenerationRequestUrlFactoryTests.java
+new file mode 100644
+index 000000000..280c9626e
+--- /dev/null
++++ b/cli/spring-boot-cli/src/test/java/org/springframework/boot/cli/command/init/ProjectGenerationRequestUrlFactoryTests.java
+@@ -0,0 +1,115 @@
++/*
++ * Copyright 2012-present the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      https://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.springframework.boot.cli.command.init;
++
++import java.io.IOException;
++import java.io.InputStream;
++import java.net.URI;
++import java.nio.charset.StandardCharsets;
++import java.util.Collections;
++
++import org.junit.jupiter.api.Test;
++
++import org.springframework.boot.cli.json.JSONException;
++import org.springframework.boot.cli.json.JSONObject;
++import org.springframework.core.io.ClassPathResource;
++import org.springframework.core.io.Resource;
++import org.springframework.util.StreamUtils;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
++
++/**
++ * Tests for {@link ProjectGenerationRequestUrlFactory}.
++ *
++ * @author Stephane Nicoll
++ */
++class ProjectGenerationRequestUrlFactoryTests {
++
++	private final ProjectGenerationRequestUrlFactory factory = new ProjectGenerationRequestUrlFactory();
++
++	@Test
++	void defaultSettings() {
++		ProjectGenerationRequest request = new ProjectGenerationRequest();
++		assertThat(this.factory.create(request, createDefaultMetadata())).isEqualTo(createDefaultUrl("?type=test-type"));
++	}
++
++	@Test
++	void buildOneMatch() {
++		ProjectGenerationRequest request = new ProjectGenerationRequest();
++		setBuildAndFormat(request, "gradle", null);
++		assertThat(this.factory.create(request, readMetadata())).isEqualTo(createDefaultUrl("?type=gradle-project"));
++	}
++
++	@Test
++	void customType() throws Exception {
++		ProjectGenerationRequest request = new ProjectGenerationRequest();
++		request.setType("custom");
++		request.getDependencies().add("data-rest");
++		ProjectType projectType = new ProjectType("custom", "Custom Type", "/foo", true, Collections.emptyMap());
++		InitializrServiceMetadata metadata = new InitializrServiceMetadata(projectType);
++		assertThat(this.factory.create(request, metadata))
++			.isEqualTo(new URI(ProjectGenerationRequest.DEFAULT_SERVICE_URL + "/foo?dependencies=data-rest&type=custom"));
++	}
++
++	@Test
++	void invalidType() {
++		ProjectGenerationRequest request = new ProjectGenerationRequest();
++		request.setType("does-not-exist");
++		assertThatExceptionOfType(ReportableException.class)
++			.isThrownBy(() -> this.factory.create(request, createDefaultMetadata()));
++	}
++
++	private static URI createUrl(String actionAndParam) {
++		try {
++			return new URI(ProjectGenerationRequest.DEFAULT_SERVICE_URL + actionAndParam);
++		}
++		catch (Exception ex) {
++			throw new IllegalStateException(ex);
++		}
++	}
++
++	private static URI createDefaultUrl(String param) {
++		return createUrl("/starter.zip" + param);
++	}
++
++	private static InitializrServiceMetadata createDefaultMetadata() {
++		ProjectType projectType = new ProjectType("test-type", "The test type", "/starter.zip", true,
++				Collections.emptyMap());
++		return new InitializrServiceMetadata(projectType);
++	}
++
++	private static InitializrServiceMetadata readMetadata() {
++		try {
++			Resource resource = new ClassPathResource("metadata/service-metadata-2.0.0.json");
++			try (InputStream stream = resource.getInputStream()) {
++				JSONObject json = new JSONObject(StreamUtils.copyToString(stream, StandardCharsets.UTF_8));
++				return new InitializrServiceMetadata(json);
++			}
++		}
++		catch (IOException | JSONException ex) {
++			throw new IllegalStateException("Failed to read metadata", ex);
++		}
++	}
++
++	private static void setBuildAndFormat(ProjectGenerationRequest request, String build, String format) {
++		request.setBuild((build != null) ? build : "maven");
++		request.setFormat((format != null) ? format : "project");
++		request.setDetectType(true);
++	}
++
++}

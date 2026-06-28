@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from experiment_runner.models import LineStats
@@ -100,11 +101,22 @@ class GitRepository:
 
         parts: list[str] = []
         for path in paths:
-            proc = self.run_git(["show", f"{commit}:{path}"], check=False)
+            # Read the blob as raw bytes: binary files (PNG icons, jars, etc. in
+            # real-world repos) are not valid UTF-8 and would crash a text-mode
+            # `git show`. Decode-test instead and skip anything non-text.
+            proc = subprocess.run(
+                ["git", "show", f"{commit}:{path}"],
+                cwd=self.repo_root,
+                capture_output=True,
+            )
             if proc.returncode != 0:
                 continue
-            content = proc.stdout
-            if "\0" in content:
+            raw = proc.stdout
+            if b"\0" in raw:
+                continue
+            try:
+                content = raw.decode("utf-8")
+            except UnicodeDecodeError:
                 continue
             parts.append(f"=== {path} ===\n{content.rstrip()}\n")
         return "\n".join(parts)

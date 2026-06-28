@@ -134,6 +134,8 @@ class Task:
     label: str | None
     effort_codex: str | None = None
     effort_claude: str | None = None
+    no_snapshot: bool = False
+    refdiff_lang: str | None = None
     exp_folder: str = field(default="")
 
     def __post_init__(self) -> None:
@@ -175,6 +177,8 @@ def load_plan(plan_path: Path, output_root: Path) -> list[Task]:
                     label=merged.get("label"),
                     effort_codex=merged.get("effort_codex"),
                     effort_claude=merged.get("effort_claude"),
+                    no_snapshot=bool(merged.get("no_snapshot", False)),
+                    refdiff_lang=merged.get("refdiff_lang"),
                 )
             )
     return tasks
@@ -262,13 +266,19 @@ def build_command(step: Step) -> list[str]:
             cmd += ["--label", t.label]
         if t.prompter:
             cmd += ["--prompter"]
+        if t.no_snapshot:
+            cmd += ["--no-snapshot"]
         return cmd
     if step.phase == "refdiff":
-        return [
+        cmd = [
             _PYTHON, str(_SCRIPT_DIR / "run_refdiff.py"),
             "--repo", str(t.target),
             "--output-base", base,
+            "--exp", t.exp_folder,
         ]
+        if t.refdiff_lang:
+            cmd += ["--lang", t.refdiff_lang]
+        return cmd
     if step.phase == "plot_lines":
         return [_PYTHON, str(_SCRIPT_DIR / "plot_lines.py"), "--output-base", base]
     if step.phase == "plot_refdiff":

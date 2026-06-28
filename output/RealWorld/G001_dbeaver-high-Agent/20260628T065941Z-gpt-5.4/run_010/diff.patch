@@ -1,0 +1,268 @@
+diff --git a/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java b/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java
+index 6005fa4e4..8f2648d85 100644
+--- a/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java
++++ b/plugins/org.jkiss.dbeaver.model.lsp/src/org/jkiss/dbeaver/model/lsp/context/LspSQLCompletionContextParser.java
+@@ -23,8 +23,7 @@ import org.jkiss.dbeaver.DBException;
+ import org.jkiss.dbeaver.model.runtime.VoidProgressMonitor;
+ import org.jkiss.dbeaver.model.sql.completion.CompletionProposalBase;
+ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionContext;
+-import org.jkiss.dbeaver.model.sql.completion.SQLCompletionProposalProvider;
+-import org.jkiss.dbeaver.model.sql.completion.SQLCompletionRequestFactory;
++import org.jkiss.dbeaver.model.sql.completion.SQLCompletionService;
+ 
+ import java.lang.reflect.InvocationTargetException;
+ import java.util.List;
+@@ -39,10 +38,12 @@ public class LspSQLCompletionContextParser {
+         @NotNull SQLCompletionContext completionContext
+     ) throws InterruptedException, InvocationTargetException, DBException {
+         Document doc = new Document(document.getText());
+-        var request = SQLCompletionRequestFactory.create(completionContext, doc, offset, false);
+-        List<CompletionProposalBase> proposals = SQLCompletionProposalProvider.collectProposals(
++        List<CompletionProposalBase> proposals = SQLCompletionService.collectProposals(
+             new VoidProgressMonitor(),
+-            request,
++            completionContext,
++            doc,
++            offset,
++            false,
+             false
+         );
+ 
+diff --git a/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/completion/SQLCompletionService.java b/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/completion/SQLCompletionService.java
+new file mode 100644
+index 000000000..961208ad5
+--- /dev/null
++++ b/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/completion/SQLCompletionService.java
+@@ -0,0 +1,79 @@
++/*
++ * DBeaver - Universal Database Manager
++ * Copyright (C) 2010-2026 DBeaver Corp and others
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.jkiss.dbeaver.model.sql.completion;
++
++import org.eclipse.jface.text.IDocument;
++import org.jkiss.code.NotNull;
++import org.jkiss.code.Nullable;
++import org.jkiss.dbeaver.DBException;
++import org.jkiss.dbeaver.model.runtime.DBRProgressMonitor;
++import org.jkiss.dbeaver.model.sql.SQLScriptElement;
++
++import java.lang.reflect.InvocationTargetException;
++import java.util.List;
++
++public final class SQLCompletionService {
++
++    private SQLCompletionService() {
++    }
++
++    @NotNull
++    public static SQLCompletionRequest prepareRequest(
++        @NotNull SQLCompletionContext context,
++        @NotNull IDocument document,
++        int documentOffset,
++        boolean simpleMode
++    ) {
++        return SQLCompletionRequestFactory.create(context, document, documentOffset, simpleMode);
++    }
++
++    @NotNull
++    public static SQLCompletionRequest prepareRequest(
++        @NotNull SQLCompletionContext context,
++        @NotNull IDocument document,
++        int documentOffset,
++        @Nullable SQLScriptElement activeQuery,
++        boolean simpleMode
++    ) {
++        return SQLCompletionRequestFactory.create(context, document, documentOffset, activeQuery, simpleMode);
++    }
++
++    @NotNull
++    public static List<CompletionProposalBase> collectProposals(
++        @NotNull DBRProgressMonitor monitor,
++        @NotNull SQLCompletionContext context,
++        @NotNull IDocument document,
++        int documentOffset,
++        boolean simpleMode,
++        boolean checkNavigatorNodes
++    ) throws DBException, InvocationTargetException, InterruptedException {
++        return collectProposals(
++            monitor,
++            prepareRequest(context, document, documentOffset, simpleMode),
++            checkNavigatorNodes
++        );
++    }
++
++    @NotNull
++    public static List<CompletionProposalBase> collectProposals(
++        @NotNull DBRProgressMonitor monitor,
++        @NotNull SQLCompletionRequest request,
++        boolean checkNavigatorNodes
++    ) throws DBException, InvocationTargetException, InterruptedException {
++        return SQLCompletionProposalProvider.collectProposals(monitor, request, checkNavigatorNodes);
++    }
++}
+diff --git a/plugins/org.jkiss.dbeaver.ui.editors.sql/src/org/jkiss/dbeaver/ui/editors/sql/syntax/SQLEditorCompletionContext.java b/plugins/org.jkiss.dbeaver.ui.editors.sql/src/org/jkiss/dbeaver/ui/editors/sql/syntax/SQLEditorCompletionContext.java
+index 29ba59696..1e9e0cff0 100644
+--- a/plugins/org.jkiss.dbeaver.ui.editors.sql/src/org/jkiss/dbeaver/ui/editors/sql/syntax/SQLEditorCompletionContext.java
++++ b/plugins/org.jkiss.dbeaver.ui.editors.sql/src/org/jkiss/dbeaver/ui/editors/sql/syntax/SQLEditorCompletionContext.java
+@@ -21,8 +21,6 @@ import org.jkiss.code.Nullable;
+ import org.jkiss.dbeaver.model.DBPImage;
+ import org.jkiss.dbeaver.model.DBPKeywordType;
+ import org.jkiss.dbeaver.model.DBPNamedObject;
+-import org.jkiss.dbeaver.model.preferences.DBPPreferenceStore;
+-import org.jkiss.dbeaver.model.sql.SQLSyntaxManager;
+ import org.jkiss.dbeaver.model.sql.completion.AbstractSQLCompletionContext;
+ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionProposalBase;
+ import org.jkiss.dbeaver.model.sql.completion.SQLCompletionRequest;
+@@ -34,7 +32,6 @@ import java.util.Map;
+ 
+ 
+ public class SQLEditorCompletionContext extends AbstractSQLCompletionContext {
+-    private final SQLEditorBase editor;
+     private final SQLCompletionObjectNameFormKind objectNameFormKind;
+ 
+     public SQLEditorCompletionContext(SQLEditorBase editor) {
+@@ -45,8 +42,7 @@ public class SQLEditorCompletionContext extends AbstractSQLCompletionContext {
+             editor.getRuleManager(),
+             editor.getActivePreferenceStore()
+         );
+-        this.editor = editor;
+-        this.objectNameFormKind = SQLCompletionObjectNameFormKind.getFromPreferences(editor.getActivePreferenceStore());
++        this.objectNameFormKind = SQLCompletionObjectNameFormKind.getFromPreferences(getPreferenceStore());
+     }
+ 
+     @NotNull
+@@ -54,12 +50,6 @@ public class SQLEditorCompletionContext extends AbstractSQLCompletionContext {
+         return this.objectNameFormKind;
+     }
+ 
+-    @NotNull
+-    @Override
+-    public DBPPreferenceStore getPreferenceStore() {
+-        return getActivePreferenceStore();
+-    }
+-
+     @Override
+     public boolean isUseFQNames() {
+         return objectNameFormKind.qualified;
+@@ -67,12 +57,12 @@ public class SQLEditorCompletionContext extends AbstractSQLCompletionContext {
+ 
+     @Override
+     public boolean isReplaceWords() {
+-        return getActivePreferenceStore().getBoolean(SQLPreferenceConstants.PROPOSAL_REPLACE_WORD);
++        return getPreferenceStore().getBoolean(SQLPreferenceConstants.PROPOSAL_REPLACE_WORD);
+     }
+ 
+     @Override
+     public boolean isShowServerHelp() {
+-        return getActivePreferenceStore().getBoolean(SQLPreferenceConstants.SHOW_SERVER_HELP_TOPICS);
++        return getPreferenceStore().getBoolean(SQLPreferenceConstants.SHOW_SERVER_HELP_TOPICS);
+     }
+ 
+     @Override
+@@ -82,42 +72,42 @@ public class SQLEditorCompletionContext extends AbstractSQLCompletionContext {
+ 
+     @Override
+     public int getInsertCase() {
+-        return getActivePreferenceStore().getInt(SQLPreferenceConstants.PROPOSAL_INSERT_CASE);
++        return getPreferenceStore().getInt(SQLPreferenceConstants.PROPOSAL_INSERT_CASE);
+     }
+ 
+     @Override
+     public boolean isSearchProcedures() {
+-        return getActivePreferenceStore().getBoolean(SQLPreferenceConstants.SHOW_COLUMN_PROCEDURES);
++        return getPreferenceStore().getBoolean(SQLPreferenceConstants.SHOW_COLUMN_PROCEDURES);
+     }
+ 
+     @Override
+     public boolean isSearchInsideNames() {
+-        return getActivePreferenceStore().getBoolean(SQLPreferenceConstants.PROPOSALS_MATCH_CONTAINS);
++        return getPreferenceStore().getBoolean(SQLPreferenceConstants.PROPOSALS_MATCH_CONTAINS);
+     }
+ 
+     @Override
+     public boolean isSortAlphabetically() {
+-        return getActivePreferenceStore().getBoolean(SQLPreferenceConstants.PROPOSAL_SORT_ALPHABETICALLY);
++        return getPreferenceStore().getBoolean(SQLPreferenceConstants.PROPOSAL_SORT_ALPHABETICALLY);
+     }
+ 
+     @Override
+     public boolean isSearchGlobally() {
+-        return getActivePreferenceStore().getBoolean(SQLPreferenceConstants.USE_GLOBAL_ASSISTANT);
++        return getPreferenceStore().getBoolean(SQLPreferenceConstants.USE_GLOBAL_ASSISTANT);
+     }
+ 
+     @Override
+     public boolean isHideDuplicates() {
+-        return getActivePreferenceStore().getBoolean(SQLPreferenceConstants.HIDE_DUPLICATE_PROPOSALS);
++        return getPreferenceStore().getBoolean(SQLPreferenceConstants.HIDE_DUPLICATE_PROPOSALS);
+     }
+ 
+     @Override
+     public boolean isShowValues() {
+-        return getActivePreferenceStore().getBoolean(SQLPreferenceConstants.SHOW_VALUES);
++        return getPreferenceStore().getBoolean(SQLPreferenceConstants.SHOW_VALUES);
+     }
+ 
+     @Override
+     public boolean isForceQualifiedColumnNames() {
+-        return getActivePreferenceStore().getBoolean(SQLPreferenceConstants.QUALIFIED_COLUMN_NAMES);
++        return getPreferenceStore().getBoolean(SQLPreferenceConstants.QUALIFIED_COLUMN_NAMES);
+     }
+ 
+     @Override
+@@ -142,8 +132,4 @@ public class SQLEditorCompletionContext extends AbstractSQLCompletionContext {
+             object,
+             params);
+     }
+-
+-    private DBPPreferenceStore getActivePreferenceStore() {
+-        return editor.getActivePreferenceStore();
+-    }
+ }
+diff --git a/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/completion/SQLCompletionProposalProviderTest.java b/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/completion/SQLCompletionProposalProviderTest.java
+index cb4837741..f6cb48ac5 100644
+--- a/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/completion/SQLCompletionProposalProviderTest.java
++++ b/test/org.jkiss.dbeaver.test.platform/src/org/jkiss/dbeaver/model/sql/completion/SQLCompletionProposalProviderTest.java
+@@ -61,6 +61,29 @@ public class SQLCompletionProposalProviderTest extends DBeaverUnitTest {
+         Assertions.assertEquals("SELECT", proposals.get(0).getReplacementString());
+     }
+ 
++    @Test
++    public void serviceShouldPrepareRequestAndCollectLegacyCompletionProposals()
++        throws DBException, InvocationTargetException, InterruptedException {
++        DBPPreferenceStore preferenceStore = mockPreferenceStore(SQLCompletionMode.DEFAULT, false, false);
++        SQLCompletionTestContext context = createCompletionContext(preferenceStore);
++
++        String sql = "SEL|";
++        int offset = sql.indexOf('|');
++        Document document = new Document(sql.replace("|", ""));
++
++        List<CompletionProposalBase> proposals = SQLCompletionService.collectProposals(
++            new VoidProgressMonitor(),
++            context,
++            document,
++            offset,
++            false,
++            false
++        );
++
++        Assertions.assertFalse(proposals.isEmpty());
++        Assertions.assertEquals("SELECT", proposals.get(0).getReplacementString());
++    }
++
+     private static DBPPreferenceStore mockPreferenceStore(
+         SQLCompletionMode mode,
+         boolean advancedHighlightingEnabled,

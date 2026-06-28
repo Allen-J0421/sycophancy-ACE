@@ -1,0 +1,118 @@
+diff --git a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/CancelReindexResponse.java b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/CancelReindexResponse.java
+index 365ce8c25..45571fb2a 100644
+--- a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/CancelReindexResponse.java
++++ b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/CancelReindexResponse.java
+@@ -30,7 +30,7 @@ public class CancelReindexResponse extends ActionResponse implements ToXContentO
+     @Nullable
+     private final GetReindexResponse completedReindexResponse;
+ 
+-    public CancelReindexResponse(@Nullable final GetReindexResponse completedReindexResponse) {
++    private CancelReindexResponse(@Nullable final GetReindexResponse completedReindexResponse) {
+         this.completedReindexResponse = completedReindexResponse;
+     }
+ 
+@@ -38,6 +38,14 @@ public class CancelReindexResponse extends ActionResponse implements ToXContentO
+         this.completedReindexResponse = in.readOptionalWriteable(GetReindexResponse::new);
+     }
+ 
++    public static CancelReindexResponse acknowledged() {
++        return new CancelReindexResponse(null);
++    }
++
++    public static CancelReindexResponse completed(final GetReindexResponse completedReindexResponse) {
++        return new CancelReindexResponse(completedReindexResponse);
++    }
++
+     @Override
+     public void writeTo(StreamOutput out) throws IOException {
+         out.writeOptionalWriteable(completedReindexResponse);
+@@ -56,4 +64,8 @@ public class CancelReindexResponse extends ActionResponse implements ToXContentO
+     public Optional<GetReindexResponse> getCompletedReindexResponse() {
+         return Optional.ofNullable(completedReindexResponse);
+     }
++
++    public boolean isAcknowledged() {
++        return completedReindexResponse == null;
++    }
+ }
+diff --git a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/ReindexCancellation.java b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/ReindexCancellation.java
+index a9078189d..b648ae5b8 100644
+--- a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/ReindexCancellation.java
++++ b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/ReindexCancellation.java
+@@ -75,7 +75,7 @@ final class ReindexCancellation {
+      * Forces the completed task view to reflect cancellation, even if the stored task snapshot predates the cancellation flag update.
+      */
+     static CancelReindexResponse completedResponse(final GetReindexResponse getResponse) {
+-        return new CancelReindexResponse(new GetReindexResponse(taskResultWithCancelledTrue(getResponse.getTaskResult())));
++        return CancelReindexResponse.completed(new GetReindexResponse(taskResultWithCancelledTrue(getResponse.getTaskResult())));
+     }
+ 
+     /**
+diff --git a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportCancelReindexAction.java b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportCancelReindexAction.java
+index 225082967..ab915797e 100644
+--- a/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportCancelReindexAction.java
++++ b/modules/reindex-management/src/main/java/org/elasticsearch/reindex/management/TransportCancelReindexAction.java
+@@ -87,7 +87,7 @@ public class TransportCancelReindexAction extends AbstractReindexTransportAction
+                     )
+                 );
+             } else {
+-                l.onResponse(new CancelReindexResponse((GetReindexResponse) null));
++                l.onResponse(CancelReindexResponse.acknowledged());
+             }
+         }));
+     }
+diff --git a/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/CancelReindexResponseTests.java b/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/CancelReindexResponseTests.java
+new file mode 100644
+index 000000000..9176a0055
+--- /dev/null
++++ b/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/CancelReindexResponseTests.java
+@@ -0,0 +1,36 @@
++/*
++ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
++ * or more contributor license agreements. Licensed under the "Elastic License
++ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
++ * Public License v 1"; you may not use this file except in compliance with, at
++ * your election, the "Elastic License 2.0", the "GNU Affero General Public
++ * License v 3.0 only", or the "Server Side Public License, v 1".
++ */
++
++package org.elasticsearch.reindex.management;
++
++import org.elasticsearch.tasks.TaskId;
++import org.elasticsearch.tasks.TaskResult;
++import org.elasticsearch.test.ESTestCase;
++
++import static org.hamcrest.Matchers.is;
++
++public class CancelReindexResponseTests extends ESTestCase {
++
++    public void testAcknowledgedFactoryProducesAcknowledgedResponse() {
++        CancelReindexResponse response = CancelReindexResponse.acknowledged();
++
++        assertThat(response.isAcknowledged(), is(true));
++        assertThat(response.getCompletedReindexResponse().isEmpty(), is(true));
++    }
++
++    public void testCompletedFactoryProducesCompletedResponse() {
++        TaskId taskId = new TaskId(randomAlphaOfLength(10), randomNonNegativeLong());
++        GetReindexResponse getResponse = new GetReindexResponse(new TaskResult(true, ReindexManagementTestUtils.reindexTaskInfo(taskId)));
++
++        CancelReindexResponse response = CancelReindexResponse.completed(getResponse);
++
++        assertThat(response.isAcknowledged(), is(false));
++        assertThat(response.getCompletedReindexResponse().orElseThrow(), is(getResponse));
++    }
++}
+diff --git a/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/ReindexManagementRestActionsTests.java b/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/ReindexManagementRestActionsTests.java
+index 3175d6f2d..0c567b1da 100644
+--- a/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/ReindexManagementRestActionsTests.java
++++ b/modules/reindex-management/src/test/java/org/elasticsearch/reindex/management/ReindexManagementRestActionsTests.java
+@@ -94,7 +94,7 @@ public class ReindexManagementRestActionsTests extends RestActionTestCase {
+             CancelReindexRequest request = (CancelReindexRequest) actionRequest;
+             assertEquals(taskId, request.getTaskId());
+             assertTrue(request.waitForCompletion());
+-            return new CancelReindexResponse(null);
++            return CancelReindexResponse.acknowledged();
+         });
+ 
+         dispatchRequest(cancelRequest(taskId.toString(), Map.of()));

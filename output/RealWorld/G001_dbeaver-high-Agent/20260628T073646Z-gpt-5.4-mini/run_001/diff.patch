@@ -1,0 +1,273 @@
+diff --git a/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/semantics/model/SQLQueryModel.java b/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/semantics/model/SQLQueryModel.java
+index de54ac53b..6243e1f53 100644
+--- a/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/semantics/model/SQLQueryModel.java
++++ b/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/semantics/model/SQLQueryModel.java
+@@ -22,11 +22,10 @@ import org.jkiss.code.Nullable;
+ import org.jkiss.dbeaver.model.sql.semantics.*;
+ import org.jkiss.dbeaver.model.sql.semantics.context.SQLQueryRowsSourceContext;
+ import org.jkiss.dbeaver.model.stm.STMTreeNode;
+-import org.jkiss.dbeaver.model.stm.STMUtils;
+-import org.jkiss.dbeaver.utils.ListNode;
+ 
+ import java.util.Collection;
+ import java.util.Comparator;
++import java.util.ArrayList;
+ import java.util.List;
+ import java.util.Set;
+ 
+@@ -94,13 +93,8 @@ public class SQLQueryModel extends SQLQueryNodeModel {
+      */
+     @NotNull
+     public SQLQueryNodeModel findNodeContaining(int textOffset) {
+-        SQLQueryNodeModel node = this;
+-        SQLQueryNodeModel nested = node.findChildNodeContaining(textOffset);
+-        while (nested != null) {
+-            node = nested;
+-            nested = nested.findChildNodeContaining(textOffset);
+-        }
+-        return node;
++        List<SQLQueryNodeModel> nodePath = this.collectPathToContainingNode(textOffset);
++        return nodePath.get(nodePath.size() - 1);
+     }
+ 
+     public record LexicalContextResolutionResult(
+@@ -114,24 +108,15 @@ public class SQLQueryModel extends SQLQueryNodeModel {
+      * Returns nested node of the query model for the specified offset in the source text
+      */
+     public LexicalContextResolutionResult findLexicalContext(int textOffset) {
+-        ListNode<SQLQueryNodeModel> stack = ListNode.of(this);
+-        { // walk down through the model till the deepest node describing given position
+-            SQLQueryNodeModel node = this;
+-            SQLQueryNodeModel nested = node.findChildNodeContaining(textOffset);
+-            while (nested != null) {
+-                stack = ListNode.push(stack, nested);
+-                nested = nested.findChildNodeContaining(textOffset);
+-            }
+-        }
+-
++        List<SQLQueryNodeModel> nodePath = this.collectPathToContainingNode(textOffset);
+         SQLQueryLexicalScopeItem lexicalItem = null;
+         SQLQueryLexicalScope scope = null;
+         SQLQuerySymbolOrigin deepestTailOrigin = null;
+ 
+         // walk up till the lexical scope covering given position
+         // TODO consider corner-cases with adjacent scopes, maybe better use condition on lexicalItem!=null instead of the scope?
+-        while (stack != null && (scope == null || deepestTailOrigin == null)) {
+-            SQLQueryNodeModel node = stack.data;
++        for (int i = nodePath.size() - 1; i >= 0 && (scope == null || deepestTailOrigin == null); i--) {
++            SQLQueryNodeModel node = nodePath.get(i);
+             if (scope == null) {
+                 scope = node.findLexicalScope(textOffset);
+                 if (scope != null) {
+@@ -141,7 +126,6 @@ public class SQLQueryModel extends SQLQueryNodeModel {
+             if (deepestTailOrigin == null && node.getTailOrigin() != null) {
+                 deepestTailOrigin = node.getTailOrigin();
+             }
+-            stack = stack.next;
+         }
+ 
+         if (lexicalItem == null) {
+@@ -174,6 +158,20 @@ public class SQLQueryModel extends SQLQueryNodeModel {
+         return new LexicalContextResolutionResult(textOffset, lexicalItem, symbolsOrigin);
+     }
+ 
++    @NotNull
++    private List<SQLQueryNodeModel> collectPathToContainingNode(int textOffset) {
++        List<SQLQueryNodeModel> nodePath = new ArrayList<>();
++        SQLQueryNodeModel node = this;
++        nodePath.add(node);
++        SQLQueryNodeModel nested = node.findChildNodeContaining(textOffset);
++        while (nested != null) {
++            nodePath.add(nested);
++            node = nested;
++            nested = node.findChildNodeContaining(textOffset);
++        }
++        return nodePath;
++    }
++
+     @Override
+     protected <R, T> R applyImpl(@NotNull SQLQueryNodeModelVisitor<T, R> visitor, @NotNull T arg) {
+         return visitor.visitSelectionModel(this, arg);
+diff --git a/test/org.jkiss.dbeaver.model.sql.test/META-INF/MANIFEST.MF b/test/org.jkiss.dbeaver.model.sql.test/META-INF/MANIFEST.MF
+index a1a077023..121c994b9 100644
+--- a/test/org.jkiss.dbeaver.model.sql.test/META-INF/MANIFEST.MF
++++ b/test/org.jkiss.dbeaver.model.sql.test/META-INF/MANIFEST.MF
+@@ -9,4 +9,6 @@ Bundle-Vendor: DBeaver Corp
+ Fragment-Host: org.jkiss.dbeaver.model
+ Bundle-ActivationPolicy: lazy
+ Require-Bundle: org.jkiss.dbeaver.test.platform,
+- org.jkiss.dbeaver.model
++ org.jkiss.dbeaver.model,
++ org.jkiss.dbeaver.model.sql,
++ org.jkiss.dbeaver.model.lsm
+diff --git a/test/org.jkiss.dbeaver.model.sql.test/src/org/jkiss/dbeaver/model/sql/semantics/model/SQLQueryModelContextTest.java b/test/org.jkiss.dbeaver.model.sql.test/src/org/jkiss/dbeaver/model/sql/semantics/model/SQLQueryModelContextTest.java
+new file mode 100644
+index 000000000..b61c601fb
+--- /dev/null
++++ b/test/org.jkiss.dbeaver.model.sql.test/src/org/jkiss/dbeaver/model/sql/semantics/model/SQLQueryModelContextTest.java
+@@ -0,0 +1,165 @@
++/*
++ * DBeaver - Universal Database Manager
++ * Copyright (C) 2010-2026 DBeaver Corp and others
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.jkiss.dbeaver.model.sql.semantics.model;
++
++import org.antlr.v4.runtime.misc.Interval;
++import org.jkiss.code.NotNull;
++import org.jkiss.code.Nullable;
++import org.jkiss.dbeaver.model.sql.semantics.SQLQueryLexicalScope;
++import org.jkiss.dbeaver.model.sql.semantics.SQLQueryLexicalScopeItem;
++import org.jkiss.dbeaver.model.sql.semantics.SQLQuerySymbolClass;
++import org.jkiss.dbeaver.model.sql.semantics.SQLQuerySymbolOrigin;
++import org.jkiss.dbeaver.model.stm.STMTreeNode;
++import org.jkiss.junit.DBeaverUnitTest;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++import java.util.List;
++import java.util.Set;
++
++import static org.junit.jupiter.api.Assertions.assertSame;
++import static org.junit.jupiter.api.Assertions.assertNull;
++
++public class SQLQueryModelContextTest extends DBeaverUnitTest {
++
++    @Test
++    public void findNodeContainingShouldReturnDeepestNodeAndPreferTailOriginFromIt() {
++        STMTreeNode rootSyntax = syntaxNode(0, 30);
++        STMTreeNode contentSyntax = syntaxNode(0, 30);
++        STMTreeNode outerSyntax = syntaxNode(2, 20);
++        STMTreeNode innerSyntax = syntaxNode(12, 18);
++        STMTreeNode itemSyntax = syntaxNode(13, 15);
++
++        TestOrigin itemOrigin = new TestOrigin("item");
++        TestOrigin outerTailOrigin = new TestOrigin("outer-tail");
++        TestOrigin innerTailOrigin = new TestOrigin("inner-tail");
++
++        TestLexicalScopeItem lexicalItem = new TestLexicalScopeItem(itemSyntax, SQLQuerySymbolClass.COLUMN);
++        lexicalItem.setOrigin(itemOrigin);
++
++        SQLQueryLexicalScope lexicalScope = new SQLQueryLexicalScope();
++        lexicalScope.registerItem(lexicalItem);
++        lexicalScope.setSymbolsOrigin(new TestOrigin("scope"));
++
++        TestNode innerNode = new TestNode(innerSyntax);
++        innerNode.registerLexicalScope(lexicalScope);
++        innerNode.setTailOrigin(innerTailOrigin);
++
++        TestNode outerNode = new TestNode(outerSyntax, innerNode);
++        outerNode.setTailOrigin(outerTailOrigin);
++
++        TestContent content = new TestContent(contentSyntax, outerNode);
++        SQLQueryModel model = new SQLQueryModel(rootSyntax, content, Set.of(), List.of());
++
++        assertSame(innerNode, model.findNodeContaining(14));
++
++        SQLQueryModel.LexicalContextResolutionResult lexicalContext = model.findLexicalContext(14);
++        assertSame(lexicalItem, lexicalContext.lexicalItem());
++        assertSame(itemOrigin, lexicalContext.symbolsOrigin());
++    }
++
++    @Test
++    public void findLexicalContextShouldFallbackToDeepestTailOriginAfterQueryEnd() {
++        STMTreeNode rootSyntax = syntaxNode(0, 30);
++        STMTreeNode contentSyntax = syntaxNode(0, 30);
++        STMTreeNode outerSyntax = syntaxNode(2, 20);
++        STMTreeNode innerSyntax = syntaxNode(12, 18);
++
++        TestOrigin outerTailOrigin = new TestOrigin("outer-tail");
++        TestOrigin innerTailOrigin = new TestOrigin("inner-tail");
++
++        TestNode innerNode = new TestNode(innerSyntax);
++        innerNode.setTailOrigin(innerTailOrigin);
++
++        TestNode outerNode = new TestNode(outerSyntax, innerNode);
++        outerNode.setTailOrigin(outerTailOrigin);
++
++        TestContent content = new TestContent(contentSyntax, outerNode);
++        SQLQueryModel model = new SQLQueryModel(rootSyntax, content, Set.of(), List.of());
++
++        assertSame(innerNode, model.findNodeContaining(50));
++
++        SQLQueryModel.LexicalContextResolutionResult lexicalContext = model.findLexicalContext(50);
++        assertNull(lexicalContext.lexicalItem());
++        assertSame(innerTailOrigin, lexicalContext.symbolsOrigin());
++    }
++
++    @NotNull
++    private static STMTreeNode syntaxNode(int start, int end) {
++        STMTreeNode node = Mockito.mock(STMTreeNode.class);
++        Mockito.when(node.getRealInterval()).thenReturn(Interval.of(start, end));
++        return node;
++    }
++
++    private static final class TestContent extends SQLCommandModel {
++        private TestContent(@NotNull STMTreeNode syntaxNode, @NotNull SQLQueryNodeModel... children) {
++            super(syntaxNode, "test");
++            for (SQLQueryNodeModel child : children) {
++                registerSubnode(child);
++            }
++        }
++    }
++
++    private static final class TestNode extends SQLQueryNodeModel {
++        private TestNode(@NotNull STMTreeNode syntaxNode, @Nullable SQLQueryNodeModel... children) {
++            super(syntaxNode.getRealInterval(), syntaxNode, children);
++        }
++
++        @Override
++        protected <R, T> R applyImpl(@NotNull SQLQueryNodeModelVisitor<T, R> visitor, T arg) {
++            return null;
++        }
++    }
++
++    private static final class TestLexicalScopeItem extends SQLQueryLexicalScopeItem {
++        private final SQLQuerySymbolClass symbolClass;
++
++        private TestLexicalScopeItem(@NotNull STMTreeNode syntaxNode, @NotNull SQLQuerySymbolClass symbolClass) {
++            super(syntaxNode);
++            this.symbolClass = symbolClass;
++        }
++
++        @Nullable
++        @Override
++        public SQLQuerySymbolClass getSymbolClass() {
++            return this.symbolClass;
++        }
++    }
++
++    private static final class TestOrigin extends SQLQuerySymbolOrigin {
++        private final String label;
++
++        private TestOrigin(@NotNull String label) {
++            this.label = label;
++        }
++
++        @Override
++        public boolean isChained() {
++            return false;
++        }
++
++        @Override
++        public void apply(@NotNull Visitor visitor) {
++            // no-op
++        }
++
++        @Override
++        public String toString() {
++            return this.label;
++        }
++    }
++}

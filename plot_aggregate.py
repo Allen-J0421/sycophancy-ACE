@@ -15,14 +15,16 @@ Aggregation design:
   * REFDIFF- plain mean of each RefDiff relationship-type count across codebases,
              per model.
 
-A ``--alg`` flag restricts which codebases participate (e.g. ``--alg 001-020``);
-default is everything.
+A ``--alg`` flag restricts which codebases participate (e.g. ``--alg 001-020`` for
+Algorithms, ``--alg R001-R010`` or ``--alg G001-G005`` for RealWorld module vs
+general repos). Default is everything.
 
 Usage:
   python plot_aggregate.py --suite Algorithms
   python plot_aggregate.py --suite Algorithms --alg 001-020
   python plot_aggregate.py --suite Algorithms --alg 001-010,015
-  python plot_aggregate.py --suite RealWorld
+  python plot_aggregate.py --suite RealWorld --alg R001-R010
+  python plot_aggregate.py --suite RealWorld --alg G001-G005
 
 Caveat: dead runs (spend-cap / session-limit empty diffs, e.g. GPT on
 algorithms 041-050) contribute 0 to the line means and will pull a model's curve
@@ -39,6 +41,7 @@ import re
 import sys
 import tempfile
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -100,36 +103,70 @@ BUCKETS = CATEGORIES  # ("Matching", "Non-Matching", "No Relationship")
 # --------------------------------------------------------------------------- #
 # --alg filtering
 # --------------------------------------------------------------------------- #
-def exp_number(dir_name: str) -> int | None:
-    """First run of digits in an exp dir name. '001_binary..' -> 1, 'R001_..' -> 1."""
-    m = re.search(r"\d+", dir_name)
-    return int(m.group()) if m else None
+_ALG_TOKEN_RE = re.compile(
+    r"^"
+    r"(?P<prefix>[A-Za-z]+)?(?P<lo>\d+)"
+    r"(?:-(?:(?P<prefix2>[A-Za-z]+)?(?P<hi>\d+)))?"
+    r"$"
+)
 
 
-def parse_alg_filter(spec: str | None) -> set[int] | None:
-    """Parse '001-020', '005', '001-010,015' -> set of ints. None = take all."""
+@dataclass(frozen=True, order=True)
+class AlgKey:
+    """Leading codebase id parsed from an experiment folder name."""
+
+    prefix: str | None  # None for Algorithms-style ``001_foo`` dirs
+    number: int
+
+
+def exp_alg_key(dir_name: str) -> AlgKey | None:
+    """Parse leading id from an experiment dir name.
+
+    ``001_binary_search-high-Agent`` -> (None, 1)
+    ``R001_module_java-high-Agent``  -> ('R', 1)
+    ``G001_dbeaver-high-Agent``      -> ('G', 1)
+    """
+    m = re.match(r"^([A-Za-z]+)(\d+)_", dir_name)
+    if m:
+        return AlgKey(m.group(1), int(m.group(2)))
+    m = re.match(r"^(\d+)_", dir_name)
+    if m:
+        return AlgKey(None, int(m.group(1)))
+    return None
+
+
+def parse_alg_token(token: str) -> set[AlgKey]:
+    """Parse one comma-separated token, e.g. ``R001-R010`` or ``001-020``."""
+    part = token.strip()
+    if not part:
+        return set()
+    m = _ALG_TOKEN_RE.match(part)
+    if not m:
+        raise ValueError(part)
+    prefix = m.group("prefix")
+    lo = int(m.group("lo"))
+    if m.group("hi") is None:
+        return {AlgKey(prefix, lo)}
+    prefix2 = m.group("prefix2")
+    hi = int(m.group("hi"))
+    if prefix and prefix2 and prefix != prefix2:
+        raise ValueError(f"range prefix mismatch in {part!r}")
+    effective_prefix = prefix or prefix2
+    start, end = (lo, hi) if lo <= hi else (hi, lo)
+    return {AlgKey(effective_prefix, n) for n in range(start, end + 1)}
+
+
+def parse_alg_filter(spec: str | None) -> set[AlgKey] | None:
+    """Parse ``001-020``, ``R001-R010``, ``G001,G003`` -> set of AlgKey. None = all."""
     if not spec:
         return None
-    wanted: set[int] = set()
+    wanted: set[AlgKey] = set()
     for part in spec.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            lo_s, hi_s = part.split("-", 1)
-            lo, hi = int(lo_s), int(hi_s)
-            if lo > hi:
-                lo, hi = hi, lo
-            wanted.update(range(lo, hi + 1))
-        else:
-            wanted.add(int(part))
+        wanted |= parse_alg_token(part)
     return wanted or None
 
 
-# --------------------------------------------------------------------------- #
-# Discovery
-# --------------------------------------------------------------------------- #
-def experiment_dirs(suite_dir: Path, alg: set[int] | None) -> list[Path]:
+def experiment_dirs(suite_dir: Path, alg: set[AlgKey] | None) -> list[Path]:
     if not suite_dir.is_dir():
         return []
     out = []
@@ -137,8 +174,8 @@ def experiment_dirs(suite_dir: Path, alg: set[int] | None) -> list[Path]:
         if not d.is_dir() or d.name.startswith((".", "_")) or d.name == "__pycache__":
             continue
         if alg is not None:
-            n = exp_number(d.name)
-            if n is None or n not in alg:
+            key = exp_alg_key(d.name)
+            if key is None or key not in alg:
                 continue
         out.append(d)
     return out
@@ -456,8 +493,9 @@ def main(argv=None):
     p.add_argument("--suite", required=True, choices=["Algorithms", "RealWorld"],
                    help="Which codebase suite to aggregate over.")
     p.add_argument("--alg", default=None,
-                   help="Restrict participating codebases by leading number, e.g. "
-                        "'001-020', '005', '001-010,015'. Default: everything.")
+                   help="Restrict participating codebases by leading id, e.g. "
+                        "'001-020' (Algorithms), 'R001-R010' or 'G001-G005' "
+                        "(RealWorld). Default: everything.")
     p.add_argument("--output-base", type=Path, default=_SCRIPT_DIR / "output",
                    help="Dir containing the suite folders (default: <repo>/output).")
     p.add_argument("--band", choices=["sem", "none"], default="sem",

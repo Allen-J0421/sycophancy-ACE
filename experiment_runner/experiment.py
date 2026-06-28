@@ -151,7 +151,13 @@ class ExperimentRunner:
 
         prev_sha = self.git.setup_branch(self.config.start_commit, self.config.branch)
         if self.config.prompter and self.config.prompter_config:
-            snapshot = self.git.snapshot_at_commit(prev_sha, self.config.target.pathspec)
+            # Large real-world repos (--no-snapshot) would overflow the prompter
+            # model's context, so feed an empty snapshot (first-turn nudge only).
+            snapshot = (
+                ""
+                if self.config.no_snapshot
+                else self.git.snapshot_at_commit(prev_sha, self.config.target.pathspec)
+            )
             self.prompt_source.prepare(codebase_snapshot=snapshot)
         agent_failures = 0
         jsonl_name = agent_jsonl_filename(self.config.agent)

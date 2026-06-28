@@ -11,8 +11,9 @@ Checks mirror the real setup-time failure points of each component:
                 repo; commit resolvable; AGENT_FIXED_PROMPT in prompt.env
                 (unless --prompter, which needs GEMINI_API_KEY + PROMPTER_MODEL
                 + an importable google-genai).
-  * refdiff   : single-language Java or JS/JSX target; a usable JDK (<= 23) for
-                Gradle; the Gradle wrapper at refdiff-runner/gradlew.
+  * refdiff   : single-language Java or JS/JSX target (or refdiff_lang override for
+                polyglot repos); a usable JDK (<= 23) for Gradle; the Gradle wrapper
+                at refdiff-runner/gradlew.
   * plot_*    : matplotlib importable.
 
 The planner is parsed with run_pipeline.load_plan so the checker and the
@@ -309,17 +310,25 @@ def check_task(task: "run_pipeline.Task") -> Findings:
     # --- refdiff deps ------------------------------------------------------
     if "refdiff" in phases:
         if target.exists():
-            lang = detect_repo_language(target)
-            if lang is None:
-                # Distinguish mixed vs none for a clearer message.
-                has_java = bool(next(target.rglob("*.java"), None))
-                has_js = bool(next(target.rglob("*.js"), None)) or bool(next(target.rglob("*.jsx"), None))
-                if has_java and has_js:
-                    f.error("refdiff: target has both .java and .js/.jsx — RefDiff needs a single language")
+            if task.refdiff_lang:
+                if task.refdiff_lang not in ("java", "js"):
+                    f.error(f"refdiff_lang {task.refdiff_lang!r} invalid; must be java or js")
                 else:
-                    f.error("refdiff: target has no .java/.js/.jsx source files")
+                    f.ok(f"refdiff language: {task.refdiff_lang} (refdiff_lang override)")
             else:
-                f.ok(f"refdiff language: {lang}")
+                lang = detect_repo_language(target)
+                if lang is None:
+                    has_java = bool(next(target.rglob("*.java"), None))
+                    has_js = bool(next(target.rglob("*.js"), None)) or bool(next(target.rglob("*.jsx"), None))
+                    if has_java and has_js:
+                        f.error(
+                            "refdiff: target has both .java and .js/.jsx — "
+                            "set refdiff_lang to java or js in pipeline_plan.json"
+                        )
+                    else:
+                        f.error("refdiff: target has no .java/.js/.jsx source files")
+                else:
+                    f.ok(f"refdiff language: {lang}")
         home, major, note = resolve_java_home()
         if home is None:
             f.error(f"refdiff: no usable JDK (<= {_MAX_GRADLE_JAVA}) found; set JAVA_HOME to e.g. {_DEFAULT_JAVA_HOME}")

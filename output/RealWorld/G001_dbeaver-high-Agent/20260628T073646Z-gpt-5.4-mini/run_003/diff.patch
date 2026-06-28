@@ -1,0 +1,424 @@
+diff --git a/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/semantics/context/SQLQueryRowsSourceContext.java b/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/semantics/context/SQLQueryRowsSourceContext.java
+index 2bee316f1..1151d2838 100644
+--- a/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/semantics/context/SQLQueryRowsSourceContext.java
++++ b/plugins/org.jkiss.dbeaver.model.sql/src/org/jkiss/dbeaver/model/sql/semantics/context/SQLQueryRowsSourceContext.java
+@@ -121,7 +121,13 @@ public class SQLQueryRowsSourceContext {
+      */
+     @NotNull
+     public final SQLQueryRowsSourceContext reset() {
+-        return new SQLQueryRowsSourceContext(this.connectionInfo, false, this.dynamicTableSources, this.relatedContextProvider);
++        return this.fork(
++            false,
++            UnmodifiableMap.emptyMap(),
++            this.dynamicTableSources,
++            UnmodifiableMap.emptyMap(),
++            this.relatedContextProvider
++        );
+     }
+ 
+     /**
+@@ -129,13 +135,18 @@ public class SQLQueryRowsSourceContext {
+      */
+     @NotNull
+     public final SQLQueryRowsSourceContext resetAsUnresolved() {
+-        return new SQLQueryRowsSourceContext(this.connectionInfo, true, this.dynamicTableSources, this.relatedContextProvider);
++        return this.fork(
++            true,
++            UnmodifiableMap.emptyMap(),
++            this.dynamicTableSources,
++            UnmodifiableMap.emptyMap(),
++            this.relatedContextProvider
++        );
+     }
+ 
+     @NotNull
+     public SQLQueryRowsSourceContext setRelatedContextProvider(@NotNull Supplier<SQLQueryRowsDataContext>  relatedContextProvider) {
+-        return new SQLQueryRowsSourceContext(
+-            this,
++        return this.fork(
+             this.hasUnresolvedSource,
+             this.rowsSources,
+             this.dynamicTableSources,
+@@ -231,11 +242,11 @@ public class SQLQueryRowsSourceContext {
+      */
+     @NotNull
+     public SQLQueryRowsSourceContext combine(@NotNull SQLQueryRowsSourceContext other) {
+-        SQLQueryRowsSourceContext result = this.setRowsSources(
++        SQLQueryRowsSourceContext result = this.fork(
++            this.hasUnresolvedSource || other.hasUnresolvedSource,
+             this.rowsSources.combine(other.rowsSources),
+-            this.sourcesByLoweredAlias.combine(other.sourcesByLoweredAlias),
+             this.dynamicTableSources.combine(other.dynamicTableSources),
+-            SQLQueryRowsSourceContext.this.hasUnresolvedSource || other.hasUnresolvedSource,
++            this.sourcesByLoweredAlias.combine(other.sourcesByLoweredAlias),
+             null
+         );
+         other.registerConsumingContext(result);
+@@ -254,27 +265,17 @@ public class SQLQueryRowsSourceContext {
+         SourceResolutionResult srr = new SourceResolutionResult(source, classifiedName, tableOrNull, null);
+ 
+         ArrayList<Map.Entry<SQLQueryComplexName, SourceResolutionResult>> newSourceEntries = new ArrayList<>(5);
+-        newSourceEntries.add(Map.entry(classifiedName, srr));
++        addSourceEntryVariants(newSourceEntries, classifiedName, srr);
+ 
+         if (tableOrNull != null && classifiedName.parts.getFirst().getDefinition() instanceof SQLQuerySymbolByDbObjectDefinition subparent) {
+-            for (SQLQueryComplexName nameFragment = classifiedName.trimStart(); nameFragment != null; nameFragment = nameFragment.trimStart()) {
+-                newSourceEntries.add(Map.entry(nameFragment, srr));
+-            }
+-            SQLQueryComplexName synthesizedName = classifiedName;
+-            for (DBSObject o = subparent.getDbObject().getParentObject(); o != null && !(o instanceof DBPDataSource); o = o.getParentObject()) {
+-                String canonicalName = SQLUtils.identifierToCanonicalForm(this.connectionInfo.dialect, o.getName(), false, true);
+-                SQLQuerySymbolEntry entry = new SQLQuerySymbolEntry(classifiedName.syntaxNode, canonicalName, o.getName(), null);
+-                entry.setDefinition(new SQLQuerySymbolByDbObjectDefinition(o, SQLQuerySemanticUtils.inferSymbolClass(o)));
+-                synthesizedName = synthesizedName.prepend(entry);
+-                newSourceEntries.add(Map.entry(synthesizedName, srr));
+-            }
++            addParentObjectVariants(newSourceEntries, classifiedName, srr, subparent.getDbObject());
+         }
+ 
+-        return this.setRowsSources(
++        return this.fork(
++            this.hasUnresolvedSource,
+             this.rowsSources.put(newSourceEntries),
+-            this.sourcesByLoweredAlias,
+             this.dynamicTableSources,
+-            this.hasUnresolvedSource,
++            this.sourcesByLoweredAlias,
+             this.relatedContextProvider
+         );
+     }
+@@ -294,11 +295,11 @@ public class SQLQueryRowsSourceContext {
+         DBSEntity oldEntryTable = oldEntries.isEmpty() ? null : oldEntries.getFirst().getValue().tableOrNull;
+         SourceResolutionResult newEntry = new SourceResolutionResult(newSource, null, oldEntryTable, alias.getSymbol());
+ 
+-        return this.setRowsSources(
++        return this.fork(
++            this.hasUnresolvedSource,
+             this.rowsSources.remove(oldEntries),
+-            this.sourcesByLoweredAlias.put(alias.getName().toLowerCase(), newEntry),
+             this.dynamicTableSources,
+-            this.hasUnresolvedSource,
++            this.sourcesByLoweredAlias.put(alias.getName().toLowerCase(), newEntry),
+             this.relatedContextProvider
+         );
+     }
+@@ -320,12 +321,24 @@ public class SQLQueryRowsSourceContext {
+                 ));
+             }
+         }
+-        return this.setDynamicRowsSources(this.dynamicTableSources.put(newSourceEntries));
++        return this.fork(
++            this.hasUnresolvedSource,
++            this.rowsSources,
++            this.dynamicTableSources.put(newSourceEntries),
++            this.sourcesByLoweredAlias,
++            this.relatedContextProvider
++        );
+     }
+ 
+     @NotNull
+     public final SQLQueryRowsSourceContext setCteSourcesFrom(@NotNull SQLQueryRowsSourceContext context) {
+-        return this.setDynamicRowsSources(context.dynamicTableSources);
++        return this.fork(
++            this.hasUnresolvedSource,
++            this.rowsSources,
++            context.dynamicTableSources,
++            this.sourcesByLoweredAlias,
++            this.relatedContextProvider
++        );
+     }
+ 
+     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+@@ -397,19 +410,69 @@ public class SQLQueryRowsSourceContext {
+      */
+     @NotNull
+     public SQLQuerySourcesInfoCollection getKnownSources(boolean forQuerySubscope) {
++        Set<SourceResolutionResult> allSourceResolutions = this.collectSourceResolutions(forQuerySubscope);
++        return this.buildKnownSourcesCollection(allSourceResolutions);
++    }
++
++    @NotNull
++    private SQLQueryRowsSourceContext fork(
++        boolean hasUnresolvedSource,
++        @NotNull UnmodifiableMap<SQLQueryComplexName, SourceResolutionResult> rowsSources,
++        @NotNull UnmodifiableMap<String, SourceResolutionResult> dynamicTableSources,
++        @NotNull UnmodifiableMap<String, SourceResolutionResult> sourcesByLoweredAlias,
++        @Nullable Supplier<SQLQueryRowsDataContext> relatedContextProvider
++    ) {
++        return new SQLQueryRowsSourceContext(
++            this,
++            hasUnresolvedSource,
++            rowsSources,
++            dynamicTableSources,
++            sourcesByLoweredAlias,
++            relatedContextProvider
++        );
++    }
++
++    @NotNull
++    private static void addSourceEntryVariants(
++        @NotNull ArrayList<Map.Entry<SQLQueryComplexName, SourceResolutionResult>> entries,
++        @NotNull SQLQueryComplexName classifiedName,
++        @NotNull SourceResolutionResult source
++    ) {
++        entries.add(Map.entry(classifiedName, source));
++        for (SQLQueryComplexName nameFragment = classifiedName.trimStart(); nameFragment != null; nameFragment = nameFragment.trimStart()) {
++            entries.add(Map.entry(nameFragment, source));
++        }
++    }
++
++    private void addParentObjectVariants(
++        @NotNull ArrayList<Map.Entry<SQLQueryComplexName, SourceResolutionResult>> entries,
++        @NotNull SQLQueryComplexName classifiedName,
++        @NotNull SourceResolutionResult source,
++        @NotNull DBSObject parentObject
++    ) {
++        SQLQueryComplexName synthesizedName = classifiedName;
++        for (DBSObject object = parentObject; object != null && !(object instanceof DBPDataSource); object = object.getParentObject()) {
++            String canonicalName = SQLUtils.identifierToCanonicalForm(this.connectionInfo.dialect, object.getName(), false, true);
++            SQLQuerySymbolEntry entry = new SQLQuerySymbolEntry(classifiedName.syntaxNode, canonicalName, object.getName(), null);
++            entry.setDefinition(new SQLQuerySymbolByDbObjectDefinition(object, SQLQuerySemanticUtils.inferSymbolClass(object)));
++            synthesizedName = synthesizedName.prepend(entry);
++            entries.add(Map.entry(synthesizedName, source));
++        }
++    }
++
++    @NotNull
++    private Set<SourceResolutionResult> collectSourceResolutions(boolean forQuerySubscope) {
+         ListNode<SQLQueryRowsSourceContext> queue = ListNode.of(this);
+         Set<SQLQueryRowsSourceContext> queued = new HashSet<>();
+         queued.add(this);
+ 
+-        Set<SourceResolutionResult>  allSourceResolutions = new HashSet<>();
++        Set<SourceResolutionResult> allSourceResolutions = new HashSet<>();
+ 
+         while (queue != null) {
+             SQLQueryRowsSourceContext source = queue.data;
+             queue = queue.next;
+ 
+-            allSourceResolutions.addAll(source.rowsSources.values());
+-            allSourceResolutions.addAll(source.sourcesByLoweredAlias.values());
+-            allSourceResolutions.addAll(source.dynamicTableSources.values());
++            this.collectSourceResolutions(source, allSourceResolutions);
+ 
+             if (forQuerySubscope) {
+                 for (ListNode<SQLQueryRowsSourceContext> item = source.targetRowContexts; item != null; item = item.next) {
+@@ -420,72 +483,51 @@ public class SQLQueryRowsSourceContext {
+             }
+         }
+ 
+-        return new SQLQuerySourcesInfoCollection() {
+-            // combine inferred sources (from the underlying query expression) and dynamically provided (from the enclosing CTE)
+-            private final Map<SQLQueryRowsSourceModel, SourceResolutionResult> resolutionResults =
+-                allSourceResolutions.stream().collect(Collectors.toMap(s -> s.source, Function.identity()));
++        return allSourceResolutions;
++    }
+ 
+-            @NotNull
+-            private final Set<DBSEntity> referencedTables = allSourceResolutions.stream()
+-                .map(s -> s.tableOrNull)
+-                .filter(Objects::nonNull)
+-                .collect(Collectors.toSet());
+-
+-            private final Set<String> aliasesInUse = allSourceResolutions.stream()
+-                .map(s -> s.aliasOrNull)
+-                .filter(Objects::nonNull)
+-                .map(SQLQuerySymbol::getName)
+-                .map(String::toLowerCase)
+-                .collect(Collectors.toSet());
++    private void collectSourceResolutions(
++        @NotNull SQLQueryRowsSourceContext source,
++        @NotNull Set<SourceResolutionResult> allSourceResolutions
++    ) {
++        allSourceResolutions.addAll(source.rowsSources.values());
++        allSourceResolutions.addAll(source.sourcesByLoweredAlias.values());
++        allSourceResolutions.addAll(source.dynamicTableSources.values());
++    }
++
++    @NotNull
++    private SQLQuerySourcesInfoCollection buildKnownSourcesCollection(@NotNull Set<SourceResolutionResult> allSourceResolutions) {
++        Map<SQLQueryRowsSourceModel, SourceResolutionResult> resolutionResults = allSourceResolutions.stream()
++            .collect(Collectors.toMap(s -> s.source, Function.identity()));
++        Set<DBSEntity> referencedTables = allSourceResolutions.stream()
++            .map(s -> s.tableOrNull)
++            .filter(Objects::nonNull)
++            .collect(Collectors.toSet());
++        Set<String> aliasesInUse = allSourceResolutions.stream()
++            .map(s -> s.aliasOrNull)
++            .filter(Objects::nonNull)
++            .map(SQLQuerySymbol::getName)
++            .map(String::toLowerCase)
++            .collect(Collectors.toSet());
+ 
++        return new SQLQuerySourcesInfoCollection() {
+             @NotNull
+             @Override
+             public Map<SQLQueryRowsSourceModel, SourceResolutionResult> getResolutionResults() {
+-                return this.resolutionResults;
++                return resolutionResults;
+             }
+ 
+             @NotNull
+             @Override
+             public Set<DBSEntity> getReferencedTables() {
+-                return this.referencedTables;
++                return referencedTables;
+             }
+ 
+             @NotNull
+             @Override
+             public Set<String> getAliasesInUse() {
+-                return this.aliasesInUse;
++                return aliasesInUse;
+             }
+         };
+     }
+-
+-    @NotNull
+-    private SQLQueryRowsSourceContext setRowsSources(
+-        @NotNull UnmodifiableMap<SQLQueryComplexName, SourceResolutionResult> rowsSources,
+-        @NotNull UnmodifiableMap<String, SourceResolutionResult> sourcesByLoweredAlias,
+-        @NotNull UnmodifiableMap<String, SourceResolutionResult> dynamicTableSources,
+-        boolean hasUnresolvedSource,
+-        @Nullable Supplier<SQLQueryRowsDataContext> relatedContextProvider
+-    ) {
+-        return new SQLQueryRowsSourceContext(
+-            this,
+-            hasUnresolvedSource,
+-            rowsSources,
+-            dynamicTableSources,
+-            sourcesByLoweredAlias,
+-            relatedContextProvider
+-        );
+-    }
+-
+-    @NotNull
+-    private SQLQueryRowsSourceContext setDynamicRowsSources(@NotNull UnmodifiableMap<String, SourceResolutionResult> dynamicTableSources) {
+-        return new SQLQueryRowsSourceContext(
+-            this,
+-            this.hasUnresolvedSource,
+-            this.rowsSources,
+-            dynamicTableSources,
+-            this.sourcesByLoweredAlias,
+-            this.relatedContextProvider
+-        );
+-    }
+-
+ }
+diff --git a/test/org.jkiss.dbeaver.model.sql.test/src/org/jkiss/dbeaver/model/sql/semantics/context/SQLQueryRowsSourceContextTest.java b/test/org.jkiss.dbeaver.model.sql.test/src/org/jkiss/dbeaver/model/sql/semantics/context/SQLQueryRowsSourceContextTest.java
+new file mode 100644
+index 000000000..55e437ffe
+--- /dev/null
++++ b/test/org.jkiss.dbeaver.model.sql.test/src/org/jkiss/dbeaver/model/sql/semantics/context/SQLQueryRowsSourceContextTest.java
+@@ -0,0 +1,111 @@
++/*
++ * DBeaver - Universal Database Manager
++ * Copyright (C) 2010-2026 DBeaver Corp and others
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.jkiss.dbeaver.model.sql.semantics.context;
++
++import org.antlr.v4.runtime.misc.Interval;
++import org.jkiss.code.NotNull;
++import org.jkiss.code.Nullable;
++import org.jkiss.dbeaver.model.sql.SQLDialect;
++import org.jkiss.dbeaver.model.sql.semantics.SQLQueryComplexName;
++import org.jkiss.dbeaver.model.sql.semantics.SQLQueryRecognitionContext;
++import org.jkiss.dbeaver.model.sql.semantics.SQLQuerySymbolEntry;
++import org.jkiss.dbeaver.model.sql.semantics.model.SQLQueryNodeModelVisitor;
++import org.jkiss.dbeaver.model.sql.semantics.model.select.SQLQueryRowsSourceModel;
++import org.jkiss.dbeaver.model.stm.STMTreeNode;
++import org.jkiss.junit.DBeaverUnitTest;
++import org.junit.jupiter.api.Test;
++import org.mockito.Mockito;
++
++import java.util.List;
++import java.util.Set;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertSame;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++public class SQLQueryRowsSourceContextTest extends DBeaverUnitTest {
++
++    @Test
++    public void appendSourceShouldRegisterVariantsAndExposeChildKnownSources() {
++        SQLQueryRowsSourceContext parent = new SQLQueryRowsSourceContext(
++            new SQLQueryConnectionDummyContext(Mockito.mock(SQLDialect.class), Set.of(), Set.of())
++        );
++
++        TestRowsSourceModel source = new TestRowsSourceModel(syntaxNode());
++        SQLQueryComplexName qualifiedName = complexName("schema", "table");
++
++        SQLQueryRowsSourceContext child = parent.appendSource(source, qualifiedName, null);
++
++        assertSame(source, child.findReferencedSourceExact(qualifiedName));
++        assertSame(source, child.findReferencedSourceExact(complexName("table")));
++
++        SQLQueryRowsSourceContext.SourceResolutionInfo trimmedLookup = child.findReferencedSource(complexName("schema", "table", "column"));
++        assertNotNull(trimmedLookup);
++        assertEquals(qualifiedName, trimmedLookup.key());
++        assertSame(source, trimmedLookup.target().source);
++
++        SQLQuerySourcesInfoCollection directKnownSources = parent.getKnownSources(false);
++        SQLQuerySourcesInfoCollection subtreeKnownSources = parent.getKnownSources(true);
++        assertTrue(directKnownSources.getResolutionResults().isEmpty());
++        assertTrue(subtreeKnownSources.getResolutionResults().containsKey(source));
++        assertSame(source, subtreeKnownSources.getResolutionResults().get(source).source);
++    }
++
++    @NotNull
++    private static STMTreeNode syntaxNode() {
++        STMTreeNode node = Mockito.mock(STMTreeNode.class);
++        Mockito.when(node.getRealInterval()).thenReturn(Interval.of(0, 0));
++        return node;
++    }
++
++    @NotNull
++    private static SQLQueryComplexName complexName(@NotNull String... parts) {
++        STMTreeNode node = syntaxNode();
++        List<SQLQuerySymbolEntry> entries = java.util.Arrays.stream(parts)
++            .map(part -> new SQLQuerySymbolEntry(node, part, part, null))
++            .toList();
++        return new SQLQueryComplexName(node, entries, 0, null);
++    }
++
++    private static final class TestRowsSourceModel extends SQLQueryRowsSourceModel {
++        private TestRowsSourceModel(@NotNull STMTreeNode syntaxNode) {
++            super(syntaxNode);
++        }
++
++        @Override
++        protected SQLQueryRowsSourceContext resolveRowSourcesImpl(
++            @NotNull SQLQueryRowsSourceContext context,
++            @NotNull SQLQueryRecognitionContext statistics
++        ) {
++            return context;
++        }
++
++        @Override
++        protected SQLQueryRowsDataContext resolveRowDataImpl(
++            @NotNull SQLQueryRowsDataContext context,
++            @NotNull SQLQueryRecognitionContext statistics
++        ) {
++            return context;
++        }
++
++        @Override
++        protected <R, T> R applyImpl(@NotNull SQLQueryNodeModelVisitor<T, R> visitor, @Nullable T arg) {
++            return null;
++        }
++    }
++}

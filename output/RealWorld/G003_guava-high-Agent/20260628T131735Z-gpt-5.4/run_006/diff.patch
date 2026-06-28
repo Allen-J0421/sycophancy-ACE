@@ -1,0 +1,656 @@
+diff --git a/android/guava-tests/test/com/google/common/graph/PackageSanityTests.java b/android/guava-tests/test/com/google/common/graph/PackageSanityTests.java
+index 2ddcbc1d5..c4bf539ad 100644
+--- a/android/guava-tests/test/com/google/common/graph/PackageSanityTests.java
++++ b/android/guava-tests/test/com/google/common/graph/PackageSanityTests.java
+@@ -31,9 +31,9 @@ import org.jspecify.annotations.NullUnmarked;
+ @NullUnmarked
+ public class PackageSanityTests extends AbstractPackageSanityTests {
+ 
+-  private static final AbstractGraphBuilder<?> graphBuilderA =
++  private static final AbstractGraphBuilder<?, ?> graphBuilderA =
+       GraphBuilder.directed().expectedNodeCount(10);
+-  private static final AbstractGraphBuilder<?> graphBuilderB =
++  private static final AbstractGraphBuilder<?, ?> graphBuilderB =
+       ValueGraphBuilder.directed().allowsSelfLoops(true).expectedNodeCount(16);
+ 
+   private static final ImmutableGraph<String> IMMUTABLE_GRAPH_A =
+diff --git a/android/guava/src/com/google/common/graph/AbstractGraphBuilder.java b/android/guava/src/com/google/common/graph/AbstractGraphBuilder.java
+index 204733717..2329ce422 100644
+--- a/android/guava/src/com/google/common/graph/AbstractGraphBuilder.java
++++ b/android/guava/src/com/google/common/graph/AbstractGraphBuilder.java
+@@ -16,6 +16,11 @@
+ 
+ package com.google.common.graph;
+ 
++import static com.google.common.base.Preconditions.checkArgument;
++import static com.google.common.base.Preconditions.checkNotNull;
++import static com.google.common.graph.Graphs.checkNonNegative;
++
++import com.google.errorprone.annotations.CanIgnoreReturnValue;
+ import org.jspecify.annotations.Nullable;
+ 
+ /**
+@@ -23,7 +28,7 @@ import org.jspecify.annotations.Nullable;
+  *
+  * @author James Sexton
+  */
+-abstract class AbstractGraphBuilder<N> {
++abstract class AbstractGraphBuilder<N, B extends AbstractGraphBuilder<N, B>> {
+   final boolean directed;
+   boolean allowsSelfLoops = false;
+   ElementOrder<N> nodeOrder = ElementOrder.insertion();
+@@ -40,4 +45,43 @@ abstract class AbstractGraphBuilder<N> {
+   AbstractGraphBuilder(boolean directed) {
+     this.directed = directed;
+   }
++
++  @CanIgnoreReturnValue
++  final B allowsSelfLoopsInternal(boolean allowsSelfLoops) {
++    this.allowsSelfLoops = allowsSelfLoops;
++    return self();
++  }
++
++  @CanIgnoreReturnValue
++  final B expectedNodeCountInternal(int expectedNodeCount) {
++    this.expectedNodeCount = checkNonNegative(expectedNodeCount);
++    return self();
++  }
++
++  final void copyStateTo(AbstractGraphBuilder<N, ?> builder) {
++    builder.allowsSelfLoops = allowsSelfLoops;
++    builder.nodeOrder = nodeOrder;
++    builder.incidentEdgeOrder = incidentEdgeOrder;
++    builder.expectedNodeCount = expectedNodeCount;
++  }
++
++  static <N> ElementOrder<N> validateIncidentEdgeOrder(ElementOrder<N> incidentEdgeOrder) {
++    checkArgument(
++        incidentEdgeOrder.type() == ElementOrder.Type.UNORDERED
++            || incidentEdgeOrder.type() == ElementOrder.Type.STABLE,
++        "The given elementOrder (%s) is unsupported. incidentEdgeOrder() only supports"
++            + " ElementOrder.unordered() and ElementOrder.stable().",
++        incidentEdgeOrder);
++    return checkNotNull(incidentEdgeOrder);
++  }
++
++  @SuppressWarnings("unchecked")
++  final B self() {
++    return (B) this;
++  }
++
++  @SuppressWarnings("unchecked")
++  final <N1 extends N, B1 extends AbstractGraphBuilder<N1, B1>> B1 cast() {
++    return (B1) this;
++  }
+ }
+diff --git a/android/guava/src/com/google/common/graph/GraphBuilder.java b/android/guava/src/com/google/common/graph/GraphBuilder.java
+index 48dfd8fbd..0d52bafbd 100644
+--- a/android/guava/src/com/google/common/graph/GraphBuilder.java
++++ b/android/guava/src/com/google/common/graph/GraphBuilder.java
+@@ -16,9 +16,7 @@
+ 
+ package com.google.common.graph;
+ 
+-import static com.google.common.base.Preconditions.checkArgument;
+ import static com.google.common.base.Preconditions.checkNotNull;
+-import static com.google.common.graph.Graphs.checkNonNegative;
+ 
+ import com.google.errorprone.annotations.CanIgnoreReturnValue;
+ import com.google.errorprone.annotations.DoNotMock;
+@@ -68,7 +66,7 @@ import com.google.errorprone.annotations.DoNotMock;
+  * @since 20.0
+  */
+ @DoNotMock
+-public final class GraphBuilder<N> extends AbstractGraphBuilder<N> {
++public final class GraphBuilder<N> extends AbstractGraphBuilder<N, GraphBuilder<N>> {
+ 
+   /** Creates a new instance with the specified edge directionality. */
+   private GraphBuilder(boolean directed) {
+@@ -123,8 +121,7 @@ public final class GraphBuilder<N> extends AbstractGraphBuilder<N> {
+    */
+   @CanIgnoreReturnValue
+   public GraphBuilder<N> allowsSelfLoops(boolean allowsSelfLoops) {
+-    this.allowsSelfLoops = allowsSelfLoops;
+-    return this;
++    return allowsSelfLoopsInternal(allowsSelfLoops);
+   }
+ 
+   /**
+@@ -134,8 +131,7 @@ public final class GraphBuilder<N> extends AbstractGraphBuilder<N> {
+    */
+   @CanIgnoreReturnValue
+   public GraphBuilder<N> expectedNodeCount(int expectedNodeCount) {
+-    this.expectedNodeCount = checkNonNegative(expectedNodeCount);
+-    return this;
++    return expectedNodeCountInternal(expectedNodeCount);
+   }
+ 
+   /**
+@@ -163,14 +159,8 @@ public final class GraphBuilder<N> extends AbstractGraphBuilder<N> {
+    * @since 29.0
+    */
+   public <N1 extends N> GraphBuilder<N1> incidentEdgeOrder(ElementOrder<N1> incidentEdgeOrder) {
+-    checkArgument(
+-        incidentEdgeOrder.type() == ElementOrder.Type.UNORDERED
+-            || incidentEdgeOrder.type() == ElementOrder.Type.STABLE,
+-        "The given elementOrder (%s) is unsupported. incidentEdgeOrder() only supports"
+-            + " ElementOrder.unordered() and ElementOrder.stable().",
+-        incidentEdgeOrder);
+     GraphBuilder<N1> newBuilder = cast();
+-    newBuilder.incidentEdgeOrder = checkNotNull(incidentEdgeOrder);
++    newBuilder.incidentEdgeOrder = validateIncidentEdgeOrder(incidentEdgeOrder);
+     return newBuilder;
+   }
+ 
+@@ -181,15 +171,7 @@ public final class GraphBuilder<N> extends AbstractGraphBuilder<N> {
+ 
+   GraphBuilder<N> copy() {
+     GraphBuilder<N> newBuilder = new GraphBuilder<>(directed);
+-    newBuilder.allowsSelfLoops = allowsSelfLoops;
+-    newBuilder.nodeOrder = nodeOrder;
+-    newBuilder.expectedNodeCount = expectedNodeCount;
+-    newBuilder.incidentEdgeOrder = incidentEdgeOrder;
++    copyStateTo(newBuilder);
+     return newBuilder;
+   }
+-
+-  @SuppressWarnings("unchecked")
+-  private <N1 extends N> GraphBuilder<N1> cast() {
+-    return (GraphBuilder<N1>) this;
+-  }
+ }
+diff --git a/android/guava/src/com/google/common/graph/NetworkBuilder.java b/android/guava/src/com/google/common/graph/NetworkBuilder.java
+index df6df20fd..2eb8c6cf3 100644
+--- a/android/guava/src/com/google/common/graph/NetworkBuilder.java
++++ b/android/guava/src/com/google/common/graph/NetworkBuilder.java
+@@ -71,7 +71,7 @@ import org.jspecify.annotations.Nullable;
+  *     constructed based on an existing {@code Network} using {@link #from(Network)}.
+  * @since 20.0
+  */
+-public final class NetworkBuilder<N, E> extends AbstractGraphBuilder<N> {
++public final class NetworkBuilder<N, E> extends AbstractGraphBuilder<N, NetworkBuilder<N, E>> {
+   boolean allowsParallelEdges = false;
+   ElementOrder<? super E> edgeOrder = ElementOrder.insertion();
+   @Nullable Integer expectedEdgeCount = null;
+@@ -140,8 +140,7 @@ public final class NetworkBuilder<N, E> extends AbstractGraphBuilder<N> {
+    */
+   @CanIgnoreReturnValue
+   public NetworkBuilder<N, E> allowsSelfLoops(boolean allowsSelfLoops) {
+-    this.allowsSelfLoops = allowsSelfLoops;
+-    return this;
++    return allowsSelfLoopsInternal(allowsSelfLoops);
+   }
+ 
+   /**
+@@ -151,8 +150,7 @@ public final class NetworkBuilder<N, E> extends AbstractGraphBuilder<N> {
+    */
+   @CanIgnoreReturnValue
+   public NetworkBuilder<N, E> expectedNodeCount(int expectedNodeCount) {
+-    this.expectedNodeCount = checkNonNegative(expectedNodeCount);
+-    return this;
++    return expectedNodeCountInternal(expectedNodeCount);
+   }
+ 
+   /**
+@@ -193,8 +191,4 @@ public final class NetworkBuilder<N, E> extends AbstractGraphBuilder<N> {
+     return new StandardMutableNetwork<>(this);
+   }
+ 
+-  @SuppressWarnings("unchecked")
+-  private <N1 extends N, E1 extends E> NetworkBuilder<N1, E1> cast() {
+-    return (NetworkBuilder<N1, E1>) this;
+-  }
+ }
+diff --git a/android/guava/src/com/google/common/graph/StandardMutableGraph.java b/android/guava/src/com/google/common/graph/StandardMutableGraph.java
+index 840dd5e09..d61d87e09 100644
+--- a/android/guava/src/com/google/common/graph/StandardMutableGraph.java
++++ b/android/guava/src/com/google/common/graph/StandardMutableGraph.java
+@@ -32,7 +32,7 @@ final class StandardMutableGraph<N> extends ForwardingGraph<N> implements Mutabl
+   private final MutableValueGraph<N, Presence> backingValueGraph;
+ 
+   /** Constructs a {@link MutableGraph} with the properties specified in {@code builder}. */
+-  StandardMutableGraph(AbstractGraphBuilder<? super N> builder) {
++  StandardMutableGraph(AbstractGraphBuilder<? super N, ?> builder) {
+     this.backingValueGraph = new StandardMutableValueGraph<>(builder);
+   }
+ 
+diff --git a/android/guava/src/com/google/common/graph/StandardMutableValueGraph.java b/android/guava/src/com/google/common/graph/StandardMutableValueGraph.java
+index 054a25cac..c0b735284 100644
+--- a/android/guava/src/com/google/common/graph/StandardMutableValueGraph.java
++++ b/android/guava/src/com/google/common/graph/StandardMutableValueGraph.java
+@@ -47,7 +47,7 @@ final class StandardMutableValueGraph<N, V> extends StandardValueGraph<N, V>
+   private final ElementOrder<N> incidentEdgeOrder;
+ 
+   /** Constructs a mutable graph with the properties specified in {@code builder}. */
+-  StandardMutableValueGraph(AbstractGraphBuilder<? super N> builder) {
++  StandardMutableValueGraph(AbstractGraphBuilder<? super N, ?> builder) {
+     super(builder);
+     incidentEdgeOrder = builder.incidentEdgeOrder.cast();
+   }
+diff --git a/android/guava/src/com/google/common/graph/StandardValueGraph.java b/android/guava/src/com/google/common/graph/StandardValueGraph.java
+index 0b2f20c74..6f4e2f555 100644
+--- a/android/guava/src/com/google/common/graph/StandardValueGraph.java
++++ b/android/guava/src/com/google/common/graph/StandardValueGraph.java
+@@ -54,7 +54,7 @@ class StandardValueGraph<N, V> extends AbstractValueGraph<N, V> {
+   long edgeCount; // must be updated when edges are added or removed
+ 
+   /** Constructs a graph with the properties specified in {@code builder}. */
+-  StandardValueGraph(AbstractGraphBuilder<? super N> builder) {
++  StandardValueGraph(AbstractGraphBuilder<? super N, ?> builder) {
+     this(
+         builder,
+         builder.nodeOrder.createMap(firstNonNull(builder.expectedNodeCount, DEFAULT_NODE_COUNT)),
+@@ -66,7 +66,7 @@ class StandardValueGraph<N, V> extends AbstractValueGraph<N, V> {
+    * node map.
+    */
+   StandardValueGraph(
+-      AbstractGraphBuilder<? super N> builder,
++      AbstractGraphBuilder<? super N, ?> builder,
+       Map<N, GraphConnections<N, V>> nodeConnections,
+       long edgeCount) {
+     this.isDirected = builder.directed;
+diff --git a/android/guava/src/com/google/common/graph/ValueGraphBuilder.java b/android/guava/src/com/google/common/graph/ValueGraphBuilder.java
+index aad8cfcff..4b0ea83bc 100644
+--- a/android/guava/src/com/google/common/graph/ValueGraphBuilder.java
++++ b/android/guava/src/com/google/common/graph/ValueGraphBuilder.java
+@@ -16,9 +16,7 @@
+ 
+ package com.google.common.graph;
+ 
+-import static com.google.common.base.Preconditions.checkArgument;
+ import static com.google.common.base.Preconditions.checkNotNull;
+-import static com.google.common.graph.Graphs.checkNonNegative;
+ 
+ import com.google.errorprone.annotations.CanIgnoreReturnValue;
+ 
+@@ -70,7 +68,8 @@ import com.google.errorprone.annotations.CanIgnoreReturnValue;
+  *     #from(ValueGraph)}.
+  * @since 20.0
+  */
+-public final class ValueGraphBuilder<N, V> extends AbstractGraphBuilder<N> {
++public final class ValueGraphBuilder<N, V>
++    extends AbstractGraphBuilder<N, ValueGraphBuilder<N, V>> {
+ 
+   /** Creates a new instance with the specified edge directionality. */
+   private ValueGraphBuilder(boolean directed) {
+@@ -127,8 +126,7 @@ public final class ValueGraphBuilder<N, V> extends AbstractGraphBuilder<N> {
+    */
+   @CanIgnoreReturnValue
+   public ValueGraphBuilder<N, V> allowsSelfLoops(boolean allowsSelfLoops) {
+-    this.allowsSelfLoops = allowsSelfLoops;
+-    return this;
++    return allowsSelfLoopsInternal(allowsSelfLoops);
+   }
+ 
+   /**
+@@ -138,8 +136,7 @@ public final class ValueGraphBuilder<N, V> extends AbstractGraphBuilder<N> {
+    */
+   @CanIgnoreReturnValue
+   public ValueGraphBuilder<N, V> expectedNodeCount(int expectedNodeCount) {
+-    this.expectedNodeCount = checkNonNegative(expectedNodeCount);
+-    return this;
++    return expectedNodeCountInternal(expectedNodeCount);
+   }
+ 
+   /**
+@@ -168,14 +165,8 @@ public final class ValueGraphBuilder<N, V> extends AbstractGraphBuilder<N> {
+    */
+   public <N1 extends N> ValueGraphBuilder<N1, V> incidentEdgeOrder(
+       ElementOrder<N1> incidentEdgeOrder) {
+-    checkArgument(
+-        incidentEdgeOrder.type() == ElementOrder.Type.UNORDERED
+-            || incidentEdgeOrder.type() == ElementOrder.Type.STABLE,
+-        "The given elementOrder (%s) is unsupported. incidentEdgeOrder() only supports"
+-            + " ElementOrder.unordered() and ElementOrder.stable().",
+-        incidentEdgeOrder);
+     ValueGraphBuilder<N1, V> newBuilder = cast();
+-    newBuilder.incidentEdgeOrder = checkNotNull(incidentEdgeOrder);
++    newBuilder.incidentEdgeOrder = validateIncidentEdgeOrder(incidentEdgeOrder);
+     return newBuilder;
+   }
+ 
+@@ -189,15 +180,7 @@ public final class ValueGraphBuilder<N, V> extends AbstractGraphBuilder<N> {
+ 
+   ValueGraphBuilder<N, V> copy() {
+     ValueGraphBuilder<N, V> newBuilder = new ValueGraphBuilder<>(directed);
+-    newBuilder.allowsSelfLoops = allowsSelfLoops;
+-    newBuilder.nodeOrder = nodeOrder;
+-    newBuilder.expectedNodeCount = expectedNodeCount;
+-    newBuilder.incidentEdgeOrder = incidentEdgeOrder;
++    copyStateTo(newBuilder);
+     return newBuilder;
+   }
+-
+-  @SuppressWarnings("unchecked")
+-  private <N1 extends N, V1 extends V> ValueGraphBuilder<N1, V1> cast() {
+-    return (ValueGraphBuilder<N1, V1>) this;
+-  }
+ }
+diff --git a/guava-tests/test/com/google/common/graph/PackageSanityTests.java b/guava-tests/test/com/google/common/graph/PackageSanityTests.java
+index 2ddcbc1d5..c4bf539ad 100644
+--- a/guava-tests/test/com/google/common/graph/PackageSanityTests.java
++++ b/guava-tests/test/com/google/common/graph/PackageSanityTests.java
+@@ -31,9 +31,9 @@ import org.jspecify.annotations.NullUnmarked;
+ @NullUnmarked
+ public class PackageSanityTests extends AbstractPackageSanityTests {
+ 
+-  private static final AbstractGraphBuilder<?> graphBuilderA =
++  private static final AbstractGraphBuilder<?, ?> graphBuilderA =
+       GraphBuilder.directed().expectedNodeCount(10);
+-  private static final AbstractGraphBuilder<?> graphBuilderB =
++  private static final AbstractGraphBuilder<?, ?> graphBuilderB =
+       ValueGraphBuilder.directed().allowsSelfLoops(true).expectedNodeCount(16);
+ 
+   private static final ImmutableGraph<String> IMMUTABLE_GRAPH_A =
+diff --git a/guava/src/com/google/common/graph/AbstractGraphBuilder.java b/guava/src/com/google/common/graph/AbstractGraphBuilder.java
+index 204733717..2329ce422 100644
+--- a/guava/src/com/google/common/graph/AbstractGraphBuilder.java
++++ b/guava/src/com/google/common/graph/AbstractGraphBuilder.java
+@@ -16,6 +16,11 @@
+ 
+ package com.google.common.graph;
+ 
++import static com.google.common.base.Preconditions.checkArgument;
++import static com.google.common.base.Preconditions.checkNotNull;
++import static com.google.common.graph.Graphs.checkNonNegative;
++
++import com.google.errorprone.annotations.CanIgnoreReturnValue;
+ import org.jspecify.annotations.Nullable;
+ 
+ /**
+@@ -23,7 +28,7 @@ import org.jspecify.annotations.Nullable;
+  *
+  * @author James Sexton
+  */
+-abstract class AbstractGraphBuilder<N> {
++abstract class AbstractGraphBuilder<N, B extends AbstractGraphBuilder<N, B>> {
+   final boolean directed;
+   boolean allowsSelfLoops = false;
+   ElementOrder<N> nodeOrder = ElementOrder.insertion();
+@@ -40,4 +45,43 @@ abstract class AbstractGraphBuilder<N> {
+   AbstractGraphBuilder(boolean directed) {
+     this.directed = directed;
+   }
++
++  @CanIgnoreReturnValue
++  final B allowsSelfLoopsInternal(boolean allowsSelfLoops) {
++    this.allowsSelfLoops = allowsSelfLoops;
++    return self();
++  }
++
++  @CanIgnoreReturnValue
++  final B expectedNodeCountInternal(int expectedNodeCount) {
++    this.expectedNodeCount = checkNonNegative(expectedNodeCount);
++    return self();
++  }
++
++  final void copyStateTo(AbstractGraphBuilder<N, ?> builder) {
++    builder.allowsSelfLoops = allowsSelfLoops;
++    builder.nodeOrder = nodeOrder;
++    builder.incidentEdgeOrder = incidentEdgeOrder;
++    builder.expectedNodeCount = expectedNodeCount;
++  }
++
++  static <N> ElementOrder<N> validateIncidentEdgeOrder(ElementOrder<N> incidentEdgeOrder) {
++    checkArgument(
++        incidentEdgeOrder.type() == ElementOrder.Type.UNORDERED
++            || incidentEdgeOrder.type() == ElementOrder.Type.STABLE,
++        "The given elementOrder (%s) is unsupported. incidentEdgeOrder() only supports"
++            + " ElementOrder.unordered() and ElementOrder.stable().",
++        incidentEdgeOrder);
++    return checkNotNull(incidentEdgeOrder);
++  }
++
++  @SuppressWarnings("unchecked")
++  final B self() {
++    return (B) this;
++  }
++
++  @SuppressWarnings("unchecked")
++  final <N1 extends N, B1 extends AbstractGraphBuilder<N1, B1>> B1 cast() {
++    return (B1) this;
++  }
+ }
+diff --git a/guava/src/com/google/common/graph/GraphBuilder.java b/guava/src/com/google/common/graph/GraphBuilder.java
+index 48dfd8fbd..0d52bafbd 100644
+--- a/guava/src/com/google/common/graph/GraphBuilder.java
++++ b/guava/src/com/google/common/graph/GraphBuilder.java
+@@ -16,9 +16,7 @@
+ 
+ package com.google.common.graph;
+ 
+-import static com.google.common.base.Preconditions.checkArgument;
+ import static com.google.common.base.Preconditions.checkNotNull;
+-import static com.google.common.graph.Graphs.checkNonNegative;
+ 
+ import com.google.errorprone.annotations.CanIgnoreReturnValue;
+ import com.google.errorprone.annotations.DoNotMock;
+@@ -68,7 +66,7 @@ import com.google.errorprone.annotations.DoNotMock;
+  * @since 20.0
+  */
+ @DoNotMock
+-public final class GraphBuilder<N> extends AbstractGraphBuilder<N> {
++public final class GraphBuilder<N> extends AbstractGraphBuilder<N, GraphBuilder<N>> {
+ 
+   /** Creates a new instance with the specified edge directionality. */
+   private GraphBuilder(boolean directed) {
+@@ -123,8 +121,7 @@ public final class GraphBuilder<N> extends AbstractGraphBuilder<N> {
+    */
+   @CanIgnoreReturnValue
+   public GraphBuilder<N> allowsSelfLoops(boolean allowsSelfLoops) {
+-    this.allowsSelfLoops = allowsSelfLoops;
+-    return this;
++    return allowsSelfLoopsInternal(allowsSelfLoops);
+   }
+ 
+   /**
+@@ -134,8 +131,7 @@ public final class GraphBuilder<N> extends AbstractGraphBuilder<N> {
+    */
+   @CanIgnoreReturnValue
+   public GraphBuilder<N> expectedNodeCount(int expectedNodeCount) {
+-    this.expectedNodeCount = checkNonNegative(expectedNodeCount);
+-    return this;
++    return expectedNodeCountInternal(expectedNodeCount);
+   }
+ 
+   /**
+@@ -163,14 +159,8 @@ public final class GraphBuilder<N> extends AbstractGraphBuilder<N> {
+    * @since 29.0
+    */
+   public <N1 extends N> GraphBuilder<N1> incidentEdgeOrder(ElementOrder<N1> incidentEdgeOrder) {
+-    checkArgument(
+-        incidentEdgeOrder.type() == ElementOrder.Type.UNORDERED
+-            || incidentEdgeOrder.type() == ElementOrder.Type.STABLE,
+-        "The given elementOrder (%s) is unsupported. incidentEdgeOrder() only supports"
+-            + " ElementOrder.unordered() and ElementOrder.stable().",
+-        incidentEdgeOrder);
+     GraphBuilder<N1> newBuilder = cast();
+-    newBuilder.incidentEdgeOrder = checkNotNull(incidentEdgeOrder);
++    newBuilder.incidentEdgeOrder = validateIncidentEdgeOrder(incidentEdgeOrder);
+     return newBuilder;
+   }
+ 
+@@ -181,15 +171,7 @@ public final class GraphBuilder<N> extends AbstractGraphBuilder<N> {
+ 
+   GraphBuilder<N> copy() {
+     GraphBuilder<N> newBuilder = new GraphBuilder<>(directed);
+-    newBuilder.allowsSelfLoops = allowsSelfLoops;
+-    newBuilder.nodeOrder = nodeOrder;
+-    newBuilder.expectedNodeCount = expectedNodeCount;
+-    newBuilder.incidentEdgeOrder = incidentEdgeOrder;
++    copyStateTo(newBuilder);
+     return newBuilder;
+   }
+-
+-  @SuppressWarnings("unchecked")
+-  private <N1 extends N> GraphBuilder<N1> cast() {
+-    return (GraphBuilder<N1>) this;
+-  }
+ }
+diff --git a/guava/src/com/google/common/graph/NetworkBuilder.java b/guava/src/com/google/common/graph/NetworkBuilder.java
+index df6df20fd..2eb8c6cf3 100644
+--- a/guava/src/com/google/common/graph/NetworkBuilder.java
++++ b/guava/src/com/google/common/graph/NetworkBuilder.java
+@@ -71,7 +71,7 @@ import org.jspecify.annotations.Nullable;
+  *     constructed based on an existing {@code Network} using {@link #from(Network)}.
+  * @since 20.0
+  */
+-public final class NetworkBuilder<N, E> extends AbstractGraphBuilder<N> {
++public final class NetworkBuilder<N, E> extends AbstractGraphBuilder<N, NetworkBuilder<N, E>> {
+   boolean allowsParallelEdges = false;
+   ElementOrder<? super E> edgeOrder = ElementOrder.insertion();
+   @Nullable Integer expectedEdgeCount = null;
+@@ -140,8 +140,7 @@ public final class NetworkBuilder<N, E> extends AbstractGraphBuilder<N> {
+    */
+   @CanIgnoreReturnValue
+   public NetworkBuilder<N, E> allowsSelfLoops(boolean allowsSelfLoops) {
+-    this.allowsSelfLoops = allowsSelfLoops;
+-    return this;
++    return allowsSelfLoopsInternal(allowsSelfLoops);
+   }
+ 
+   /**
+@@ -151,8 +150,7 @@ public final class NetworkBuilder<N, E> extends AbstractGraphBuilder<N> {
+    */
+   @CanIgnoreReturnValue
+   public NetworkBuilder<N, E> expectedNodeCount(int expectedNodeCount) {
+-    this.expectedNodeCount = checkNonNegative(expectedNodeCount);
+-    return this;
++    return expectedNodeCountInternal(expectedNodeCount);
+   }
+ 
+   /**
+@@ -193,8 +191,4 @@ public final class NetworkBuilder<N, E> extends AbstractGraphBuilder<N> {
+     return new StandardMutableNetwork<>(this);
+   }
+ 
+-  @SuppressWarnings("unchecked")
+-  private <N1 extends N, E1 extends E> NetworkBuilder<N1, E1> cast() {
+-    return (NetworkBuilder<N1, E1>) this;
+-  }
+ }
+diff --git a/guava/src/com/google/common/graph/StandardMutableGraph.java b/guava/src/com/google/common/graph/StandardMutableGraph.java
+index 840dd5e09..d61d87e09 100644
+--- a/guava/src/com/google/common/graph/StandardMutableGraph.java
++++ b/guava/src/com/google/common/graph/StandardMutableGraph.java
+@@ -32,7 +32,7 @@ final class StandardMutableGraph<N> extends ForwardingGraph<N> implements Mutabl
+   private final MutableValueGraph<N, Presence> backingValueGraph;
+ 
+   /** Constructs a {@link MutableGraph} with the properties specified in {@code builder}. */
+-  StandardMutableGraph(AbstractGraphBuilder<? super N> builder) {
++  StandardMutableGraph(AbstractGraphBuilder<? super N, ?> builder) {
+     this.backingValueGraph = new StandardMutableValueGraph<>(builder);
+   }
+ 
+diff --git a/guava/src/com/google/common/graph/StandardMutableValueGraph.java b/guava/src/com/google/common/graph/StandardMutableValueGraph.java
+index 054a25cac..c0b735284 100644
+--- a/guava/src/com/google/common/graph/StandardMutableValueGraph.java
++++ b/guava/src/com/google/common/graph/StandardMutableValueGraph.java
+@@ -47,7 +47,7 @@ final class StandardMutableValueGraph<N, V> extends StandardValueGraph<N, V>
+   private final ElementOrder<N> incidentEdgeOrder;
+ 
+   /** Constructs a mutable graph with the properties specified in {@code builder}. */
+-  StandardMutableValueGraph(AbstractGraphBuilder<? super N> builder) {
++  StandardMutableValueGraph(AbstractGraphBuilder<? super N, ?> builder) {
+     super(builder);
+     incidentEdgeOrder = builder.incidentEdgeOrder.cast();
+   }
+diff --git a/guava/src/com/google/common/graph/StandardValueGraph.java b/guava/src/com/google/common/graph/StandardValueGraph.java
+index 0b2f20c74..6f4e2f555 100644
+--- a/guava/src/com/google/common/graph/StandardValueGraph.java
++++ b/guava/src/com/google/common/graph/StandardValueGraph.java
+@@ -54,7 +54,7 @@ class StandardValueGraph<N, V> extends AbstractValueGraph<N, V> {
+   long edgeCount; // must be updated when edges are added or removed
+ 
+   /** Constructs a graph with the properties specified in {@code builder}. */
+-  StandardValueGraph(AbstractGraphBuilder<? super N> builder) {
++  StandardValueGraph(AbstractGraphBuilder<? super N, ?> builder) {
+     this(
+         builder,
+         builder.nodeOrder.createMap(firstNonNull(builder.expectedNodeCount, DEFAULT_NODE_COUNT)),
+@@ -66,7 +66,7 @@ class StandardValueGraph<N, V> extends AbstractValueGraph<N, V> {
+    * node map.
+    */
+   StandardValueGraph(
+-      AbstractGraphBuilder<? super N> builder,
++      AbstractGraphBuilder<? super N, ?> builder,
+       Map<N, GraphConnections<N, V>> nodeConnections,
+       long edgeCount) {
+     this.isDirected = builder.directed;
+diff --git a/guava/src/com/google/common/graph/ValueGraphBuilder.java b/guava/src/com/google/common/graph/ValueGraphBuilder.java
+index aad8cfcff..4b0ea83bc 100644
+--- a/guava/src/com/google/common/graph/ValueGraphBuilder.java
++++ b/guava/src/com/google/common/graph/ValueGraphBuilder.java
+@@ -16,9 +16,7 @@
+ 
+ package com.google.common.graph;
+ 
+-import static com.google.common.base.Preconditions.checkArgument;
+ import static com.google.common.base.Preconditions.checkNotNull;
+-import static com.google.common.graph.Graphs.checkNonNegative;
+ 
+ import com.google.errorprone.annotations.CanIgnoreReturnValue;
+ 
+@@ -70,7 +68,8 @@ import com.google.errorprone.annotations.CanIgnoreReturnValue;
+  *     #from(ValueGraph)}.
+  * @since 20.0
+  */
+-public final class ValueGraphBuilder<N, V> extends AbstractGraphBuilder<N> {
++public final class ValueGraphBuilder<N, V>
++    extends AbstractGraphBuilder<N, ValueGraphBuilder<N, V>> {
+ 
+   /** Creates a new instance with the specified edge directionality. */
+   private ValueGraphBuilder(boolean directed) {
+@@ -127,8 +126,7 @@ public final class ValueGraphBuilder<N, V> extends AbstractGraphBuilder<N> {
+    */
+   @CanIgnoreReturnValue
+   public ValueGraphBuilder<N, V> allowsSelfLoops(boolean allowsSelfLoops) {
+-    this.allowsSelfLoops = allowsSelfLoops;
+-    return this;
++    return allowsSelfLoopsInternal(allowsSelfLoops);
+   }
+ 
+   /**
+@@ -138,8 +136,7 @@ public final class ValueGraphBuilder<N, V> extends AbstractGraphBuilder<N> {
+    */
+   @CanIgnoreReturnValue
+   public ValueGraphBuilder<N, V> expectedNodeCount(int expectedNodeCount) {
+-    this.expectedNodeCount = checkNonNegative(expectedNodeCount);
+-    return this;
++    return expectedNodeCountInternal(expectedNodeCount);
+   }
+ 
+   /**
+@@ -168,14 +165,8 @@ public final class ValueGraphBuilder<N, V> extends AbstractGraphBuilder<N> {
+    */
+   public <N1 extends N> ValueGraphBuilder<N1, V> incidentEdgeOrder(
+       ElementOrder<N1> incidentEdgeOrder) {
+-    checkArgument(
+-        incidentEdgeOrder.type() == ElementOrder.Type.UNORDERED
+-            || incidentEdgeOrder.type() == ElementOrder.Type.STABLE,
+-        "The given elementOrder (%s) is unsupported. incidentEdgeOrder() only supports"
+-            + " ElementOrder.unordered() and ElementOrder.stable().",
+-        incidentEdgeOrder);
+     ValueGraphBuilder<N1, V> newBuilder = cast();
+-    newBuilder.incidentEdgeOrder = checkNotNull(incidentEdgeOrder);
++    newBuilder.incidentEdgeOrder = validateIncidentEdgeOrder(incidentEdgeOrder);
+     return newBuilder;
+   }
+ 
+@@ -189,15 +180,7 @@ public final class ValueGraphBuilder<N, V> extends AbstractGraphBuilder<N> {
+ 
+   ValueGraphBuilder<N, V> copy() {
+     ValueGraphBuilder<N, V> newBuilder = new ValueGraphBuilder<>(directed);
+-    newBuilder.allowsSelfLoops = allowsSelfLoops;
+-    newBuilder.nodeOrder = nodeOrder;
+-    newBuilder.expectedNodeCount = expectedNodeCount;
+-    newBuilder.incidentEdgeOrder = incidentEdgeOrder;
++    copyStateTo(newBuilder);
+     return newBuilder;
+   }
+-
+-  @SuppressWarnings("unchecked")
+-  private <N1 extends N, V1 extends V> ValueGraphBuilder<N1, V1> cast() {
+-    return (ValueGraphBuilder<N1, V1>) this;
+-  }
+ }

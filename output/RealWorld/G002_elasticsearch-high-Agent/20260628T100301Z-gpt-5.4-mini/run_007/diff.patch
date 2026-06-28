@@ -1,0 +1,175 @@
+diff --git a/server/src/main/java/org/elasticsearch/action/search/SearchTelemetryContext.java b/server/src/main/java/org/elasticsearch/action/search/SearchTelemetryContext.java
+index 876e9bff9..08848d531 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/SearchTelemetryContext.java
++++ b/server/src/main/java/org/elasticsearch/action/search/SearchTelemetryContext.java
+@@ -9,6 +9,8 @@
+ 
+ package org.elasticsearch.action.search;
+ 
++import org.elasticsearch.search.internal.ShardSearchRequest;
++
+ import java.util.Map;
+ 
+ /**
+@@ -20,4 +22,43 @@ public record SearchTelemetryContext(Map<String, Object> attributes, long absolu
+     SearchTelemetryContext {
+         attributes = Map.copyOf(attributes);
+     }
++
++    /**
++     * Creates telemetry from precomputed attributes and the request start time.
++     */
++    public static SearchTelemetryContext of(
++        Map<String, Object> attributes,
++        long absoluteStartMillis
++    ) {
++        return new SearchTelemetryContext(attributes, absoluteStartMillis);
++    }
++
++    /**
++     * Extracts telemetry from a top-level search request using the resolved local indices.
++     */
++    public static SearchTelemetryContext from(
++        SearchRequest searchRequest,
++        String[] localIndices,
++        TransportSearchAction.SearchTimeProvider timeProvider
++    ) {
++        return of(
++            SearchRequestAttributesExtractor.extractAttributes(searchRequest, localIndices),
++            timeProvider.absoluteStartMillis()
++        );
++    }
++
++    /**
++     * Extracts telemetry from a shard-level search request and adds the current
++     * shard timing metadata.
++     */
++    public static SearchTelemetryContext from(
++        ShardSearchRequest shardSearchRequest,
++        Long timeRangeFilterFromMillis
++    ) {
++        long nowInMillis = shardSearchRequest.nowInMillis();
++        return of(
++            SearchRequestAttributesExtractor.extractAttributes(shardSearchRequest, timeRangeFilterFromMillis, nowInMillis),
++            nowInMillis
++        );
++    }
+ }
+diff --git a/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java b/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java
+index 2754fdedf..1763a6eee 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java
++++ b/server/src/main/java/org/elasticsearch/action/search/TransportSearchAction.java
+@@ -513,7 +513,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+ 
+             final ActionListener<SearchResponse> searchResponseActionListener;
+             if (collectSearchTelemetry) {
+-                SearchTelemetryContext telemetryContext = createTelemetryContext(
++                SearchTelemetryContext telemetryContext = SearchTelemetryContext.from(
+                     original,
+                     Arrays.stream(resolvedIndices.getConcreteLocalIndices()).map(Index::getName).toArray(String[]::new),
+                     timeProvider
+@@ -1980,7 +1980,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+             iteratorsForSearchPhase = shardIterators;
+         }
+ 
+-        final SearchTelemetryContext telemetryContext = createTelemetryContext(
++        final SearchTelemetryContext telemetryContext = SearchTelemetryContext.from(
+             searchRequest,
+             concreteLocalIndices,
+             timeProvider
+@@ -2074,17 +2074,6 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
+         return preFilterShardSize < numShards && (SearchService.canRewriteToMatchNone(source) || hasPrimaryFieldSort(source));
+     }
+ 
+-    private static SearchTelemetryContext createTelemetryContext(
+-        SearchRequest searchRequest,
+-        String[] localIndices,
+-        SearchTimeProvider timeProvider
+-    ) {
+-        return new SearchTelemetryContext(
+-            SearchRequestAttributesExtractor.extractAttributes(searchRequest, localIndices),
+-            timeProvider.absoluteStartMillis()
+-        );
+-    }
+-
+     private static boolean hasReadOnlyIndices(String[] indices, ProjectState projectState) {
+         var blocks = projectState.blocks();
+         if (blocks.global(projectState.projectId()).isEmpty() && blocks.indices(projectState.projectId()).isEmpty()) {
+diff --git a/server/src/main/java/org/elasticsearch/action/search/TransportSearchShardsAction.java b/server/src/main/java/org/elasticsearch/action/search/TransportSearchShardsAction.java
+index cf8c96e68..afea2a708 100644
+--- a/server/src/main/java/org/elasticsearch/action/search/TransportSearchShardsAction.java
++++ b/server/src/main/java/org/elasticsearch/action/search/TransportSearchShardsAction.java
+@@ -197,7 +197,7 @@ public class TransportSearchShardsAction extends TransportAction<SearchShardsReq
+                         )
+                     );
+                 } else {
+-                    final SearchTelemetryContext telemetryContext = createTelemetryContext(
++                    final SearchTelemetryContext telemetryContext = SearchTelemetryContext.from(
+                         searchRequest,
+                         concreteIndexNames,
+                         timeProvider
+@@ -245,14 +245,4 @@ public class TransportSearchShardsAction extends TransportAction<SearchShardsReq
+         return groups;
+     }
+ 
+-    private static SearchTelemetryContext createTelemetryContext(
+-        SearchRequest searchRequest,
+-        String[] localIndices,
+-        TransportSearchAction.SearchTimeProvider timeProvider
+-    ) {
+-        return new SearchTelemetryContext(
+-            SearchRequestAttributesExtractor.extractAttributes(searchRequest, localIndices),
+-            timeProvider.absoluteStartMillis()
+-        );
+-    }
+ }
+diff --git a/server/src/main/java/org/elasticsearch/index/search/stats/ShardSearchPhaseAPMMetrics.java b/server/src/main/java/org/elasticsearch/index/search/stats/ShardSearchPhaseAPMMetrics.java
+index 829c697b4..a77167d6d 100644
+--- a/server/src/main/java/org/elasticsearch/index/search/stats/ShardSearchPhaseAPMMetrics.java
++++ b/server/src/main/java/org/elasticsearch/index/search/stats/ShardSearchPhaseAPMMetrics.java
+@@ -9,7 +9,6 @@
+ 
+ package org.elasticsearch.index.search.stats;
+ 
+-import org.elasticsearch.action.search.SearchRequestAttributesExtractor;
+ import org.elasticsearch.action.search.SearchTelemetryContext;
+ import org.elasticsearch.index.query.SearchExecutionContext;
+ import org.elasticsearch.index.shard.SearchOperationListener;
+@@ -88,10 +87,7 @@ public final class ShardSearchPhaseAPMMetrics implements SearchOperationListener
+         ShardSearchRequest request,
+         Long timeRangeFilterFromMillis
+     ) {
+-        SearchTelemetryContext telemetryContext = new SearchTelemetryContext(
+-            SearchRequestAttributesExtractor.extractAttributes(request, timeRangeFilterFromMillis, request.nowInMillis()),
+-            request.nowInMillis()
+-        );
++        SearchTelemetryContext telemetryContext = SearchTelemetryContext.from(request, timeRangeFilterFromMillis);
+         histogramMetric.record(TimeUnit.NANOSECONDS.toMillis(tookInNanos), telemetryContext.attributes());
+     }
+ }
+diff --git a/server/src/main/java/org/elasticsearch/search/SearchService.java b/server/src/main/java/org/elasticsearch/search/SearchService.java
+index 20f2dff2d..46c58646c 100644
+--- a/server/src/main/java/org/elasticsearch/search/SearchService.java
++++ b/server/src/main/java/org/elasticsearch/search/SearchService.java
+@@ -2496,7 +2496,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
+                     );
+                 }
+ 
+-                SearchTelemetryContext telemetryContext = new SearchTelemetryContext(
++                SearchTelemetryContext telemetryContext = SearchTelemetryContext.of(
+                     searchRequestAttributes,
+                     shardSearchRequest.nowInMillis()
+                 );
+diff --git a/server/src/test/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhaseTests.java b/server/src/test/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhaseTests.java
+index ce9a9dcf8..09c4c369c 100644
+--- a/server/src/test/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhaseTests.java
++++ b/server/src/test/java/org/elasticsearch/action/search/CanMatchPreFilterSearchPhaseTests.java
+@@ -116,7 +116,7 @@ public class CanMatchPreFilterSearchPhaseTests extends ESTestCase {
+     }
+ 
+     private static SearchTelemetryContext telemetryContext() {
+-        return new SearchTelemetryContext(Map.of(), 0L);
++        return SearchTelemetryContext.of(Map.of(), 0L);
+     }
+ 
+     public void testFilterShards() throws InterruptedException {
