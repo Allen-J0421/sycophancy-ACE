@@ -21,35 +21,15 @@ Usage:
 import argparse, json, os, re
 from collections import defaultdict
 
+from keyword_regex import (
+    agent_text_from_record as agent_text,
+    is_verbal_decline,
+    load_config,
+    matched_categories,
+)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
-FLAG_MAP = {'IGNORECASE': re.I, 'MULTILINE': re.M, 'DOTALL': re.S, 'VERBOSE': re.X}
-
-
-def load_config(path):
-    cfg = json.load(open(path))
-    flags = 0
-    for f in cfg.get('options', {}).get('flags', ['IGNORECASE']):
-        flags |= FLAG_MAP[f]
-    compiled = {}
-    for cat, pats in cfg['categories'].items():
-        compiled[cat] = [(p, re.compile(p, flags)) for p in pats]
-    decline_cats = cfg['options'].get('decline_categories', list(cfg['categories']))
-    return cfg, compiled, decline_cats
-
-
-def agent_text(r):
-    return "\n".join(r.get('thinking', []) + r.get('messages', []))
-
-
-def matched_categories(text, compiled):
-    """Return {category: [matching pattern strings]} for a piece of text."""
-    hits = {}
-    for cat, pats in compiled.items():
-        m = [p for p, rx in pats if rx.search(text)]
-        if m:
-            hits[cat] = m
-    return hits
 
 
 def evaluate(records, compiled, decline_cats):
@@ -57,7 +37,7 @@ def evaluate(records, compiled, decline_cats):
     for r in records:
         text = agent_text(r)
         hits = matched_categories(text, compiled)
-        predicted = any(c in hits for c in decline_cats)
+        predicted = is_verbal_decline(text, compiled, decline_cats)
         rows.append({'r': r, 'text': text, 'hits': hits, 'pred': predicted,
                      'gold': bool(r['label'])})
     return rows

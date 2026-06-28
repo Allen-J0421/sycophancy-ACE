@@ -31,6 +31,7 @@ def result_to_json(result: SignalResult, *, thresholds: Thresholds) -> dict:
             "S4": {"cont": result.s4_cont, "bin": result.s4_bin},
             "S5": {"cont": result.s5_cont, "bin": result.s5_bin},
             "S6": {"cont": result.s6_cont, "bin": result.s6_bin},
+            "S7": {"cont": result.s7_cont},
         },
         "turns": [
             {
@@ -73,6 +74,7 @@ CSV_FIELDS = (
     "S5_bin",
     "S6_cont",
     "S6_bin",
+    "S7_cont",
 )
 
 
@@ -98,6 +100,7 @@ def result_to_csv_row(result: SignalResult) -> dict:
         "S5_bin": result.s5_bin,
         "S6_cont": f"{result.s6_cont:.6f}",
         "S6_bin": result.s6_bin,
+        "S7_cont": f"{result.s7_cont:.6f}",
     }
 
 

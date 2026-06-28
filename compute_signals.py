@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compute sycophancy signals (S1-S6) from RefDiff JSONL + git stats.
+"""Compute sycophancy signals (S1-S7) from RefDiff JSONL + git stats.
 
 Phase 4 of the pipeline (after run_experiment.py / run_refdiff.py). Scans
 ``result/`` for ``<exp>/refdiff/<stamp>-refdiff.jsonl`` files (one per
@@ -8,7 +8,7 @@ keyed by ``run`` (= turn ``t``). For each model run-sequence it derives the six
 behavioral signals defined in ``doc/sycophancy_signals.tex`` and writes:
 
   * ``result/<exp>/signals/<stamp>-signals.json`` - full per-model breakdown
-    (per-turn series + S1..S6 continuous/binary values).
+    (per-turn series + S1..S7 continuous values; S1..S6 also have binary flags).
   * ``result/<exp>/signals/<exp>_signals.csv`` - one row per model for quick comparison.
 
 Implementation lives in the ``signal_computation`` package; this module re-exports

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot sycophancy signals (S1-S6) per experiment.
+"""Plot sycophancy signals (S1-S7) per experiment.
 
 Reads the per-model JSON written by ``compute_signals.py``
 (``result/<exp>/signals/<stamp>-signals.json``) and renders, per experiment, a
@@ -36,16 +36,6 @@ import matplotlib.pyplot as plt  # noqa: E402
 import matplotlib.gridspec as gridspec  # noqa: E402
 import matplotlib.ticker as ticker  # noqa: E402
 
-SIGNAL_IDS = ("S1", "S2", "S3", "S4", "S5", "S6")
-SIGNAL_TITLES = {
-    "S1": "S1: Pre-convergence churn",
-    "S2": "S2: Post-convergence mod.",
-    "S3": "S3: Line-change volatility",
-    "S4": "S4: Feature rollback",
-    "S5": "S5: Reimplementation loop",
-    "S6": "S6: Patch-region recurrence",
-}
-
 plt.rcParams.update(
     {
         "font.family": "serif",
@@ -58,7 +48,27 @@ plt.rcParams.update(
 )
 
 
-from style_config import COLORS, LABELS  # noqa: E402
+from style_config import (  # noqa: E402
+    BINARY_SIGNAL_IDS,
+    COLORS,
+    LABELS,
+    RATIO_SIGNAL_IDS,
+    SIGNAL_GRID_COLS,
+    SIGNAL_IDS,
+    SIGNAL_TITLES,
+)
+
+
+def _signal_bar_ylim(sid: str, top: float) -> tuple[float, float]:
+    if sid in RATIO_SIGNAL_IDS:
+        return 0.0, min(1.0, max(top * 1.12, 0.1))
+    return 0.0, top * 1.18 if top > 0 else 1.0
+
+
+def _format_signal_value(sid: str, val: float) -> str:
+    if sid in RATIO_SIGNAL_IDS:
+        return f"{val:.3f}"
+    return f"{val:.2f}"
 
 
 @dataclass
@@ -94,7 +104,9 @@ def load_model_signals(exp_dir: Path) -> list[ModelSignals]:
         model = str(data.get("model") or json_path.stem)
         signals = data.get("signals") or {}
         cont = {sid: float(signals.get(sid, {}).get("cont", 0.0)) for sid in SIGNAL_IDS}
-        binary = {sid: int(signals.get(sid, {}).get("bin", 0)) for sid in SIGNAL_IDS}
+        binary = {
+            sid: int(signals.get(sid, {}).get("bin", 0)) for sid in BINARY_SIGNAL_IDS
+        }
         models.append(
             ModelSignals(
                 model=model,
@@ -119,14 +131,19 @@ def plot_experiment(
     outer = gridspec.GridSpec(
         2, 1, figure=fig, height_ratios=[3.0, 1.0], hspace=0.45
     )
-    bar_grid = outer[0].subgridspec(2, 3, hspace=0.55, wspace=0.3)
+    bar_grid = outer[0].subgridspec(
+        (len(SIGNAL_IDS) + SIGNAL_GRID_COLS - 1) // SIGNAL_GRID_COLS,
+        SIGNAL_GRID_COLS,
+        hspace=0.55,
+        wspace=0.3,
+    )
 
     labels = [m.label for m in models]
     colors = [m.color for m in models]
     x = list(range(n_models))
 
     for idx, sid in enumerate(SIGNAL_IDS):
-        ax = fig.add_subplot(bar_grid[idx // 3, idx % 3])
+        ax = fig.add_subplot(bar_grid[idx // SIGNAL_GRID_COLS, idx % SIGNAL_GRID_COLS])
         values = [m.cont[sid] for m in models]
         ax.bar(x, values, color=colors, edgecolor="white", linewidth=0.6)
         ax.set_title(SIGNAL_TITLES[sid], fontsize=10)
@@ -135,27 +152,27 @@ def plot_experiment(
         ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
         ax.margins(x=0.15)
         top = max(values + [0.0])
-        ax.set_ylim(0, top * 1.18 if top > 0 else 1.0)
+        ax.set_ylim(*_signal_bar_ylim(sid, top))
         for xi, val in zip(x, values):
             ax.text(
                 xi,
                 val + (top * 0.02 if top > 0 else 0.02),
-                f"{val:.2f}" if isinstance(val, float) else str(val),
+                _format_signal_value(sid, val),
                 ha="center",
                 va="bottom",
                 fontsize=8,
             )
 
     matrix_ax = fig.add_subplot(outer[1])
-    grid = [[m.binary[sid] for sid in SIGNAL_IDS] for m in models]
+    grid = [[m.binary[sid] for sid in BINARY_SIGNAL_IDS] for m in models]
     matrix_ax.imshow(grid, cmap="Greens", vmin=0, vmax=1, aspect="auto")
-    matrix_ax.set_xticks(range(len(SIGNAL_IDS)))
-    matrix_ax.set_xticklabels(SIGNAL_IDS)
+    matrix_ax.set_xticks(range(len(BINARY_SIGNAL_IDS)))
+    matrix_ax.set_xticklabels(BINARY_SIGNAL_IDS)
     matrix_ax.set_yticks(range(n_models))
     matrix_ax.set_yticklabels(labels, fontsize=8)
     matrix_ax.set_title("Binary signal flags (1 = triggered)", fontsize=10)
     for r in range(n_models):
-        for c in range(len(SIGNAL_IDS)):
+        for c in range(len(BINARY_SIGNAL_IDS)):
             val = grid[r][c]
             matrix_ax.text(
                 c,
@@ -166,11 +183,11 @@ def plot_experiment(
                 fontsize=9,
                 color="white" if val else "0.4",
             )
-    matrix_ax.set_xticks([i - 0.5 for i in range(1, len(SIGNAL_IDS))], minor=True)
+    matrix_ax.set_xticks([i - 0.5 for i in range(1, len(BINARY_SIGNAL_IDS))], minor=True)
     matrix_ax.set_yticks([i - 0.5 for i in range(1, n_models)], minor=True)
     matrix_ax.grid(which="minor", color="white", linewidth=1.2)
     matrix_ax.tick_params(which="minor", length=0)
-    matrix_ax.xaxis.set_major_locator(ticker.FixedLocator(range(len(SIGNAL_IDS))))
+    matrix_ax.xaxis.set_major_locator(ticker.FixedLocator(range(len(BINARY_SIGNAL_IDS))))
 
     fig.suptitle(
         suptitle or f"Sycophancy signals: {exp_dir.name}",
@@ -238,7 +255,7 @@ def build_one(exp_dir: Path) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Plot S1-S6 signals per experiment.")
+    parser = argparse.ArgumentParser(description="Plot S1-S7 signals per experiment.")
     parser.add_argument(
         "--output-base",
         type=Path,

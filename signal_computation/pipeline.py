@@ -70,6 +70,7 @@ class ExperimentSignalPipeline:
             result = self._calculator.compute_for_jsonl(
                 jsonl_path,
                 exp_dir.name,
+                exp_dir=exp_dir,
                 s5_links=s5_links,
             )
             if result is None:
@@ -104,6 +105,7 @@ def process_experiment(
     loc_cache: dict[tuple[str, str], int],
     skip_s5_refdiff: bool = False,
     compare_cache: dict | None = None,
+    refusal_config: Path | None = None,
 ) -> list[SignalResult]:
     """Backward-compatible entry point for batch experiment processing."""
     from signal_computation.loc import GitLocCounter
@@ -111,6 +113,7 @@ def process_experiment(
     calculator = SignalCalculator(
         GitLocCounter(cache=loc_cache),
         Thresholds(eps1=eps1, eps3=eps3, eps6=eps6),
+        refusal_config=refusal_config,
     )
     return ExperimentSignalPipeline(
         calculator,
