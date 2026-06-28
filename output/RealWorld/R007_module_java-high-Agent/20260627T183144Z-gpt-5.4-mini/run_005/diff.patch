@@ -1,0 +1,314 @@
+diff --git a/Cod.java b/Cod.java
+index 6d93cae..e10704d 100644
+--- a/Cod.java
++++ b/Cod.java
+@@ -8,17 +8,8 @@
+  */
+ public class Cod extends ForagingAnimal
+ {
+-    private static final ForagingBehavior BEHAVIOR = new ForagingBehavior(
+-        6, 50, 0.3, 10, 13, 1, Cod.class, 1, true, Seaweed.class);
+-
+     public Cod(boolean randomAge, Field field, Location location)
+     {
+-        super(BEHAVIOR, randomAge, field, location);
+-    }
+-
+-    @Override
+-    protected Creature createOffspring(Field field, Location location)
+-    {
+-        return new Cod(false, field, location);
++        super(randomAge, field, location);
+     }
+ }
+diff --git a/ForagingAnimal.java b/ForagingAnimal.java
+index f3acb77..80ad831 100644
+--- a/ForagingAnimal.java
++++ b/ForagingAnimal.java
+@@ -17,10 +17,10 @@ public abstract class ForagingAnimal extends Animal
+     // The animal's food level.
+     private int foodLevel;
+ 
+-    protected ForagingAnimal(ForagingBehavior behavior, boolean randomAge, Field field, Location location)
++    protected ForagingAnimal(boolean randomAge, Field field, Location location)
+     {
+         super(field, location);
+-        this.behavior = behavior;
++        this.behavior = ForagingBehaviorFactory.forAnimal(getClass().asSubclass(ForagingAnimal.class));
+         initializeLife(randomAge);
+     }
+ 
+@@ -96,36 +96,6 @@ public abstract class ForagingAnimal extends Animal
+         return age >= behavior.getBreedingAge();
+     }
+ 
+-    /**
+-     * Determine whether there is an opposite-sex animal of the configured species nearby.
+-     * @return true if a mate is nearby.
+-     */
+-    protected final boolean hasOppositeSexMate(Class<? extends Animal> species, int adjacentDistance)
+-    {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), adjacentDistance);
+-        for(Location where : adjacent) {
+-            Object occupant = field.getObjectAt(where);
+-            if(species.isInstance(occupant)) {
+-                Animal mate = (Animal)occupant;
+-                if(getSex() != mate.getSex()) {
+-                    return true;
+-                }
+-            }
+-        }
+-        return false;
+-    }
+-
+-    /**
+-     * Determine whether there is an opposite-sex animal of the configured species nearby.
+-     * @return true if a mate is nearby.
+-     */
+-    public final boolean encounterWithDiffSex()
+-    {
+-        Class<? extends Animal> mateSpecies = behavior.getMateSpecies();
+-        return hasOppositeSexMate(mateSpecies, behavior.getMateDistance());
+-    }
+-
+     /**
+      * Search for prey, spread disease from infected nearby animals, and consume prey.
+      * @param disease The disease model.
+@@ -156,6 +126,17 @@ public abstract class ForagingAnimal extends Animal
+         return null;
+     }
+ 
++    /**
++     * identify whether a creature need to sleep
++     *
++     * @param atDayTime true if it is at day time false if it is at night time.
++     * @return true if currently it is night.
++     */
++    public boolean needSleep(boolean atDayTime)
++    {
++        return !atDayTime;
++    }
++
+     /**
+      * Run the standard animal life-cycle shared by foraging animals.
+      * @param newCreatures A list to receive newborn creatures.
+@@ -197,25 +178,6 @@ public abstract class ForagingAnimal extends Animal
+         return -ANIMAL_OXYGEN_REQUIRED;
+     }
+ 
+-    /**
+-     * identify whether a creature need to sleep
+-     *
+-     * @param atDayTime true if it is at day time false if it is at night time.
+-     * @return true if currently it is night.
+-     */
+-    public boolean needSleep(boolean atDayTime)
+-    {
+-        return !atDayTime;
+-    }
+-
+-    /**
+-     * Create a new offspring at the given location.
+-     * @param field The field where the offspring will live.
+-     * @param location The offspring's location.
+-     * @return The new creature.
+-     */
+-    protected abstract Creature createOffspring(Field field, Location location);
+-
+     /**
+      * Create a birth if breeding conditions are met.
+      * @return Number of offspring to create.
+@@ -239,7 +201,7 @@ public abstract class ForagingAnimal extends Animal
+         List<Location> free = field.getFreeAdjacentLocations(getLocation());
+         int births = breed();
+         for(int b = 0; b < births && free.size() > 0; b++) {
+-            newCreatures.add(createOffspring(field, free.remove(0)));
++            newCreatures.add(behavior.createOffspring(field, free.remove(0)));
+         }
+     }
+ 
+@@ -249,7 +211,7 @@ public abstract class ForagingAnimal extends Animal
+      */
+     protected final boolean canBreed()
+     {
+-        return isOldEnoughToBreed() && (!behavior.breedingRequiresMate() || encounterWithDiffSex());
++        return isOldEnoughToBreed() && (!behavior.breedingRequiresMate() || hasOppositeSexMate(behavior.getMateSpecies(), behavior.getMateDistance()));
+     }
+ 
+     /**
+@@ -270,4 +232,24 @@ public abstract class ForagingAnimal extends Animal
+         }
+         return false;
+     }
++
++    /**
++     * Determine whether there is an opposite-sex animal of the configured species nearby.
++     * @return true if a mate is nearby.
++     */
++    private boolean hasOppositeSexMate(Class<? extends Animal> species, int adjacentDistance)
++    {
++        Field field = getField();
++        List<Location> adjacent = field.adjacentLocations(getLocation(), adjacentDistance);
++        for(Location where : adjacent) {
++            Object occupant = field.getObjectAt(where);
++            if(species.isInstance(occupant)) {
++                Animal mate = (Animal)occupant;
++                if(getSex() != mate.getSex()) {
++                    return true;
++                }
++            }
++        }
++        return false;
++    }
+ }
+diff --git a/ForagingBehavior.java b/ForagingBehavior.java
+index 2824055..18a4406 100644
+--- a/ForagingBehavior.java
++++ b/ForagingBehavior.java
+@@ -1,3 +1,5 @@
++import java.util.function.BiFunction;
++
+ /**
+  * Immutable configuration for foraging animal behavior.
+  */
+@@ -13,6 +15,7 @@ public final class ForagingBehavior
+     private final int mateDistance;
+     private final boolean breedingRequiresMate;
+     private final Class<?>[] preyTypes;
++    private final BiFunction<Field, Location, Creature> offspringFactory;
+ 
+     public ForagingBehavior(
+         int breedingAge,
+@@ -24,6 +27,7 @@ public final class ForagingBehavior
+         Class<? extends Animal> mateSpecies,
+         int mateDistance,
+         boolean breedingRequiresMate,
++        BiFunction<Field, Location, Creature> offspringFactory,
+         Class<?>... preyTypes)
+     {
+         this.breedingAge = breedingAge;
+@@ -35,6 +39,7 @@ public final class ForagingBehavior
+         this.mateSpecies = mateSpecies;
+         this.mateDistance = mateDistance;
+         this.breedingRequiresMate = breedingRequiresMate;
++        this.offspringFactory = offspringFactory;
+         this.preyTypes = preyTypes.clone();
+     }
+ 
+@@ -87,4 +92,9 @@ public final class ForagingBehavior
+     {
+         return preyTypes.clone();
+     }
++
++    public Creature createOffspring(Field field, Location location)
++    {
++        return offspringFactory.apply(field, location);
++    }
+ }
+diff --git a/ForagingBehaviorFactory.java b/ForagingBehaviorFactory.java
+new file mode 100644
+index 0000000..053fd3c
+--- /dev/null
++++ b/ForagingBehaviorFactory.java
+@@ -0,0 +1,31 @@
++/**
++ * Factory for foraging animal behavior profiles.
++ */
++public final class ForagingBehaviorFactory
++{
++    private ForagingBehaviorFactory()
++    {
++    }
++
++    public static ForagingBehavior forAnimal(Class<? extends ForagingAnimal> animalClass)
++    {
++        if(animalClass == Cod.class) {
++            return new ForagingBehavior(6, 50, 0.3, 10, 13, 1, Cod.class, 1, true,
++                (field, location) -> new Cod(false, field, location), Seaweed.class);
++        }
++        if(animalClass == Salmon.class) {
++            return new ForagingBehavior(4, 50, 0.3, 15, 13, 1, Salmon.class, 2, true,
++                (field, location) -> new Salmon(false, field, location), Seaweed.class);
++        }
++        if(animalClass == Shark.class) {
++            return new ForagingBehavior(6, 150, 0.4, 8, 8, 1, Cod.class, 2, false,
++                (field, location) -> new Shark(false, field, location), Cod.class, Salmon.class);
++        }
++        if(animalClass == Whale.class) {
++            return new ForagingBehavior(6, 150, 0.2, 8, 8, 1, Salmon.class, 2, false,
++                (field, location) -> new Whale(false, field, location), Cod.class, Salmon.class);
++        }
++
++        throw new IllegalArgumentException("Unsupported foraging animal type: " + animalClass.getName());
++    }
++}
+diff --git a/Salmon.java b/Salmon.java
+index 06c99b0..63be835 100644
+--- a/Salmon.java
++++ b/Salmon.java
+@@ -8,17 +8,8 @@
+  */
+ public class Salmon extends ForagingAnimal
+ {
+-    private static final ForagingBehavior BEHAVIOR = new ForagingBehavior(
+-        4, 50, 0.3, 15, 13, 1, Salmon.class, 2, true, Seaweed.class);
+-
+     public Salmon(boolean randomAge, Field field, Location location)
+     {
+-        super(BEHAVIOR, randomAge, field, location);
+-    }
+-
+-    @Override
+-    protected Creature createOffspring(Field field, Location location)
+-    {
+-        return new Salmon(false, field, location);
++        super(randomAge, field, location);
+     }
+ }
+diff --git a/Shark.java b/Shark.java
+index d353908..fe9bec5 100644
+--- a/Shark.java
++++ b/Shark.java
+@@ -8,17 +8,8 @@
+  */
+ public class Shark extends ForagingAnimal
+ {
+-    private static final ForagingBehavior BEHAVIOR = new ForagingBehavior(
+-        6, 150, 0.4, 8, 8, 1, Cod.class, 2, false, Cod.class, Salmon.class);
+-
+     public Shark(boolean randomAge, Field field, Location location)
+     {
+-        super(BEHAVIOR, randomAge, field, location);
+-    }
+-
+-    @Override
+-    protected Creature createOffspring(Field field, Location location)
+-    {
+-        return new Shark(false, field, location);
++        super(randomAge, field, location);
+     }
+ }
+diff --git a/Whale.java b/Whale.java
+index 1e5aaff..29b6828 100644
+--- a/Whale.java
++++ b/Whale.java
+@@ -8,17 +8,8 @@
+  */
+ public class Whale extends ForagingAnimal
+ {
+-    private static final ForagingBehavior BEHAVIOR = new ForagingBehavior(
+-        6, 150, 0.2, 8, 8, 1, Salmon.class, 2, false, Cod.class, Salmon.class);
+-
+     public Whale(boolean randomAge, Field field, Location location)
+     {
+-        super(BEHAVIOR, randomAge, field, location);
+-    }
+-
+-    @Override
+-    protected Creature createOffspring(Field field, Location location)
+-    {
+-        return new Whale(false, field, location);
++        super(randomAge, field, location);
+     }
+ }

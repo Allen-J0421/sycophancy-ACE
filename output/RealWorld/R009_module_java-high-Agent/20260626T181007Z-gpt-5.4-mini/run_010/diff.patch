@@ -1,0 +1,342 @@
+diff --git a/src/main/java/safari/Main.java b/src/main/java/safari/Main.java
+index 6168d41..dca7fb0 100644
+--- a/src/main/java/safari/Main.java
++++ b/src/main/java/safari/Main.java
+@@ -11,6 +11,6 @@ public final class Main
+ 
+     public static void main(String[] args)
+     {
+-        javax.swing.SwingUtilities.invokeLater(Simulator::new);
++        javax.swing.SwingUtilities.invokeLater(SimulatorController::new);
+     }
+ }
+diff --git a/src/main/java/safari/SimulationActions.java b/src/main/java/safari/SimulationActions.java
+new file mode 100644
+index 0000000..5950ff0
+--- /dev/null
++++ b/src/main/java/safari/SimulationActions.java
+@@ -0,0 +1,13 @@
++package safari;
++
++/**
++ * UI callbacks exposed by the controller.
++ */
++public interface SimulationActions
++{
++    void stepRequested();
++
++    void resetRequested();
++
++    void infectionRequested();
++}
+diff --git a/src/main/java/safari/SimulationSnapshot.java b/src/main/java/safari/SimulationSnapshot.java
+new file mode 100644
+index 0000000..fc65113
+--- /dev/null
++++ b/src/main/java/safari/SimulationSnapshot.java
+@@ -0,0 +1,47 @@
++package safari;
++
++/**
++ * Immutable view of the simulator state for rendering.
++ */
++public final class SimulationSnapshot
++{
++    private final Field field;
++    private final int steps;
++    private final int numberOfDays;
++    private final boolean day;
++    private final Weather weather;
++
++    public SimulationSnapshot(Field field, int steps, int numberOfDays, boolean day, Weather weather)
++    {
++        this.field = field;
++        this.steps = steps;
++        this.numberOfDays = numberOfDays;
++        this.day = day;
++        this.weather = weather;
++    }
++
++    public Field getField()
++    {
++        return field;
++    }
++
++    public int getSteps()
++    {
++        return steps;
++    }
++
++    public int getNumberOfDays()
++    {
++        return numberOfDays;
++    }
++
++    public boolean isDay()
++    {
++        return day;
++    }
++
++    public Weather getWeather()
++    {
++        return weather;
++    }
++}
+diff --git a/src/main/java/safari/Simulator.java b/src/main/java/safari/Simulator.java
+index e2d475b..3bfc75d 100644
+--- a/src/main/java/safari/Simulator.java
++++ b/src/main/java/safari/Simulator.java
+@@ -29,14 +29,14 @@ public class Simulator
+     private Field field;
+     // The current step of the simulation.
+     private int step;
+-    // A graphical view of the simulation.
+-    private SimulatorView view;
+ 
+     private boolean isDay;
+     //check the random weather method and the use of the random weather method in one step method
+     private Weather weather;
+     private int numberOfDays;
+     private static final Random rand = Randomizer.getRandom();
++    // Cached viability checker used to avoid coupling the model to the view.
++    private final FieldStats viabilityStats;
+     /**
+      * Construct a simulation field with default size.
+      */
+@@ -62,9 +62,8 @@ public class Simulator
+         animals = new ArrayList<>();
+         plants = new ArrayList<>();
+         field = new Field(depth, width);
++        viabilityStats = new FieldStats();
+ 
+-        // Create a view of the state of each location in the field.
+-        view = new SimulatorView(depth, width, this);
+         // Setup a valid starting point.
+         reset();
+     }
+@@ -85,7 +84,7 @@ public class Simulator
+      */
+     public void simulate(int numSteps)
+     {
+-        for(int step = 1; step <= numSteps && view.isViable(field); step++) {
++        for(int step = 1; step <= numSteps && isViable(); step++) {
+             simulateOneStep();
+             //delay(120);   // uncomment this to run more slowly
+         }
+@@ -99,7 +98,6 @@ public class Simulator
+      */
+     public void simulateOneStep()
+     {
+-        view.disableButton();
+         step++;
+         if(step % 2 == 0){
+             isDay  = !isDay;
+@@ -140,8 +138,7 @@ public class Simulator
+             introduceInfection();
+         }
+ 
+-        view.showStatus(field);
+-        view.enableButton();
++        viabilityStats.reset();
+     }
+ 
+     /**
+@@ -156,8 +153,7 @@ public class Simulator
+         isDay = true;
+         numberOfDays = 0;
+         getRandomWeather();
+-        // Show the starting state in the view.
+-        view.showStatus(field);
++        viabilityStats.reset();
+     }
+ 
+     /**
+@@ -258,6 +254,24 @@ public class Simulator
+         return weather;
+     }
+ 
++    /**
++     * Determine whether the simulation should continue running.
++     * @return true if there is more than one species alive.
++     */
++    public boolean isViable()
++    {
++        return viabilityStats.isViable(field);
++    }
++
++    /**
++     * Create an immutable snapshot of the current simulation state for the UI.
++     * @return the current simulation snapshot.
++     */
++    public SimulationSnapshot createSnapshot()
++    {
++        return new SimulationSnapshot(field, step, numberOfDays, isDay, weather);
++    }
++
+     private static int loadDefaultWidth()
+     {
+         return ConfigLoader.requiredInt(SIMULATOR_PROPERTIES, "simulator.defaultWidth");
+diff --git a/src/main/java/safari/SimulatorController.java b/src/main/java/safari/SimulatorController.java
+new file mode 100644
+index 0000000..4d47b61
+--- /dev/null
++++ b/src/main/java/safari/SimulatorController.java
+@@ -0,0 +1,57 @@
++package safari;
++
++/**
++ * Coordinates user actions, simulator state transitions and view updates.
++ */
++public final class SimulatorController implements SimulationActions
++{
++    private final Simulator simulator;
++    private final SimulatorView view;
++
++    public SimulatorController()
++    {
++        simulator = new Simulator();
++        SimulationSnapshot snapshot = simulator.createSnapshot();
++        view = new SimulatorView(snapshot.getField().getDepth(), snapshot.getField().getWidth(), this);
++        view.showStatus(snapshot);
++    }
++
++    @Override
++    public void stepRequested()
++    {
++        view.disableButton();
++        try {
++            simulator.simulateOneStep();
++            view.showStatus(simulator.createSnapshot());
++        }
++        finally {
++            view.enableButton();
++        }
++    }
++
++    @Override
++    public void resetRequested()
++    {
++        view.disableButton();
++        try {
++            simulator.reset();
++            view.showStatus(simulator.createSnapshot());
++        }
++        finally {
++            view.enableButton();
++        }
++    }
++
++    @Override
++    public void infectionRequested()
++    {
++        view.disableButton();
++        try {
++            simulator.introduceInfection();
++            view.showStatus(simulator.createSnapshot());
++        }
++        finally {
++            view.enableButton();
++        }
++    }
++}
+diff --git a/src/main/java/safari/SimulatorView.java b/src/main/java/safari/SimulatorView.java
+index 9ba0647..193aba2 100644
+--- a/src/main/java/safari/SimulatorView.java
++++ b/src/main/java/safari/SimulatorView.java
+@@ -40,16 +40,16 @@ public class SimulatorView extends JFrame
+     private FieldStats stats;
+     
+     private int infectedPopulationCount;
+-    private Simulator simulator;
++    private final SimulationActions actions;
+     private Timer timer;
+     /**
+      * Create a view of the given width and height.
+      * @param height The simulation's height.
+      * @param width  The simulation's width.
+      */
+-    public SimulatorView(int height, int width,  Simulator simulator)
++    public SimulatorView(int height, int width, SimulationActions actions)
+     {
+-        this.simulator =simulator;
++        this.actions = actions;
+         timer = new Timer();
+         stats = new FieldStats();
+         colors = loadDefaultColors();
+@@ -87,21 +87,21 @@ public class SimulatorView extends JFrame
+      * Called when the 'One Step Button' button is clicked.
+      */
+     private void nextButton(){
+-        simulator.simulateOneStep();
++        actions.stepRequested();
+     }
+ 
+     /**
+      * Called when the 'Introduce Infection Button' button is clicked.
+      */
+     private void infectionButton(){
+-        simulator.introduceInfection();
++        actions.infectionRequested();
+     }
+ 
+     /**
+      * Called when the 'Reset Button' button is clicked.
+      */
+     private void resetButton(){
+-        simulator.reset();
++        actions.resetRequested();
+     }
+ 
+     /**
+@@ -168,16 +168,16 @@ public class SimulatorView extends JFrame
+ 
+     /**
+      * Show the current status of the field.
+-     * @param step Which iteration step it is.
+-     * @param field The field whose status is to be displayed.
++     * @param snapshot The current simulation state.
+      */
+-    public void showStatus(Field field)
++    public void showStatus(SimulationSnapshot snapshot)
+     {
+         if(!isVisible()) {
+             setVisible(true);
+         }
+ 
+-        stepLabel.setText(STEP_PREFIX + simulator.getSteps() );
++        Field field = snapshot.getField();
++        stepLabel.setText(STEP_PREFIX + snapshot.getSteps() );
+         stats.reset();
+         infectedPopulationCount = 0;
+ 
+@@ -203,26 +203,17 @@ public class SimulatorView extends JFrame
+             }
+         }
+         stats.countFinished();
+-        if(simulator.isDay()){
+-            dayLabel.setText( DAY_PREFIX+ simulator.getNoOfDays() + "      Time: " + timer.getTime(simulator.getSteps()) + "   It is Day Time. ");
++        if(snapshot.isDay()){
++            dayLabel.setText( DAY_PREFIX+ snapshot.getNumberOfDays() + "      Time: " + timer.getTime(snapshot.getSteps()) + "   It is Day Time. ");
+         }else{
+-            dayLabel.setText( DAY_PREFIX+ simulator.getNoOfDays() + "      Time: " + timer.getTime(simulator.getSteps()) + "   It is Night Time ");
++            dayLabel.setText( DAY_PREFIX+ snapshot.getNumberOfDays() + "      Time: " + timer.getTime(snapshot.getSteps()) + "   It is Night Time ");
+         }
+ 
+-        infoLabel.setText(" " + simulator.getWeather() + "        " + INFECTION_PREFIX + infectedPopulationCount );
++        infoLabel.setText(" " + snapshot.getWeather() + "        " + INFECTION_PREFIX + infectedPopulationCount );
+         population.setText(POPULATION_PREFIX + stats.getPopulationDetails(field));
+         fieldView.repaint();
+     }
+ 
+-    /**
+-     * Determine whether the simulation should continue to run.
+-     * @return true If there is more than one species alive.
+-     */
+-    public boolean isViable(Field field)
+-    {
+-        return stats.isViable(field);
+-    }
+-
+     private Map<ActorKind, Color> loadDefaultColors()
+     {
+         Properties properties = ConfigLoader.loadProperties("config/ui.properties");

@@ -1,0 +1,388 @@
+diff --git a/EventService.java b/EventService.java
+new file mode 100644
+index 0000000..7fb5a4f
+--- /dev/null
++++ b/EventService.java
+@@ -0,0 +1,38 @@
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * Publishes simulation domain events to interested subscribers.
++ */
++public class EventService
++{
++    private final List<SimulationEventListener> listeners;
++    private SimulationEvent lastEvent;
++
++    public EventService()
++    {
++        this.listeners = new ArrayList<>();
++    }
++
++    public void subscribe(SimulationEventListener listener)
++    {
++        listeners.add(listener);
++        if(lastEvent != null) {
++            listener.onEvent(lastEvent);
++        }
++    }
++
++    public void unsubscribe(SimulationEventListener listener)
++    {
++        listeners.remove(listener);
++    }
++
++    public void publish(SimulationEvent event)
++    {
++        lastEvent = event;
++        List<SimulationEventListener> snapshot = new ArrayList<>(listeners);
++        for(SimulationEventListener listener : snapshot) {
++            listener.onEvent(event);
++        }
++    }
++}
+diff --git a/Main.java b/Main.java
+index ee1865d..fea9a1c 100644
+--- a/Main.java
++++ b/Main.java
+@@ -12,7 +12,7 @@ public class Main {
+                 initialState.getField().getWidth()
+         );
+         bindViewControls(sim, view);
+-        sim.addObserver(view);
++        sim.getSimulationContext().getEventService().subscribe(view);
+         //runSim(sim);
+         // Uncomment above line to have the simulation run as soon as the window is rendered
+     }
+diff --git a/SimulationContext.java b/SimulationContext.java
+index 30b14f8..1a3853c 100644
+--- a/SimulationContext.java
++++ b/SimulationContext.java
+@@ -8,6 +8,7 @@ public class SimulationContext
+     private final DiseaseService diseaseService;
+     private final WeatherService weatherService;
+     private final MovementService movementService;
++    private final EventService eventService;
+ 
+     private Field field;
+     private OrganismFactory organismFactory;
+@@ -20,6 +21,7 @@ public class SimulationContext
+         this.diseaseService = new DiseaseService(randomProvider);
+         this.weatherService = new WeatherService(randomProvider);
+         this.movementService = new MovementService(randomProvider);
++        this.eventService = new EventService();
+     }
+ 
+     public RandomProvider getRandomProvider()
+@@ -47,6 +49,11 @@ public class SimulationContext
+         return movementService;
+     }
+ 
++    public EventService getEventService()
++    {
++        return eventService;
++    }
++
+     public Field getField()
+     {
+         return field;
+diff --git a/SimulationEvent.java b/SimulationEvent.java
+new file mode 100644
+index 0000000..d5c34ec
+--- /dev/null
++++ b/SimulationEvent.java
+@@ -0,0 +1,7 @@
++/**
++ * Marker for domain events emitted by the simulation.
++ */
++public interface SimulationEvent
++{
++    SimulationState state();
++}
+diff --git a/SimulationEventListener.java b/SimulationEventListener.java
+new file mode 100644
+index 0000000..5680305
+--- /dev/null
++++ b/SimulationEventListener.java
+@@ -0,0 +1,7 @@
++/**
++ * Subscriber for simulation domain events.
++ */
++public interface SimulationEventListener
++{
++    void onEvent(SimulationEvent event);
++}
+diff --git a/SimulationObserver.java b/SimulationObserver.java
+deleted file mode 100644
+index 12a7448..0000000
+--- a/SimulationObserver.java
++++ /dev/null
+@@ -1,7 +0,0 @@
+-/**
+- * Observer for published simulator state changes.
+- */
+-public interface SimulationObserver
+-{
+-    void onStateChanged(SimulationState state);
+-}
+diff --git a/SimulationReset.java b/SimulationReset.java
+new file mode 100644
+index 0000000..090c826
+--- /dev/null
++++ b/SimulationReset.java
+@@ -0,0 +1,6 @@
++/**
++ * Emitted after the simulation is reset to its starting state.
++ */
++public record SimulationReset(SimulationState state) implements SimulationEvent
++{
++}
+diff --git a/SimulationStarted.java b/SimulationStarted.java
+new file mode 100644
+index 0000000..3e11b5f
+--- /dev/null
++++ b/SimulationStarted.java
+@@ -0,0 +1,6 @@
++/**
++ * Emitted when the simulator enters a running state.
++ */
++public record SimulationStarted(SimulationState state) implements SimulationEvent
++{
++}
+diff --git a/SimulationStopped.java b/SimulationStopped.java
+new file mode 100644
+index 0000000..1183414
+--- /dev/null
++++ b/SimulationStopped.java
+@@ -0,0 +1,6 @@
++/**
++ * Emitted when the simulator exits a running state.
++ */
++public record SimulationStopped(SimulationState state) implements SimulationEvent
++{
++}
+diff --git a/Simulator.java b/Simulator.java
+index 80c5278..4af157c 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -1,6 +1,3 @@
+-import java.util.ArrayList;
+-import java.util.List;
+-
+ /**
+  * A simple predator-prey simulator, based on a rectangular field
+  * containing different organisms.
+@@ -22,8 +19,6 @@ public class Simulator
+     private final SimulationConfig config;
+     private final SimulationContext context;
+     private final ActorService actorService;
+-    // Published state for observers.
+-    private final List<SimulationObserver> observers;
+     private SimulationState currentState;
+ 
+     /**
+@@ -125,28 +120,18 @@ public class Simulator
+         this.actorService = new ActorService(context, field);
+         context.setActorService(actorService);
+         this.environment = new Environment(new Time(), context);
+-        this.observers = new ArrayList<>();
+ 
+         reset();
+     }
+ 
+-    /**
+-     * Register an observer and immediately publish the current state to it.
+-     */
+-    public void addObserver(SimulationObserver observer)
+-    {
+-        observers.add(observer);
+-        observer.onStateChanged(currentState);
+-    }
+-
+-    public void removeObserver(SimulationObserver observer)
++    public SimulationState getCurrentState()
+     {
+-        observers.remove(observer);
++        return currentState;
+     }
+ 
+-    public SimulationState getCurrentState()
++    public SimulationContext getSimulationContext()
+     {
+-        return currentState;
++        return context;
+     }
+ 
+     public boolean isPlayingSimulation()
+@@ -187,9 +172,9 @@ public class Simulator
+             return;
+         }
+ 
+-        playingSimulation = true;
++        startSimulation();
+         simulateOneStep();
+-        playingSimulation = false;
++        finishSimulation();
+     }
+ 
+     /**
+@@ -197,7 +182,10 @@ public class Simulator
+      */
+     public void stop()
+     {
+-        playingSimulation = false;
++        if(playingSimulation) {
++            playingSimulation = false;
++            publishEvent(new SimulationStopped(currentState));
++        }
+     }
+ 
+     /**
+@@ -207,25 +195,23 @@ public class Simulator
+      */
+     public void simulate(int numSteps)
+     {
+-        playingSimulation = true;
++        startSimulation();
+         remainingSteps = numSteps;
+ 
+         int completedSteps = 0;
+-        while(playingSimulation) {
+-            for(int currentStep = 0;
+-                    currentStep < numSteps && playingSimulation && currentState.isViable();
+-                    currentStep++) {
+-                simulateOneStep();
+-                completedSteps++;
++        for(int currentStep = 0;
++                currentStep < numSteps && playingSimulation && currentState.isViable();
++                currentStep++) {
++            simulateOneStep();
++            completedSteps++;
+ //                delay(60);   // uncomment this to run more slowly
+-            }
+-            if(!currentState.isViable()) {
+-                updateBestSimulationResult(completedSteps);
+-                playingSimulation = false;
+-            }
+         }
+ 
+         remainingSteps = Math.max(0, numSteps - completedSteps);
++        if(!currentState.isViable()) {
++            updateBestSimulationResult(completedSteps);
++        }
++        finishSimulation();
+     }
+ 
+     /**
+@@ -241,7 +227,7 @@ public class Simulator
+         environment.advanceTime();
+         context.getWeatherService().advance();
+         actorService.updateActors(environment, step);
+-        publishState();
++        publishState(new StepAdvanced(captureState()));
+     }
+ 
+     /**
+@@ -258,7 +244,7 @@ public class Simulator
+ 
+         actorService.reset();
+ 
+-        publishState();
++        publishState(new SimulationReset(captureState()));
+     }
+ 
+     /**
+@@ -275,11 +261,33 @@ public class Simulator
+         }
+     }
+ 
+-    private void publishState()
++    private SimulationState captureState()
+     {
+         currentState = SimulationState.capture(step, environment, field);
+-        for(SimulationObserver observer : observers) {
+-            observer.onStateChanged(currentState);
++        return currentState;
++    }
++
++    private void publishState(SimulationEvent event)
++    {
++        publishEvent(event);
++    }
++
++    private void publishEvent(SimulationEvent event)
++    {
++        context.getEventService().publish(event);
++    }
++
++    private void startSimulation()
++    {
++        playingSimulation = true;
++        publishEvent(new SimulationStarted(currentState));
++    }
++
++    private void finishSimulation()
++    {
++        if(playingSimulation) {
++            playingSimulation = false;
++            publishEvent(new SimulationStopped(currentState));
+         }
+     }
+ 
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 899662b..663459b 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -14,7 +14,7 @@ import java.util.*;
+  * @version 2022.03.3
+  */
+ public class SimulatorView extends JFrame
+-        implements SimulationObserver
++        implements SimulationEventListener
+ {
+     // Colors used for empty locations.
+     private static final Color EMPTY_COLOR = Color.white;
+@@ -241,12 +241,29 @@ public class SimulatorView extends JFrame
+      * Show the current status of the field.
+      */
+     @Override
+-    public void onStateChanged(SimulationState state)
++    public void onEvent(SimulationEvent event)
++    {
++        SwingUtilities.invokeLater(() -> render(event));
++    }
++
++    private void render(SimulationEvent event)
+     {
+         if(!isVisible()) {
+             setVisible(true);
+         }
+ 
++        if(event instanceof SimulationStarted) {
++            setInfoText("Running");
++        }
++        else if(event instanceof SimulationStopped) {
++            setInfoText("Stopped");
++        }
++        else if(event instanceof SimulationReset) {
++            setInfoText("Reset");
++        }
++
++        SimulationState state = event.state();
++
+         stepLabel.setText(STEP_PREFIX + state.getStep());
+         weatherLabel.setText(WEATHER_PREFIX + state.getWeather());
+         timeLabel.setText(TIME_PREFIX + state.getTime());
+diff --git a/StepAdvanced.java b/StepAdvanced.java
+new file mode 100644
+index 0000000..79a03e5
+--- /dev/null
++++ b/StepAdvanced.java
+@@ -0,0 +1,6 @@
++/**
++ * Emitted after the simulation successfully advances by one step.
++ */
++public record StepAdvanced(SimulationState state) implements SimulationEvent
++{
++}

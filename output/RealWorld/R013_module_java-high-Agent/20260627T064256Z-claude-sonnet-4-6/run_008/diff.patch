@@ -1,0 +1,795 @@
+diff --git a/Animal.java b/Animal.java
+index 32e1e09..7e34902 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -136,4 +136,11 @@ public abstract class Animal extends Entity
+     {
+         return gender;
+     }
++
++    /** Animals count toward the viability check. */
++    @Override
++    public boolean countsTowardViability()
++    {
++        return true;
++    }
+ }
+diff --git a/Cat.java b/Cat.java
+index 2ff19a5..8e54807 100644
+--- a/Cat.java
++++ b/Cat.java
+@@ -1,3 +1,4 @@
++import java.awt.Color;
+ import java.util.List;
+ import java.util.Iterator;
+ import java.util.Random;
+@@ -46,6 +47,7 @@ public class Cat extends Animal
+     @Override protected double getBreedingProbability()      { return BREEDING_PROBABILITY; }
+     @Override protected int getMaxLitterSize()               { return MAX_LITTER_SIZE; }
+     @Override public    int foodValue()                      { return FOOD_VALUE; }
++    @Override public    Color getDisplayColor()              { return Color.PINK; }
+ 
+     /**
+      * This is what the Cat does most of the time: it hunts for mice.
+diff --git a/Counter.java b/Counter.java
+index c7f40a5..04f7382 100644
+--- a/Counter.java
++++ b/Counter.java
+@@ -1,30 +1,32 @@
+-import java.awt.Color;
+-
+ /**
+  * Provide a counter for a participant in the simulation.
+- * This includes an identifying string and a count of how
+- * many participants of this type currently exist within 
+- * the simulation.
++ * This includes an identifying string, a count of how many participants of
++ * this type currently exist, and a flag indicating whether this type counts
++ * toward the simulation's viability check.
+  *
+  * @version 2016.02.29
+  */
+ public class Counter
+ {
+-    // A name for this type of simulation participant
++    // A name for this type of simulation participant.
+     private String name;
+     // How many of this type exist in the simulation.
+     private int count;
++    // Whether this species contributes to the viability count.
++    private boolean countsTowardViability;
+ 
+     /**
+      * Provide a name for one of the simulation types.
+      * @param name  A name, e.g. "Fox".
++     * @param countsTowardViability Whether this type counts toward viability.
+      */
+-    public Counter(String name)
++    public Counter(String name, boolean countsTowardViability)
+     {
+         this.name = name;
++        this.countsTowardViability = countsTowardViability;
+         count = 0;
+     }
+-    
++
+     /**
+      * @return The short description of this type.
+      */
+@@ -41,6 +43,14 @@ public class Counter
+         return count;
+     }
+ 
++    /**
++     * @return true if this species counts toward the simulation viability check.
++     */
++    public boolean countsTowardViability()
++    {
++        return countsTowardViability;
++    }
++
+     /**
+      * Increment the current count by one.
+      */
+@@ -48,7 +58,7 @@ public class Counter
+     {
+         count++;
+     }
+-    
++
+     /**
+      * Reset the current count to zero.
+      */
+diff --git a/Deer.java b/Deer.java
+index 4bb89e0..c34c2d3 100644
+--- a/Deer.java
++++ b/Deer.java
+@@ -1,3 +1,4 @@
++import java.awt.Color;
+ import java.util.List;
+ import java.util.Iterator;
+ import java.util.Random;
+@@ -46,6 +47,7 @@ public class Deer extends Animal
+     @Override protected double getBreedingProbability()      { return BREEDING_PROBABILITY; }
+     @Override protected int getMaxLitterSize()               { return MAX_LITTER_SIZE; }
+     @Override public    int foodValue()                      { return FOOD_VALUE; }
++    @Override public    Color getDisplayColor()              { return Color.BLUE; }
+ 
+     /**
+      * This is what the Deer does most of the time - it runs
+diff --git a/Entity.java b/Entity.java
+index f2f004c..975bc92 100644
+--- a/Entity.java
++++ b/Entity.java
+@@ -1,3 +1,4 @@
++import java.awt.Color;
+ import java.util.List;
+ 
+ /**
+@@ -5,7 +6,7 @@ import java.util.List;
+  * Centralises the lifecycle state that Animal and Plant previously each carried
+  * their own copy of: alive/dead status, field reference, and grid position.
+  */
+-public abstract class Entity
++public abstract class Entity implements Viewable
+ {
+     // Whether the entity is alive or not.
+     private boolean alive;
+@@ -100,4 +101,29 @@ public abstract class Entity
+     {
+         return navigator;
+     }
++
++    // --- Viewable ---
++
++    /**
++     * @return the color used to render this entity in the simulation view.
++     */
++    @Override
++    public abstract Color getDisplayColor();
++
++    /**
++     * @return a short human-readable name for this entity type.
++     * Defaults to the simple class name (e.g. "Cat"); override for a custom label.
++     */
++    @Override
++    public String getDisplayName()
++    {
++        return getClass().getSimpleName();
++    }
++
++    /**
++     * Whether this entity type counts toward the viability check.
++     * Implemented by {@link Animal} (true) and {@link Plant} (false).
++     */
++    @Override
++    public abstract boolean countsTowardViability();
+ }
+diff --git a/EntityRegistry.java b/EntityRegistry.java
+index 732ed02..fa4eb21 100644
+--- a/EntityRegistry.java
++++ b/EntityRegistry.java
+@@ -1,15 +1,14 @@
+ import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.List;
+-import java.awt.Color;
+ 
+ /**
+  * The single source of truth for every entity type in the simulation.
+  *
+- * Each {@link Registration} entry bundles the four things the {@code Simulator}
+- * needs to know about a species: how likely it is to appear at each cell, what
+- * colour it renders as, how to construct an instance, and which Java class it
+- * represents (for the view's colour map).
++ * Each {@link Registration} entry bundles the three things the {@code Simulator}
++ * needs to know about a species: how likely it is to appear at each cell, how to
++ * construct an instance, and which Java class it represents. Display colour is now
++ * provided by each entity directly via {@link Viewable#getDisplayColor()}.
+  *
+  * To add a new species to the simulation, add one {@code Registration} line here.
+  * No other class needs to change.
+@@ -17,26 +16,22 @@ import java.awt.Color;
+ public class EntityRegistry
+ {
+     /**
+-     * Pairs an {@link EntityFactory} with the display and population metadata
+-     * the {@code Simulator} needs for one entity type.
++     * Pairs an {@link EntityFactory} with the population metadata the
++     * {@code Simulator} needs for one entity type.
+      */
+     public static class Registration
+     {
+-        /** The runtime class, used to register a display colour. */
++        /** The runtime class, used to identify the entity type. */
+         public final Class<?>       type;
+         /** Per-cell creation probability during field initialisation. */
+         public final double         probability;
+-        /** Display colour in the simulation view. */
+-        public final Color          color;
+         /** Factory that constructs a new instance of this entity type. */
+         public final EntityFactory  factory;
+ 
+-        public Registration(Class<?> type, double probability,
+-                            Color color, EntityFactory factory)
++        public Registration(Class<?> type, double probability, EntityFactory factory)
+         {
+             this.type        = type;
+             this.probability = probability;
+-            this.color       = color;
+             this.factory     = factory;
+         }
+     }
+@@ -48,12 +43,12 @@ public class EntityRegistry
+ 
+     private static final List<Registration> REGISTRATIONS = Collections.unmodifiableList(
+         Arrays.asList(
+-            new Registration(Lion.class,  0.01, Color.RED,    (f, l) -> new Lion(true, f, l)),
+-            new Registration(Deer.class,  0.02, Color.BLUE,   (f, l) -> new Deer(true, f, l)),
+-            new Registration(Owl.class,   0.05, Color.ORANGE, (f, l) -> new Owl(true, f, l)),
+-            new Registration(Mouse.class, 0.04, Color.YELLOW, (f, l) -> new Mouse(true, f, l)),
+-            new Registration(Cat.class,   0.05, Color.PINK,   (f, l) -> new Cat(true, f, l)),
+-            new Registration(Grass.class, 0.40, Color.GREEN,  (f, l) -> new Grass(true, f, l))
++            new Registration(Lion.class,  0.01, (f, l) -> new Lion(true, f, l)),
++            new Registration(Deer.class,  0.02, (f, l) -> new Deer(true, f, l)),
++            new Registration(Owl.class,   0.05, (f, l) -> new Owl(true, f, l)),
++            new Registration(Mouse.class, 0.04, (f, l) -> new Mouse(true, f, l)),
++            new Registration(Cat.class,   0.05, (f, l) -> new Cat(true, f, l)),
++            new Registration(Grass.class, 0.40, (f, l) -> new Grass(true, f, l))
+         )
+     );
+ 
+diff --git a/FieldStats.java b/FieldStats.java
+index e537a6b..a8a3d0e 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -1,17 +1,21 @@
+-import java.awt.Color;
+ import java.util.HashMap;
+ 
+ /**
+- * This class collects and provides some statistical data on the state 
+- * of a field. It is flexible: it will create and maintain a counter 
+- * for any class of object that is found within the field.
++ * This class collects and provides some statistical data on the state
++ * of a field. It is flexible: it will create and maintain a counter
++ * for any entity type found within the field.
++ *
++ * <p>Entity types are identified by their {@link Viewable#getDisplayName()}
++ * string rather than their runtime {@code Class}, so no class-specific
++ * knowledge is needed here. Whether a type counts toward the viability
++ * check is determined by {@link Viewable#countsTowardViability()}.
+  *
+  * @version 2016.02.29
+  */
+ public class FieldStats
+ {
+-    // Counters for each type of entity (fox, rabbit, etc.) in the simulation.
+-    private HashMap<Class, Counter> counters;
++    // Counters for each entity type (keyed by display name).
++    private HashMap<String, Counter> counters;
+     // Whether the counters are currently up to date.
+     private boolean countsValid;
+ 
+@@ -20,8 +24,6 @@ public class FieldStats
+      */
+     public FieldStats()
+     {
+-        // Set up a collection for counters for each type of animal that
+-        // we might find
+         counters = new HashMap<>();
+         countsValid = true;
+     }
+@@ -33,11 +35,10 @@ public class FieldStats
+     public String getPopulationDetails(Field<Entity> field)
+     {
+         StringBuffer buffer = new StringBuffer();
+-        if(!countsValid) {
++        if (!countsValid) {
+             generateCounts(field);
+         }
+-        for(Class key : counters.keySet()) {
+-            Counter info = counters.get(key);
++        for (Counter info : counters.values()) {
+             buffer.append(info.getName());
+             buffer.append(": ");
+             buffer.append(info.getCount());
+@@ -45,38 +46,36 @@ public class FieldStats
+         }
+         return buffer.toString();
+     }
+-    
++
+     /**
+-     * Invalidate the current set of statistics; reset all 
++     * Invalidate the current set of statistics; reset all
+      * counts to zero.
+      */
+     public void reset()
+     {
+         countsValid = false;
+-        for(Class key : counters.keySet()) {
+-            Counter count = counters.get(key);
++        for (Counter count : counters.values()) {
+             count.reset();
+         }
+     }
+ 
+     /**
+-     * Increment the count for one class of animal.
+-     * @param animalClass The class of animal to increment.
++     * Increment the count for the given entity's type.
++     * @param entity The entity whose type count should be incremented.
+      */
+-    public void incrementCount(Class animalClass)
++    public void incrementCount(Entity entity)
+     {
+-        Counter count = counters.get(animalClass);
+-        if(count == null) {
+-            // We do not have a counter for this species yet.
+-            // Create one.
+-            count = new Counter(animalClass.getName());
+-            counters.put(animalClass, count);
++        String name = entity.getDisplayName();
++        Counter count = counters.get(name);
++        if (count == null) {
++            count = new Counter(name, entity.countsTowardViability());
++            counters.put(name, count);
+         }
+         count.increment();
+     }
+ 
+     /**
+-     * Indicate that an animal count has been completed.
++     * Indicate that an entity count has been completed.
+      */
+     public void countFinished()
+     {
+@@ -85,40 +84,36 @@ public class FieldStats
+ 
+     /**
+      * Determine whether the simulation is still viable.
+-     * I.e., should it continue to run.
+-     * @return true If there is more than one species alive.
++     * @return true if there is more than one animal species alive.
+      */
+     public boolean isViable(Field<Entity> field)
+     {
+-        // How many counts are non-zero.
+         int nonZero = 0;
+-        if(!countsValid) {
++        if (!countsValid) {
+             generateCounts(field);
+         }
+-        for(Class key : counters.keySet()) {
+-            Counter info = counters.get(key);
+-            if(info.getCount() > 0 && !info.getName().equals("Grass")) {
++        for (Counter info : counters.values()) {
++            if (info.getCount() > 0 && info.countsTowardViability()) {
+                 nonZero++;
+             }
+         }
+         return nonZero > 1;
+     }
+-    
++
+     /**
+-     * Generate counts of the number of animals.
+-     * These are not kept up to date as animals
+-     * are placed in the field, but only when a request
+-     * is made for the information.
++     * Generate counts of the number of entities.
++     * These are not kept up to date as entities are placed in the field,
++     * but only when a request is made for the information.
+      * @param field The field to generate the stats for.
+      */
+     private void generateCounts(Field<Entity> field)
+     {
+         reset();
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
++        for (int row = 0; row < field.getDepth(); row++) {
++            for (int col = 0; col < field.getWidth(); col++) {
+                 Entity entity = field.getObjectAt(row, col);
+-                if(entity != null) {
+-                    incrementCount(entity.getClass());
++                if (entity != null) {
++                    incrementCount(entity);
+                 }
+             }
+         }
+diff --git a/Grass.java b/Grass.java
+index 660deb2..e216fdd 100644
+--- a/Grass.java
++++ b/Grass.java
+@@ -1,3 +1,4 @@
++import java.awt.Color;
+ import java.util.List;
+ import java.util.Iterator;
+ import java.util.Random;
+@@ -39,7 +40,7 @@ public class Grass extends Plant
+     public Grass(boolean randomSize, Field<Entity> field, Location location)
+     {
+         super(field, location);
+-        
++
+         if(randomSize) {
+             size = rand.nextInt(MAX_SIZE);
+         }
+@@ -48,6 +49,8 @@ public class Grass extends Plant
+         }
+         steppeFired = false;
+     }
++
++    @Override public Color getDisplayColor() { return Color.GREEN; }
+     
+     /**
+      * This is what the Grass does most of the time - it grows 
+diff --git a/Lion.java b/Lion.java
+index 0152904..8b55713 100644
+--- a/Lion.java
++++ b/Lion.java
+@@ -1,3 +1,4 @@
++import java.awt.Color;
+ import java.util.List;
+ import java.util.Iterator;
+ import java.util.Random;
+@@ -46,6 +47,7 @@ public class Lion extends Animal
+     @Override protected double getBreedingProbability()      { return BREEDING_PROBABILITY; }
+     @Override protected int getMaxLitterSize()               { return MAX_LITTER_SIZE; }
+     @Override public    int foodValue()                      { return FOOD_VALUE; }
++    @Override public    Color getDisplayColor()              { return Color.RED; }
+ 
+     /**
+      * This is what the Lion does most of the time: it hunts for prey.
+diff --git a/Mouse.java b/Mouse.java
+index a967c18..d2b9d67 100644
+--- a/Mouse.java
++++ b/Mouse.java
+@@ -1,3 +1,4 @@
++import java.awt.Color;
+ import java.util.List;
+ import java.util.Iterator;
+ import java.util.Random;
+@@ -51,6 +52,7 @@ public class Mouse extends Animal
+     @Override protected double getBreedingProbability()      { return BREEDING_PROBABILITY; }
+     @Override protected int getMaxLitterSize()               { return MAX_LITTER_SIZE; }
+     @Override public    int foodValue()                      { return FOOD_VALUE; }
++    @Override public    Color getDisplayColor()              { return Color.YELLOW; }
+ 
+     /**
+      * This is what the mouse does most of the time - it runs
+diff --git a/Owl.java b/Owl.java
+index bd476ce..6fc33a5 100644
+--- a/Owl.java
++++ b/Owl.java
+@@ -1,3 +1,4 @@
++import java.awt.Color;
+ import java.util.List;
+ import java.util.Iterator;
+ import java.util.Random;
+@@ -46,6 +47,7 @@ public class Owl extends Animal
+     @Override protected double getBreedingProbability()      { return BREEDING_PROBABILITY; }
+     @Override protected int getMaxLitterSize()               { return MAX_LITTER_SIZE; }
+     @Override public    int foodValue()                      { return FOOD_VALUE; }
++    @Override public    Color getDisplayColor()              { return Color.ORANGE; }
+ 
+     /**
+      * This is what the Owl does most of the time: it hunts for mice.
+diff --git a/Plant.java b/Plant.java
+index 83fe6ca..fa5d61c 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -29,4 +29,11 @@ public abstract class Plant extends Entity
+      */
+     @Override
+     public abstract void act(List<Entity> newEntities, int step, String weather);
++
++    /** Plants do not count toward the viability check. */
++    @Override
++    public boolean countsTowardViability()
++    {
++        return false;
++    }
+ }
+diff --git a/Simulator.java b/Simulator.java
+index 09edf16..7723cef 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -2,7 +2,6 @@ import java.util.Random;
+ import java.util.List;
+ import java.util.ArrayList;
+ import java.util.Iterator;
+-import java.awt.Color;
+ 
+ /**
+  * A simple predator-prey simulator, based on a rectangular field
+@@ -55,9 +54,6 @@ public class Simulator
+         weatherManager = new WeatherManager();
+ 
+         view = new SimulatorView(depth, width);
+-        for (EntityRegistry.Registration reg : EntityRegistry.getAll()) {
+-            view.setColor(reg.type, reg.color);
+-        }
+ 
+         // Setup a valid starting point.
+         reset();
+diff --git a/SimulatorView.java b/SimulatorView.java
+index dea3d56..c14b3a7 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -1,36 +1,31 @@
+ import java.awt.*;
+ import java.awt.event.*;
+ import javax.swing.*;
+-import java.util.LinkedHashMap;
+-import java.util.Map;
+ 
+ /**
+  * A graphical view of the simulation grid.
+- * The view displays a colored rectangle for each location 
+- * representing its contents. It uses a default background color.
+- * Colors for each type of species can be defined using the
+- * setColor method.
++ * The view displays a colored rectangle for each location
++ * representing its contents.
++ *
++ * <p>Each entity provides its own display color via {@link Viewable#getDisplayColor()},
++ * so this class no longer maintains a class-to-color map or depends on
++ * specific entity types.
+  *
+  * @version 2016.02.29
+  */
+ public class SimulatorView extends JFrame
+ {
+-    // Colors used for empty locations.
++    // Color used for empty locations.
+     private static final Color EMPTY_COLOR = Color.white;
+ 
+-    // Color used for objects that have no defined color.
+-    private static final Color UNKNOWN_COLOR = Color.gray;
+-
+     private final String STEP_PREFIX = "Step: ";
+     private final String DAYZONE_PREFIX = " Day Zone: ";
+     private final String WEATHER_PREFIX = " Weather: ";
+     private final String POPULATION_PREFIX = "Population: ";
+     private JLabel stepLabel, population, infoLabel;
+     private FieldView fieldView;
+-    
+-    // A map for storing colors for participants in the simulation
+-    private Map<Class, Color> colors;
+-    // A statistics object computing and storing simulation information
++
++    // A statistics object computing and storing simulation information.
+     private FieldStats stats;
+ 
+     /**
+@@ -41,19 +36,18 @@ public class SimulatorView extends JFrame
+     public SimulatorView(int height, int width)
+     {
+         stats = new FieldStats();
+-        colors = new LinkedHashMap<>();
+ 
+         setTitle("Predator/Prey Simulation");
+         stepLabel = new JLabel(STEP_PREFIX, JLabel.CENTER);
+         infoLabel = new JLabel("  ", JLabel.CENTER);
+         population = new JLabel(POPULATION_PREFIX, JLabel.CENTER);
+-        
++
+         setLocation(60, 50);
+-        
++
+         fieldView = new FieldView(height, width);
+ 
+         Container contents = getContentPane();
+-        
++
+         JPanel infoPane = new JPanel(new BorderLayout());
+             infoPane.add(stepLabel, BorderLayout.WEST);
+             infoPane.add(infoLabel, BorderLayout.CENTER);
+@@ -63,16 +57,6 @@ public class SimulatorView extends JFrame
+         pack();
+         setVisible(true);
+     }
+-    
+-    /**
+-     * Define a color to be used for a given class of animal.
+-     * @param animalClass The animal's Class object.
+-     * @param color The color to be used for the given class.
+-     */
+-    public void setColor(Class animalClass, Color color)
+-    {
+-        colors.put(animalClass, color);
+-    }
+ 
+     /**
+      * Display a short information label at the top of the window.
+@@ -82,62 +66,39 @@ public class SimulatorView extends JFrame
+         infoLabel.setText(text);
+     }
+ 
+-    /**
+-     * @return The color to be used for a given class of animal.
+-     */
+-    private Color getColor(Class animalClass)
+-    {
+-        Color col = colors.get(animalClass);
+-        if(col == null) {
+-            // no color defined for this class
+-            return UNKNOWN_COLOR;
+-        }
+-        else {
+-            return col;
+-        }
+-    }
+-
+     /**
+      * Show the current status of the field.
+      * @param step Which iteration step it is.
+      * @param field The field whose status is to be displayed.
++     * @param weather The current weather condition.
+      */
+     public void showStatus(int step, Field<Entity> field, String weather)
+     {
+         String dayzone = "";
+-        
+-        if(!isVisible()) {
++
++        if (!isVisible()) {
+             setVisible(true);
+         }
+-        
++
+         switch (step % 4) {
+-            case 1:
+-                dayzone = "Morning ";
+-                break;
+-            case 2:
+-                dayzone = "Afternoon ";
+-                break;
+-            case 3:
+-                dayzone = "Evening ";
+-                break;
+-            case 0:
+-                dayzone = "Night ";
+-                break;                
++            case 1: dayzone = "Morning ";   break;
++            case 2: dayzone = "Afternoon "; break;
++            case 3: dayzone = "Evening ";   break;
++            case 0: dayzone = "Night ";     break;
+         }
+ 
+         stepLabel.setText(STEP_PREFIX + step + DAYZONE_PREFIX + dayzone + WEATHER_PREFIX + weather);
+         stats.reset();
+-        
++
+         fieldView.preparePaint();
+ 
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
++        for (int row = 0; row < field.getDepth(); row++) {
++            for (int col = 0; col < field.getWidth(); col++) {
+                 Entity entity = field.getObjectAt(row, col);
+-                if(entity != null) {
+-                    stats.incrementCount(entity.getClass());
+-                    fieldView.drawMark(col, row, getColor(entity.getClass()));
+-                }
+-                else {
++                if (entity != null) {
++                    stats.incrementCount(entity);
++                    fieldView.drawMark(col, row, entity.getDisplayColor());
++                } else {
+                     fieldView.drawMark(col, row, EMPTY_COLOR);
+                 }
+             }
+@@ -150,20 +111,18 @@ public class SimulatorView extends JFrame
+ 
+     /**
+      * Determine whether the simulation should continue to run.
+-     * @return true If there is more than one species alive.
++     * @return true If there is more than one animal species alive.
+      */
+     public boolean isViable(Field<Entity> field)
+     {
+         return stats.isViable(field);
+     }
+-    
++
+     /**
+-     * Provide a graphical view of a rectangular field. This is 
++     * Provide a graphical view of a rectangular field. This is
+      * a nested class (a class defined inside a class) which
+      * defines a custom component for the user interface. This
+      * component displays the field.
+-     * This is rather advanced GUI stuff - you can ignore this 
+-     * for your project if you like.
+      */
+     private class FieldView extends JPanel
+     {
+@@ -200,24 +159,24 @@ public class SimulatorView extends JFrame
+          */
+         public void preparePaint()
+         {
+-            if(! size.equals(getSize())) {  // if the size has changed...
++            if (!size.equals(getSize())) {
+                 size = getSize();
+                 fieldImage = fieldView.createImage(size.width, size.height);
+                 g = fieldImage.getGraphics();
+ 
+                 xScale = size.width / gridWidth;
+-                if(xScale < 1) {
++                if (xScale < 1) {
+                     xScale = GRID_VIEW_SCALING_FACTOR;
+                 }
+                 yScale = size.height / gridHeight;
+-                if(yScale < 1) {
++                if (yScale < 1) {
+                     yScale = GRID_VIEW_SCALING_FACTOR;
+                 }
+             }
+         }
+-        
++
+         /**
+-         * Paint on grid location on this field in a given color.
++         * Paint one grid location on this field in a given color.
+          */
+         public void drawMark(int x, int y, Color color)
+         {
+@@ -231,13 +190,11 @@ public class SimulatorView extends JFrame
+          */
+         public void paintComponent(Graphics g)
+         {
+-            if(fieldImage != null) {
++            if (fieldImage != null) {
+                 Dimension currentSize = getSize();
+-                if(size.equals(currentSize)) {
++                if (size.equals(currentSize)) {
+                     g.drawImage(fieldImage, 0, 0, null);
+-                }
+-                else {
+-                    // Rescale the previous image.
++                } else {
+                     g.drawImage(fieldImage, 0, 0, currentSize.width, currentSize.height, null);
+                 }
+             }
+diff --git a/Viewable.java b/Viewable.java
+new file mode 100644
+index 0000000..752cdc8
+--- /dev/null
++++ b/Viewable.java
+@@ -0,0 +1,34 @@
++import java.awt.Color;
++
++/**
++ * Exposes the display metadata that the simulation view needs from any entity.
++ *
++ * <p>By implementing this interface, each entity type becomes self-describing
++ * from the renderer's perspective: the view no longer maintains an external
++ * class-to-color map or hard-codes species names for viability checks.
++ *
++ * <p>All concrete {@link Entity} subclasses must implement
++ * {@link #getDisplayColor()}. {@link #getDisplayName()} has a default in
++ * {@code Entity} that returns the simple class name.
++ * {@link #countsTowardViability()} is implemented once in {@link Animal}
++ * (returns {@code true}) and once in {@link Plant} (returns {@code false}).
++ */
++public interface Viewable
++{
++    /**
++     * @return the color used to render this entity in the simulation view.
++     */
++    Color getDisplayColor();
++
++    /**
++     * @return a short human-readable name for this entity type (e.g. "Cat").
++     */
++    String getDisplayName();
++
++    /**
++     * @return {@code true} if this entity type should count toward the
++     *         viability check (i.e. its extinction would end the simulation).
++     *         Animals return {@code true}; plants return {@code false}.
++     */
++    boolean countsTowardViability();
++}

@@ -1,0 +1,434 @@
+diff --git a/SimulationEngine.java b/SimulationEngine.java
+index af7ff0a..7b80fd5 100644
+--- a/SimulationEngine.java
++++ b/SimulationEngine.java
+@@ -1,6 +1,8 @@
+ import java.util.ArrayList;
++import java.util.HashSet;
+ import java.util.Iterator;
+ import java.util.List;
++import java.util.Set;
+ 
+ /**
+  * This file is part of the Predator-Prey Simulation.
+@@ -8,9 +10,10 @@ import java.util.List;
+  * Drives the predator-prey simulation: it owns the simulation state (the field,
+  * the organisms, the current step, time and weather) and advances it each step.
+  *
+- * The engine talks to the view only through the {@link SimulationView}
+- * abstraction, so the simulation logic is decoupled from any particular GUI
+- * (such as the Swing/JFrame-based SimulatorView).
++ * The engine does not know about any view. Instead it broadcasts {@link
++ * SimulationEvent}s to registered {@link SimulationListener}s when it resets or
++ * completes a step, so a GUI (or a logger, a test probe, ...) can observe the
++ * simulation without the engine depending on it.
+  *
+  * @version 2022.03.02
+  */
+@@ -20,8 +23,10 @@ public class SimulationEngine
+     private final List<Entity> organisms;
+     // The current state of the field.
+     private final Field field;
+-    // The view used to display the simulation and report viability.
+-    private final SimulationView view;
++    // Seeds the field with organisms at the start of each run.
++    private final Populator populator;
++    // Parties observing the simulation (e.g. the GUI).
++    private final List<SimulationListener> listeners;
+     // The current step of the simulation.
+     private int step;
+     // The current hour of the simulation.
+@@ -32,21 +37,31 @@ public class SimulationEngine
+     private Weather currentWeather;
+ 
+     /**
+-     * Create a simulation engine for a field of the given size, displayed
+-     * through the given view.
++     * Create a simulation engine for a field of the given size, seeded by the
++     * given populator.
+      *
+      * @param depth Depth of the field. Must be greater than zero.
+      * @param width Width of the field. Must be greater than zero.
+-     * @param view The view used to display the simulation.
++     * @param populator The populator used to seed the field.
+      */
+-    public SimulationEngine(int depth, int width, SimulationView view)
++    public SimulationEngine(int depth, int width, Populator populator)
+     {
+         this.organisms = new ArrayList<>();
+         this.field = new Field(depth, width);
+-        this.view = view;
++        this.populator = populator;
++        this.listeners = new ArrayList<>();
++    }
+ 
+-        // Setup a valid starting point
+-        reset();
++    /**
++     * Register a listener to be notified of simulation events. Listeners should
++     * be added before the simulation is reset or run so they receive every
++     * event.
++     *
++     * @param listener The listener to add.
++     */
++    public void addListener(SimulationListener listener)
++    {
++        listeners.add(listener);
+     }
+ 
+     /**
+@@ -65,7 +80,7 @@ public class SimulationEngine
+      */
+     public void simulate(int numSteps)
+     {
+-        for(int s = 1; s <= numSteps && view.isViable(field); s++) {
++        for(int s = 1; s <= numSteps && isViable(); s++) {
+             simulateOneStep();
+             delay(5);   // uncomment this to run more slowly
+         }
+@@ -99,10 +114,8 @@ public class SimulationEngine
+         int day = step/120 +1;
+         hour = (step/5) % 24 + 1;
+ 
+-
+-        view.showStatus(step, field);
+-        view.updateTimeLabel(day,hour);
+-        view.updateEnvironmentLabel(currentWeather, currentTime);
++        // Notify observers that a step has completed.
++        fireStepCompleted(day, hour);
+ 
+         // every hour, generate new weather if we are done with current weather
+         if (step % 5 == 0) {
+@@ -131,11 +144,57 @@ public class SimulationEngine
+ 
+         organisms.clear();
+ 
+-        Populator populator = new Populator(view);
+         populator.populate(organisms, field);
+ 
+-        // Show the starting state in the view.
+-        view.showStatus(step, field);
++        // Notify observers of the fresh starting state.
++        fireSimulationReset();
++    }
++
++    /**
++     * Determine whether the simulation should continue to run: it is viable
++     * while more than one species remains alive in the field.
++     *
++     * @return true if more than one species is present.
++     */
++    private boolean isViable()
++    {
++        Set<Class<?>> speciesPresent = new HashSet<>();
++        for(int row = 0; row < field.getDepth(); row++) {
++            for(int col = 0; col < field.getWidth(); col++) {
++                Object organism = field.getObjectAt(row, col);
++                if(organism != null) {
++                    speciesPresent.add(organism.getClass());
++                }
++            }
++        }
++        return speciesPresent.size() > 1;
++    }
++
++    /**
++     * Broadcast a reset event describing the current starting state.
++     */
++    private void fireSimulationReset()
++    {
++        int day = step/120 + 1;
++        int hourNow = (step/5) % 24 + 1;
++        SimulationEvent event = new SimulationEvent(step, field, day, hourNow, currentWeather, currentTime);
++        for(SimulationListener listener : listeners) {
++            listener.simulationReset(event);
++        }
++    }
++
++    /**
++     * Broadcast a step-completed event describing the current state.
++     *
++     * @param day The current day.
++     * @param hour The current hour.
++     */
++    private void fireStepCompleted(int day, int hour)
++    {
++        SimulationEvent event = new SimulationEvent(step, field, day, hour, currentWeather, currentTime);
++        for(SimulationListener listener : listeners) {
++            listener.simulationStepCompleted(event);
++        }
+     }
+ 
+     /**
+diff --git a/SimulationEvent.java b/SimulationEvent.java
+new file mode 100644
+index 0000000..410514d
+--- /dev/null
++++ b/SimulationEvent.java
+@@ -0,0 +1,62 @@
++/**
++ * This file is part of the Predator-Prey Simulation.
++ *
++ * An immutable snapshot of the simulation's state at a single moment, broadcast
++ * to {@link SimulationListener}s when the simulation resets or completes a step.
++ * Listeners (such as the GUI) read whatever they need from it instead of being
++ * pushed individual updates.
++ *
++ * @version 2022.03.02
++ */
++public class SimulationEvent {
++
++    private final int step;
++    private final Field field;
++    private final int day;
++    private final int hour;
++    private final Weather weather;
++    private final TimeOfDay time;
++
++    /**
++     * Create a snapshot of the simulation state.
++     *
++     * @param step The current step number.
++     * @param field The current field.
++     * @param day The current day.
++     * @param hour The current hour.
++     * @param weather The current weather.
++     * @param time The current time of day.
++     */
++    public SimulationEvent(int step, Field field, int day, int hour, Weather weather, TimeOfDay time) {
++        this.step = step;
++        this.field = field;
++        this.day = day;
++        this.hour = hour;
++        this.weather = weather;
++        this.time = time;
++    }
++
++    public int getStep() {
++        return step;
++    }
++
++    public Field getField() {
++        return field;
++    }
++
++    public int getDay() {
++        return day;
++    }
++
++    public int getHour() {
++        return hour;
++    }
++
++    public Weather getWeather() {
++        return weather;
++    }
++
++    public TimeOfDay getTime() {
++        return time;
++    }
++}
+diff --git a/SimulationListener.java b/SimulationListener.java
+new file mode 100644
+index 0000000..cf63e82
+--- /dev/null
++++ b/SimulationListener.java
+@@ -0,0 +1,26 @@
++/**
++ * This file is part of the Predator-Prey Simulation.
++ *
++ * Observes the simulation. Instead of the engine pushing individual display
++ * updates to a known view, interested parties (such as the GUI) register as
++ * listeners and are notified of simulation events, reading whatever state they
++ * need from the {@link SimulationEvent}.
++ *
++ * @version 2022.03.02
++ */
++public interface SimulationListener {
++
++    /**
++     * Called when the simulation has been reset to a fresh starting state.
++     *
++     * @param event A snapshot of the starting state.
++     */
++    void simulationReset(SimulationEvent event);
++
++    /**
++     * Called when the simulation has completed a single step.
++     *
++     * @param event A snapshot of the state after the step.
++     */
++    void simulationStepCompleted(SimulationEvent event);
++}
+diff --git a/SimulationView.java b/SimulationView.java
+index 2e6ba58..820350e 100644
+--- a/SimulationView.java
++++ b/SimulationView.java
+@@ -3,11 +3,10 @@ import java.awt.Color;
+ /**
+  * This file is part of the Predator-Prey Simulation.
+  *
+- * An abstraction of the view that displays the simulation. The simulation
+- * engine drives a SimulationView without depending on any particular GUI
+- * toolkit, so the Swing/JFrame-based {@link SimulatorView} can be swapped for
+- * an alternative (for example a headless or test view) without changing the
+- * simulation logic.
++ * The view abstraction used to configure how the simulation is displayed -
++ * specifically, the colour used to draw each species. Per-step display updates
++ * are delivered separately through the {@link SimulationListener} event
++ * mechanism, so the simulation engine does not depend on this interface.
+  *
+  * @version 2022.03.02
+  */
+@@ -20,36 +19,4 @@ public interface SimulationView {
+      * @param color The colour to use for that species.
+      */
+     void setColor(Class<?> animalClass, Color color);
+-
+-    /**
+-     * Display the current state of the field.
+-     *
+-     * @param step Which iteration step it is.
+-     * @param field The field whose status is to be displayed.
+-     */
+-    void showStatus(int step, Field field);
+-
+-    /**
+-     * Determine whether the simulation should continue to run.
+-     *
+-     * @param field The field to inspect.
+-     * @return true if the simulation is still viable.
+-     */
+-    boolean isViable(Field field);
+-
+-    /**
+-     * Display the current day and hour.
+-     *
+-     * @param day The current day.
+-     * @param hour The current hour.
+-     */
+-    void updateTimeLabel(int day, int hour);
+-
+-    /**
+-     * Display the current weather and time of day.
+-     *
+-     * @param weather The current weather.
+-     * @param time The current time of day.
+-     */
+-    void updateEnvironmentLabel(Weather weather, TimeOfDay time);
+ }
+diff --git a/Simulator.java b/Simulator.java
+index 8189c16..08c138c 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -3,8 +3,9 @@
+  *
+  * This class is a thin entry point: it wires the Swing-based {@link
+  * SimulatorView} to a {@link SimulationEngine} (which holds all the simulation
+- * logic) and delegates to it. The engine itself depends only on the {@link
+- * SimulationView} abstraction, so the simulation is decoupled from the GUI.
++ * logic) and delegates to it. The view observes the engine as a {@link
++ * SimulationListener}, so the engine drives the GUI through events rather than
++ * depending on it directly.
+  *
+  * @version 2022.03.02
+  */
+@@ -41,10 +42,16 @@ public class Simulator
+             width = DEFAULT_WIDTH;
+         }
+ 
+-        // Create the GUI view and hand it to the engine through the
+-        // SimulationView abstraction.
++        // Create the GUI view, build a populator that draws species onto it,
++        // and wire the view to the engine as an observer. The engine never
++        // references the view directly - it only emits events.
+         SimulatorView view = new SimulatorView(depth, width);
+-        engine = new SimulationEngine(depth, width, view);
++        Populator populator = new Populator(view);
++        engine = new SimulationEngine(depth, width, populator);
++        engine.addListener(view);
++
++        // Populate the field and show the initial state (fires a reset event).
++        engine.reset();
+     }
+ 
+     /**
+diff --git a/SimulatorView.java b/SimulatorView.java
+index b8e0861..493490d 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -12,7 +12,7 @@ import java.util.Map;
+  *
+  * @version 2022.03.02
+  */
+-public class SimulatorView extends JFrame implements SimulationView
++public class SimulatorView extends JFrame implements SimulationView, SimulationListener
+ {
+     // Colors used for empty locations.
+     private static final Color EMPTY_COLOR = Color.white;
+@@ -106,13 +106,37 @@ public class SimulatorView extends JFrame implements SimulationView
+         }
+     }
+ 
++    /**
++     * Called when the simulation has been reset: show the fresh starting state.
++     *
++     * @param event A snapshot of the starting state.
++     */
++    @Override
++    public void simulationReset(SimulationEvent event)
++    {
++        showStatus(event.getStep(), event.getField());
++    }
++
++    /**
++     * Called when the simulation has completed a step: refresh the field and
++     * the time/environment labels from the event.
++     *
++     * @param event A snapshot of the state after the step.
++     */
++    @Override
++    public void simulationStepCompleted(SimulationEvent event)
++    {
++        showStatus(event.getStep(), event.getField());
++        updateTimeLabel(event.getDay(), event.getHour());
++        updateEnvironmentLabel(event.getWeather(), event.getTime());
++    }
++
+     /**
+      * Show the current status of the field.
+      * @param step Which iteration step it is.
+      * @param field The field whose status is to be displayed.
+      */
+-    @Override
+-    public void showStatus(int step, Field field)
++    private void showStatus(int step, Field field)
+     {
+         if(!isVisible()) {
+             setVisible(true);
+@@ -140,23 +164,11 @@ public class SimulatorView extends JFrame implements SimulationView
+         fieldView.repaint();
+     }
+ 
+-    /**
+-     * Determine whether the simulation should continue to run.
+-     * @return true If there is more than one species alive.
+-     */
+-    @Override
+-    public boolean isViable(Field field)
+-    {
+-        return stats.isViable(field);
+-    }
+-
+-    @Override
+-    public void updateTimeLabel(int day, int hour){
++    private void updateTimeLabel(int day, int hour){
+         timeLabel.setText(TIME_DAY_PREFIX + (day) + " " + TIME_HOUR_PREFIX + (hour));
+     }
+ 
+-    @Override
+-    public void updateEnvironmentLabel(Weather weather, TimeOfDay time) {
++    private void updateEnvironmentLabel(Weather weather, TimeOfDay time) {
+         environmentLabel.setText(WEATHER_PREFIX + weather.getType().toString() + " " + TIME_OF_DAY_PREFIX + time);
+     }
+     

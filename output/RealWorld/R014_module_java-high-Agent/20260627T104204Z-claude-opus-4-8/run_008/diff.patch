@@ -1,0 +1,165 @@
+diff --git a/Actor.java b/Actor.java
+index 87fc677..a00f8f9 100644
+--- a/Actor.java
++++ b/Actor.java
+@@ -21,6 +21,8 @@ public abstract class Actor
+     protected boolean overlap;
+     // The current phase (time of day) of the simulation step.
+     private Phase phase;
++    // The strategy mapping each phase to the behaviour run during it.
++    private Schedule schedule;
+     // The current weather conditions in the field
+     protected Weather weather;
+     // A shared random number generator to control breeding and disease infection effects.
+@@ -37,6 +39,13 @@ public abstract class Actor
+         alive = true;
+         this.field = field;
+         setLocation(location);
++
++        // Default strategy: run each phase's own action. Subclasses provide
++        // dayAct/nightAct; callers can swap in a different Schedule to change
++        // the day/night behaviour without modifying Actor.act.
++        schedule = new Schedule()
++            .on(Phase.DAY, this::dayAct)
++            .on(Phase.NIGHT, this::nightAct);
+     }
+ 
+     /**
+@@ -57,18 +66,34 @@ public abstract class Actor
+         this.weather = weather;
+         setWeatherEffects();
+ 
+-        // Records the phase and runs only the action for that phase.
+-        // The break statements prevent the day case from falling through
+-        // into the night case (which would run nightAct on every day step).
++        // Records the phase and delegates to the schedule strategy, which
++        // decides what behaviour runs for this phase. Swapping the schedule
++        // changes the day/night behaviour without changing this method.
+         this.phase = phase;
+-        switch (phase) {
+-            case DAY:
+-                dayAct(newActors);
+-                break;
+-            case NIGHT:
+-                nightAct(newActors);
+-                break;
+-        }
++        schedule.run(phase, newActors);
++    }
++
++    /**
++     * Replace this actor's phase behaviour strategy. Lets the simulation swap
++     * day/night schedules (or install entirely new ones) without modifying how
++     * act works.
++     *
++     * @param schedule The new schedule to use.
++     */
++    public void setSchedule(Schedule schedule)
++    {
++        this.schedule = schedule;
++    }
++
++    /**
++     * Return this actor's current phase behaviour strategy. Useful for deriving
++     * a variant, e.g. {@code actor.setSchedule(actor.getSchedule().swapped(Phase.DAY, Phase.NIGHT))}.
++     *
++     * @return The current schedule.
++     */
++    public Schedule getSchedule()
++    {
++        return schedule;
+     }
+ 
+     /**
+diff --git a/PhaseBehaviour.java b/PhaseBehaviour.java
+new file mode 100644
+index 0000000..f276c68
+--- /dev/null
++++ b/PhaseBehaviour.java
+@@ -0,0 +1,19 @@
++import java.util.List;
++
++/**
++ * Strategy interface for the behaviour an actor performs during a single phase
++ * (time of day). Encapsulating a phase's behaviour behind this interface lets
++ * the mapping of phase to behaviour be varied independently of Actor.act.
++ *
++ * @version (27/06/2026)
++ */
++@FunctionalInterface
++public interface PhaseBehaviour
++{
++    /**
++     * Perform this phase's behaviour.
++     *
++     * @param newActors A list to which newly born actors are added.
++     */
++    void act(List<Actor> newActors);
++}
+diff --git a/Schedule.java b/Schedule.java
+new file mode 100644
+index 0000000..0721e0a
+--- /dev/null
++++ b/Schedule.java
+@@ -0,0 +1,61 @@
++import java.util.EnumMap;
++import java.util.List;
++
++/**
++ * The Strategy context for an actor's phase behaviour. It holds the behaviour
++ * to run for each Phase, so the simulation can swap day/night schedules - or
++ * plug in entirely new ones - without changing the Actor.act control flow.
++ *
++ * @version (27/06/2026)
++ */
++public class Schedule
++{
++    // The behaviour to run for each phase.
++    private final EnumMap<Phase, PhaseBehaviour> behaviours = new EnumMap<>(Phase.class);
++
++    /**
++     * Register the behaviour to run during a given phase.
++     *
++     * @param phase     The phase the behaviour applies to.
++     * @param behaviour The behaviour to run during that phase.
++     * @return This schedule, so calls can be chained.
++     */
++    public Schedule on(Phase phase, PhaseBehaviour behaviour)
++    {
++        behaviours.put(phase, behaviour);
++        return this;
++    }
++
++    /**
++     * Run the behaviour registered for the given phase. Does nothing if no
++     * behaviour has been registered for that phase.
++     *
++     * @param phase     The current phase.
++     * @param newActors A list to which newly born actors are added.
++     */
++    public void run(Phase phase, List<Actor> newActors)
++    {
++        PhaseBehaviour behaviour = behaviours.get(phase);
++        if (behaviour != null) {
++            behaviour.act(newActors);
++        }
++    }
++
++    /**
++     * Create a copy of this schedule with the behaviours of two phases
++     * exchanged. This lets callers swap, for example, the day and night
++     * routines without touching the actors that run them.
++     *
++     * @param first  The first phase.
++     * @param second The second phase.
++     * @return A new schedule with the two phases' behaviours swapped.
++     */
++    public Schedule swapped(Phase first, Phase second)
++    {
++        Schedule copy = new Schedule();
++        copy.behaviours.putAll(behaviours);
++        copy.behaviours.put(first, behaviours.get(second));
++        copy.behaviours.put(second, behaviours.get(first));
++        return copy;
++    }
++}

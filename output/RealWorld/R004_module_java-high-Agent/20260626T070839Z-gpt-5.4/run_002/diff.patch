@@ -1,0 +1,574 @@
+diff --git a/Main.java b/Main.java
+index e1478cd..3c55927 100644
+--- a/Main.java
++++ b/Main.java
+@@ -1,22 +1,30 @@
+-import java.util.ArrayList;
+-import java.util.List;
+-
+ /**
+  * This class is used to start the simulation
+  * @version 2022.03.2
+  */
+ public class Main {
+-    private static List<Double[]> allCombs = new ArrayList<>();
+-
+     public static void main(String[] args) {
+         Simulator sim = new Simulator();
++        SimulationState initialState = sim.getCurrentState();
++        SimulatorView view = new SimulatorView(
++                initialState.getField().getDepth(),
++                initialState.getField().getWidth()
++        );
++        bindViewControls(sim, view);
++        sim.addObserver(view);
+         //runSim(sim);
+         // Uncomment above line to have the simulation run as soon as the window is rendered
+     }
+ 
+-
+     public static void runSim(Simulator sim) {
+         sim.runLongSimulation();
+     }
+-}
+ 
++    private static void bindViewControls(Simulator sim, SimulatorView view)
++    {
++        view.addOneStepButtonListener(e -> sim.stepOnce());
++        view.addStopButtonListener(e -> sim.stop());
++        view.addResetButtonListener(e -> sim.reset());
++        view.addLongButtonListener(e -> sim.startLongSimulation());
++    }
++}
+diff --git a/SimulationInfo.java b/SimulationInfo.java
+index f106958..cfaceb4 100644
+--- a/SimulationInfo.java
++++ b/SimulationInfo.java
+@@ -15,7 +15,7 @@ public class SimulationInfo {
+     /**
+      * The list of the classes of all actors in the simulation
+      */
+-    public static final List<Class> ALL_ACTORS = new ArrayList<>(Arrays.asList(Grass.class, Deer.class, Coyote.class, Wolf.class, Eagle.class, Hunter.class, Mouse.class));
++    public static final List<Class<?>> ALL_ACTORS = new ArrayList<>(Arrays.asList(Grass.class, Deer.class, Coyote.class, Wolf.class, Eagle.class, Hunter.class, Mouse.class));
+ 
+     /**
+      * A Map connecting each class in the simulation to a default colour
+diff --git a/SimulationObserver.java b/SimulationObserver.java
+new file mode 100644
+index 0000000..12a7448
+--- /dev/null
++++ b/SimulationObserver.java
+@@ -0,0 +1,7 @@
++/**
++ * Observer for published simulator state changes.
++ */
++public interface SimulationObserver
++{
++    void onStateChanged(SimulationState state);
++}
+diff --git a/SimulationState.java b/SimulationState.java
+new file mode 100644
+index 0000000..af863b1
+--- /dev/null
++++ b/SimulationState.java
+@@ -0,0 +1,112 @@
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++/**
++ * Immutable snapshot of the current simulation state.
++ */
++public class SimulationState
++{
++    private final int step;
++    private final WeatherType weather;
++    private final String time;
++    private final Field field;
++    private final Map<Class<?>, Integer> populationCounts;
++    private final int diseasedPopulation;
++    private final boolean viable;
++
++    private SimulationState(int step,
++            WeatherType weather,
++            String time,
++            Field field,
++            Map<Class<?>, Integer> populationCounts,
++            int diseasedPopulation,
++            boolean viable)
++    {
++        this.step = step;
++        this.weather = weather;
++        this.time = time;
++        this.field = field;
++        this.populationCounts = Collections.unmodifiableMap(populationCounts);
++        this.diseasedPopulation = diseasedPopulation;
++        this.viable = viable;
++    }
++
++    public static SimulationState capture(int step, Environment environment, Field field)
++    {
++        Map<Class<?>, Integer> populationCounts = new LinkedHashMap<>();
++        for(Class<?> actorClass : SimulationInfo.ALL_ACTORS) {
++            populationCounts.put(actorClass, 0);
++        }
++
++        int diseasedPopulation = 0;
++        for(int row = 0; row < field.getDepth(); row++) {
++            for(int col = 0; col < field.getWidth(); col++) {
++                Object actor = field.getObjectAt(row, col);
++                if(actor != null) {
++                    populationCounts.merge(actor.getClass(), 1, Integer::sum);
++                    if(actor instanceof Organism organism && organism.isDiseased()) {
++                        diseasedPopulation++;
++                    }
++                }
++            }
++        }
++
++        int livingSpecies = 0;
++        for(int count : populationCounts.values()) {
++            if(count > 0) {
++                livingSpecies++;
++            }
++        }
++
++        return new SimulationState(
++                step,
++                environment.getWeather().getCurrentWeather(),
++                environment.getTime().getCurrentTimeString(),
++                field,
++                populationCounts,
++                diseasedPopulation,
++                livingSpecies > 2
++        );
++    }
++
++    public int getStep()
++    {
++        return step;
++    }
++
++    public WeatherType getWeather()
++    {
++        return weather;
++    }
++
++    public String getTime()
++    {
++        return time;
++    }
++
++    public Field getField()
++    {
++        return field;
++    }
++
++    public int getPopulationCount(Class<?> actorClass)
++    {
++        return populationCounts.getOrDefault(actorClass, 0);
++    }
++
++    public Map<Class<?>, Integer> getPopulationCounts()
++    {
++        return populationCounts;
++    }
++
++    public int getDiseasedPopulation()
++    {
++        return diseasedPopulation;
++    }
++
++    public boolean isViable()
++    {
++        return viable;
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index efe4823..0e5102d 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -1,4 +1,3 @@
+-import java.awt.event.ActionListener;
+ import java.util.ArrayList;
+ import java.util.Iterator;
+ import java.util.List;
+@@ -23,13 +22,14 @@ public class Simulator
+     private final Field field;
+     // The current step of the simulation.
+     private int step;
+-    // A graphical view of the simulation.
+-    private final SimulatorView view;
+     // Environment in the simulation.
+     private final Environment environment;
+     // Configuration and actor creation rules for the simulation.
+     private final SimulationConfig config;
+     private final ActorFactory actorFactory;
++    // Published state for observers.
++    private final List<SimulationObserver> observers;
++    private SimulationState currentState;
+ 
+     /**
+      * A simulator constructor to set the creation probability of each actor.
+@@ -90,11 +90,35 @@ public class Simulator
+         this.field = new Field(depth, width);
+         this.environment = new Environment(new Time(), new Weather());
+         this.actorFactory = new ActorFactory(config);
+-        this.view = createView(depth, width);
++        this.observers = new ArrayList<>();
+ 
+         reset();
+     }
+ 
++    /**
++     * Register an observer and immediately publish the current state to it.
++     */
++    public void addObserver(SimulationObserver observer)
++    {
++        observers.add(observer);
++        observer.onStateChanged(currentState);
++    }
++
++    public void removeObserver(SimulationObserver observer)
++    {
++        observers.remove(observer);
++    }
++
++    public SimulationState getCurrentState()
++    {
++        return currentState;
++    }
++
++    public boolean isPlayingSimulation()
++    {
++        return playingSimulation;
++    }
++
+     /**
+      * Run the simulation from its current state for a reasonably long period.
+      */
+@@ -104,6 +128,43 @@ public class Simulator
+         simulate(remainingSteps);
+     }
+ 
++    /**
++     * Start a long simulation on a background thread.
++     */
++    public void startLongSimulation()
++    {
++        if(playingSimulation) {
++            System.out.println("Stop the simulation first");
++            return;
++        }
++
++        Thread runLongSimThread = new Thread(this::runLongSimulation, "SimulationRunThread");
++        runLongSimThread.start();
++    }
++
++    /**
++     * Run a single simulation step if the simulator is currently idle.
++     */
++    public void stepOnce()
++    {
++        if(playingSimulation) {
++            System.out.println("Stop the simulation first");
++            return;
++        }
++
++        playingSimulation = true;
++        simulateOneStep();
++        playingSimulation = false;
++    }
++
++    /**
++     * Stop the simulation loop.
++     */
++    public void stop()
++    {
++        playingSimulation = false;
++    }
++
+     /**
+      * Run the simulation from its current state for the given number of steps.
+      * Stop before the given number of steps if it ceases to be viable.
+@@ -115,13 +176,15 @@ public class Simulator
+         remainingSteps = numSteps;
+ 
+         int completedSteps = 0;
+-        while(playingSimulation){
+-            for(int currentStep = 0; currentStep < numSteps && playingSimulation && view.isViable(field); currentStep++) {
++        while(playingSimulation) {
++            for(int currentStep = 0;
++                    currentStep < numSteps && playingSimulation && currentState.isViable();
++                    currentStep++) {
+                 simulateOneStep();
+                 completedSteps++;
+ //                delay(60);   // uncomment this to run more slowly
+             }
+-            if(!view.isViable(field)){
++            if(!currentState.isViable()) {
+                 updateBestSimulationResult(completedSteps);
+                 playingSimulation = false;
+             }
+@@ -156,7 +219,7 @@ public class Simulator
+ 
+         actors.addAll(newActors);
+         actors.addAll(actorFactory.createGrassPatches(field, environment));
+-        showStatus();
++        publishState();
+     }
+ 
+     /**
+@@ -172,7 +235,7 @@ public class Simulator
+         actors.clear();
+         actors.addAll(actorFactory.populate(field));
+ 
+-        showStatus();
++        publishState();
+     }
+ 
+     /**
+@@ -189,20 +252,6 @@ public class Simulator
+         }
+     }
+ 
+-    private SimulatorView createView(int depth, int width)
+-    {
+-        SimulatorView simulatorView = new SimulatorView(depth, width);
+-        for(Class<?> cls : SimulationInfo.DEFAULT_COLOR_MAP.keySet()) {
+-            simulatorView.setColor(cls, SimulationInfo.DEFAULT_COLOR_MAP.get(cls));
+-        }
+-
+-        simulatorView.addLongButtonListener(longButtonListener);
+-        simulatorView.addOneStepButtonListener(startButtonListener);
+-        simulatorView.addStopButtonListener(stopButtonListener);
+-        simulatorView.addResetButtonListener(resetButtonListener);
+-        return simulatorView;
+-    }
+-
+     private void processActor(Actor actor, List<Actor> newActors)
+     {
+         if(actor instanceof Animal animal) {
+@@ -226,14 +275,12 @@ public class Simulator
+         }
+     }
+ 
+-    private void showStatus()
++    private void publishState()
+     {
+-        view.showStatus(
+-                step,
+-                environment.getWeather().getCurrentWeather().toString(),
+-                environment.getTime().getCurrentTimeString(),
+-                field
+-        );
++        currentState = SimulationState.capture(step, environment, field);
++        for(SimulationObserver observer : observers) {
++            observer.onStateChanged(currentState);
++        }
+     }
+ 
+     private void updateBestSimulationResult(int completedSteps)
+@@ -243,42 +290,4 @@ public class Simulator
+             SimulationInfo.HIGHEST_STEP_PROBS = config.getCreationProbabilities();
+         }
+     }
+-
+-    /**
+-     * Whenever the start button is pressed, the simulateOneStep() method is called.
+-     */
+-    private final ActionListener startButtonListener = e -> {
+-        if(playingSimulation) {
+-            System.out.println("Stop the simulation first");
+-        }
+-        else {
+-            playingSimulation = true;
+-            simulateOneStep();
+-            playingSimulation = false;
+-        }
+-    };
+-
+-    /**
+-     * Whenever the stop button is pressed, the simulation is stopped.
+-     */
+-    private final ActionListener stopButtonListener = e -> playingSimulation = false;
+-
+-    /**
+-     * Whenever the reset button is pressed, the simulation is reset.
+-     */
+-    private final ActionListener resetButtonListener = e -> reset();
+-
+-    /**
+-     * Whenever the long button is pressed, runLongSimulation() is called.
+-     */
+-    private final ActionListener longButtonListener = e -> {
+-        Thread runLongSimThread = new Thread(this::runLongSimulation, "SimulationRunThread");
+-
+-        if(!playingSimulation) {
+-            runLongSimThread.start();
+-        }
+-        else {
+-            System.out.println("Stop the simulation first");
+-        }
+-    };
+ }
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 091f130..899662b 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -14,6 +14,7 @@ import java.util.*;
+  * @version 2022.03.3
+  */
+ public class SimulatorView extends JFrame
++        implements SimulationObserver
+ {
+     // Colors used for empty locations.
+     private static final Color EMPTY_COLOR = Color.white;
+@@ -41,9 +42,7 @@ public class SimulatorView extends JFrame
+ 
+ 
+     // A map for storing colors for participants in the simulation
+-    private Map<Class, Color> colors;
+-    // A statistics object computing and storing simulation information
+-    private FieldStats stats;
++    private Map<Class<?>, Color> colors;
+ 
+ 
+     /**
+@@ -53,7 +52,6 @@ public class SimulatorView extends JFrame
+      */
+     public SimulatorView(int height, int width)
+     {
+-        stats = new FieldStats();
+         colors = new LinkedHashMap<>();
+ 
+         setTitle("Prey and predator simulation");
+@@ -119,7 +117,7 @@ public class SimulatorView extends JFrame
+                 Map.entry(Eagle.class, eagleCheckBox)
+         );
+ 
+-        for(Class cls : SimulationInfo.ALL_ACTORS){
++        for(Class<?> cls : SimulationInfo.ALL_ACTORS){
+             classToCheckBox.get(cls).setForeground(SimulationInfo.DEFAULT_COLOR_MAP.get(cls));
+         }
+ 
+@@ -151,6 +149,7 @@ public class SimulatorView extends JFrame
+         pack();
+         setVisible(false);
+ 
++        applyDefaultColors();
+         setColorsByCheckBox();
+ 
+ 
+@@ -190,7 +189,7 @@ public class SimulatorView extends JFrame
+      * @param animalClass The animal's Class object.
+      * @param color The color to be used for the given class.
+      */
+-    public void setColor(Class animalClass, Color color)
++    public void setColor(Class<?> animalClass, Color color)
+     {
+         colors.put(animalClass, color);
+     }
+@@ -206,7 +205,7 @@ public class SimulatorView extends JFrame
+     /**
+      * @return The color to be used for a given class of animal.
+      */
+-    private Color getColor(Class animalClass)
++    private Color getColor(Class<?> animalClass)
+     {
+         Color col = colors.get(animalClass);
+         if(col == null) {
+@@ -219,7 +218,7 @@ public class SimulatorView extends JFrame
+     }
+ 
+     public void setColorsByCheckBox(){
+-        for(Class c : new Class[] {Grass.class, Deer.class, Coyote.class, Wolf.class, Eagle.class, Hunter.class}){
++        for(Class<?> c : new Class[] {Grass.class, Deer.class, Coyote.class, Wolf.class, Eagle.class, Hunter.class, Mouse.class}){
+             if(!classToCheckBox.get(c).isSelected()){
+                 setColor(c, Color.white);
+             }
+@@ -229,7 +228,7 @@ public class SimulatorView extends JFrame
+         }
+     }
+ 
+-    public void checkCheckBoxByColor(Class c){
++    public void checkCheckBoxByColor(Class<?> c){
+         if(!classToCheckBox.get(c).isSelected()){
+             setColor(c, Color.white);
+         }
+@@ -240,32 +239,25 @@ public class SimulatorView extends JFrame
+ 
+     /**
+      * Show the current status of the field.
+-     * @param step Which iteration step it is.
+-     * @param field The field whose status is to be displayed.
+      */
+-    public void showStatus(int step, String weather, String time, Field field)
++    @Override
++    public void onStateChanged(SimulationState state)
+     {
+         if(!isVisible()) {
+             setVisible(true);
+         }
+ 
+-        stepLabel.setText(STEP_PREFIX + step);
+-        weatherLabel.setText(WEATHER_PREFIX + weather);
+-        timeLabel.setText(TIME_PREFIX + time);
+-        stats.reset();
++        stepLabel.setText(STEP_PREFIX + state.getStep());
++        weatherLabel.setText(WEATHER_PREFIX + state.getWeather());
++        timeLabel.setText(TIME_PREFIX + state.getTime());
+ 
+         fieldView.preparePaint();
++        Field field = state.getField();
+ 
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+                 Object actor = field.getObjectAt(row, col);
+                 if(actor != null) {
+-                    stats.incrementCount(actor.getClass());
+-                    if(actor instanceof Organism){
+-                        if(((Organism) actor).isDiseased()){
+-                            stats.incrementDiseasedCount();
+-                        }
+-                    }
+                     fieldView.drawMark(col, row, getColor(actor.getClass()));
+                 }
+                 else {
+@@ -273,24 +265,26 @@ public class SimulatorView extends JFrame
+                 }
+             }
+         }
+-        stats.countFinished();
+-        for(Class cls : SimulationInfo.ALL_ACTORS){
+-            classToCheckBox.get(cls).setText(stats.getCountDetails(cls));
++        for(Class<?> cls : SimulationInfo.ALL_ACTORS){
++            classToCheckBox.get(cls).setText(getPopulationLabel(cls, state));
+         }
+ 
+ //        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(field));
+-        diseasedPopulation.setText(stats.getDiseasedPopulation());
++        diseasedPopulation.setText(DISEASED_PREFIX + state.getDiseasedPopulation());
+         setColorsByCheckBox();
+         fieldView.repaint();
+     }
+ 
+-    /**
+-     * Determine whether the simulation should continue to run.
+-     * @return true If there is more than one species alive.
+-     */
+-    public boolean isViable(Field field)
++    private void applyDefaultColors()
++    {
++        for(Map.Entry<Class<?>, Color> entry : SimulationInfo.DEFAULT_COLOR_MAP.entrySet()) {
++            setColor(entry.getKey(), entry.getValue());
++        }
++    }
++
++    private String getPopulationLabel(Class<?> actorClass, SimulationState state)
+     {
+-        return stats.isViable(field);
++        return actorClass.getSimpleName() + ": " + state.getPopulationCount(actorClass);
+     }
+ 
+     /**

@@ -1,0 +1,583 @@
+diff --git a/Actor.java b/Actor.java
+index c625205..b947c3e 100644
+--- a/Actor.java
++++ b/Actor.java
+@@ -1,17 +1,33 @@
++import java.util.ArrayList;
+ import java.util.List;
+ 
+ /**
+- * Represents all aspects of the simulator that perform some functionality
+- * with each step (organisms, water, weather, diseases)
++ * Represents all simulation entities that participate in a lifecycle step.
+  *
+- * @version 2022.02.25
++ * @version 2022.06.27
+  */
+ interface Actor
+ {
+     /**
+-     * Make this actor act - that is: make it do
+-     * whatever it wants/needs to do.
+-     * @param newActors A list to receive any actors relevant to action
++     * Advance this actor by one simulation tick.
++     * @param context Shared lifecycle state for the current step.
+      */
+-    abstract public void act(List<Actor> actorsList);
+-}
+\ No newline at end of file
++    void tick(SimulationContext context);
++
++    /**
++     * Legacy adapter for the older act-based contract.
++     * @param actorsList Actors available to the step.
++     */
++    default void act(List<Actor> actorsList)
++    {
++        tick(new SimulationContext(actorsList, new ArrayList<>(), false));
++    }
++
++    /**
++     * @return true if this actor should be removed from the simulation.
++     */
++    default boolean isExpired()
++    {
++        return false;
++    }
++}
+diff --git a/Animal.java b/Animal.java
+index 50525ad..80dfb91 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -41,17 +41,20 @@ public abstract class Animal extends Organism
+     }
+     
+     /**
+-     * Make this animal act - that is: make it do
+-     * whatever it wants/needs to do.
+-     * @param newAnimals A list to receive newly born animals.
++     * Advance the animal by one lifecycle tick.
++     * @param context Shared lifecycle state for the current step.
+      */
+-    public void act(List<Actor> newOrganisms) {
+-        // All animals eat; all organisms also increment age and water level
+-        super.act(newOrganisms);
++    @Override
++    public void tick(SimulationContext context) {
++        if (context.isNightTime() != isNocturnal()) {
++            return;
++        }
++
++        super.tick(context);
+         incrementHunger();
+         if(isAlive() && !sleeping) {        
+             // Move towards a source of food if found
+-            giveBirth(newOrganisms);  
++            giveBirth(context.getSpawnedActors());  
+             Location newLocation = null;
+             newLocation = findWater();
+             if (newLocation == null && getFoodLevel() < 8 && rand.nextDouble() <= getHuntProbability()) {
+diff --git a/Disease.java b/Disease.java
+index f1d7612..aeb75b8 100644
+--- a/Disease.java
++++ b/Disease.java
+@@ -26,7 +26,7 @@ public abstract class Disease implements Actor
+     // How long the disease affects an infected organism for
+     private int duration;
+     // Randomiser to control random spread of disease
+-    private Random rand = new Random();
++    private static final Random rand = Randomizer.getRandom();
+     
+     /**
+      * Constructor for a disease
+@@ -42,40 +42,39 @@ public abstract class Disease implements Actor
+     }
+ 
+     /**
+-     * Make this actor act - that is: disease spreads and kills any 
+-     * infected individuals after a certain number of days
+-     * @param newActors A list to receive any actors relevant to action
++     * Advance the disease by one lifecycle tick.
++     * Disease can infect susceptible actors, spread through the field, and resolve infections.
++     * @param context Shared lifecycle state for the current step.
+      */
+-    public void act(List<Actor> actorsList)
++    @Override
++    public void tick(SimulationContext context)
+     {
+-        // Loops through every infected animal
+-        Iterator<Actor> it = affected.keySet().iterator();
+-        // List to hold individuals who are newly infected by disease
++        infectSusceptibleActors(context.getActors());
++
++        List<Actor> infectedActors = new ArrayList<>(affected.keySet());
++        // Loops through every infected actor that was already active this tick.
++        Iterator<Actor> it = infectedActors.iterator();
+         List<Actor> newInfections = new ArrayList<>();
+         while (it.hasNext()) {
+             Actor infected = it.next();
+             newInfections.addAll(spread(infected));
+             if (affected.get(infected) == duration) {
+-                // After certain number of days, infected individual 
+-                // dies (animal)/ is cured (water)
+-                it.remove();
++                affected.remove(infected);
+                 if (infected instanceof Organism) {
+                     Organism organism = (Organism) infected;
+                     organism.setDead();
+-                    }
++                }
+                 else {
+                     WaterSources water = (WaterSources) infected;
+                     water.notInfected();
+                 }
+             }
+             else {
+-                // Increases the number of days an individual has been infected by 1
+                 int days = affected.get(infected) + 1;
+                 affected.put(infected, days);
+             }
+         }
+         for (Actor infectee: newInfections) {
+-            // adds any newly infected individuals to the list and sets days infected to 0
+             if (infectee instanceof Organism) {
+                 Organism organism = (Organism) infectee;
+                 organism.setInfected();
+@@ -132,6 +131,45 @@ public abstract class Disease implements Actor
+         }
+         return newlyInfected;
+     }
++
++    /**
++     * Infect susceptible actors with the disease's random occurrence probability.
++     * @param actors The actors available in the current simulation step.
++     */
++    private void infectSusceptibleActors(List<Actor> actors)
++    {
++        for (Actor actor : actors) {
++            if (!affectedSpecies.contains(actor.getClass().getName())) {
++                continue;
++            }
++            if (affected.containsKey(actor)) {
++                continue;
++            }
++            if (actor instanceof Organism) {
++                Organism organism = (Organism) actor;
++                if (!organism.isAlive()) {
++                    continue;
++                }
++            }
++            else if (actor instanceof WaterSources) {
++                WaterSources water = (WaterSources) actor;
++                if (water.isEmpty()) {
++                    continue;
++                }
++            }
++            if (rand.nextDouble() <= probability) {
++                addIndividual(actor);
++                if (actor instanceof Organism) {
++                    Organism organism = (Organism) actor;
++                    organism.setInfected();
++                }
++                else if (actor instanceof WaterSources) {
++                    WaterSources water = (WaterSources) actor;
++                    water.setInfected();
++                }
++            }
++        }
++    }
+     
+     /**
+      * Method to add species which can be infected with the disease
+diff --git a/FennecFox.java b/FennecFox.java
+index d89e50b..91439c0 100644
+--- a/FennecFox.java
++++ b/FennecFox.java
+@@ -28,9 +28,9 @@ public class FennecFox extends Animal
+     }
+ 
+     @Override
+-    public void act(List<Actor> newFoxes)
++    public void tick(SimulationContext context)
+     {
+-        super.act(newFoxes);
++        super.tick(context);
+     }
+ 
+     @Override
+diff --git a/Gazelle.java b/Gazelle.java
+index 78ace04..ab7c685 100644
+--- a/Gazelle.java
++++ b/Gazelle.java
+@@ -26,9 +26,9 @@ public class Gazelle extends Animal
+     }
+ 
+     @Override
+-    public void act(List<Actor> newGazelles)
++    public void tick(SimulationContext context)
+     {
+-        super.act(newGazelles);
++        super.tick(context);
+     }
+ 
+     @Override
+diff --git a/Hyena.java b/Hyena.java
+index b6e14d3..5a7caee 100644
+--- a/Hyena.java
++++ b/Hyena.java
+@@ -28,9 +28,9 @@ public class Hyena extends Animal
+     }
+ 
+     @Override
+-    public void act(List<Actor> newHyenas)
++    public void tick(SimulationContext context)
+     {
+-        super.act(newHyenas);
++        super.tick(context);
+     }
+ 
+     @Override
+diff --git a/Lion.java b/Lion.java
+index e977c0d..fb90de0 100644
+--- a/Lion.java
++++ b/Lion.java
+@@ -27,9 +27,9 @@ public class Lion extends Animal
+     }
+ 
+     @Override
+-    public void act(List<Actor> newLions)
++    public void tick(SimulationContext context)
+     {
+-        super.act(newLions);
++        super.tick(context);
+     }
+ 
+     @Override
+diff --git a/Mouse.java b/Mouse.java
+index 07c7b0a..4ba4f9d 100644
+--- a/Mouse.java
++++ b/Mouse.java
+@@ -27,9 +27,9 @@ public class Mouse extends Animal
+     }
+ 
+     @Override
+-    public void act(List<Actor> newMice)
++    public void tick(SimulationContext context)
+     {
+-        super.act(newMice);
++        super.tick(context);
+     }
+ 
+     @Override
+diff --git a/Organism.java b/Organism.java
+index c1748c5..21a4f05 100644
+--- a/Organism.java
++++ b/Organism.java
+@@ -40,14 +40,14 @@ public abstract class Organism implements Actor
+         age = 0;
+     }
+     
+-     /**
+-     * Make this organism act - that is: make it do
+-     * whatever it wants/needs to do.
+-     * All organisms will age and lose water with each step that they act
++    /**
++     * Advance the organism by one lifecycle tick.
++     * All organisms age and lose water at each tick.
+      *
+-     * @param newOrganisms A list to receive newly born organisms
++     * @param context Shared lifecycle state for the current step.
+      */
+-    public void act(List<Actor> newOrganisms)
++    @Override
++    public void tick(SimulationContext context)
+     {
+         incrementAge();
+         decreaseWaterLevel();
+@@ -246,4 +246,10 @@ public abstract class Organism implements Actor
+     protected boolean isInfected(){
+         return infected;
+     }
++
++    @Override
++    public boolean isExpired()
++    {
++        return !alive;
++    }
+ }
+diff --git a/Plant.java b/Plant.java
+index f05ae88..9dabe84 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -28,15 +28,15 @@ public abstract class Plant extends Organism
+     }
+ 
+     /**
+-     * Make this plant act - that is: make it do whatever it needs to do.
+-     * @param newPlants A list to receive newly grown plants.
++     * Advance the plant by one lifecycle tick.
++     * @param context Shared lifecycle state for the current step.
+      */
+     @Override
+-    public void act(List<Actor> newPlants)
++    public void tick(SimulationContext context)
+     {
+-        super.act(newPlants);
++        super.tick(context);
+         if (isAlive()) {
+-            giveBirth(newPlants);
++            giveBirth(context.getSpawnedActors());
+             findWater();
+         }
+     }
+diff --git a/SimulationContext.java b/SimulationContext.java
+new file mode 100644
+index 0000000..8b954fc
+--- /dev/null
++++ b/SimulationContext.java
+@@ -0,0 +1,45 @@
++import java.util.List;
++
++/**
++ * Shared lifecycle state for one simulation tick.
++ */
++public final class SimulationContext
++{
++    private final List<Actor> actors;
++    private final List<Actor> spawnedActors;
++    private final boolean nightTime;
++    private boolean generateWater;
++
++    public SimulationContext(List<Actor> actors, List<Actor> spawnedActors, boolean nightTime)
++    {
++        this.actors = actors;
++        this.spawnedActors = spawnedActors;
++        this.nightTime = nightTime;
++        this.generateWater = false;
++    }
++
++    public List<Actor> getActors()
++    {
++        return actors;
++    }
++
++    public List<Actor> getSpawnedActors()
++    {
++        return spawnedActors;
++    }
++
++    public boolean isNightTime()
++    {
++        return nightTime;
++    }
++
++    public void requestWaterGeneration()
++    {
++        generateWater = true;
++    }
++
++    public boolean shouldGenerateWater()
++    {
++        return generateWater;
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index 8849e1c..010f62a 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -1,7 +1,6 @@
+ import java.util.Random;
+ import java.util.List;
+ import java.util.ArrayList;
+-import java.util.Arrays;
+ import java.util.Iterator;
+ import java.awt.Color;
+ 
+@@ -34,8 +33,6 @@ public class Simulator
+     private static final double LAKE_CREATION_PROBABILITY = 0.005;
+     // List of all actors in simulation
+     private List<Actor> actors;
+-    // List of potential diseases that could occur in simulation
+-    private List<Disease> diseases;
+     // The current state of the field.
+     private Field field;
+     // The current step of the simulation.
+@@ -123,54 +120,23 @@ public class Simulator
+         }
+         
+         // Provide space for newborn organisms
+-        List<Actor> newOrganisms = new ArrayList<>();   
++        List<Actor> newOrganisms = new ArrayList<>();
++        SimulationContext context = new SimulationContext(actors, newOrganisms, nightTime);
+ 
+-        Weather weather = null;
+-        
+-        // Let all actors act
++        // Let all actors advance by one tick.
+         Iterator<Actor> it = actors.iterator();
+         while(it.hasNext()) {
+-            boolean canAct = true;
+             Actor actor = it.next();
+-            if (actor instanceof Weather) {
+-                weather = (Weather) actor;
+-            }
+-            if (actor instanceof Organism) {
+-                // low chance of each animal being infected wiht a disease
+-                generateDisease(actor);
+-                Organism organism = (Organism) actor;
+-                if (organism instanceof Animal) {
+-                    Animal animal = (Animal) organism;   
+-                    // animals only act during certain times of day (i.e. if day but nocturnal, won't act)
+-                    if (nightTime != animal.isNocturnal()) {
+-                        canAct = false;
+-                    }
+-                }
+-                if (canAct) {
+-                    actor.act(newOrganisms);
+-                }
+-                if(!(organism.isAlive())) {
+-                    it.remove();
+-                }
+-            }
+-            else {
+-                actor.act(actors);  
+-            }
+-            
+-            // Removes any empty water sources from the field
+-            if (actor instanceof WaterSources) {
+-                WaterSources water = (WaterSources) actor;
+-                // if a water source is empty, remove it from simulation
+-                if (water.isEmpty()) {
+-                    it.remove();
+-                }
++            actor.tick(context);
++            if (actor.isExpired()) {
++                it.remove();
+             }
+         }
+-        // Add the newly born animals to the main lists.
+-        actors.addAll(newOrganisms);      
++        // Add the newly born actors to the main list.
++        actors.addAll(newOrganisms);
+         
+         // If it has rained, create new water
+-        if (weather != null && weather.generateNewWater()) {
++        if (context.shouldGenerateWater()) {
+             generateWater();
+         }
+         
+@@ -201,15 +167,9 @@ public class Simulator
+         field.clear();
+         
+         // Creates default actors (diseases and weather)
+-        diseases = new ArrayList<>();
+-        Disease covid = new Covid(field);
+-        Disease leptospirosis = new Leptospirosis(field);
+-        diseases.addAll(Arrays.asList(covid, leptospirosis));
+-        
+-        Weather weather = new Weather();
+-        
+-        actors.addAll(diseases);
+-        actors.add(weather);
++        actors.add(new Covid(field));
++        actors.add(new Leptospirosis(field));
++        actors.add(new Weather());
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+                 populateCell(rand, row, col);
+@@ -217,27 +177,6 @@ public class Simulator
+         }
+     }
+     
+-    /**
+-     * Random chance of a disease being generated in the population
+-     * @param actor An individual which could be infected
+-     */
+-    private void generateDisease(Actor actor) 
+-    {
+-        Random rand = Randomizer.getRandom();
+-        for (Disease disease: diseases) {
+-            // random low chance of an individual developing a disease
+-            if(rand.nextDouble() <= disease.getProbability()) {
+-                // only infects certain species (must be organisms)
+-                if (disease.getSpecies().contains(actor.getClass().getName())) {
+-                    // adds infected individual to diseased list and sets infected to true
+-                    disease.addIndividual(actor);
+-                    Organism organism = (Organism) actor;
+-                    organism.setInfected();
+-                }
+-            }
+-        }
+-    }
+-    
+     /** 
+      * Creates random water spaces in free locations in field
+      * Used when it rains to create new water sources
+diff --git a/WaterSources.java b/WaterSources.java
+index 0ce9fee..5c27991 100644
+--- a/WaterSources.java
++++ b/WaterSources.java
+@@ -35,11 +35,12 @@ public abstract class WaterSources implements Actor
+     }
+ 
+     /**
+-     * Make this actor act - that is: make it do
+-     * whatever it wants/needs to do.
+-     * @param newActors A list to receive any actors relevant to action
++     * Advance the water source by one lifecycle tick.
++     * Water sources do not perform autonomous actions.
++     * @param context Shared lifecycle state for the current step.
+      */
+-    public void act(List<Actor> actorsList) {}
++    @Override
++    public void tick(SimulationContext context) {}
+ 
+     /**
+      * Return the water source's location.
+@@ -152,4 +153,10 @@ public abstract class WaterSources implements Actor
+             setDead();
+         }
+     }
++
++    @Override
++    public boolean isExpired()
++    {
++        return isEmpty;
++    }
+ }
+diff --git a/Weather.java b/Weather.java
+index b8b126d..ba30eea 100644
+--- a/Weather.java
++++ b/Weather.java
+@@ -24,23 +24,24 @@ public class Weather implements Actor
+     public Weather() {}
+ 
+     /**
+-     * Make the weather act - that is: make it do
+-     * whatever it wants/needs to do.
+-     * @param newActors A list to receive any species affected by the weather event
++     * Advance the weather by one lifecycle tick.
++     * @param context Shared lifecycle state for the current step.
+      */
+-    public void act(List<Actor> actorsList) {
++    @Override
++    public void tick(SimulationContext context) {
+         generateWater = false;
+         // Generate one weather event per step using shared randomness.
+         Random rand = Randomizer.getRandom();
+         if (rand.nextDouble() <= RAIN_PROB) {
+-            makeRain(actorsList);
++            makeRain(context.getActors());
+             generateWater = true;
++            context.requestWaterGeneration();
+         }
+         else if (rand.nextDouble() <= FOG_PROB){
+-            makeFog(actorsList);
++            makeFog(context.getActors());
+         }
+         else if (rand.nextDouble() <= HEATWAVE_PROB) {
+-            makeHeatWave(actorsList);
++            makeHeatWave(context.getActors());
+         }
+     }
+ 

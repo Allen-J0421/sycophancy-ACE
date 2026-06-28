@@ -1,0 +1,270 @@
+diff --git a/Animal.java b/Animal.java
+index 46ddafe..5a04afe 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -66,6 +66,13 @@ public abstract class Animal extends Organism implements Actor
+      */
+     public void act(List<Actor> newAnimals, Environment environment)
+     {
++        if (!isAwake(environment)) {
++            return;
++        }
++        if (isDiseased() && getDisease().getPropagationRate() <= rand.nextDouble()) {
++            setDead();
++            return;
++        }
+         randomlyContractDisease();
+         incrementAge();
+         incrementHunger();
+diff --git a/Eagle.java b/Eagle.java
+index ec34533..8fb342c 100644
+--- a/Eagle.java
++++ b/Eagle.java
+@@ -64,6 +64,13 @@ public class Eagle extends Animal
+      */
+     public void act(List<Actor> newAnimals, Environment environment)
+     {
++        if (!isAwake(environment)) {
++            return;
++        }
++        if (isDiseased() && getDisease().getPropagationRate() <= rand.nextDouble()) {
++            setDead();
++            return;
++        }
+         randomlyContractDisease();
+         incrementAge();
+         incrementHunger();
+diff --git a/Grass.java b/Grass.java
+index b9caed4..43f897c 100644
+--- a/Grass.java
++++ b/Grass.java
+@@ -47,15 +47,18 @@ public class Grass extends Plant
+      */
+     public void act(List<Actor> newGrass, Environment environment)
+     {
+-        if (environment.getWeather().getCurrentWeather() == WeatherType.SUNNY){
++        if (environment.getWeather().getCurrentWeather() == WeatherType.SUNNY) {
+             changeGerminationRate(0.15);
++        } else {
++            changeGerminationRate(0.1);
+         }
+ 
+-        else if (environment.getWeather().getCurrentWeather() != WeatherType.SUNNY){
+-            changeGerminationRate(0.1);
++        if (environment.getTime().getStep() % STEPS_PER_STAGE == 0) {
++            incrementGrowth();
+         }
+ 
+-        if(isAlive() && environment.getTime().isDay() && rand.nextDouble() <= GERMINATION_RATE && (environment.getWeather().getCurrentWeather() != (WeatherType.CLOUDY))) {
++        if (isAlive() && environment.getTime().isDay() && rand.nextDouble() <= GERMINATION_RATE
++                && environment.getWeather().getCurrentWeather() != WeatherType.CLOUDY) {
+             germinate(newGrass);
+         }
+     }
+diff --git a/Simulator.java b/Simulator.java
+index e3503eb..8ab1fad 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -1,5 +1,6 @@
+ import java.awt.event.ActionListener;
+ import java.util.*;
++import java.util.function.BiFunction;
+ 
+ /**
+  * A simple predator-prey simulator, based on a rectangular field
+@@ -9,8 +10,8 @@ import java.util.*;
+  */
+ public class Simulator
+ {
+-    private static boolean playingSimulation = false;
+-    private static int remainingSteps;
++    private boolean playingSimulation = false;
++    private int remainingSteps;
+ 
+     private static final Random rand = Randomizer.getRandom();
+ 
+@@ -34,7 +35,7 @@ public class Simulator
+ 
+     // Maximum number of hunters in the simulation
+     private static final int HUNTER_LIMIT = 5;
+-    private static int HUNTER_COUNT = 0;
++    private int HUNTER_COUNT = 0;
+ 
+ 
+     // List of actors in the field.
+@@ -233,35 +234,15 @@ public class Simulator
+         // Let all actors act.
+         for(Iterator<Actor> it = actors.iterator(); it.hasNext(); ) {
+             Actor actor = it.next();
+-            if(actor instanceof Animal){
+-               if(((Animal) actor).isAwake(environment)) {
+-                   if(((Animal) actor).isDiseased() && ((Animal) actor).getDisease().getPropagationRate() <= rand.nextDouble()) {
+-                       ((Animal) actor).setDead();
+-                   }
+-                   actor.act(newActors, environment);
+-               }
+-            }
+-            else {
+-                actor.act(newActors, environment);
+-            }
+-
+-            if(actor instanceof Plant){
+-                if(step % ((Plant) actor).STEPS_PER_STAGE()==0){
+-                    ((Plant) actor).incrementGrowth();
+-                }
+-            }
+-
+-            if(! actor.isAlive()) {
++            actor.act(newActors, environment);
++            if(!actor.isAlive()) {
+                 it.remove();
+             }
+-
+-
+-
+         }
+         actors.addAll(newActors);
+         plantGrassInPatches();
+ 
+-        view.showStatus(step, environment.getWeather().getCurrentWeather().toString(), environment.getTime().getCurrentTimeString(), field);
++        view.showStatus(step, environment, field);
+     }
+ 
+     /**
+@@ -283,61 +264,46 @@ public class Simulator
+     public void reset()
+     {
+         step = 0;
++        HUNTER_COUNT = 0;
+         actors.clear();
+         populate();
+         environment.getTime().reset();
+ 
+         // Show the starting state in the view.
+-        view.showStatus(step,environment.getWeather().getCurrentWeather().toString(), environment.getTime().getCurrentTimeString().toString(), field);
++        view.showStatus(step, environment, field);
+     }
+ 
+     /**
+      * Randomly populate the field with organisms.
++     * The factory map determines which actor is spawned at each cell; entries
++     * are tried in insertion order and only the first match is placed per cell.
+      */
+     private void populate()
+     {
+-        Random rand = Randomizer.getRandom();
++        LinkedHashMap<Class<?>, BiFunction<Location, Animal.Gender, Actor>> factories = new LinkedHashMap<>();
++        factories.put(Grass.class,  (loc, sex) -> new Grass(field, loc));
++        factories.put(Deer.class,   (loc, sex) -> new Deer(true, field, loc, sex));
++        factories.put(Coyote.class, (loc, sex) -> new Coyote(true, field, loc, sex));
++        factories.put(Wolf.class,   (loc, sex) -> new Wolf(true, field, loc, sex));
++        factories.put(Eagle.class,  (loc, sex) -> new Eagle(true, field, loc, sex));
++        factories.put(Mouse.class,  (loc, sex) -> new Mouse(true, field, loc, sex));
++        factories.put(Hunter.class, (loc, sex) -> new Hunter(field, loc, environment));
++
+         field.clear();
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+-                Animal.Gender sex = Randomizer.getRandomSex();
+                 Location location = new Location(row, col);
+-
+-                if(rand.nextDouble() <= CREATION_PROBABILITIES.get(Grass.class)) {
+-                    Grass grass = new Grass(field, location);
+-                    actors.add(grass);
+-                }
+-
+-                else if(rand.nextDouble() <= CREATION_PROBABILITIES.get(Deer.class)) {
+-                    Deer deer = new Deer(true, field, location, sex);
+-                    actors.add(deer);
+-                }
+-                else if(rand.nextDouble() <= CREATION_PROBABILITIES.get(Coyote.class)) {
+-                    Coyote coyote = new Coyote(true, field, location, sex);
+-                    actors.add(coyote);
+-                }
+-
+-                else if(rand.nextDouble() <= CREATION_PROBABILITIES.get(Wolf.class)) {
+-                    Wolf wolf = new Wolf(true, field, location, sex);
+-                    actors.add(wolf);
+-                }
+-                else if(rand.nextDouble() <= CREATION_PROBABILITIES.get(Eagle.class)) {
+-                    Eagle eagle = new Eagle(true, field, location, sex);
+-                    actors.add(eagle);
+-                }
+-                else if(rand.nextDouble() <= CREATION_PROBABILITIES.get(Mouse.class)) {
+-                    Mouse mouse = new Mouse(true, field, location, sex);
+-                    actors.add(mouse);
+-                }
+-
+-                else if(rand.nextDouble() <= CREATION_PROBABILITIES.get(Hunter.class)) {
+-                    if(!(HUNTER_COUNT >= HUNTER_LIMIT)){
+-                        Hunter hunter = new Hunter(field, location, environment);
+-                        actors.add(hunter);
+-                        HUNTER_COUNT++;
++                Animal.Gender sex = Randomizer.getRandomSex();
++                for(Map.Entry<Class<?>, BiFunction<Location, Animal.Gender, Actor>> entry : factories.entrySet()) {
++                    Class<?> cls = entry.getKey();
++                    if(cls == Hunter.class && HUNTER_COUNT >= HUNTER_LIMIT) continue;
++                    if(rand.nextDouble() <= CREATION_PROBABILITIES.get(cls)) {
++                        actors.add(entry.getValue().apply(location, sex));
++                        if(cls == Hunter.class) HUNTER_COUNT++;
++                        break;
+                     }
+                 }
+-                // else leave the location empty.
++                // else leave the location empty
+             }
+         }
+     }
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 091f130..b9e41bc 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -241,17 +241,18 @@ public class SimulatorView extends JFrame
+     /**
+      * Show the current status of the field.
+      * @param step Which iteration step it is.
++     * @param environment The current simulation environment (weather and time).
+      * @param field The field whose status is to be displayed.
+      */
+-    public void showStatus(int step, String weather, String time, Field field)
++    public void showStatus(int step, Environment environment, Field field)
+     {
+         if(!isVisible()) {
+             setVisible(true);
+         }
+ 
+         stepLabel.setText(STEP_PREFIX + step);
+-        weatherLabel.setText(WEATHER_PREFIX + weather);
+-        timeLabel.setText(TIME_PREFIX + time);
++        weatherLabel.setText(WEATHER_PREFIX + environment.getWeather().getCurrentWeather());
++        timeLabel.setText(TIME_PREFIX + environment.getTime().getCurrentTimeString());
+         stats.reset();
+ 
+         fieldView.preparePaint();
+diff --git a/Time.java b/Time.java
+index 46309db..4d5bf22 100644
+--- a/Time.java
++++ b/Time.java
+@@ -99,11 +99,19 @@ public class Time
+     }
+ 
+     /**
+-     * Returns the day count number. 
++     * Returns the current simulation step count.
++     */
++    public int getStep()
++    {
++        return stepCount;
++    }
++
++    /**
++     * Returns the day count number.
+      */
+     private int getDayCount()
+-    { 
+-        return dayCount; 
++    {
++        return dayCount;
+     }
+ 
+     /**

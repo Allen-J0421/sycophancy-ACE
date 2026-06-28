@@ -1,0 +1,258 @@
+diff --git a/DiseaseHandler.java b/DiseaseHandler.java
+index 1863344..f2dbf09 100644
+--- a/DiseaseHandler.java
++++ b/DiseaseHandler.java
+@@ -52,11 +52,10 @@ public class DiseaseHandler
+      */
+     public void simulateDiseaseStep()
+     {
+-        // fetch the animal per blocks eg : [block1 : [animal1,animal2, animal3]. block 2: [animal1, animal 2, animal3]...]
+-        List<List<Animal>> blocks = field.getAnimalsPerBlock();
+         int infectionCount = 0;
++        int[] totalInfections = {0};
+         currentStep++;
+-        for (List<Animal> block : blocks) {
++        field.forEachAnimalBlock(block -> {
+             int densityIndex = 0;
+             List<Animal> uninfectedAnimals = new ArrayList<>();
+             for(Animal animal : block) {
+@@ -77,8 +76,9 @@ public class DiseaseHandler
+                     animal.setInfectionTimestamp(currentStep);
+                 }
+             }
+-            infectionCount += densityIndex;
+-        }
++            totalInfections[0] += densityIndex;
++        });
++        infectionCount = totalInfections[0];
+         infectionCounts.put(currentStep, infectionCount);
+     }
+ 
+diff --git a/Field.java b/Field.java
+index 534c9b0..999faa9 100644
+--- a/Field.java
++++ b/Field.java
+@@ -12,6 +12,24 @@ import java.util.ArrayList;
+ public class Field
+ {
+     private static final int DISEASE_BLOCK_SIZE = 20;
++
++    @FunctionalInterface
++    public interface LocationVisitor
++    {
++        void visit(int row, int col);
++    }
++
++    @FunctionalInterface
++    public interface OccupantVisitor
++    {
++        void visit(int row, int col, Actor actor);
++    }
++
++    @FunctionalInterface
++    public interface AnimalBlockVisitor
++    {
++        void visit(List<Animal> animals);
++    }
+     
+     /*///////////////////////////////////////////////////////////////
+                                    STATE
+@@ -55,12 +73,10 @@ public class Field
+      */
+     public void clear()
+     {
+-        for(int row = 0; row < depth; row++) {
+-            for(int col = 0; col < width; col++) {
+-                animals[row][col] = null;
+-                plants[row][col] = null;
+-            }
+-        }
++        forEachLocation((row, col) -> {
++            animals[row][col] = null;
++            plants[row][col] = null;
++        });
+     }
+     
+     /**
+@@ -137,9 +153,8 @@ public class Field
+      * 
+      * @return List of animals contained within the same block.
+      */
+-    public List<List<Animal>> getAnimalsPerBlock()
++    public void forEachAnimalBlock(AnimalBlockVisitor visitor)
+     {
+-        List<List<Animal>> blocks = new ArrayList<>();
+         for(int colStart = 0 ; colStart < width; colStart += DISEASE_BLOCK_SIZE){
+             for (int rowStart = 0; rowStart < depth; rowStart += DISEASE_BLOCK_SIZE) {
+                 List<Animal> blockAnimals = new ArrayList<>();
+@@ -153,10 +168,9 @@ public class Field
+                         }
+                     }
+                 }
+-                blocks.add(blockAnimals);
++                visitor.visit(blockAnimals);
+             }
+         }
+-        return blocks;
+     }
+     
+     /*///////////////////////////////////////////////////////////////
+@@ -326,6 +340,53 @@ public class Field
+         return locations;
+     }
+ 
++    /**
++     * Visit every location in the field.
++     */
++    public void forEachLocation(LocationVisitor visitor)
++    {
++        for(int row = 0; row < depth; row++) {
++            for(int col = 0; col < width; col++) {
++                visitor.visit(row, col);
++            }
++        }
++    }
++
++    /**
++     * Visit visible occupants, giving animals precedence over plants.
++     */
++    public void forEachOccupiedLocation(OccupantVisitor visitor)
++    {
++        forEachLocation((row, col) -> {
++            Animal animal = getAnimalAt(row, col);
++            if(animal != null) {
++                visitor.visit(row, col, animal);
++                return;
++            }
++            Plant plant = getPlantAt(row, col);
++            if(plant != null) {
++                visitor.visit(row, col, plant);
++            }
++        });
++    }
++
++    /**
++     * Visit every stored actor, including plants underneath animals.
++     */
++    public void forEachStoredActor(OccupantVisitor visitor)
++    {
++        forEachLocation((row, col) -> {
++            Animal animal = getAnimalAt(row, col);
++            if(animal != null) {
++                visitor.visit(row, col, animal);
++            }
++            Plant plant = getPlantAt(row, col);
++            if(plant != null) {
++                visitor.visit(row, col, plant);
++            }
++        });
++    }
++
+     /**
+      * Return the depth of the field.
+      * 
+diff --git a/FieldStats.java b/FieldStats.java
+index 6606bba..2955fc9 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -111,18 +111,7 @@ public class FieldStats
+     private void generateCounts(Field field)
+     {
+         reset();
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
+-                Animal animal = field.getAnimalAt(row, col);
+-                Plant plant = field.getPlantAt(row, col);
+-                if(animal != null) {
+-                    incrementCount(animal.getClass());
+-                }
+-                if(plant != null) {
+-                    incrementCount(plant.getClass());
+-                }
+-            }
+-        }
++        field.forEachStoredActor((row, col, actor) -> incrementCount(actor.getClass()));
+         countsValid = true;
+     }
+ 
+diff --git a/PopulationGenerator.java b/PopulationGenerator.java
+index 36af2d0..9717ff2 100644
+--- a/PopulationGenerator.java
++++ b/PopulationGenerator.java
+@@ -82,29 +82,25 @@ public class PopulationGenerator
+     private void populateAnimals(SimulationPopulation population)
+     {
+         Random rand = Randomizer.getRandom();
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
+-                Location location = new Location(row, col);
+-                Animal animal = createAnimalAt(rand, location);
+-                if(animal != null) {
+-                    population.addAnimal(animal);
+-                }
++        field.forEachLocation((row, col) -> {
++            Location location = new Location(row, col);
++            Animal animal = createAnimalAt(rand, location);
++            if(animal != null) {
++                population.addAnimal(animal);
+             }
+-        }
++        });
+     }
+ 
+     private void populatePlants(SimulationPopulation population)
+     {
+         Random rand = Randomizer.getRandom();
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
+-                Location location = new Location(row, col);
+-                Plant plant = createPlantAt(rand, location);
+-                if(plant != null) {
+-                    population.addPlant(plant);
+-                }
++        field.forEachLocation((row, col) -> {
++            Location location = new Location(row, col);
++            Plant plant = createPlantAt(rand, location);
++            if(plant != null) {
++                population.addPlant(plant);
+             }
+-        }
++        });
+     }
+ 
+     private Animal createAnimalAt(Random rand, Location location)
+diff --git a/SimulatorView.java b/SimulatorView.java
+index b102d0b..72fd1db 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -202,25 +202,11 @@ public class SimulatorView extends JFrame
+         
+         fieldView.preparePaint();
+ 
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
+-                Animal animal = field.getAnimalAt(row, col);
+-                //animal takes precendence over plants
+-                if(animal != null) {
+-                    stats.incrementCount(animal.getClass());
+-                    fieldView.drawMark(col, row, getColor(animal.getClass()));
+-                }
+-                else if(field.getPlantAt(row, col) != null) {
+-                    // if the cell is not occupied by an animal, attempt to occupy with plant. 
+-                    Plant plant = field.getPlantAt(row, col);
+-                    stats.incrementCount(plant.getClass());
+-                    fieldView.drawMark(col, row, getColor(plant.getClass()));
+-                }
+-                else {
+-                    fieldView.drawMark(col, row, EMPTY_COLOR);
+-                }
+-            }
+-        }
++        field.forEachLocation((row, col) -> fieldView.drawMark(col, row, EMPTY_COLOR));
++        field.forEachOccupiedLocation((row, col, actor) -> {
++            stats.incrementCount(actor.getClass());
++            fieldView.drawMark(col, row, getColor(actor.getClass()));
++        });
+         stats.countFinished();
+ 
+         population.setText(POPULATION_PREFIX + stats.getPopulationDetails(field));

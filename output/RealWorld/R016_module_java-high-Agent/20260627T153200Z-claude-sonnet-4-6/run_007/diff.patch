@@ -1,0 +1,296 @@
+diff --git a/SimulationEvent.java b/SimulationEvent.java
+new file mode 100644
+index 0000000..cb7b3c7
+--- /dev/null
++++ b/SimulationEvent.java
+@@ -0,0 +1,24 @@
++/**
++ * Immutable snapshot of simulation state emitted after each step.
++ * Passed to registered SimulationObservers so they can update without
++ * holding a direct reference to the Simulator.
++ *
++ * @version 2022.03.01
++ */
++public class SimulationEvent
++{
++    private final int step;
++    private final Field field;
++    private final boolean nightTime;
++
++    public SimulationEvent(int step, Field field, boolean nightTime)
++    {
++        this.step = step;
++        this.field = field;
++        this.nightTime = nightTime;
++    }
++
++    public int getStep()      { return step; }
++    public Field getField()   { return field; }
++    public boolean isNightTime() { return nightTime; }
++}
+diff --git a/SimulationObserver.java b/SimulationObserver.java
+new file mode 100644
+index 0000000..cecaaaa
+--- /dev/null
++++ b/SimulationObserver.java
+@@ -0,0 +1,25 @@
++/**
++ * Observer interface for simulation state changes.
++ *
++ * Implementors are notified after each simulation step and consulted
++ * to determine whether the simulation remains viable.  Decouples the
++ * Simulator from any concrete display or monitoring class.
++ *
++ * @version 2022.03.01
++ */
++public interface SimulationObserver
++{
++    /**
++     * Called after every simulation step (including the initial reset).
++     * @param event Immutable snapshot of the current simulation state.
++     */
++    void onStepCompleted(SimulationEvent event);
++
++    /**
++     * Whether the simulation should continue running.
++     * The simulation halts when any registered observer returns false.
++     * @param field The current field state.
++     * @return true if the simulation is still viable.
++     */
++    boolean isViable(Field field);
++}
+diff --git a/Simulator.java b/Simulator.java
+index dbdcd02..079a386 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -17,12 +17,12 @@ public class Simulator
+     private Field field;
+     // The current step of the simulation.
+     private int step;
+-    // A graphical view of the simulation.
+-    private SimulatorView view;
+     // Whether it is currently day or night - determines each animal's behaviour.
+     private boolean nightTime;
+     // Handles initial population and dynamic entity creation.
+     private PopulationManager populationManager;
++    // Observers notified after each simulation step.
++    private final List<SimulationObserver> observers = new ArrayList<>();
+ 
+     /**
+      * Construct a simulation field with default size.
+@@ -50,7 +50,7 @@ public class Simulator
+         field = new Field(depth, width);
+         populationManager = new PopulationManager(field, this);
+ 
+-        view = new SimulatorView(depth, width, this);
++        SimulatorView view = new SimulatorView(depth, width);
+         view.setColor(Gazelle.class, Color.ORANGE);
+         view.setColor(Lion.class, Color.YELLOW);
+         view.setColor(Hyena.class, Color.RED);
+@@ -58,10 +58,21 @@ public class Simulator
+         view.setColor(FennecFox.class, Color.MAGENTA);
+         view.setColor(Grass.class, Color.GREEN);
+         view.setColor(Lake.class, Color.BLUE);
++        addObserver(view);
+ 
+         reset();
+     }
+ 
++    /**
++     * Register an observer to be notified after each simulation step
++     * and consulted for viability checks.
++     * @param observer The observer to register.
++     */
++    public void addObserver(SimulationObserver observer)
++    {
++        observers.add(observer);
++    }
++
+     /**
+      * Run the simulation from its current state for a reasonably long period.
+      */
+@@ -77,7 +88,7 @@ public class Simulator
+      */
+     public void simulate(int numSteps)
+     {
+-        for(int step = 1; step <= numSteps && view.isViable(field); step++) {
++        for(int step = 1; step <= numSteps && checkViable(field); step++) {
+             simulateOneStep();
+             delay(60);
+         }
+@@ -142,7 +153,7 @@ public class Simulator
+             actors.addAll(populationManager.generateWater());
+         }
+ 
+-        view.showStatus(step, field);
++        notifyObservers(new SimulationEvent(step, field, nightTime));
+     }
+ 
+     /**
+@@ -154,7 +165,7 @@ public class Simulator
+         actors.clear();
+         actors.addAll(populationManager.populate());
+         nightTime = false;
+-        view.showStatus(step, field);
++        notifyObservers(new SimulationEvent(step, field, nightTime));
+     }
+ 
+     /**
+@@ -186,4 +197,26 @@ public class Simulator
+     {
+         return nightTime;
+     }
++
++    /**
++     * Notify all registered observers that a step has completed.
++     */
++    private void notifyObservers(SimulationEvent event)
++    {
++        for(SimulationObserver obs : observers) {
++            obs.onStepCompleted(event);
++        }
++    }
++
++    /**
++     * @return true if all registered observers consider the simulation viable.
++     */
++    private boolean checkViable(Field field)
++    {
++        if(observers.isEmpty()) return false;
++        for(SimulationObserver obs : observers) {
++            if(!obs.isViable(field)) return false;
++        }
++        return true;
++    }
+ }
+diff --git a/SimulatorView.java b/SimulatorView.java
+index ac82538..9e7d818 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -6,14 +6,17 @@ import java.util.Map;
+ 
+ /**
+  * A graphical view of the simulation grid.
+- * The view displays a colored rectangle for each location 
++ * The view displays a colored rectangle for each location
+  * representing its contents. It uses a default background color.
+  * Colors for each type of species can be defined using the
+  * setColor method.
+  *
++ * Implements SimulationObserver so the Simulator can notify it through
++ * the observer interface rather than calling display methods directly.
++ *
+  * @version 2022.02.28
+  */
+-public class SimulatorView extends JFrame
++public class SimulatorView extends JFrame implements SimulationObserver
+ {
+     // Colors used for empty locations.
+     private static final Color EMPTY_COLOR = Color.white;
+@@ -33,17 +36,14 @@ public class SimulatorView extends JFrame
+     private Map<Class, Color> colors;
+     // A statistics object computing and storing simulation information
+     private FieldStats stats;
+-    private Simulator simulator;
+ 
+     /**
+      * Create a view of the given width and height.
+      * @param height The simulation's height.
+      * @param width  The simulation's width.
+      */
+-    public SimulatorView(int height, int width, Simulator simulator)
++    public SimulatorView(int height, int width)
+     {
+-        this.simulator = simulator;   
+-
+         stats = new FieldStats();
+         colors = new LinkedHashMap<>();
+ 
+@@ -86,24 +86,46 @@ public class SimulatorView extends JFrame
+         }
+     }
+ 
++    // -------------------------------------------------------------------------
++    // SimulationObserver implementation
++    // -------------------------------------------------------------------------
++
++    /**
++     * Receive a simulation step notification and refresh the display.
++     * @param event Snapshot of the current simulation state.
++     */
++    @Override
++    public void onStepCompleted(SimulationEvent event)
++    {
++        showStatus(event.getStep(), event.getField(), event.isNightTime());
++    }
++
++    /**
++     * Determine whether the simulation should continue to run.
++     * @return true If there is more than one species alive.
++     */
++    @Override
++    public boolean isViable(Field field)
++    {
++        return stats.isViable(field);
++    }
++
++    // -------------------------------------------------------------------------
++    // Display logic
++    // -------------------------------------------------------------------------
++
+     /**
+      * Show the current status of the field.
+-     * @param step Which iteration step it is.
+-     * @param field The field whose status is to be displayed.
++     * @param step      Which iteration step it is.
++     * @param field     The field whose status is to be displayed.
++     * @param nightTime Whether it is currently night in the simulation.
+      */
+-    public void showStatus(int step, Field field)
++    public void showStatus(int step, Field field, boolean nightTime)
+     {
+         if(!isVisible()) {
+             setVisible(true);
+         }
+-        String time = "";
+-        if (simulator.isNight()) {
+-            time = " Night";
+-        }
+-        else {
+-            time = " Day";
+-        }
+-        
++        String time = nightTime ? " Night" : " Day";
+         stepLabel.setText(STEP_PREFIX + step + time);
+         stats.reset();
+ 
+@@ -144,20 +166,11 @@ public class SimulatorView extends JFrame
+     }
+ 
+     /**
+-     * Determine whether the simulation should continue to run.
+-     * @return true If there is more than one species alive.
+-     */
+-    public boolean isViable(Field field)
+-    {
+-        return stats.isViable(field);
+-    }
+-
+-    /**
+-     * Provide a graphical view of a rectangular field. This is 
++     * Provide a graphical view of a rectangular field. This is
+      * a nested class (a class defined inside a class) which
+      * defines a custom component for the user interface. This
+      * component displays the field.
+-     * This is rather advanced GUI stuff - you can ignore this 
++     * This is rather advanced GUI stuff - you can ignore this
+      * for your project if you like.
+      */
+     private class FieldView extends JPanel
+@@ -246,5 +259,5 @@ public class SimulatorView extends JFrame
+                 }
+             }
+         }
+-    } 
++    }
+ }

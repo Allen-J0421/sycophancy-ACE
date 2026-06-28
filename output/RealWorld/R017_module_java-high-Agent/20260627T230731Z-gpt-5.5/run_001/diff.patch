@@ -1,0 +1,1789 @@
+diff --git a/Animal.java b/Animal.java
+index 6373132..6613919 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -1,4 +1,5 @@
+ import java.util.List;
++import java.util.Map;
+ import java.util.Random;
+ 
+ /**
+@@ -8,49 +9,165 @@ import java.util.Random;
+  */
+ public abstract class Animal extends LivingBeing
+ {
+-    // Whether the animal is alive or not.
+-    private boolean alive;
+-    // The animal's field.
+-    private Field field;
+-    // The animal's position in the field.
+-    private Location location;
+-
+-    protected SEX gender;
+-    //enum for M or F 
+-    private enum SEX { MALE, FEMALE} 
++    private static final Random rand = Randomizer.getRandom();
++
++    private enum Sex { MALE, FEMALE }
++
++    private final Sex sex;
++    private final int maxAge;
++    private int age;
++    private int foodLevel;
++
+     /**
+      * Create a new animal at location in field.
++     * @param randomAge If true, the animal will have random age and hunger level.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
++     * @param maxAge The age to which the animal can live.
++     * @param initialFoodLevel The food level to use as the random upper bound.
++     * @param newbornFoodLevel The food level assigned to newborn animals.
+      */
+-    public Animal(Field field, Location location)
++    public Animal(boolean randomAge, Field field, Location location, int maxAge,
++                  int initialFoodLevel, int newbornFoodLevel)
+     {
+-        super(field,location);
+-        gender = randomGender(); // Assigns a random gender to the animal 
++        super(field, location);
++        this.maxAge = maxAge;
++        sex = randomSex();
++
++        if(randomAge) {
++            age = rand.nextInt(maxAge);
++            foodLevel = rand.nextInt(initialFoodLevel);
++        }
++        else {
++            age = 0;
++            foodLevel = newbornFoodLevel;
++        }
+     }
+ 
+-    /**
+-     * Assign a random gender to the animal
+-     * Called in Animal Constructor
+-     * @return MALE or FEMALE
+-     */
+-    private SEX randomGender() {
+-        int g = new Random().nextInt(SEX.values().length);
+-        return SEX.values()[g];
++    private Sex randomSex()
++    {
++        Sex[] values = Sex.values();
++        return values[rand.nextInt(values.length)];
+     }
+ 
+     /**
+-     * Returns true if animal is Female, false if Male
+-     * @param first animal to compare sex
+-     * @param second animal to compare sex
++     * Run the standard animal lifecycle for one simulation step.
++     * @param newAnimals A list to receive newly born animals.
++     * @param activeAtNight Whether this species moves, feeds and breeds at night.
++     * @param breedingAge The age at which this species can start breeding.
++     * @param breedingProbability The likelihood of this species breeding.
++     * @param maxLitterSize The maximum number of births per breeding event.
++     * @param foodValues Food classes and the energy gained from eating each one.
+      */
+-    protected boolean getOppositeGender(Animal animal1, Animal animal2) {
+-        if(animal1.gender != animal2.gender) {
+-            return true; //The animals are of opposite genders
++    protected void live(List<LivingBeing> newAnimals, boolean activeAtNight,
++                        int breedingAge, double breedingProbability, int maxLitterSize,
++                        Map<Class<? extends LivingBeing>, Integer> foodValues)
++    {
++        incrementAge();
++        incrementHunger();
++
++        if(isNight() != activeAtNight || !isAlive()) {
++            return;
++        }
++
++        giveBirth(newAnimals, breedingAge, breedingProbability, maxLitterSize);
++
++        Location newLocation = findFood(foodValues);
++        if(newLocation == null && getLocation() != null) {
++            newLocation = getField().freeAdjacentLocation(getLocation());
++        }
++
++        if(newLocation != null) {
++            setLocation(newLocation);
++        }
++    }
++
++    private void incrementAge()
++    {
++        age++;
++        if(age > maxAge) {
++            setDead();
++        }
++    }
++
++    private void incrementHunger()
++    {
++        foodLevel--;
++        if(foodLevel <= 0) {
++            setDead();
+         }
+-        return false; //The animals are of the same gender
++    }
++
++    private Location findFood(Map<Class<? extends LivingBeing>, Integer> foodValues)
++    {
++        Field field = getField();
++        if(field == null || getLocation() == null) {
++            return null;
++        }
++
++        for(Location where : field.adjacentLocations(getLocation())) {
++            Object occupant = field.getObjectAt(where);
++            for(Map.Entry<Class<? extends LivingBeing>, Integer> food : foodValues.entrySet()) {
++                if(food.getKey().isInstance(occupant)) {
++                    LivingBeing prey = (LivingBeing) occupant;
++                    if(prey.isAlive()) {
++                        prey.setDead();
++                        foodLevel += food.getValue();
++                        return where;
++                    }
++                }
++            }
++        }
++        return null;
++    }
++
++    private void giveBirth(List<LivingBeing> newAnimals, int breedingAge,
++                           double breedingProbability, int maxLitterSize)
++    {
++        Field field = getField();
++        if(field == null || getLocation() == null || !canBreed(breedingAge)) {
++            return;
++        }
++
++        for(Location where : field.adjacentLocations(getLocation())) {
++            Object occupant = field.getObjectAt(where);
++            if(getClass().isInstance(occupant) && hasOppositeSex((Animal) occupant)) {
++                List<Location> free = field.getFreeAdjacentLocations(getLocation());
++                int births = breed(breedingProbability, maxLitterSize);
++                for(int b = 0; b < births && free.size() > 0; b++) {
++                    Location loc = free.remove(0);
++                    newAnimals.add(createOffspring(field, loc));
++                }
++            }
++        }
++    }
++
++    private boolean hasOppositeSex(Animal other)
++    {
++        return sex != other.sex;
++    }
++
++    private int breed(double breedingProbability, int maxLitterSize)
++    {
++        if(rand.nextDouble() <= breedingProbability) {
++            return rand.nextInt(maxLitterSize) + 1;
++        }
++        return 0;
++    }
++
++    private boolean canBreed(int breedingAge)
++    {
++        return age >= breedingAge;
+     }
+     
++    /**
++     * Create a newborn of this animal's species.
++     * @param field The field the newborn will occupy.
++     * @param location The newborn's location.
++     * @return The newborn animal.
++     */
++    protected abstract Animal createOffspring(Field field, Location location);
++
+     /**
+      * Abstract method act, defined in subclasses (meant to be overridden)
+      * @param newAnimals a list of new animals 
+diff --git a/Badger.java b/Badger.java
+index 6e66e4a..78169a9 100644
+--- a/Badger.java
++++ b/Badger.java
+@@ -1,225 +1,60 @@
+-import java.util.Random;
++import java.util.LinkedHashMap;
+ import java.util.List;
+-import java.util.Iterator;
++import java.util.Map;
+ 
+ /**
+- * Badgers are predators. 
+- * Badgers are omnivores as they eat hedgehogs, frogs and plants
+- * Badgers are eaten by bears
+- * Badgers sleep at night time and move around and hunt during the day.
++ * Badgers are daytime omnivores. They eat hedgehogs, frogs and plants, and are
++ * eaten by bears.
+  *
+  * @version 2022.02.24
+  */
+ public class Badger extends Animal
+ {
+-    // Characteristics shared by all badgers (class variables).
+-
+-    // The age at which a badger can start to breed.
+     private static final int BREEDING_AGE = 2;
+-    // The age to which a badger can live.
+     private static final int MAX_AGE = 1000;
+-    // The likelihood of a badger breeding.
+     private static final double BREEDING_PROBABILITY = 0.75;
+-    // The maximum number of births.
+     private static final int MAX_LITTER_SIZE = 10;
+-    // The food value of a single Hedgehog. In effect, this is the
+-    // number of steps a badger can go before it has to eat again.
++
+     private static final int HEDGEHOG_FOOD_VALUE = 23;
+-    //The food value of a single Frog
+     private static final int FROG_FOOD_VALUE = 23;
+-    //The food value of a single Plant
+     private static final int PLANT_FOOD_VALUE = 12;
+-    // A shared random number generator to control breeding.
+-    private static final Random rand = Randomizer.getRandom();
++    private static final int INITIAL_FOOD_LEVEL =
++            HEDGEHOG_FOOD_VALUE + FROG_FOOD_VALUE + PLANT_FOOD_VALUE;
+ 
+-    // Individual characteristics (instance fields).
+-    // The badger's age.
+-    private int age;
+-    // The badger's food level, which is increased by eating hedgehogs.
+-    private int foodLevel;
++    private static final Map<Class<? extends LivingBeing>, Integer> FOOD_VALUES =
++            new LinkedHashMap<>();
++
++    static {
++        FOOD_VALUES.put(Hedgehog.class, HEDGEHOG_FOOD_VALUE);
++        FOOD_VALUES.put(Frog.class, FROG_FOOD_VALUE);
++        FOOD_VALUES.put(Plant.class, PLANT_FOOD_VALUE);
++    }
+ 
+     /**
+-     * Create a badger. A badger can be created as a new born (age zero
+-     * and not hungry) or with a random age and food level.
+-     * 
++     * Create a badger. A badger can be created as a newborn or with a random
++     * age and food level.
+      * @param randomAge If true, the badger will have random age and hunger level.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+     public Badger(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        int hunger = HEDGEHOG_FOOD_VALUE + FROG_FOOD_VALUE + PLANT_FOOD_VALUE;
+-        if(randomAge) {
+-            age = rand.nextInt(MAX_AGE);
+-            foodLevel = rand.nextInt(hunger);
+-        }
+-        else {
+-            age = 0;
+-            foodLevel = hunger;
+-        }
+-    }
+-
+-    /**
+-     * This is what the badger does most of the time: it hunts for
+-     * hedgehogs, badgers and plants. In the process, it might breed, die of hunger,
+-     * or die of old age.
+-     * @param field The field currently occupied.
+-     * @param newBears A list to return newly born badgers.
+-     */
+-    public void act(List<LivingBeing> newBadgers)
+-    {
+-        incrementAge();
+-        incrementHunger();
+-        if(!isNight()) {
+-            if(isAlive()) {
+-                giveBirth(newBadgers);            
+-                // Move towards a source of food if found.
+-                Location newLocation = findFood();
+-                if(newLocation == null) { 
+-                    // No food found - try to move to a free location.
+-                    Location l =  getLocation();
+-                    if(l != null) {
+-                        newLocation = getField().freeAdjacentLocation(l);
+-                    }
+-                }
+-                // See if it was possible to move.
+-                if(newLocation != null) {
+-                    setLocation(newLocation);
+-                }
+-                else {
+-                    // Overcrowding.
+-                }
+-            }
+-        } else {
+-            //Sleep at night
+-        }
++        super(randomAge, field, location, MAX_AGE, INITIAL_FOOD_LEVEL, INITIAL_FOOD_LEVEL);
+     }
+ 
+     /**
+-     * Increase the age. This could result in the badger's death.
+-     */
+-    private void incrementAge()
+-    {
+-        age++;
+-        if(age > MAX_AGE) {
+-            setDead();
+-        }
+-    }
+-
+-    /**
+-     * Make this badger more hungry. This could result in the badger's death.
+-     */
+-    private void incrementHunger()
+-    {
+-        foodLevel--;
+-        if(foodLevel <= 0) {
+-            setDead();
+-        }
+-    }
+-
+-    /**
+-     * Look for food adjacent to the current location.
+-     * Only the first live food is eaten.
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    private Location findFood()
+-    {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        
+-        //goes through all adjacent locations checking for each type of animal to eat 
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            if(animal instanceof Hedgehog) {
+-                Hedgehog hedgehog = (Hedgehog) animal;
+-                if(hedgehog.isAlive()) { 
+-                    hedgehog.setDead();
+-                    foodLevel += HEDGEHOG_FOOD_VALUE;
+-                    return where;
+-                }
+-            }
+-            else if(animal instanceof Frog) {
+-                Frog frog = (Frog) animal;
+-                if(frog.isAlive()) {
+-                    frog.setDead();
+-                    foodLevel += FROG_FOOD_VALUE;
+-                    return where;
+-                }
+-            }
+-            else if(animal instanceof Plant) {
+-                Plant plant = (Plant) animal;
+-                if(plant.isAlive()) {
+-                    plant.setDead();
+-                    foodLevel += PLANT_FOOD_VALUE;
+-                    return where;
+-                }
+-            }
+-        }
+-        return null;
+-    }
+-
+-    /**
+-     * Check whether or not this badger is to give birth at this step.
+-     * New births will be made into free adjacent locations.
++     * Act for one simulation step.
+      * @param newBadgers A list to return newly born badgers.
+      */
+-    private void giveBirth(List<LivingBeing> newBadgers)
+-    {
+-        // New foxes are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+-        Field field = getField();
+-        
+-        //get location of current animal and one surrounding it
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        
+-        //iterates through checking if one in the surrouding places are the opposite sex
+-        while(it.hasNext()) {
+-            Location nextPlace = it.next();
+-            Object animal = field.getObjectAt(nextPlace);
+-            Object animal2 = field.getObjectAt(getLocation());
+-            
+-            if(animal instanceof Badger && animal2 instanceof Badger) {
+-                Badger badge = (Badger) animal;
+-                Badger badge2 = (Badger) animal;
+-                
+-                //if they can breed populate the fields 
+-                if(getOppositeGender(badge,badge2)) {
+-                    List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-                    int births = breed();
+-                    for(int b = 0; b < births && free.size() > 0; b++) {
+-                        Location loc = free.remove(0);
+-                        Badger young = new Badger(false, field, loc);
+-                        newBadgers.add(young);
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    /**
+-     * Generate a number representing the number of births,
+-     * if it can breed.
+-     * @return The number of births (may be zero).
+-     */
+-    private int breed()
++    public void act(List<LivingBeing> newBadgers)
+     {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
++        live(newBadgers, false, BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE,
++             FOOD_VALUES);
+     }
+ 
+-    /**
+-     * A badger can breed if it has reached the breeding age.
+-     */
+-    private boolean canBreed()
++    @Override
++    protected Animal createOffspring(Field field, Location location)
+     {
+-        return age >= BREEDING_AGE;
++        return new Badger(false, field, location);
+     }
+-
+ }
+diff --git a/Bear.java b/Bear.java
+index 347ed41..55ec4fc 100644
+--- a/Bear.java
++++ b/Bear.java
+@@ -1,228 +1,60 @@
++import java.util.LinkedHashMap;
+ import java.util.List;
+-import java.util.Iterator;
+-import java.util.Random;
++import java.util.Map;
+ 
+ /**
+- * Bears are the apex predators, they eat Hedgehogs, Badgers and Frogs
+- * Bears are not eaten by another species
+- * Bears sleep during the night and hunt and move during day
++ * Bears are apex predators. They eat hedgehogs, badgers and frogs, and are
++ * active during the day.
+  *
+  * @version 2022.02.24 (2)
+  */
+ public class Bear extends Animal
+ {
+-    // Characteristics shared by all bears (class variables).
+-
+-    // The age at which a bear can start to breed.
+     private static final int BREEDING_AGE = 10;
+-    // The age to which a bear can live.
+     private static final int MAX_AGE = 1500;
+-    // The likelihood of a bear breeding.
+     private static final double BREEDING_PROBABILITY = 0.99;
+-    // The maximum number of births.
+     private static final int MAX_LITTER_SIZE = 7;
+-    // The food value of a single Hedgehog. In effect, this is the
+-    // number of steps a bear can go before it has to eat again.
++
+     private static final int HEDGEHOG_FOOD_VALUE = 40;
+-    //The food value of a single Badger
+     private static final int BADGER_FOOD_VALUE = 25;
+-    //The food value of a single Frog
+     private static final int FROG_FOOD_VALUE = 40;
+-    // A shared random number generator to control breeding.
+-    private static final Random rand = Randomizer.getRandom();
++    private static final int INITIAL_FOOD_LEVEL =
++            HEDGEHOG_FOOD_VALUE + BADGER_FOOD_VALUE + FROG_FOOD_VALUE;
+ 
+-    // Individual characteristics (instance fields).
+-    
+-    // The bears's age.
+-    private int age;
+-    // The bears's food level, which is increased by eating hedgehogs.
+-    private int foodLevel;
++    private static final Map<Class<? extends LivingBeing>, Integer> FOOD_VALUES =
++            new LinkedHashMap<>();
++
++    static {
++        FOOD_VALUES.put(Hedgehog.class, HEDGEHOG_FOOD_VALUE);
++        FOOD_VALUES.put(Badger.class, BADGER_FOOD_VALUE);
++        FOOD_VALUES.put(Frog.class, FROG_FOOD_VALUE);
++    }
+ 
+     /**
+-     * Create a bear. A bear can be created as a new born (age zero
+-     * and not hungry) or with a random age and food level.
+-     * 
++     * Create a bear. A bear can be created as a newborn or with a random age
++     * and food level.
+      * @param randomAge If true, the bear will have random age and hunger level.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+     public Bear(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        int hunger = HEDGEHOG_FOOD_VALUE + BADGER_FOOD_VALUE + FROG_FOOD_VALUE;
+-        if(randomAge) {
+-            age = rand.nextInt(MAX_AGE);
+-            foodLevel = rand.nextInt(hunger);
+-        }
+-        else {
+-            age = 0;
+-            foodLevel = hunger;
+-        }
++        super(randomAge, field, location, MAX_AGE, INITIAL_FOOD_LEVEL, INITIAL_FOOD_LEVEL);
+     }
+ 
+     /**
+-     * This is what the bear does most of the time: it hunts for
+-     * hedgehogs, badgers and frogs. In the process, it might breed, die of hunger,
+-     * or die of old age.
+-     * @param field The field currently occupied.
++     * Act for one simulation step.
+      * @param newBears A list to return newly born bears.
+      */
+     public void act(List<LivingBeing> newBears)
+     {
+-        incrementAge();
+-        incrementHunger();
+-        if(!isNight()) {
+-            if(isAlive()) {
+-                giveBirth(newBears);            
+-                // Move towards a source of food if found.
+-                Location newLocation = findFood();
+-                if(newLocation == null) { 
+-                    // No food found - try to move to a free location.
+-                    //newLocation = getField().freeAdjacentLocation(getLocation());
+-                    Location l =  getLocation();
+-                    if(l != null) {
+-                        newLocation = getField().freeAdjacentLocation(l);
+-                    }
+-                }
+-                // See if it was possible to move.
+-                if(newLocation != null) {
+-                    setLocation(newLocation);
+-                }
+-                else {
+-                    // Overcrowding.
+-                }
+-            }
+-        }
+-        else {
+-            //Sleep at night
+-        }
+-    }
+-
+-    /**
+-     * Increase the age. This could result in the bear's death.
+-     */
+-    private void incrementAge()
+-    {
+-        age++;
+-        if(age > MAX_AGE) {
+-            setDead();
+-        }
++        live(newBears, false, BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE,
++             FOOD_VALUES);
+     }
+ 
+-    /**
+-     * Make this bear more hungry. This could result in the bear's death.
+-     */
+-    private void incrementHunger()
+-    {
+-        foodLevel--;
+-        if(foodLevel <= 0) {
+-            setDead();
+-        }
+-    }
+-
+-    /**
+-     * Look for food adjacent to the current location.
+-     * Only the first live hedgehog/badger/frog is eaten.
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    private Location findFood()
+-    {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        
+-        //goes through all adjacent locations checking for each type of animal to eat
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            if(animal instanceof Hedgehog) {
+-                Hedgehog hedgehog = (Hedgehog) animal;
+-                if(hedgehog.isAlive()) { 
+-                    hedgehog.setDead();
+-                    foodLevel += HEDGEHOG_FOOD_VALUE;
+-                    return where;
+-                }
+-            }
+-
+-            else if(animal instanceof Badger) {
+-                Badger badger = (Badger) animal;
+-                if(badger.isAlive()) {
+-                    badger.setDead();
+-                    foodLevel += BADGER_FOOD_VALUE;
+-                    return where;
+-                }
+-            }
+-
+-            else if(animal instanceof Frog) {
+-                Frog frog = (Frog) animal;
+-                if(frog.isAlive()) {
+-                    frog.setDead();
+-                    foodLevel += FROG_FOOD_VALUE;
+-                    return where;
+-                }
+-            }
+-        }
+-        return null;
+-    }
+-
+-    /**
+-     * Check whether or not this bear is to give birth at this step.
+-     * New births will be made into free adjacent locations.
+-     * @param newBears A list to return newly born bears.
+-     */
+-    private void giveBirth(List<LivingBeing> newBears)
+-    {
+-        // New bears are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+-        Field field = getField();
+-        
+-        //get location of current animal and one surrounding it
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        
+-        //iterates through checking if one in the surrouding places are the opposite sex
+-        while(it.hasNext()) {
+-            Location nextPlace = it.next();
+-            Object animal = field.getObjectAt(nextPlace);
+-            Object currentAnimal = field.getObjectAt(getLocation());
+-            
+-            if(animal instanceof Bear && currentAnimal instanceof Bear) {
+-                Bear bear = (Bear) animal;
+-                Bear bear2 = (Bear) animal;
+-                
+-                //if they can breed populate the fields 
+-                if(getOppositeGender(bear,bear2)) {
+-                    List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-                    int births = breed();
+-                    for(int b = 0; b < births && free.size() > 0; b++) {
+-                        Location loc = free.remove(0);
+-                        Bear young = new Bear(false, field, loc);
+-                        newBears.add(young);
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    /**
+-     * Generate a number representing the number of births,
+-     * if it can breed.
+-     * @return The number of births (may be zero).
+-     */
+-    private int breed()
+-    {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
+-    }
+-
+-    /**
+-     * A bear can breed if it has reached the breeding age.
+-     */
+-    private boolean canBreed()
++    @Override
++    protected Animal createOffspring(Field field, Location location)
+     {
+-        return age >= BREEDING_AGE;
++        return new Bear(false, field, location);
+     }
+ }
+diff --git a/Counter.java b/Counter.java
+index c7f40a5..e66801d 100644
+--- a/Counter.java
++++ b/Counter.java
+@@ -1,5 +1,3 @@
+-import java.awt.Color;
+-
+ /**
+  * Provide a counter for a participant in the simulation.
+  * This includes an identifying string and a count of how
+diff --git a/Field.java b/Field.java
+index d3a63f0..2013ce6 100644
+--- a/Field.java
++++ b/Field.java
+@@ -1,5 +1,4 @@
+ import java.util.Collections;
+-import java.util.Iterator;
+ import java.util.LinkedList;
+ import java.util.List;
+ import java.util.Random;
+diff --git a/FieldStats.java b/FieldStats.java
+index 6b50599..37546eb 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -1,4 +1,3 @@
+-import java.awt.Color;
+ import java.util.HashMap;
+ 
+ /**
+@@ -11,7 +10,7 @@ import java.util.HashMap;
+ public class FieldStats
+ {
+     // Counters for each type of entity in the simulation.
+-    private HashMap<Class, Counter> counters;
++    private HashMap<Class<?>, Counter> counters;
+     // Whether the counters are currently up to date.
+     private boolean countsValid;
+ 
+@@ -36,7 +35,7 @@ public class FieldStats
+         if(!countsValid) {
+             generateCounts(field);
+         }
+-        for(Class key : counters.keySet()) {
++        for(Class<?> key : counters.keySet()) {
+             Counter info = counters.get(key);
+             buffer.append(info.getName());
+             buffer.append(": ");
+@@ -53,7 +52,7 @@ public class FieldStats
+     public void reset()
+     {
+         countsValid = false;
+-        for(Class key : counters.keySet()) {
++        for(Class<?> key : counters.keySet()) {
+             Counter count = counters.get(key);
+             count.reset();
+         }
+@@ -63,7 +62,7 @@ public class FieldStats
+      * Increment the count for one class of animal.
+      * @param animalClass The class of animal to increment.
+      */
+-    public void incrementCount(Class animalClass)
++    public void incrementCount(Class<?> animalClass)
+     {
+         Counter count = counters.get(animalClass);
+         if(count == null) {
+@@ -95,7 +94,7 @@ public class FieldStats
+         if(!countsValid) {
+             generateCounts(field);
+         }
+-        for(Class key : counters.keySet()) {
++        for(Class<?> key : counters.keySet()) {
+             Counter info = counters.get(key);
+             if(info.getCount() > 0) {
+                 nonZero++;
+diff --git a/Frog.java b/Frog.java
+index a2e6d36..20a6cfa 100644
+--- a/Frog.java
++++ b/Frog.java
+@@ -1,200 +1,52 @@
+-import java.util.Random;
++import java.util.LinkedHashMap;
+ import java.util.List;
+-import java.util.Iterator;
++import java.util.Map;
+ 
+ /**
+- * Frogs are not predators as they eat Plants.  
+- * Frogs are simulated to be able to move and eat plants during night time and sleep in day time.
+- * Frogs are eaten by Bears, Wolves and Badgers
++ * Frogs eat plants, move at night and are eaten by bears, wolves and badgers.
+  *
+  * @version 2022.02.24
+  */
+ public class Frog extends Animal
+ {
+-    // Characteristics shared by all frogs (class variables).
+-
+-    // The age at which a frog can start to breed.
+     private static final int BREEDING_AGE = 3;
+-    // The age to which a frog can live.
+     private static final int MAX_AGE = 27;
+-    // The likelihood of a frog breeding.
+     private static final double BREEDING_PROBABILITY = 0.75;
+-    // The maximum number of births.
+     private static final int MAX_LITTER_SIZE = 4;
+-    // A shared random number generator to control breeding.
+-    private static final Random rand = Randomizer.getRandom();
+ 
+-    // Individual characteristics (instance fields)
+     private static final int PLANT_FOOD_VALUE = 12;
+-    // The frog's age.
+-    private int age;
+-    // The frog's food level
+-    private int foodLevel;
++    private static final Map<Class<? extends LivingBeing>, Integer> FOOD_VALUES =
++            new LinkedHashMap<>();
++
++    static {
++        FOOD_VALUES.put(Plant.class, PLANT_FOOD_VALUE);
++    }
++
+     /**
+-     * Create a new frog. A frog may be created with age
+-     * zero (a new born) or with a random age.
+-     * 
+-     * @param randomAge If true, the frog will have a random age.
++     * Create a frog. A frog can be created as a newborn or with a random age
++     * and food level.
++     * @param randomAge If true, the frog will have random age and hunger level.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+     public Frog(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        age = 0;
+-        int hunger = PLANT_FOOD_VALUE;
+-        if(randomAge) {
+-            age = rand.nextInt(MAX_AGE);
+-            foodLevel = rand.nextInt(hunger);
+-        }
+-        else {
+-            age = 0;
+-            foodLevel = hunger/2;
+-        }
++        super(randomAge, field, location, MAX_AGE, PLANT_FOOD_VALUE, PLANT_FOOD_VALUE / 2);
+     }
+ 
+     /**
+-     * This is what the frog does most of the time - it runs 
+-     * around. Sometimes it will breed or die of old age.
++     * Act for one simulation step.
+      * @param newFrogs A list to return newly born frogs.
+      */
+     public void act(List<LivingBeing> newFrogs)
+     {
+-        incrementAge();
+-        incrementHunger();
+-        if(isNight()) {
+-            if(isAlive()) {
+-                giveBirth(newFrogs);            
+-                // Try to move into a free location.
+-                Location newLocation = findFood();
+-                if(newLocation == null) { 
+-                    // No food found - try to move to a free location.
+-                    Location l =  getLocation();
+-                    if(l != null) {
+-                        newLocation = getField().freeAdjacentLocation(l);
+-                    }
+-                }
+-                // See if it was possible to move.
+-                if(newLocation != null) {
+-                    setLocation(newLocation);
+-                }
+-                else {
+-                    // Overcrowding.
+-                    //setDead();
+-                }
+-            }
+-        } else {
+-            //sleep during daytime
+-        }
+-    }
+-
+-    /**
+-     * Look for plants adjacent to the current location.
+-     * Only the first live plant is eaten.
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    private Location findFood() {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        
+-        //goes through all adjacent locations checking for plants to eat
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object plant = field.getObjectAt(where);
+-            if(plant instanceof Plant) {
+-                Plant pl = (Plant) plant;
+-                if(pl.isAlive()) {
+-                    pl.setDead();
+-                    foodLevel += PLANT_FOOD_VALUE;
+-                    return where;
+-                }
+-            }
+-        }
+-        return null;
+-    }
+-
+-    /**
+-     * Make this frog more hungry. This could result in the frog's death.
+-     */
+-    private void incrementHunger()
+-    {
+-        foodLevel--;
+-        if(foodLevel <= 0) {
+-            setDead();
+-        }
+-    }
+-
+-    /**
+-     * Increase the age.
+-     * This could result in the frog's death.
+-     */
+-    private void incrementAge()
+-    {
+-        age++;
+-        if(age > MAX_AGE) {
+-            setDead();
+-        }
+-    }
+-
+-    /**
+-     * Check whether or not this frog is to give birth at this step.
+-     * New births will be made into free adjacent locations.
+-     * @param newFrogs A list to return newly born rabbits.
+-     */
+-    private void giveBirth(List<LivingBeing> newFrogs)
+-    {
+-        //New frogs are born
+-        Field field = getField();
+-        
+-        //get location of current animal and one surrounding it
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        
+-        //iterates through checking if one in the surrouding places are the opposite sex
+-        while(it.hasNext()) {
+-            Location nextPlace = it.next();
+-            Object animal = field.getObjectAt(nextPlace);
+-            Object animal2 = field.getObjectAt(getLocation());
+-            
+-            if(animal instanceof Frog && animal2 instanceof Frog) {
+-                Frog frog = (Frog) animal;
+-                Frog frog2 = (Frog) animal2;
+-                
+-                //if they can breed populate the fields 
+-                if(getOppositeGender(frog,frog2)) {
+-                    List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-                    int births = breed();
+-                    for(int b = 0; b < births && free.size() > 0; b++) {
+-                        Location loc = free.remove(0);
+-                        Frog young = new Frog(false, field, loc);
+-                        newFrogs.add(young);
+-                    }
+-                }
+-            }
+-        }
++        live(newFrogs, true, BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE,
++             FOOD_VALUES);
+     }
+ 
+-    /**
+-     * Generate a number representing the number of births,
+-     * if it can breed.
+-     * @return The number of births (may be zero).
+-     */
+-    private int breed()
+-    {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
+-    }
+-
+-    /**
+-     * A frog can breed if it has reached the breeding age.
+-     * @return true if the rabbit can breed, false otherwise.
+-     */
+-    private boolean canBreed()
++    @Override
++    protected Animal createOffspring(Field field, Location location)
+     {
+-        return age >= BREEDING_AGE;
++        return new Frog(false, field, location);
+     }
+ }
+diff --git a/Hedgehog.java b/Hedgehog.java
+index 7a94d37..5aef0c3 100644
+--- a/Hedgehog.java
++++ b/Hedgehog.java
+@@ -1,214 +1,53 @@
++import java.util.LinkedHashMap;
+ import java.util.List;
+-import java.util.Random;
+-import java.util.Iterator;
++import java.util.Map;
+ 
+ /**
+- * Hedgehogs are animals that are not predetors in this simulation.
+- * They only eat plants and no animals.
+- * Hedgehogs get eaten by wolves, bears and badgers
++ * Hedgehogs eat plants, move at night and are eaten by wolves, bears and
++ * badgers.
+  *
+  * @version 2022.02.24
+  */
+ public class Hedgehog extends Animal
+ {
+-    // Characteristics shared by all hedgehog (class variables).
+-
+-    // The age at which a hedgehog can start to breed.
+     private static final int BREEDING_AGE = 3;
+-    // The age to which a hedgehog can live.
+     private static final int MAX_AGE = 35;
+-    // The likelihood of a hedgehog breeding.
+     private static final double BREEDING_PROBABILITY = 0.75;
+-    // The maximum number of births.
+     private static final int MAX_LITTER_SIZE = 5;
+-    //The food value of a single Plant
+-    private static final int PLANT_FOOD_VALUE = 13;
+-
+-    // A shared random number generator to control breeding.
+-    private static final Random rand = Randomizer.getRandom();
+ 
+-    // Individual characteristics (instance fields).
++    private static final int PLANT_FOOD_VALUE = 13;
++    private static final Map<Class<? extends LivingBeing>, Integer> FOOD_VALUES =
++            new LinkedHashMap<>();
+ 
+-    // The hedgehog's age.
+-    private int age;
+-    //The hedgehog's food level
+-    private int foodLevel;
++    static {
++        FOOD_VALUES.put(Plant.class, PLANT_FOOD_VALUE);
++    }
+ 
+     /**
+-     * Create a new hedgehog. A hedgehog may be created with age
+-     * zero (a new born) or with a random age.
+-     * 
+-     * @param randomAge If true, the hedgehog will have a random age.
++     * Create a hedgehog. A hedgehog can be created as a newborn or with a
++     * random age and food level.
++     * @param randomAge If true, the hedgehog will have random age and hunger level.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+     public Hedgehog(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        age = 0;
+-        int hunger = PLANT_FOOD_VALUE;
+-        if(randomAge) {
+-            age = rand.nextInt(MAX_AGE);
+-            foodLevel = rand.nextInt(hunger);
+-        }
+-        else {
+-            age = 0;
+-            foodLevel = hunger/2; //Newly born hedgehogs start with half the food level
+-        }
+-    }
+-
+-    /**
+-     * This is what the hedgehog does most of the time - it runs 
+-     * around. Sometimes it will breed or die of old age.
+-     * @param newHedgehogs A list to return newly born hedgehog.
+-     */
+-    public void act(List<LivingBeing> newHedgehogs)
+-    {
+-        incrementAge();
+-        incrementHunger();
+-
+-        if(isNight()) { //if it is night time, then move around
+-            if(isAlive()) {
+-                incrementHunger();
+-                giveBirth(newHedgehogs);            
+-
+-                Location newLocation = findFood();
+-
+-                if(newLocation == null) { 
+-                    // No food found - try to move to a free location.
+-                    Location l =  getLocation();
+-                    if(l != null) {
+-                        newLocation = getField().freeAdjacentLocation(l);
+-                    }
+-
+-                }
+-                // See if it was possible to move.
+-                if(newLocation != null) {
+-                    setLocation(newLocation);
+-                }
+-                else {
+-                    // Overcrowding.
+-
+-                }
+-            }
+-        } else {
+-            //Sleep in day time
+-
+-        }
++        super(randomAge, field, location, MAX_AGE, PLANT_FOOD_VALUE, PLANT_FOOD_VALUE / 2);
+     }
+ 
+     /**
+-     * Look for plants adjacent to the current location
+-     * Only the first plant is eaten
+-     * @return Where food was found or null if food was not found
+-     */
+-    private Location findFood() {
+-        Field field = getField();
+-        if(field != null) {
+-            List<Location> adjacent = field.adjacentLocations(getLocation());
+-            Iterator<Location> it = adjacent.iterator();
+-            while(it.hasNext()) {
+-                Location where = it.next();
+-                Object plant = field.getObjectAt(where);
+-                if(plant instanceof Plant) {
+-                    Plant pl = (Plant) plant;
+-                    if(pl.isAlive()) {
+-                        pl.setDead();
+-                        foodLevel += PLANT_FOOD_VALUE;
+-                        return where;
+-                    }
+-                }
+-            }
+-        } 
+-        return null;
+-    }
+-
+-    /**
+-     * Make this hedgehog more hungry. This could result in the hedgehog's death.
+-     */
+-    private void incrementHunger()
+-    {
+-        foodLevel--;
+-        if(foodLevel <= 0) {
+-            setDead();
+-        }
+-    }
+-
+-    /**
+-     * Increase the age.
+-     * This could result in the hedgehog's death.
+-     */
+-    private void incrementAge()
+-    {
+-        age++;
+-        if(age > MAX_AGE) {
+-            setDead();
+-        }
+-    }
+-
+-    /**
+-     * Check whether or not this hedgehog is to give birth at this step.
+-     * New births will be made into free adjacent locations.
++     * Act for one simulation step.
+      * @param newHedgehogs A list to return newly born hedgehogs.
+      */
+-    private void giveBirth(List<LivingBeing> newHedgehogs)
+-    {
+-        // New hedgehogs are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+-        Field field = getField();
+-        if(field == null) {
+-            return;
+-        }
+-        
+-        //get location of current animal and one surrounding it
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        
+-        //iterates through checking if one in the surrouding places are the opposite sex
+-        while(it.hasNext()) {
+-            Location nextPlace = it.next();
+-            Object animal = field.getObjectAt(nextPlace);
+-            Object currAnimal = field.getObjectAt(getLocation());
+-            
+-            if(animal instanceof Hedgehog && currAnimal instanceof Hedgehog) {
+-                Hedgehog hedge = (Hedgehog) animal;
+-                Hedgehog hedge2 = (Hedgehog) currAnimal;
+-                
+-                //if they can breed populate the fields 
+-                if(getOppositeGender(hedge,hedge2)) {
+-                    List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-                    int births = breed();
+-                
+-                    for(int b = 0; b < births && free.size() > 0; b++) {
+-                        Location loc = free.remove(0);
+-                        Hedgehog young = new Hedgehog(false, field, loc);
+-                        newHedgehogs.add(young);
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    /**
+-     * Generate a number representing the number of births,
+-     * if it can breed.
+-     * @return The number of births (may be zero).
+-     */
+-    private int breed()
++    public void act(List<LivingBeing> newHedgehogs)
+     {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
++        live(newHedgehogs, true, BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE,
++             FOOD_VALUES);
+     }
+ 
+-    /**
+-     * A hedgehog can breed if it has reached the breeding age.
+-     * @return true if the rabbit can breed, false otherwise.
+-     */
+-    private boolean canBreed()
++    @Override
++    protected Animal createOffspring(Field field, Location location)
+     {
+-        return age >= BREEDING_AGE;
++        return new Hedgehog(false, field, location);
+     }
+ }
+diff --git a/LivingBeing.java b/LivingBeing.java
+index 7e09539..2257411 100644
+--- a/LivingBeing.java
++++ b/LivingBeing.java
+@@ -1,6 +1,4 @@
+ import java.util.List;
+-import java.util.TimerTask;
+-import java.util.Timer;
+ 
+ /**
+  * A class representing shared characteristics of all living beings, animals and plants
+@@ -15,8 +13,8 @@ public abstract class LivingBeing
+     private Field field;
+     // The being's position in the field.
+     private Location location;
+-    //Checks to see if it is night time or not
+-    protected static boolean nightTime;
++    // Shared day/night state for all living beings in the simulation.
++    private static boolean nightTime;
+ 
+     /**
+      * Constructor for objects of class LivingBeing
+@@ -29,8 +27,6 @@ public abstract class LivingBeing
+         this.field = field;
+         setLocation(location);
+ 
+-        nightTime = false;
+-
+     }
+ 
+     /**
+@@ -42,10 +38,11 @@ public abstract class LivingBeing
+     }
+ 
+     /**
+-     * Switches between night time and day time
++     * Set the shared day/night state.
++     * @param night true if the simulation is currently at night.
+      */
+-    protected void switchNight() {
+-        nightTime = !nightTime;
++    protected static void setNight(boolean night) {
++        nightTime = night;
+     }
+ 
+     /**
+diff --git a/Plant.java b/Plant.java
+index ca36707..8c1956a 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -1,6 +1,5 @@
+ import java.util.List;
+ import java.util.Random;
+-import java.util.Iterator;
+ 
+ /**
+  * Plants do not move around but they do grow and produce more plants. 
+@@ -13,12 +12,6 @@ import java.util.Iterator;
+  */
+ public class Plant extends LivingBeing
+ {
+-    // instance variables
+-    private boolean alive;
+-    // The plant's field.
+-    private Field field;
+-    // The plant's position in the field.
+-    private Location location;
+     // The plant's age
+     private int age;
+     //The probability that the plant can grow
+diff --git a/Simulator.java b/Simulator.java
+index 15f6e9e..9bfa3c0 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -3,8 +3,6 @@ import java.util.List;
+ import java.util.ArrayList;
+ import java.util.Iterator;
+ import java.awt.Color;
+-import java.util.TimerTask;
+-import java.util.Timer;
+ 
+ /**
+  * A simple predator-prey simulator, based on a rectangular field
+@@ -20,6 +18,8 @@ public class Simulator
+     private static final int DEFAULT_WIDTH = 150;
+     // The default depth of the grid.
+     private static final int DEFAULT_DEPTH = 100;
++    // The number of simulation steps between day/night transitions.
++    private static final int DAY_NIGHT_CYCLE_LENGTH = 35;
+ 
+     // The probability that a hedgehog will be created in any given grid position.
+     private static final double HEDGEHOG_CREATION_PROBABILITY = 0.115;
+@@ -41,7 +41,7 @@ public class Simulator
+     // The current step of the simulation.
+     private int step;
+ 
+-    private static boolean night;
++    private boolean night;
+     // A graphical view of the simulation.
+     private SimulatorView view;
+     
+@@ -56,7 +56,6 @@ public class Simulator
+     public Simulator()
+     {
+         this(DEFAULT_DEPTH, DEFAULT_WIDTH);
+-        night = false;
+     }
+ 
+     /**
+@@ -131,8 +130,10 @@ public class Simulator
+     /**
+      * Switches between night time and day time
+      */
+-    protected void switchNight() {
++    private void switchNight() {
+         night = !night;
++        LivingBeing.setNight(night);
++        view.setNight(night);
+     }
+ 
+     /**
+@@ -143,24 +144,21 @@ public class Simulator
+     public void simulateOneStep()
+     {
+         step++;
++        if(step % DAY_NIGHT_CYCLE_LENGTH == 0) {
++            switchNight();
++        }
+ 
+         // Provide space for newborn animals.
+         List<LivingBeing> newAnimals = new ArrayList<>();        
+         // Let all animals act.
+-        int counter = 0;
+         for(Iterator<LivingBeing> it = animals.iterator(); it.hasNext(); ) {
+ 
+             LivingBeing animal = it.next();
+             animal.act(newAnimals);
+ 
+-            if(counter % 35 == 0) {
+-                animal.switchNight();
+-            }
+-
+             if(! animal.isAlive()) {
+                 it.remove();
+             }
+-            counter++;
+         }
+ 
+         // Add the newly born animals to the main lists.
+@@ -175,6 +173,9 @@ public class Simulator
+     public void reset()
+     {
+         step = 0;
++        night = false;
++        LivingBeing.setNight(night);
++        view.setNight(night);
+         animals.clear();
+         populate();
+ 
+@@ -193,33 +194,28 @@ public class Simulator
+         //goes through each cell and populates based on given probabilty 
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
++                Location location = new Location(row, col);
+                 if(rand.nextDouble() <= HEDGEHOG_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+                     Hedgehog hedgehog = new Hedgehog(true, field, location);
+                     animals.add(hedgehog);
+                 }
+                 else if(rand.nextDouble() <= BEAR_CREATION_PROBABILITY) {
+-                    Location location = new Location(row,col);
+                     Bear bear = new Bear(true, field, location);
+                     animals.add(bear);
+                 }
+                 else if(rand.nextDouble() <= BADGER_CREATION_PROBABILITY) {
+-                    Location location = new Location(row,col);
+                     Badger badger = new Badger(true, field, location);
+                     animals.add(badger);
+                 }
+                 else if(rand.nextDouble() <= FROG_CREATION_PROBABILITY) {
+-                    Location location = new Location(row,col);
+                     Frog frog = new Frog(true,field,location);
+                     animals.add(frog);
+                 }
+                 else if(rand.nextDouble() <= WOLF_CREATION_PROBABILITY) {
+-                    Location location = new Location(row,col);
+                     Wolf wolfie = new Wolf(true,field,location);
+                     animals.add(wolfie);
+                 }
+                 else if(rand.nextDouble() <= PLANT_CREATION_PROBABILITY) {
+-                    Location location = new Location(row,col);
+                     Plant plant = new Plant(true,field,location);
+                     animals.add(plant);
+                 }
+@@ -242,4 +238,3 @@ public class Simulator
+         }
+     }
+ }
+-
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 70fb21a..13a30bd 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -21,16 +21,15 @@ public class SimulatorView extends JFrame
+     // Color used for objects that have no defined color.
+     private static final Color UNKNOWN_COLOR = Color.gray;
+ 
+-    private final String STEP_PREFIX = "Step: ";
+-    private final String POPULATION_PREFIX = "Population: ";
++    private static final String STEP_PREFIX = "Step: ";
++    private static final String POPULATION_PREFIX = "Population: ";
+     private JLabel stepLabel, population, infoLabel;
+     private FieldView fieldView;
+     
+     private boolean night;
+-    private int counter;
+     
+     // A map for storing colors for participants in the simulation
+-    private Map<Class, Color> colors;
++    private Map<Class<?>, Color> colors;
+     // A statistics object computing and storing simulation information
+     private FieldStats stats;
+ 
+@@ -51,10 +50,6 @@ public class SimulatorView extends JFrame
+         
+         setLocation(100, 50);
+         
+-        //test
+-        //night = false;
+-        //counter = 0;
+-        
+         fieldView = new FieldView(height, width);
+ 
+         Container contents = getContentPane();
+@@ -74,11 +69,19 @@ public class SimulatorView extends JFrame
+      * @param animalClass The animal's Class object.
+      * @param color The color to be used for the given class.
+      */
+-    public void setColor(Class animalClass, Color color)
++    public void setColor(Class<?> animalClass, Color color)
+     {
+         colors.put(animalClass, color);
+     }
+ 
++    /**
++     * Set whether the simulation is currently showing night-time conditions.
++     */
++    public void setNight(boolean night)
++    {
++        this.night = night;
++    }
++
+     /**
+      * Display a short information label at the top of the window.
+      */
+@@ -90,7 +93,7 @@ public class SimulatorView extends JFrame
+     /**
+      * @return The color to be used for a given class of animal.
+      */
+-    private Color getColor(Class animalClass)
++    private Color getColor(Class<?> animalClass)
+     {
+         Color col = colors.get(animalClass);
+         if(col == null) {
+@@ -101,15 +104,6 @@ public class SimulatorView extends JFrame
+             return col;
+         }
+     }
+-    
+-    /*private boolean Night() {
+-        if(counter % 5 == 0) {
+-            night = !night;
+-        }
+-        return night;
+-    }*/
+-
+-
+     /**
+      * Show the current status of the field.
+      * @param step Which iteration step it is.
+@@ -134,15 +128,9 @@ public class SimulatorView extends JFrame
+                     fieldView.drawMark(col, row, getColor(animal.getClass()));
+                 }
+                 else {
+-                    //Animal a = (Animal) animal;
+-                    if(!night) {
+-                    fieldView.drawMark(col, row, EMPTY_COLOR);
+-                    } else {
+-                    fieldView.drawMark(col, row, Color.GRAY);
+-                    }
++                    fieldView.drawMark(col, row, night ? Color.GRAY : EMPTY_COLOR);
+                 }
+             }
+-            //counter++;
+         }
+         stats.countFinished();
+ 
+diff --git a/Wolf.java b/Wolf.java
+index ce1582d..68e2d84 100644
+--- a/Wolf.java
++++ b/Wolf.java
+@@ -1,212 +1,56 @@
+-import java.util.Random;
++import java.util.LinkedHashMap;
+ import java.util.List;
+-import java.util.Iterator;
++import java.util.Map;
+ 
+ /**
+- * Wolves are the next level of predators; they eat Hedgehogs and Frogs.
+- * Wolves hunt and move around at night and sleep during the day. 
++ * Wolves eat hedgehogs and frogs. They hunt and move at night.
+  *
+  * @version 2022.02.24
+  */
+ public class Wolf extends Animal
+ {
+-    // Characteristics shared by all wolves (class variables).
+-
+-    // The age at which a wolf can start to breed.
+     private static final int BREEDING_AGE = 5;
+-    // The age to which a wolf can live.
+     private static final int MAX_AGE = 500;
+-    // The likelihood of a wolf breeding.
+     private static final double BREEDING_PROBABILITY = 0.99;
+-    // The maximum number of births.
+     private static final int MAX_LITTER_SIZE = 8;
+-    // The food value of a single hedgehog. In effect, this is the
+-    // number of steps a wolf can go before it has to eat again.
++
+     private static final int HEDGEHOG_FOOD_VALUE = 25;
+-    // number of steps a wolf can go before it has to eat again.
+     private static final int FROG_FOOD_VALUE = 25;
++    private static final int INITIAL_FOOD_LEVEL = HEDGEHOG_FOOD_VALUE + FROG_FOOD_VALUE;
+ 
+-    // A shared random number generator to control breeding.
+-    private static final Random rand = Randomizer.getRandom();
++    private static final Map<Class<? extends LivingBeing>, Integer> FOOD_VALUES =
++            new LinkedHashMap<>();
+ 
+-    // Individual characteristics (instance fields).
+-    // The wolves' age.
+-    private int age;
+-    // The wolves' food level, which is increased by eating hedgehogs and frogs.
+-    private int foodLevel;
++    static {
++        FOOD_VALUES.put(Hedgehog.class, HEDGEHOG_FOOD_VALUE);
++        FOOD_VALUES.put(Frog.class, FROG_FOOD_VALUE);
++    }
+ 
+     /**
+-     * Create a wolf. A wolf can be created as a new born (age zero
+-     * and not hungry) or with a random age and food level.
+-     * 
++     * Create a wolf. A wolf can be created as a newborn or with a random age
++     * and food level.
+      * @param randomAge If true, the wolf will have random age and hunger level.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+     public Wolf(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        int hunger = HEDGEHOG_FOOD_VALUE + FROG_FOOD_VALUE;
+-        if(randomAge) {
+-            age = rand.nextInt(MAX_AGE);
+-            foodLevel = rand.nextInt(hunger);
+-        }
+-        else {
+-            age = 0;
+-            foodLevel = hunger;
+-        }
++        super(randomAge, field, location, MAX_AGE, INITIAL_FOOD_LEVEL, INITIAL_FOOD_LEVEL);
+     }
+ 
+     /**
+-     * This is what the wolf does most of the time: it hunts for
+-     * hedgehogs. In the process, it might breed, die of hunger,
+-     * or die of old age.
++     * Act for one simulation step.
+      * @param newWolves A list to return newly born wolves.
+      */
+     public void act(List<LivingBeing> newWolves)
+     {
+-        incrementAge();
+-        incrementHunger();
+-        if(isNight()) { //Move,hunt etc at night time
+-            if(isAlive()) {
+-                giveBirth(newWolves);            
+-                // Move towards a source of food if found.
+-                Location newLocation = findFood();
+-                if(newLocation == null) { 
+-                    // No food found - try to move to a free location.
+-                    Location l =  getLocation();
+-                    if(l != null) {
+-                        newLocation = getField().freeAdjacentLocation(l);
+-                    }
+-                }
+-                // See if it was possible to move.
+-                if(newLocation != null) {
+-                    setLocation(newLocation);
+-                }
+-                else {
+-                    // Overcrowding.
+-                }
+-            }
+-        } else {
+-            //Sleep in day time
+-        }
+-    }
+-
+-    /**
+-     * Increase the age. This could result in the wolves' death.
+-     */
+-    private void incrementAge()
+-    {
+-        age++;
+-        if(age > MAX_AGE) {
+-            setDead();
+-        }
+-    }
+-
+-    /**
+-     * Make this wolf more hungry. This could result in the wolves' death.
+-     */
+-    private void incrementHunger()
+-    {
+-        foodLevel--;
+-        if(foodLevel <= 0) {
+-            setDead();
+-        }
+-    }
+-
+-    /**
+-     * Look for hedgehogs and frogs adjacent to the current location.
+-     * Only the first live hedgehog and frogs is eaten.
+-     * @return Where food was found, or null if it wasn't.
+-     */
+-    private Location findFood()
+-    {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        
+-        //goes through all adjacent locations checking for each type of animal to eat
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            if(animal instanceof Hedgehog) {
+-                Hedgehog hedgehog = (Hedgehog) animal;
+-                if(hedgehog.isAlive()) { 
+-                    hedgehog.setDead();
+-                    foodLevel += HEDGEHOG_FOOD_VALUE;
+-                    return where;
+-                }
+-            }
+-
+-            else if(animal instanceof Frog) {
+-                Frog frog = (Frog) animal;
+-                if(frog.isAlive()) {
+-                    frog.setDead();
+-                    foodLevel += FROG_FOOD_VALUE;
+-                    return where;
+-                }
+-            }
+-        }
+-        return null;
+-    }
+-
+-    /**
+-     * Check whether or not this wolf is to give birth at this step.
+-     * New births will be made into free adjacent locations.
+-     * @param newWolves A list to return newly born wolves.
+-     */
+-    private void giveBirth(List<LivingBeing> newWolves)
+-    {
+-        // New bears are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+-        Field field = getField();
+-        
+-        //get location of current animal and one surrounding it
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        
+-        //iterates through checking if one in the surrouding places are the opposite sex
+-        while(it.hasNext()) {
+-            Location nextPlace = it.next();
+-            Object animal = field.getObjectAt(nextPlace);
+-            Object animal2 = field.getObjectAt(getLocation());
+-            if(animal instanceof Wolf && animal2 instanceof Wolf) {
+-                Wolf wolf = (Wolf) animal;
+-                Wolf wolf2 = (Wolf) animal;
+-                
+-                //if they can breed populate the fields 
+-                if(getOppositeGender(wolf, wolf2)) {
+-                    List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-                    int births = breed();
+-                    for(int b = 0; b < births && free.size() > 0; b++) {
+-                        Location loc = free.remove(0);
+-                        Wolf young = new Wolf(false, field, loc);
+-                        newWolves.add(young);
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    /**
+-     * Generate a number representing the number of births,
+-     * if it can breed.
+-     * @return The number of births (may be zero).
+-     */
+-    private int breed()
+-    {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
++        live(newWolves, true, BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE,
++             FOOD_VALUES);
+     }
+ 
+-    /**
+-     * A wolf can breed if it has reached the breeding age.
+-     */
+-    private boolean canBreed()
++    @Override
++    protected Animal createOffspring(Field field, Location location)
+     {
+-        return age >= BREEDING_AGE;
++        return new Wolf(false, field, location);
+     }
+ }

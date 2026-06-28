@@ -1,0 +1,347 @@
+diff --git a/Animal.java b/Animal.java
+index e2063a7..f4485b8 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -31,12 +31,7 @@ public abstract class Animal extends Organism
+         if (randomAge) {
+             currentHealth = getRand().nextInt(getMaxHealth());
+         }
+-        if (getRand().nextInt(2) == 0) {
+-            isMale = true;
+-        }
+-        else {
+-            isMale = false;
+-        }
++        isMale = getRand().nextInt(2) == 0;
+ 
+         isInfected = false;
+     }
+@@ -126,30 +121,48 @@ public abstract class Animal extends Organism
+      * This is what animals do each simulation step: age, lose health,
+      * handle disease, breed, eat, and move.
+      */
++    @Override
+     public void act(List<Organism> newOrganisms)
+     {
+         incrementAge();
+         incrementHealth();
+-        if (isAlive() && this instanceof Infectable) {
+-            ((Infectable) this).illness();
+-        }
++        handleIllness();
+         if (isAlive()) {
+-            if (this instanceof Infectable) {
+-                ((Infectable) this).spreadDisease();
+-            }
++            spreadDiseaseIfInfectable();
+             giveBirth(newOrganisms);
+             moveOrDie();
+         }
+     }
+ 
++    /**
++     * Apply infection damage when this animal supports infection.
++     */
++    private void handleIllness()
++    {
++        if (isAlive() && this instanceof Infectable) {
++            ((Infectable) this).illness();
++        }
++    }
++
++    /**
++     * Spread disease when this animal supports infection.
++     */
++    private void spreadDiseaseIfInfectable()
++    {
++        if (this instanceof Infectable) {
++            ((Infectable) this).spreadDisease();
++        }
++    }
++
+     /**
+      * Checks if the animal can breed
+      *
+      * @return true if the animal can breed
+      */
++    @Override
+     protected boolean canBreed()
+     {
+-        if (isMale == false)
++        if (!isMale)
+         {
+             Field field = getField();
+             for (Location where : field.adjacentLocations(getLocation()))
+@@ -158,7 +171,7 @@ public abstract class Animal extends Organism
+                 if (getAnimalClass(thing))
+                 {
+                     Animal animal = (Animal) thing;
+-                    return animal.getGender() == true && getAge() >= getBreedingAge();
++                    return animal.getGender() && getAge() >= getBreedingAge();
+                 }
+             }
+         }
+@@ -175,15 +188,33 @@ public abstract class Animal extends Organism
+             Object animal = field.getObjectAt(where);
+             if (animal != null) {                       // makes sure to filter out empty squares
+                 Organism target = (Organism) animal;
+-                if (getFoodSources().contains(target.getClass()) && target.isAlive() && getRand().nextDouble() <= weather.getWeatherModifier()) {
+-                    target.setDead();
+-                    currentHealth = getMaxHealth();
+-                }
++                eatIfPossible(target);
+             }
+         }
+         return null;
+     }
+ 
++    /**
++     * Eat an eligible target and restore health when hunting succeeds.
++     */
++    private void eatIfPossible(Organism target)
++    {
++        if (canEat(target)) {
++            target.setDead();
++            currentHealth = getMaxHealth();
++        }
++    }
++
++    /**
++     * Return whether this animal can eat the target on this step.
++     */
++    private boolean canEat(Organism target)
++    {
++        return getFoodSources().contains(target.getClass())
++            && target.isAlive()
++            && getRand().nextDouble() <= weather.getWeatherModifier();
++    }
++
+     /**
+      * Move to food or a free adjacent location. Die if trapped.
+      */
+@@ -210,7 +241,7 @@ public abstract class Animal extends Organism
+             Object object = field.getObjectAt(where);
+             if (object != null) {
+                 Organism organism = (Organism) object;
+-                if (organism instanceof Infectable && organism.isAlive() && getRand().nextDouble() <= Infectable.SPREAD_PROBABILITY) {
++                if (canInfect(organism)) {
+                     Animal target = (Animal) organism;
+                     target.infect();
+                 }
+@@ -218,6 +249,16 @@ public abstract class Animal extends Organism
+         }
+     }
+ 
++    /**
++     * Return whether a target can be infected by this animal on this step.
++     */
++    private boolean canInfect(Organism organism)
++    {
++        return organism instanceof Infectable
++            && organism.isAlive()
++            && getRand().nextDouble() <= Infectable.SPREAD_PROBABILITY;
++    }
++
+     /**
+      * Makes an infected animal take extra damage.
+      */
+diff --git a/Organism.java b/Organism.java
+index f194092..2bfc9c1 100644
+--- a/Organism.java
++++ b/Organism.java
+@@ -20,7 +20,7 @@ public abstract class Organism
+     private Location location;
+     
+     // A shared random number generator to control breeding.
+-    private static final Random rand = Randomizer.getRandom();
++    private static final Random RAND = Randomizer.getRandom();
+     
+     /**
+      * Constructor for objects of class Organism
+@@ -29,7 +29,7 @@ public abstract class Organism
+     {
+         age = 0;
+         if (randomAge) {
+-            age = rand.nextInt(getMaxAge());
++            age = RAND.nextInt(getMaxAge());
+         }
+         alive = true;
+         this.field = field;
+@@ -74,9 +74,9 @@ public abstract class Organism
+     abstract protected int getBreedingAge();
+     
+     /**
+-     * Abstract methohd that returns the litter size of the animal
++     * Abstract method that returns the litter size of the organism
+      * 
+-     * @return the animal's max litter size
++     * @return the organism's max litter size
+      */
+     abstract protected int getMaxLitterSize();
+     
+@@ -120,7 +120,7 @@ public abstract class Organism
+      * @return Random object of the organism
+      */
+     protected Random getRand() {
+-        return rand;
++        return RAND;
+     }
+     
+     /**
+@@ -159,11 +159,10 @@ public abstract class Organism
+      */
+     protected int breed()
+     {
+-        int births = 0;
+         if(canBreed() && getRand().nextDouble() <= getBreedingProbability()) {
+-            births = getRand().nextInt(getMaxLitterSize()) + 1;
++            return getRand().nextInt(getMaxLitterSize()) + 1;
+         }
+-        return births;
++        return 0;
+     }
+     
+     /**
+@@ -171,12 +170,12 @@ public abstract class Organism
+      */
+     protected void giveBirth(List<Organism> newOrganisms)
+     {
+-        // New rabbits are born into adjacent locations.
++        // New organisms are born into adjacent locations.
+         // Get a list of adjacent free locations.
+         Field field = getField();
+         List<Location> free = field.getFreeAdjacentLocations(getLocation());
+         int births = breed();
+-        for(int b = 0; b < births && free.size() > 0; b++) {
++        for(int b = 0; b < births && !free.isEmpty(); b++) {
+             Location loc = free.remove(0);
+             Organism young = createNewOrganism(false, field, loc);
+             newOrganisms.add(young);
+@@ -189,8 +188,7 @@ public abstract class Organism
+     protected void incrementAge()
+     {
+         age++;
+-        if (age > getMaxAge())
+-        {
++        if (age > getMaxAge()) {
+             setDead();
+         }
+     }
+@@ -202,11 +200,12 @@ public abstract class Organism
+     protected void setDead()
+     {
+         alive = false;
+-        if(location != null) {
+-            field.clear(location);
+-            location = null;
+-            field = null;
++        if(location == null) {
++            return;
+         }
++        field.clear(location);
++        location = null;
++        field = null;
+     }
+ 
+     /**
+@@ -221,4 +220,4 @@ public abstract class Organism
+         location = newLocation;
+         field.place(this, newLocation);
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/Plant.java b/Plant.java
+index d8e7c58..d8a9249 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -1,22 +1,21 @@
+ import java.util.List;
+ 
+ /**
+- * Write a description of class Plant here.
++ * A plant in the simulation. Plants age and spread to adjacent free locations.
+  *
+- * @version (a version number or a date)
++ * @version 2022.03.02
+  */
+-
+ public class Plant extends Organism
+ {
+-    // The age at which a monkey can start to breed.
++    // The age at which a plant can start to breed.
+     private static final int BREEDING_AGE = 5;
+-    // The age to which a monkey can live.
++    // The age to which a plant can live.
+     private static final int MAX_AGE = 15;
+-    // The likelihood of a monkey breeding.
++    // The likelihood of a plant breeding.
+     private static final double BREEDING_PROBABILITY = 0.09;
+     // The maximum number of births.
+     private static final int MAX_LITTER_SIZE = 6;
+-    // Whether the animal is diurnal or nocturnal
++    // Whether the plant is diurnal or nocturnal
+     private static final boolean IS_DIURNAL = true;
+ 
+     public Plant(boolean randomAge, Field field, Location location)
+@@ -31,10 +30,12 @@ public class Plant extends Organism
+      * 
+      * @return boolean True if the plant is diurnal, false if nocturnal
+      */
++    @Override
+     protected boolean getIsDiurnal() {
+         return IS_DIURNAL;
+     }
+     
++    @Override
+     public void act(List<Organism> newOrganisms) {
+         incrementAge();
+         if(isAlive()) {
+@@ -47,6 +48,7 @@ public class Plant extends Organism
+      * 
+      * @return int of the plant's breeding age.
+      */
++    @Override
+     protected int getBreedingAge() {
+         return BREEDING_AGE;
+     }
+@@ -56,6 +58,7 @@ public class Plant extends Organism
+      * 
+      * @return int of the plant's max age.
+      */
++    @Override
+     protected int getMaxAge() {
+         return MAX_AGE;
+     }
+@@ -65,6 +68,7 @@ public class Plant extends Organism
+      * 
+      * @return boolean True if the plant can breed
+      */
++    @Override
+     protected boolean canBreed() {
+         return getAge() >= BREEDING_AGE;
+     }
+@@ -74,6 +78,7 @@ public class Plant extends Organism
+      * 
+      * @return int of the plant's max litter size
+      */
++    @Override
+     protected int getMaxLitterSize() {
+         return MAX_LITTER_SIZE;
+     }
+@@ -83,6 +88,7 @@ public class Plant extends Organism
+      * 
+      * @return double of the plant's breeding probability
+      */
++    @Override
+     protected double getBreedingProbability() {
+         return BREEDING_PROBABILITY;
+     }
+@@ -94,6 +100,7 @@ public class Plant extends Organism
+      * 
+      * @return Organism object of subclass plant
+      */
++    @Override
+     protected Organism createNewOrganism(boolean randomAge, Field field, Location location) {
+         return new Plant(randomAge, field, location);
+     }

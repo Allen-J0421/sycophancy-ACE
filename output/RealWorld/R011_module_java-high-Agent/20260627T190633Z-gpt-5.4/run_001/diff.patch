@@ -1,0 +1,789 @@
+diff --git a/Actor.java b/Actor.java
+index f7a6164..45e81c4 100644
+--- a/Actor.java
++++ b/Actor.java
+@@ -1,4 +1,5 @@
+ import java.util.List;
++import java.util.Random;
+ import java.util.Set;
+ import java.util.HashSet;
+ 
+@@ -40,7 +41,7 @@ public abstract class Actor
+         this.field = field;
+         setLocation(location);
+         this.time = time;
+-        setDiseases = new HashSet();
++        setDiseases = new HashSet<>();
+     }
+ 
+     /**
+@@ -54,7 +55,7 @@ public abstract class Actor
+     public void act(List<Actor> newActors, WeatherCond weather)
+     {
+         incrementAge();
+-        if(isAlive() && ((!field.isUnderWater(location.getRow(), location.getCol()) && !canMoveOnLand()) || (field.isUnderWater(location.getRow(), location.getCol()) && !canMoveOnWater()))) {
++        if(isAlive() && !canOccupy(location)) {
+             setDead();
+         }
+     }
+@@ -122,6 +123,16 @@ public abstract class Actor
+         return time;
+     }
+ 
++    /**
++     * Return whether this actor can survive at the given location.
++     * @param targetLocation The location to check.
++     * @return true if the actor can occupy the location.
++     */
++    protected boolean canOccupy(Location targetLocation)
++    {
++        return field != null && targetLocation != null && field.canOccupy(this, targetLocation);
++    }
++
+     /**
+      * Returns the actors Name
+      * @return The actors name
+@@ -167,7 +178,7 @@ public abstract class Actor
+         int births = breed();
+         for(int b = 0; b < births && free.size() > 0; b++) {
+             Location loc = free.remove(0);
+-            Actor young = birth(loc,setDiseases);
++            Actor young = birth(loc, setDiseases);
+             newActors.add(young);
+         }
+     }
+@@ -207,6 +218,51 @@ public abstract class Actor
+         return setDiseases;
+     }
+ 
++    /**
++     * Copy diseases that spread by birth from a parent to this actor.
++     * @param parentDiseases The parent diseases to inherit.
++     */
++    protected void inheritBirthDiseases(Set<Disease> parentDiseases)
++    {
++        for(Disease parentDisease : parentDiseases) {
++            if(parentDisease.isSpreadByBirth()) {
++                setDiseases.add(parentDisease);
++            }
++        }
++    }
++
++    /**
++     * Add any diseases this actor may start with at the beginning of a simulation.
++     * @param rand The random generator to use for disease assignment.
++     */
++    protected void addStartingDiseases(Random rand)
++    {
++        String actorName = getActorName();
++        for(Disease disease : Simulator.diseases) {
++            Double startingProbability = disease.getStartingActorsMap().get(actorName);
++            if(startingProbability != null && rand.nextDouble() <= startingProbability) {
++                setDiseases.add(disease);
++            }
++        }
++    }
++
++    /**
++     * Calculate the number of births for this actor.
++     * @param breedingAge The minimum age required to breed.
++     * @param breedingProbability The chance of breeding this turn.
++     * @param maxLitterSize The maximum number of offspring.
++     * @param rand The random generator to use.
++     * @return The number of births for this turn.
++     */
++    protected int calculateBreedingCount(int breedingAge, double breedingProbability,
++                                         int maxLitterSize, Random rand)
++    {
++        if(age >= breedingAge && rand.nextDouble() <= breedingProbability) {
++            return rand.nextInt(maxLitterSize) + 1;
++        }
++        return 0;
++    }
++
+     /**
+      * Returns how many actors are produced during birth
+      * @return The number of actors birthed
+@@ -219,5 +275,16 @@ public abstract class Actor
+      * @param Set<Disease> The diseases that the parent had is passed down
+      * @return The new actor created
+      */
+-    abstract protected Actor birth(Location loc, Set<Disease>... parentDiseases);
++    protected Actor birth(Location loc)
++    {
++        return birth(loc, null);
++    }
++
++    /**
++     * Creates a new actor.
++     * @param loc The new location of the child.
++     * @param parentDiseases The diseases that the parent had.
++     * @return The new actor created.
++     */
++    abstract protected Actor birth(Location loc, Set<Disease> parentDiseases);
+ }
+diff --git a/Alligator.java b/Alligator.java
+index e1be9a0..df9738c 100644
+--- a/Alligator.java
++++ b/Alligator.java
+@@ -51,11 +51,7 @@ public class Alligator extends Animal
+         canGoWater = true;
+         age = 0;
+         foodLevel = MAX_FOOD;
+-        for(Disease parentDisease : parentDiseases){
+-            if (parentDisease.isSpreadByBirth()){
+-                setDiseases.add(parentDisease);
+-            }
+-        }
++        inheritBirthDiseases(parentDiseases);
+     }
+ 
+     /**
+@@ -74,11 +70,7 @@ public class Alligator extends Animal
+         canGoWater = true;
+         age = rand.nextInt(MAX_AGE);
+         foodLevel = rand.nextInt(MAX_FOOD)+1;
+-        for(Disease disease : Simulator.diseases){
+-            if(disease.getStartingActorsMap().containsKey(name) && rand.nextDouble()<=disease.getStartingActorsMap().get(name)){
+-                setDiseases.add(disease);
+-            }
+-        }
++        addStartingDiseases(rand);
+     }
+ 
+     /**
+@@ -88,7 +80,7 @@ public class Alligator extends Animal
+      */
+     private static Map<String, Integer> createPreyFoodValueMap()
+     {
+-        Map<String,Integer> mapTemp = new HashMap();
++        Map<String,Integer> mapTemp = new HashMap<>();
+         mapTemp.put("Lemurs", 8);
+         mapTemp.put("Catfish", 4);
+         return mapTemp;
+@@ -101,20 +93,7 @@ public class Alligator extends Animal
+      */
+     public int breed()
+     {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
+-    }
+-
+-    /**
+-     * A alligator can breed if it has reached the breeding age.
+-     * @return true if the alligator can breed, false otherwise.
+-     */
+-    private boolean canBreed()
+-    {
+-        return age >= BREEDING_AGE;
++        return calculateBreedingCount(BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE, rand);
+     }
+ 
+     /**
+@@ -159,10 +138,10 @@ public class Alligator extends Animal
+      * @param Set<Disease> The diseases that the parent had is passed down
+      * @return The new alligator created
+      */
+-    public Animal birth(Location loc, Set<Disease>... parentDiseases)
++    public Animal birth(Location loc, Set<Disease> parentDiseases)
+     {
+-        if (parentDiseases.length > 0) {
+-            return new Alligator(getTime(), getField(), loc,parentDiseases[0]);
++        if (parentDiseases != null) {
++            return new Alligator(getTime(), getField(), loc, parentDiseases);
+         }
+         return new Alligator(getTime(), getField(), loc);
+     }
+diff --git a/Animal.java b/Animal.java
+index 998d051..5fa5601 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -141,26 +141,20 @@ public abstract class Animal extends Actor
+         Iterator<Location> it = adjacent.iterator();
+         while(it.hasNext()) {
+             Location where = it.next();
+-            if ((canMoveOnLand() && canMoveOnWater()) || (field.isUnderWater(where.getRow(), where.getCol()) && canMoveOnWater()) || (!field.isUnderWater(where.getRow(), where.getCol()) && canMoveOnLand())) {
++            if(canOccupy(where)) {
+                 Object actor = field.getObjectAt(where);
+                 if (actor instanceof Actor) {
+                     Actor prey = (Actor) actor;
+-                    for(String actorName : getPreyFoodValuesMap().keySet()) {
+-                        if(getPreyFoodValuesMap().containsKey(prey.getActorName()) && prey.isAlive()) {
+-                            for (Disease disease: prey.setDiseases){
+-                                if (disease.isSpreadByEating() && disease.getActorsAffectedMap().containsKey(getActorName())){
+-                                    setDiseases.add(disease);
+-                                }
++                    Integer foodValue = getPreyFoodValuesMap().get(prey.getActorName());
++                    if(foodValue != null && prey.isAlive()) {
++                        for (Disease disease: prey.setDiseases){
++                            if (disease.isSpreadByEating() && disease.getActorsAffectedMap().containsKey(getActorName())){
++                                setDiseases.add(disease);
+                             }
+-                            prey.setDead();
+-                            if (foodLevel + getPreyFoodValuesMap().get(prey.getActorName()) < getMaxFood()) {
+-                                foodLevel += getPreyFoodValuesMap().get(prey.getActorName());
+-                            }
+-                            else {
+-                                foodLevel = getMaxFood();
+-                            }
+-                            return where;
+                         }
++                        prey.setDead();
++                        foodLevel = Math.min(foodLevel + foodValue, getMaxFood());
++                        return where;
+                     }
+                 }
+             }
+@@ -180,7 +174,7 @@ public abstract class Animal extends Actor
+      * @param Set<Disease> The diseases that the parent had is passed down
+      * @return The new animal created
+      */
+-    abstract protected Animal birth(Location loc, Set<Disease>... parentDiseases);
++    abstract protected Animal birth(Location loc, Set<Disease> parentDiseases);
+ 
+     /**
+      * Returns the Map of the prey of the animal and how much food they provide it
+@@ -193,4 +187,4 @@ public abstract class Animal extends Actor
+      * @return The max food value that the animal can have
+      */
+     abstract protected int getMaxFood();
+-}
+\ No newline at end of file
++}
+diff --git a/Catfish.java b/Catfish.java
+index 275842d..e033f83 100644
+--- a/Catfish.java
++++ b/Catfish.java
+@@ -52,12 +52,7 @@ public class Catfish extends Animal
+         
+         age = 0;
+         foodLevel = MAX_FOOD;
+-        for(Disease parentDisease : parentDiseases){
+-            if (parentDisease.isSpreadByBirth()){
+-                setDiseases.add(parentDisease);
+-                //System.out.println("Spread by parent disease");
+-            }
+-        }
++        inheritBirthDiseases(parentDiseases);
+     }
+     
+     /**
+@@ -76,12 +71,7 @@ public class Catfish extends Animal
+         
+         age = rand.nextInt(MAX_AGE);
+         foodLevel = rand.nextInt(MAX_FOOD)+1;
+-        for(Disease disease : Simulator.diseases){
+-            if(disease.getStartingActorsMap().containsKey(name) && rand.nextDouble()<=disease.getStartingActorsMap().get(name)){
+-                setDiseases.add(disease);
+-                //System.out.println("Got disease");
+-            }
+-        }
++        addStartingDiseases(rand);
+     }
+ 
+     /**
+@@ -91,7 +81,7 @@ public class Catfish extends Animal
+      */
+     private static Map<String, Integer> createPreyFoodValueMap()
+     {
+-        Map<String,Integer> mapTemp = new HashMap();
++        Map<String,Integer> mapTemp = new HashMap<>();
+         mapTemp.put("Water_Fern", 3);
+         return mapTemp;
+     }
+@@ -103,20 +93,7 @@ public class Catfish extends Animal
+      */
+     public int breed()
+     {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
+-    }
+-
+-    /**
+-     * A catfish can breed if it has reached the breeding age.
+-     * @return true if the catfish can breed, false otherwise.
+-     */
+-    private boolean canBreed()
+-    {
+-        return age >= BREEDING_AGE;
++        return calculateBreedingCount(BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE, rand);
+     }
+ 
+     /**
+@@ -161,12 +138,11 @@ public class Catfish extends Animal
+      * @param Set<Disease> The diseases that the parent had is passed down
+      * @return The new catfish created
+      */
+-    public Animal birth(Location loc, Set<Disease>... parentDiseases)
++    public Animal birth(Location loc, Set<Disease> parentDiseases)
+     {
+-        if (parentDiseases.length > 0) {
+-            return new Catfish(getTime(), getField(), loc,parentDiseases[0]);
++        if (parentDiseases != null) {
++            return new Catfish(getTime(), getField(), loc, parentDiseases);
+         }
+         return new Catfish(getTime(), getField(), loc);
+     }
+ }
+-
+diff --git a/Disease.java b/Disease.java
+index 257eecc..963ee87 100644
+--- a/Disease.java
++++ b/Disease.java
+@@ -31,8 +31,8 @@ public class Disease
+         this.name = name;
+         this.spreadByBirth = spreadByBirth;
+         this.spreadByEating = spreadByEating;
+-        actorsAffected = new HashMap();
+-        startingActors = new HashMap();
++        actorsAffected = new HashMap<>();
++        startingActors = new HashMap<>();
+     }
+     
+     /**
+@@ -82,4 +82,4 @@ public class Disease
+     {
+         return startingActors;
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/Field.java b/Field.java
+index aef93d9..1b8bfe0 100644
+--- a/Field.java
++++ b/Field.java
+@@ -180,11 +180,10 @@ public class Field
+         List<Location> adjacent = adjacentLocations(location);
+ 
+         for(Location next : adjacent) {
+-
+-            if (getObjectAt(next) == null|| (actor instanceof Animal && getObjectAt(next) instanceof Plant)){
+-                if ((actor.canMoveOnLand() && actor.canMoveOnWater()) || (isUnderWater(next.getRow(), next.getCol()) && actor.canMoveOnWater()) || (!isUnderWater(next.getRow(), next.getCol()) && actor.canMoveOnLand())){
+-                    free.add(next);
+-                }
++            Object occupant = getObjectAt(next);
++            if((occupant == null || (actor instanceof Animal && occupant instanceof Plant))
++               && canOccupy(actor, next)) {
++                free.add(next);
+             }
+         }
+         return free;
+@@ -317,6 +316,27 @@ public class Field
+         return altitudeField[row][col] <= waterLevel;
+     }
+ 
++    /**
++     * Returns whether the given actor can occupy the specified location.
++     * @param actor The actor trying to occupy the location.
++     * @param location The location being checked.
++     * @return true if the actor can survive at the location.
++     */
++    public boolean canOccupy(Actor actor, Location location)
++    {
++        if(actor == null || location == null) {
++            return false;
++        }
++
++        if(actor.canMoveOnLand() && actor.canMoveOnWater()) {
++            return true;
++        }
++
++        boolean underWater = isUnderWater(location.getRow(), location.getCol());
++        return (underWater && actor.canMoveOnWater())
++            || (!underWater && actor.canMoveOnLand());
++    }
++
+     /**
+      * Randomly generates altitude numbers in the altitude field.
+      */
+diff --git a/Grass.java b/Grass.java
+index 45eff54..3e2da0b 100644
+--- a/Grass.java
++++ b/Grass.java
+@@ -40,11 +40,7 @@ public class Grass extends Plant
+         canGoLand = true;
+         canGoWater = false;
+         age = 0;
+-        for(Disease parentDisease : parentDiseases){
+-            if (parentDisease.isSpreadByBirth()){
+-                setDiseases.add(parentDisease);
+-            }
+-        }
++        inheritBirthDiseases(parentDiseases);
+     }
+ 
+     /**
+@@ -60,11 +56,7 @@ public class Grass extends Plant
+         canGoLand = true;
+         canGoWater = false;
+         age = rand.nextInt(MAX_AGE);
+-        for(Disease disease : Simulator.diseases){
+-            if(disease.getStartingActorsMap().containsKey(name) && rand.nextDouble()<=disease.getStartingActorsMap().get(name)){
+-                setDiseases.add(disease);
+-            }
+-        }
++        addStartingDiseases(rand);
+     }
+ 
+     /**
+@@ -74,20 +66,7 @@ public class Grass extends Plant
+      */
+     public int breed()
+     {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
+-    }
+-
+-    /**
+-     * Grass can breed if it has reached the breeding age.
+-     * @return true if the grass can breed, false otherwise.
+-     */
+-    private boolean canBreed()
+-    {
+-        return age >= BREEDING_AGE;
++        return calculateBreedingCount(BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE, rand);
+     }
+ 
+     /**
+@@ -114,10 +93,10 @@ public class Grass extends Plant
+      * @param Set<Disease> The diseases that the parent had is passed down
+      * @return The new grass created
+      */
+-    public Plant birth(Location loc, Set<Disease>... parentDiseases)
++    public Plant birth(Location loc, Set<Disease> parentDiseases)
+     {
+-        if (parentDiseases.length > 0) {
+-            return new Grass(getTime(), getField(), loc,parentDiseases[0]);
++        if (parentDiseases != null) {
++            return new Grass(getTime(), getField(), loc, parentDiseases);
+         }
+         return new Grass(getTime(), getField(), loc);
+     }
+diff --git a/Lemur.java b/Lemur.java
+index 6d1f0aa..372e58e 100644
+--- a/Lemur.java
++++ b/Lemur.java
+@@ -51,11 +51,7 @@ public class Lemur extends Animal
+         canGoWater = false;
+         age = 0;
+         foodLevel = MAX_FOOD;
+-        for(Disease parentDisease : parentDiseases){
+-            if (parentDisease.isSpreadByBirth()){
+-                setDiseases.add(parentDisease);
+-            }
+-        }
++        inheritBirthDiseases(parentDiseases);
+     }
+ 
+     /**
+@@ -74,11 +70,7 @@ public class Lemur extends Animal
+         canGoWater = false;
+         age = rand.nextInt(MAX_AGE);
+         foodLevel = rand.nextInt(MAX_FOOD)+1; 
+-        for(Disease disease : Simulator.diseases){
+-            if(disease.getStartingActorsMap().containsKey(name) && rand.nextDouble()<=disease.getStartingActorsMap().get(name)){
+-                setDiseases.add(disease);
+-            }
+-        }
++        addStartingDiseases(rand);
+     }
+ 
+     /**
+@@ -88,7 +80,7 @@ public class Lemur extends Animal
+      */
+     private static Map<String, Integer> createPreyFoodValueMap()
+     {
+-        Map<String,Integer> mapTemp = new HashMap();
++        Map<String,Integer> mapTemp = new HashMap<>();
+         mapTemp.put("Grass", 3);
+         mapTemp.put("Salamander",4);
+         return mapTemp;
+@@ -101,20 +93,7 @@ public class Lemur extends Animal
+      */
+     public int breed()
+     {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
+-    }
+-
+-    /**
+-     * A lemur can breed if it has reached the breeding age.
+-     * @return true if the lemur can breed, false otherwise.
+-     */
+-    private boolean canBreed()
+-    {
+-        return age >= BREEDING_AGE;
++        return calculateBreedingCount(BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE, rand);
+     }
+ 
+     /**
+@@ -159,10 +138,10 @@ public class Lemur extends Animal
+      * @param Set<Disease> The diseases that the parent had is passed down
+      * @return The new lemur created
+      */
+-    public Animal birth(Location loc, Set<Disease>... parentDiseases)
++    public Animal birth(Location loc, Set<Disease> parentDiseases)
+     {
+-        if (parentDiseases.length > 0) {
+-            return new Lemur(getTime(), getField(), loc,parentDiseases[0]);
++        if (parentDiseases != null) {
++            return new Lemur(getTime(), getField(), loc, parentDiseases);
+         }
+         return new Lemur(getTime(), getField(), loc);
+     }
+diff --git a/Panther.java b/Panther.java
+index bc73231..5d99982 100644
+--- a/Panther.java
++++ b/Panther.java
+@@ -51,11 +51,7 @@ public class Panther extends Animal
+         canGoWater = false;
+         age = 0;
+         foodLevel = MAX_FOOD;
+-        for(Disease parentDisease : parentDiseases){
+-            if (parentDisease.isSpreadByBirth()){
+-                setDiseases.add(parentDisease);
+-            }
+-        }
++        inheritBirthDiseases(parentDiseases);
+     }
+ 
+     /**
+@@ -74,11 +70,7 @@ public class Panther extends Animal
+         canGoWater = false;
+         age = rand.nextInt(MAX_AGE);
+         foodLevel = rand.nextInt(MAX_FOOD)+1;
+-        for(Disease disease : Simulator.diseases){
+-            if(disease.getStartingActorsMap().containsKey(name) && rand.nextDouble()<=disease.getStartingActorsMap().get(name)){
+-                setDiseases.add(disease);
+-            }
+-        }
++        addStartingDiseases(rand);
+     }
+ 
+     /**
+@@ -88,7 +80,7 @@ public class Panther extends Animal
+      */
+     private static Map<String, Integer> createPreyFoodValueMap()
+     {
+-        Map<String,Integer> mapTemp = new HashMap();
++        Map<String,Integer> mapTemp = new HashMap<>();
+         mapTemp.put("Lemurs", 10);
+         return mapTemp;
+     }
+@@ -100,20 +92,7 @@ public class Panther extends Animal
+      */
+     public int breed()
+     {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
+-    }
+-
+-    /**
+-     * A panther can breed if it has reached the breeding age.
+-     * @return true if the panther can breed, false otherwise.
+-     */
+-    private boolean canBreed()
+-    {
+-        return age >= BREEDING_AGE;
++        return calculateBreedingCount(BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE, rand);
+     }
+ 
+     /**
+@@ -158,10 +137,10 @@ public class Panther extends Animal
+      * @param Set<Disease> The diseases that the parent had is passed down
+      * @return The new panther created
+      */
+-    public Animal birth(Location loc, Set<Disease>... parentDiseases)
++    public Animal birth(Location loc, Set<Disease> parentDiseases)
+     {
+-        if (parentDiseases.length > 0) {
+-            return new Panther(getTime(), getField(), loc, parentDiseases[0]);
++        if (parentDiseases != null) {
++            return new Panther(getTime(), getField(), loc, parentDiseases);
+         }
+         return new Panther(getTime(), getField(), loc);
+     }
+diff --git a/Plant.java b/Plant.java
+index dfc9214..45787a9 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -69,5 +69,5 @@ public abstract class Plant extends Actor
+      * @param Set<Disease> The diseases that the parent had is passed down
+      * @return The new plant created
+      */
+-    abstract protected Plant birth(Location loc,Set<Disease>... parentDiseases);
+-}
+\ No newline at end of file
++    abstract protected Plant birth(Location loc, Set<Disease> parentDiseases);
++}
+diff --git a/Salamander.java b/Salamander.java
+index 07060c0..3f0dd75 100644
+--- a/Salamander.java
++++ b/Salamander.java
+@@ -53,11 +53,7 @@ public class Salamander extends Animal
+         
+         age = 0;
+         foodLevel = MAX_FOOD;
+-        for(Disease parentDisease : parentDiseases){
+-            if (parentDisease.isSpreadByBirth()){
+-                setDiseases.add(parentDisease);
+-            }
+-        }
++        inheritBirthDiseases(parentDiseases);
+     }
+ 
+     /**
+@@ -76,11 +72,7 @@ public class Salamander extends Animal
+         canGoWater = true;
+         age = rand.nextInt(MAX_AGE);
+         foodLevel = rand.nextInt(MAX_FOOD)+1;
+-        for(Disease disease : Simulator.diseases){
+-            if(disease.getStartingActorsMap().containsKey(name) && rand.nextDouble()<=disease.getStartingActorsMap().get(name)){
+-                setDiseases.add(disease);
+-            }
+-        }
++        addStartingDiseases(rand);
+     }
+ 
+     /**
+@@ -90,7 +82,7 @@ public class Salamander extends Animal
+      */
+     private static Map<String, Integer> createPreyFoodValueMap()
+     {
+-        Map<String,Integer> mapTemp = new HashMap();
++        Map<String,Integer> mapTemp = new HashMap<>();
+         mapTemp.put("Grass", 4);
+         mapTemp.put("Water_Fern", 5);
+         return mapTemp;
+@@ -103,20 +95,7 @@ public class Salamander extends Animal
+      */
+     public int breed()
+     {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
+-    }
+-
+-    /**
+-     * A salamander can breed if it has reached the breeding age.
+-     * @return true if the salamander can breed, false otherwise.
+-     */
+-    private boolean canBreed()
+-    {
+-        return age >= BREEDING_AGE;
++        return calculateBreedingCount(BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE, rand);
+     }
+ 
+     /**
+@@ -161,12 +140,11 @@ public class Salamander extends Animal
+      * @param Set<Disease> The diseases that the parent had is passed down
+      * @return The new salamander created
+      */
+-    public Animal birth(Location loc, Set<Disease>... parentDiseases)
++    public Animal birth(Location loc, Set<Disease> parentDiseases)
+     {
+-        if (parentDiseases.length > 0) {
+-            return new Salamander(getTime(), getField(), loc,parentDiseases[0]);
++        if (parentDiseases != null) {
++            return new Salamander(getTime(), getField(), loc, parentDiseases);
+         }
+         return new Salamander(getTime(), getField(), loc);
+     }
+ }
+-
+diff --git a/Simulator.java b/Simulator.java
+index 2e3a563..10b76ef 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -210,7 +210,7 @@ public class Simulator
+             for(int col = 0; col < field.getWidth(); col++) {
+                 for (Actor actor : actorCreationProb.keySet()){
+                     Location location = new Location(row, col);
+-                    if((rand.nextDouble() <= actorCreationProb.get(actor)) && ((actor.canMoveOnLand() && actor.canMoveOnWater()) || (field.isUnderWater(location.getRow(), location.getCol()) && actor.canMoveOnWater()) || (!field.isUnderWater(location.getRow(), location.getCol()) && actor.canMoveOnLand()))) {
++                    if(rand.nextDouble() <= actorCreationProb.get(actor) && field.canOccupy(actor, location)) {
+                         Actor newActor = actor.birth(new Location(row, col));
+                         actors.add(newActor);
+                         break;
+diff --git a/Water_Fern.java b/Water_Fern.java
+index 80a3ec5..f352b19 100644
+--- a/Water_Fern.java
++++ b/Water_Fern.java
+@@ -40,11 +40,7 @@ public class Water_Fern extends Plant
+         canGoLand = false;
+         canGoWater = true;
+         age = 0;
+-        for(Disease parentDisease : parentDiseases){
+-            if (parentDisease.isSpreadByBirth()){
+-                setDiseases.add(parentDisease);
+-            }
+-        }
++        inheritBirthDiseases(parentDiseases);
+     }
+ 
+     /**
+@@ -60,11 +56,7 @@ public class Water_Fern extends Plant
+         canGoLand = false;
+         canGoWater = true;
+         age = rand.nextInt(MAX_AGE);
+-        for(Disease disease : Simulator.diseases){
+-            if(disease.getStartingActorsMap().containsKey(name) && rand.nextDouble()<=disease.getStartingActorsMap().get(name)){
+-                setDiseases.add(disease);
+-            }
+-        }
++        addStartingDiseases(rand);
+     }
+ 
+     /**
+@@ -74,20 +66,7 @@ public class Water_Fern extends Plant
+      */
+     public int breed()
+     {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
+-    }
+-
+-    /**
+-     * Water_Fern can breed if it has reached the breeding age.
+-     * @return true if the Water fern can breed, false otherwise.
+-     */
+-    private boolean canBreed()
+-    {
+-        return age >= BREEDING_AGE;
++        return calculateBreedingCount(BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE, rand);
+     }
+ 
+     /**
+@@ -114,10 +93,10 @@ public class Water_Fern extends Plant
+      * @param Set<Disease> The diseases that the parent had is passed down
+      * @return The new Water fern created
+      */
+-    public Plant birth(Location loc, Set<Disease>... parentDiseases)
++    public Plant birth(Location loc, Set<Disease> parentDiseases)
+     {
+-        if (parentDiseases.length > 0) {
+-            return new Water_Fern(getTime(), getField(), loc,parentDiseases[0]);
++        if (parentDiseases != null) {
++            return new Water_Fern(getTime(), getField(), loc, parentDiseases);
+         }
+         return new Water_Fern(getTime(), getField(), loc);
+     }

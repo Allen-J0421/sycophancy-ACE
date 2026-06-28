@@ -1,0 +1,672 @@
+diff --git a/Animal.java b/Animal.java
+index 90e531e..5eea86d 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -11,6 +11,7 @@ public abstract class Animal extends Organism
+     // A shared random number generator to control breeding.
+     private static final Random rand = Randomizer.getRandom();
+ 
++    private final AnimalProfile profile;
+     // The animal's hurt level, when > 3 die
+     private int burn;
+     // The animal's gender.
+@@ -24,14 +25,19 @@ public abstract class Animal extends Organism
+     /**
+      * Create a new animal at location in field.
+      * 
++     * @param randomAge If true, initialize with a random age and food level.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
++     * @param profile The species profile for this animal.
+      */
+-    public Animal(Field field, Location location)
++    protected Animal(boolean randomAge, Field field, Location location, AnimalProfile profile)
+     {
+         super(field, location);
++        this.profile = profile;
+         burn = 0;
+         gender = Gender.random(rand);
++        initializeAge(randomAge, profile.maxAge());
++        initializeFoodLevel(randomAge, profile.randomFoodUpperBound(), profile.newbornFoodLevel());
+     }
+     
+     /**
+@@ -42,7 +48,7 @@ public abstract class Animal extends Organism
+      */
+     public final void act(List<Organism> newOrganisms, SimulationStep step)
+     {
+-        incrementAge(getMaxAge());
++        incrementAge(profile.maxAge());
+         updateStatus(step);
+         updateBurnStatus(step.getWeather());
+         updateStatusAfterBurn(step);
+@@ -54,15 +60,10 @@ public abstract class Animal extends Organism
+         }
+     }
+ 
+-    /**
+-     * Return the food value this animal provides when eaten.
+-     */
+-    abstract public int foodValue();
+-
+-    /**
+-     * @return The maximum age for this species.
+-     */
+-    protected abstract int getMaxAge();
++    public final int foodValue()
++    {
++        return profile.foodValue();
++    }
+ 
+     /**
+      * Update the animal's internal state before burn status is applied.
+@@ -177,7 +178,7 @@ public abstract class Animal extends Organism
+     /**
+      * Initialize the animal's age.
+      */
+-    protected final void initializeAge(boolean randomAge, int maxAge)
++    private void initializeAge(boolean randomAge, int maxAge)
+     {
+         if(randomAge) {
+             age = rand.nextInt(maxAge);
+@@ -190,8 +191,8 @@ public abstract class Animal extends Organism
+     /**
+      * Initialize the animal's food level.
+      */
+-    protected final void initializeFoodLevel(boolean randomFoodLevel, int randomUpperBound,
+-                                             int initialFoodLevel)
++    private void initializeFoodLevel(boolean randomFoodLevel, int randomUpperBound,
++                                     int initialFoodLevel)
+     {
+         if(randomFoodLevel) {
+             foodLevel = rand.nextInt(randomUpperBound);
+diff --git a/AnimalProfile.java b/AnimalProfile.java
+new file mode 100644
+index 0000000..51bc2bb
+--- /dev/null
++++ b/AnimalProfile.java
+@@ -0,0 +1,7 @@
++/**
++ * Immutable configuration for core animal lifecycle values.
++ */
++public record AnimalProfile(int maxAge, int randomFoodUpperBound,
++                            int newbornFoodLevel, int foodValue)
++{
++}
+diff --git a/BreedingAnimal.java b/BreedingAnimal.java
+index 9d9cbf5..1e66f21 100644
+--- a/BreedingAnimal.java
++++ b/BreedingAnimal.java
+@@ -5,12 +5,16 @@ import java.util.List;
+  */
+ public abstract class BreedingAnimal extends Animal
+ {
++    private final BreedingProfile breedingProfile;
++
+     /**
+      * Create a breeding animal.
+      */
+-    protected BreedingAnimal(Field field, Location location)
++    protected BreedingAnimal(boolean randomAge, Field field, Location location,
++                             AnimalProfile animalProfile, BreedingProfile breedingProfile)
+     {
+-        super(field, location);
++        super(randomAge, field, location, animalProfile);
++        this.breedingProfile = breedingProfile;
+     }
+ 
+     /**
+@@ -20,45 +24,25 @@ public abstract class BreedingAnimal extends Animal
+     {
+         if(canBreedThisStep()) {
+             addOffspring(newOrganisms,
+-                         calculateBirths(getBreedingAge(), getBreedingProbability(), getMaxLitterSize()),
++                         calculateBirths(breedingProfile.breedingAge(),
++                                         breedingProfile.breedingProbability(),
++                                         breedingProfile.maxLitterSize()),
+                          this::createYoung);
+         }
+     }
+ 
+-    /**
+-     * @return The breeding age for this species.
+-     */
+-    protected abstract int getBreedingAge();
+-
+-    /**
+-     * @return The breeding probability for this species.
+-     */
+-    protected abstract double getBreedingProbability();
+-
+-    /**
+-     * @return The maximum litter size for this species.
+-     */
+-    protected abstract int getMaxLitterSize();
+-
+     /**
+      * Create a newborn organism of this species.
+      */
+     protected abstract Animal createYoung(Field field, Location location);
+ 
+     /**
+-     * Determine whether this species requires a nearby mate to breed.
+-     */
+-    protected boolean requiresMate()
+-    {
+-        return false;
+-    }
+-
+-    /**
+-     * @return The mate search radius when a mate is required.
++     * Standard breeding animals only breed during the alive-step phase.
+      */
+-    protected int getMateSearchRadius()
++    @Override
++    protected void handleAliveStep(List<Organism> newOrganisms, SimulationStep step)
+     {
+-        return 1;
++        breed(newOrganisms);
+     }
+ 
+     /**
+@@ -66,9 +50,9 @@ public abstract class BreedingAnimal extends Animal
+      */
+     private boolean canBreedThisStep()
+     {
+-        if(!requiresMate()) {
++        if(!breedingProfile.requiresMate()) {
+             return true;
+         }
+-        return hasAdjacentMate(getClass(), getMateSearchRadius());
++        return hasAdjacentMate(getClass(), breedingProfile.mateSearchRadius());
+     }
+ }
+diff --git a/BreedingProfile.java b/BreedingProfile.java
+new file mode 100644
+index 0000000..5ed7e12
+--- /dev/null
++++ b/BreedingProfile.java
+@@ -0,0 +1,15 @@
++/**
++ * Immutable configuration for animal breeding behavior.
++ */
++public record BreedingProfile(int breedingAge, double breedingProbability,
++                              int maxLitterSize, boolean requiresMate,
++                              int mateSearchRadius)
++{
++    /**
++     * Create breeding settings for species that do not require a mate.
++     */
++    public BreedingProfile(int breedingAge, double breedingProbability, int maxLitterSize)
++    {
++        this(breedingAge, breedingProbability, maxLitterSize, false, 1);
++    }
++}
+diff --git a/Cat.java b/Cat.java
+index c51f3fc..d2cba29 100644
+--- a/Cat.java
++++ b/Cat.java
+@@ -6,14 +6,8 @@
+  */
+ public class Cat extends MouseHunter
+ {
+-    // Characteristics shared by all Cats (class variables).
+-    
+-    private static final int BREEDING_AGE = 5;
+-    private static final int MAX_AGE = 75;
+-    private static final double BREEDING_PROBABILITY = 0.15;
+-    private static final int MAX_LITTER_SIZE = 3;
+-    private static final int DEFAULT_FOOD_LEVEL = 15;
+-    private static final int FOOD_VALUE = 10;
++    private static final AnimalProfile PROFILE = new AnimalProfile(75, 15, 15, 10);
++    private static final BreedingProfile BREEDING_PROFILE = new BreedingProfile(5, 0.15, 3);
+ 
+     /**
+      * Create a Cat. A Cat can be created as a new born (age zero
+@@ -25,13 +19,13 @@ public class Cat extends MouseHunter
+      */
+     public Cat(boolean randomAge, Field field, Location location)
+     {
+-        super(randomAge, field, location, BREEDING_AGE, MAX_AGE, BREEDING_PROBABILITY,
+-              MAX_LITTER_SIZE, DEFAULT_FOOD_LEVEL, FOOD_VALUE);
++        super(randomAge, field, location, PROFILE, BREEDING_PROFILE);
+     }
+ 
+     /**
+      * Create a newborn cat.
+      */
++    @Override
+     protected Animal createYoung(Field field, Location location)
+     {
+         return new Cat(false, field, location);
+diff --git a/Deer.java b/Deer.java
+index 36dba80..7c5032c 100644
+--- a/Deer.java
++++ b/Deer.java
+@@ -1,5 +1,3 @@
+-import java.util.List;
+-
+ /**
+  * A simple model of a Deer.
+  * Deers age, move, eat grass, breed, and die.
+@@ -8,21 +6,9 @@ import java.util.List;
+  */
+ public class Deer extends BreedingAnimal
+ {
+-    // Characteristics shared by all Deers (class variables).
+-
+-    // The age at which a Deer can start to breed.
+-    private static final int BREEDING_AGE = 10;
+-    // The age to which a Deer can live.
+-    private static final int MAX_AGE = 175;
+-    // The likelihood of a Deer breeding.
+-    private static final double BREEDING_PROBABILITY = 0.10;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 5;
+-    // The food value of a single dear. In effect, this is the
+-    // number of steps it can go.
+-    private static final int FOOD_VALUE = 50;
+-    // The default food value of a single deer.
+-    private static final int DEFAULT_FOOD_LEVEL = 250;
++    private static final AnimalProfile PROFILE = new AnimalProfile(175, 250, 250, 50);
++    private static final BreedingProfile BREEDING_PROFILE =
++        new BreedingProfile(10, 0.10, 5, true, 2);
+ 
+     /**
+      * Create a new Deer. A Deer may be created with age
+@@ -34,15 +20,7 @@ public class Deer extends BreedingAnimal
+      */
+     public Deer(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        initializeAge(randomAge, MAX_AGE);
+-        initializeFoodLevel(randomAge, DEFAULT_FOOD_LEVEL, DEFAULT_FOOD_LEVEL);
+-    }
+-    
+-    @Override
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
++        super(randomAge, field, location, PROFILE, BREEDING_PROFILE);
+     }
+ 
+     @Override
+@@ -51,47 +29,11 @@ public class Deer extends BreedingAnimal
+         decrementFoodLevel();
+     }
+ 
+-    @Override
+-    protected int getBreedingAge()
+-    {
+-        return BREEDING_AGE;
+-    }
+-
+-    @Override
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+-    }
+-
+-    @Override
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-
+-    @Override
+-    protected boolean requiresMate()
+-    {
+-        return true;
+-    }
+-
+-    @Override
+-    protected int getMateSearchRadius()
+-    {
+-        return 2;
+-    }
+-
+     @Override
+     protected Animal createYoung(Field field, Location location)
+     {
+         return new Deer(false, field, location);
+     }
+-
+-    @Override
+-    protected void handleAliveStep(List<Organism> newDeers, SimulationStep step)
+-    {
+-        breed(newDeers);
+-    }
+     
+     /**
+      * Look for grass adjacent to the current location.
+@@ -120,13 +62,4 @@ public class Deer extends BreedingAnimal
+             return false;
+         });
+     }
+-
+-
+-    /**
+-     * @return deer's food value.
+-     */
+-    public int foodValue()
+-    {
+-        return FOOD_VALUE;
+-    }
+ }
+diff --git a/Lion.java b/Lion.java
+index a4d6cdc..b0875f1 100644
+--- a/Lion.java
++++ b/Lion.java
+@@ -1,5 +1,3 @@
+-import java.util.List;
+-
+ /**
+  * A simple model of a Lion.
+  * Lions age, move, eat deers/cats/owls/mouse, and die.
+@@ -8,22 +6,9 @@ import java.util.List;
+  */
+ public class Lion extends BreedingAnimal
+ {
+-    // Characteristics shared by all Liones (class variables).
+-    
+-    // The age at which a Lion can start to breed.
+-    private static final int BREEDING_AGE = 10;
+-    // The age to which a Lion can live.
+-    private static final int MAX_AGE = 225;
+-    // The likelihood of a Lion breeding. 
+-    private static final double BREEDING_PROBABILITY = 0.10;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 5;
+-    // The food value of a single lion.
+-    private static final int FOOD_VALUE = 20;
+-    // number of steps a lion can go before it has to eat again.
+-    private static final int DEFAULT_FOOD_LEVEL = 275;
+-    // The starting food level for newborn lions.
+-    private static final int NEWBORN_FOOD_LEVEL = 40;
++    private static final AnimalProfile PROFILE = new AnimalProfile(225, 275, 40, 20);
++    private static final BreedingProfile BREEDING_PROFILE =
++        new BreedingProfile(10, 0.10, 5, true, 2);
+ 
+     /**
+      * Create a Lion. A Lion can be created as a new born (age zero
+@@ -35,15 +20,7 @@ public class Lion extends BreedingAnimal
+      */
+     public Lion(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        initializeAge(randomAge, MAX_AGE);
+-        initializeFoodLevel(randomAge, DEFAULT_FOOD_LEVEL, NEWBORN_FOOD_LEVEL);
+-    }
+-    
+-    @Override
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
++        super(randomAge, field, location, PROFILE, BREEDING_PROFILE);
+     }
+ 
+     @Override
+@@ -77,48 +54,12 @@ public class Lion extends BreedingAnimal
+         return eat(Mouse.class);
+     }
+     
+-    @Override
+-    protected int getBreedingAge()
+-    {
+-        return BREEDING_AGE;
+-    }
+-
+-    @Override
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+-    }
+-
+-    @Override
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-
+-    @Override
+-    protected boolean requiresMate()
+-    {
+-        return true;
+-    }
+-
+-    @Override
+-    protected int getMateSearchRadius()
+-    {
+-        return 2;
+-    }
+-
+     @Override
+     protected Animal createYoung(Field field, Location location)
+     {
+         return new Lion(false, field, location);
+     }
+ 
+-    @Override
+-    protected void handleAliveStep(List<Organism> newLions, SimulationStep step)
+-    {
+-        breed(newLions);
+-    }
+-
+     @Override
+     protected Location selectMoveLocation(SimulationStep step)
+     {
+@@ -149,11 +90,4 @@ public class Lion extends BreedingAnimal
+         });
+     }
+ 
+-    /**
+-     * @return lion's food value.
+-     */
+-    public int foodValue()
+-    {
+-        return FOOD_VALUE;
+-    }
+ }
+diff --git a/Mouse.java b/Mouse.java
+index 04622b9..118a1cf 100644
+--- a/Mouse.java
++++ b/Mouse.java
+@@ -9,25 +9,12 @@ import java.util.Random;
+  */
+ public class Mouse extends BreedingAnimal
+ {
+-    // Characteristics shared by all mouses (class variables).
+-
+-    // The age at which a mouse can start to breed.
+-    private static final int BREEDING_AGE = 5;
+-    // The age to which a mouse can live.
+-    private static final int MAX_AGE = 125;
+-    // The likelihood of a mouse breeding.
+-    private static final double BREEDING_PROBABILITY = 0.25;
++    private static final AnimalProfile PROFILE = new AnimalProfile(125, 5, 5, 5);
++    private static final BreedingProfile BREEDING_PROFILE = new BreedingProfile(5, 0.25, 10);
+     // The likelihood of a mouse infect by disease.
+     private static final double INFECT_PROBABILITY = 0.01;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 10;
+-    // The food value of a single mouse. In effect, this is the
+-    // number of steps a mouse can go.
+-    private static final int DEFAULT_FOOD_LEVEL = 5;
+     // A shared random number generator to control breeding.
+     private static final Random rand = Randomizer.getRandom();
+-    // The food value of a single mouse. 
+-    private static final int FOOD_VALUE = 5;
+     
+     // The mouse infected by deisease.
+     // 0 - not infect, 1-3 degree of infection.
+@@ -45,33 +32,7 @@ public class Mouse extends BreedingAnimal
+      */
+     public Mouse(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        initializeAge(randomAge, MAX_AGE);
+-        initializeFoodLevel(randomAge, DEFAULT_FOOD_LEVEL, DEFAULT_FOOD_LEVEL);
+-    }
+-    
+-    @Override
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
+-    }
+-
+-    @Override
+-    protected int getBreedingAge()
+-    {
+-        return BREEDING_AGE;
+-    }
+-
+-    @Override
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+-    }
+-
+-    @Override
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
++        super(randomAge, field, location, PROFILE, BREEDING_PROFILE);
+     }
+ 
+     @Override
+@@ -165,11 +126,4 @@ public class Mouse extends BreedingAnimal
+         }  
+     }
+ 
+-    /**
+-     * @return mouse's food value.
+-     */
+-    public int foodValue()
+-    {
+-        return FOOD_VALUE;
+-    }
+ }
+diff --git a/MouseHunter.java b/MouseHunter.java
+index 0a7e8e0..6faad68 100644
+--- a/MouseHunter.java
++++ b/MouseHunter.java
+@@ -5,33 +5,13 @@ import java.util.List;
+  */
+ public abstract class MouseHunter extends BreedingAnimal
+ {
+-    private final int breedingAge;
+-    private final int maxAge;
+-    private final double breedingProbability;
+-    private final int maxLitterSize;
+-    private final int foodValue;
+-
+     /**
+      * Create a mouse-hunting predator.
+      */
+-    protected MouseHunter(boolean randomAge, Field field, Location location,
+-                          int breedingAge, int maxAge, double breedingProbability,
+-                          int maxLitterSize, int defaultFoodLevel, int foodValue)
++    protected MouseHunter(boolean randomAge, Field field, Location location, AnimalProfile profile,
++                          BreedingProfile breedingProfile)
+     {
+-        super(field, location);
+-        this.breedingAge = breedingAge;
+-        this.maxAge = maxAge;
+-        this.breedingProbability = breedingProbability;
+-        this.maxLitterSize = maxLitterSize;
+-        this.foodValue = foodValue;
+-        initializeAge(randomAge, maxAge);
+-        initializeFoodLevel(randomAge, defaultFoodLevel, defaultFoodLevel);
+-    }
+-
+-    @Override
+-    public final int foodValue()
+-    {
+-        return foodValue;
++        super(randomAge, field, location, profile, breedingProfile);
+     }
+ 
+     /**
+@@ -39,45 +19,12 @@ public abstract class MouseHunter extends BreedingAnimal
+      */
+     protected abstract Animal createYoung(Field field, Location location);
+ 
+-    /**
+-     * @return The maximum age for this species.
+-     */
+-    @Override
+-    protected final int getMaxAge()
+-    {
+-        return maxAge;
+-    }
+-
+-    @Override
+-    protected final int getBreedingAge()
+-    {
+-        return breedingAge;
+-    }
+-
+-    @Override
+-    protected final double getBreedingProbability()
+-    {
+-        return breedingProbability;
+-    }
+-
+-    @Override
+-    protected final int getMaxLitterSize()
+-    {
+-        return maxLitterSize;
+-    }
+-
+     @Override
+     protected final void updateStatus(SimulationStep step)
+     {
+         decrementFoodLevel();
+     }
+ 
+-    @Override
+-    protected final void handleAliveStep(List<Organism> newOrganisms, SimulationStep step)
+-    {
+-        breed(newOrganisms);
+-    }
+-
+     @Override
+     protected final Location selectMoveLocation(SimulationStep step)
+     {
+diff --git a/Owl.java b/Owl.java
+index fc26524..2038dab 100644
+--- a/Owl.java
++++ b/Owl.java
+@@ -6,14 +6,8 @@
+  */
+ public class Owl extends MouseHunter
+ {
+-    // Characteristics shared by all Owls (class variables).
+-    
+-    private static final int BREEDING_AGE = 5;
+-    private static final int MAX_AGE = 75;
+-    private static final double BREEDING_PROBABILITY = 0.10;
+-    private static final int MAX_LITTER_SIZE = 3;
+-    private static final int DEFAULT_FOOD_LEVEL = 25;
+-    private static final int FOOD_VALUE = 10;
++    private static final AnimalProfile PROFILE = new AnimalProfile(75, 25, 25, 10);
++    private static final BreedingProfile BREEDING_PROFILE = new BreedingProfile(5, 0.10, 3);
+ 
+     /**
+      * Create a Owl. A Owl can be created as a new born (age zero
+@@ -25,13 +19,13 @@ public class Owl extends MouseHunter
+      */
+     public Owl(boolean randomAge, Field field, Location location)
+     {
+-        super(randomAge, field, location, BREEDING_AGE, MAX_AGE, BREEDING_PROBABILITY,
+-              MAX_LITTER_SIZE, DEFAULT_FOOD_LEVEL, FOOD_VALUE);
++        super(randomAge, field, location, PROFILE, BREEDING_PROFILE);
+     }
+ 
+     /**
+      * Create a newborn owl.
+      */
++    @Override
+     protected Animal createYoung(Field field, Location location)
+     {
+         return new Owl(false, field, location);

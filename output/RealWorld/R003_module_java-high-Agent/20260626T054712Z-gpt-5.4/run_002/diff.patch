@@ -1,0 +1,607 @@
+diff --git a/Aardvark.java b/Aardvark.java
+index 13cce8c..1204c2d 100644
+--- a/Aardvark.java
++++ b/Aardvark.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.ArrayList;
+ 
+ /**
+  * A simple model of an aardvark.
+@@ -22,8 +21,7 @@ public class Aardvark extends Consumer
+     //    Max sustenance level of the aadvark:
+     private static final int MAX_SUSTENANCE_LEVEL = 50;
+     //   The prey this aardvark hunts:
+-    private static final ArrayList<Class> PREY
+-    = new ArrayList<>(List.of(Grasshopper.class,HarvesterAnt.class));
++    private static final List<Class<? extends Actor>> PREY = List.of(Grasshopper.class, HarvesterAnt.class);
+ 
+     /**
+      * Create a new aardvark. A aardvark may be created with age
+@@ -36,8 +34,13 @@ public class Aardvark extends Consumer
+     public Aardvark(boolean randomAge, Field field, Location location)
+     {
+         super(field, location, PREY, CONSUMPTION_WORTH, BREEDING_PROBABILITY,
+-              MAX_BIRTHS_AT_ONCE, MAX_AGE, BREEDING_AGE,MAX_SUSTENANCE_LEVEL,true,false);
++              MAX_BIRTHS_AT_ONCE, MAX_AGE, BREEDING_AGE, MAX_SUSTENANCE_LEVEL, true);
+         
+         setStartingAge(randomAge);
+     }
++
++    protected Actor createChild(Field field, Location location)
++    {
++        return new Aardvark(false, field, location);
++    }
+ }
+diff --git a/Acacia.java b/Acacia.java
+index 928ecb8..a8d2324 100644
+--- a/Acacia.java
++++ b/Acacia.java
+@@ -26,4 +26,9 @@ public class Acacia extends Producer
+         super(field, location, CONSUMPTION_WORTH, BREEDING_PROBABILITY,
+               MAX_BIRTHS_AT_ONCE,MAX_AGE);
+     }
++
++    protected Actor createChild(Field field, Location location)
++    {
++        return new Acacia(field, location);
++    }
+ }
+diff --git a/Consumer.java b/Consumer.java
+index 929f56d..25a4084 100644
+--- a/Consumer.java
++++ b/Consumer.java
+@@ -1,6 +1,4 @@
+ import java.util.List;
+-import java.util.Random;
+-import java.util.ArrayList;
+ import java.util.Iterator;
+ 
+ /**
+@@ -11,21 +9,17 @@ import java.util.Iterator;
+ public abstract class Consumer extends Actor
+ {
+     // Properties shared between all consumers:
+-    private static final int STARTING_SUSTENANCE_LEVEL = 20;
+-    private static final double NEW_DISEASE = 0.0005;
++    private static final int STARTING_SUSTENANCE_LEVEL = 30;
+     private static final double NIGHT_PREY_MISS_PROBABILITY = 0.5;
+-    private static Random rand = Randomizer.getRandom();
+ 
+     // Properties unique to this consumer:
+-    private int breedingAge;
++    private final int breedingAge;
+     private int sustenanceLevel;
+-    private int maxSustenanceLevel;
+-    private ArrayList<Class> prey;
++    private final List<Class<? extends Actor>> prey;
+     private Disease disease;
+-    private boolean ifCarcass;
+-    private Carcass newCarcass;
+-    private boolean canEatCarcass;
+-    private boolean primaryConsumer;
++    private boolean shouldDropCarcass;
++    private Carcass pendingCarcass;
++    private final boolean canEatCarcass;
+     
+     /**
+      * Create a new consumer at a location in the field.
+@@ -38,16 +32,17 @@ public abstract class Consumer extends Actor
+      * @param maxAge              The age to which this consumer can live.
+      * @param breedingAge         The age at which this consumer can start to breed.
+      */
+-    public Consumer(Field field, Location location, ArrayList<Class> prey, int consumptionWorth,
+-                    double breedingProbability, int maxBirthsAtOnce, int maxAge, int breedingAge,int maxSustenanceLevel,boolean canEatCarcass,boolean primaryConsumer)
++    public Consumer(Field field, Location location, List<Class<? extends Actor>> prey, int consumptionWorth,
++                    double breedingProbability, int maxBirthsAtOnce, int maxAge, int breedingAge,
++                    int maxSustenanceLevel, boolean canEatCarcass)
+     {
+-        super(field, location, consumptionWorth, breedingProbability, maxBirthsAtOnce,maxSustenanceLevel,maxAge);
++        super(field, location, consumptionWorth, breedingProbability, maxBirthsAtOnce,
++              maxSustenanceLevel, maxAge);
+         this.canEatCarcass = canEatCarcass;
+         this.prey = prey;
+         this.maxAge = maxAge;
+         this.breedingAge = breedingAge;
+-        this.primaryConsumer = primaryConsumer;
+-        sustenanceLevel = 30;
++        sustenanceLevel = STARTING_SUSTENANCE_LEVEL;
+     }
+     
+     /**
+@@ -64,13 +59,13 @@ public abstract class Consumer extends Actor
+         {
+             giveBirth(newConsumers);
+             boolean wasPossibleToMove = huntForFood();
+-            if(ifCarcass)
++            if (shouldDropCarcass)
+             {
+-                newConsumers.add(newCarcass);
+-                ifCarcass = false;
+-                newCarcass = null;
++                newConsumers.add(pendingCarcass);
++                shouldDropCarcass = false;
++                pendingCarcass = null;
+             }
+-            if(hasDisease())
++            if (hasDisease())
+             {                                                                                   
+                 diseaseEffect();
+             }
+@@ -101,7 +96,7 @@ public abstract class Consumer extends Actor
+      */
+     private void diseaseEffect()
+     {
+-        if(hasDisease())
++        if (hasDisease())
+         {
+             disease.decrementStepsBeforeDeath();
+             spreadDisease();
+@@ -114,9 +109,9 @@ public abstract class Consumer extends Actor
+      */
+     private void checkForFatalDisease()
+     {
+-        if(hasDisease() && disease.diseaseFinished())
++        if (hasDisease() && disease.diseaseFinished())
+         {   
+-            if(disease.isFatal())
++            if (disease.isFatal())
+             {
+                 setDead();
+             }
+@@ -128,20 +123,18 @@ public abstract class Consumer extends Actor
+      */
+     private void spreadDisease()
+     {
+-            Field field = getField();
+-            List<Location> adjacent = field.adjacentLocations(getLocation());
+-            Iterator<Location> it = adjacent.iterator();
+-            while(it.hasNext())
++        Field field = getField();
++        List<Location> adjacent = field.adjacentLocations(getLocation());
++
++        for (Location loc : adjacent)
++        {
++            Object neighbor = field.getObjectAt(loc);
+ 
++            if (neighbor != null && neighbor.getClass() == getClass() && hasDisease())
+             {
+-                Location loc = it.next();
+-                Object animal = field.getObjectAt(loc);
+-                Actor consumer = (Actor) animal;
+-                if(consumer != null && consumer.getClass() == this.getClass() && this.hasDisease())
+-                {
+-                    ((Consumer) consumer).disease = giveDisease();
+-                }
++                ((Consumer) neighbor).disease = giveDisease();
+             }
++        }
+     }
+     /**
+      * Hunt for food by moving toward it.
+@@ -171,7 +164,7 @@ public abstract class Consumer extends Actor
+      */
+     protected void setStartingAge(boolean randomAge)
+     {
+-        if (randomAge) currentAge = rand.nextInt(maxAge) ;
++        if (randomAge) currentAge = rand.nextInt(maxAge);
+         else           currentAge = 0;
+     }
+     
+@@ -184,38 +177,27 @@ public abstract class Consumer extends Actor
+      */
+     private void giveBirth(List<Actor> newConsumers)
+     {
+-        // Ensure this consumer has a valid mate in a neighboring location before continuing.
+         if (!checkForValidMate()) return;
+-        
+-        // Get a list of free adjacent locations:
++
+         Field field = getField();
+         List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        
+-        // Work out the number of births this producer will have this step:
+         int births = breed();
+-        // Add each birth into an adjacent location:
++
+         for (int b = 0; b < births && free.size() > 0; b++)
+         {
+             Location location = free.remove(0);
+-            
+-            try
+-            {
+-                Actor child = this.getClass()
+-                              .getDeclaredConstructor(boolean.class,
+-                                                      Field.class,
+-                                                      Location.class)
+-                              .newInstance(true, field, location);
+-                
+-                newConsumers.add(child);
+-            }
+-            catch (java.lang.Exception e)
+-            {
+-                System.out.println("Error!");
+-                
+-                continue;
+-            }
++            newConsumers.add(createChild(field, location));
+         }
+     }
++
++    /**
++     * Create a newborn consumer of this species.
++     *
++     * @param field The field the child will be placed in.
++     * @param location The child's starting location.
++     * @return A new consumer instance.
++     */
++    protected abstract Actor createChild(Field field, Location location);
+     
+     /**
+      * @return True if there is a valid mate in an adjacent location for the consumer.
+@@ -295,7 +277,7 @@ public abstract class Consumer extends Actor
+             Location where = it.next();
+             Object object = field.getObjectAt(where);
+             
+-            for (Class preyClass : prey)
++            for (Class<? extends Actor> preyClass : prey)
+             {   
+                 if (preyClass.isInstance(object))
+                 {   
+@@ -320,12 +302,12 @@ public abstract class Consumer extends Actor
+                     }
+                 }
+             }
+-            if(Carcass.class.isInstance(object))
++            if (Carcass.class.isInstance(object))
+             {   
+-                if(canEatCarcass)
++                if (canEatCarcass)
+                 {
+                     Carcass carcass = (Carcass) object;
+-                    if(carcass.isDiseased())
++                    if (carcass.isDiseased())
+                     {
+                         this.disease = giveDisease();
+                     }
+@@ -350,24 +332,24 @@ public abstract class Consumer extends Actor
+     {   
+         Location location = actor.getLocation();
+         int actorConsumptionWorth = actor.getConsumptionWorth();
+-        if(actor.becomeCarcass())
++        if (actor.becomeCarcass())
+         {   
+             actor.setDead();
+-            if((sustenanceLevel + actorConsumptionWorth) > maxSustenanceLevel)
++            if ((sustenanceLevel + actorConsumptionWorth) > maxSustenanceLevel)
+             {   
+-                int foodLeft = (sustenanceLevel + consumptionWorth) - maxSustenanceLevel;
+-                sustenanceLevel = this.maxSustenanceLevel;
++                int foodLeft = (sustenanceLevel + actorConsumptionWorth) - maxSustenanceLevel;
++                sustenanceLevel = maxSustenanceLevel;
+                 Carcass carcass = new Carcass(getField(),location,foodLeft);
+-                newCarcass = carcass;
+-                ifCarcass = true;
++                pendingCarcass = carcass;
++                shouldDropCarcass = true;
+                 return getLocation();
+             }  
+         }
+-        if(sustenanceLevel + actorConsumptionWorth <= maxSustenanceLevel)
++        if (sustenanceLevel + actorConsumptionWorth <= maxSustenanceLevel)
+         {
+             sustenanceLevel += actorConsumptionWorth;
+             return location;
+         }
+         return null;
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/Grasshopper.java b/Grasshopper.java
+index 287e9ee..33696f3 100644
+--- a/Grasshopper.java
++++ b/Grasshopper.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.ArrayList;
+ 
+ /**
+  * A simple model of a grasshopper.
+@@ -22,8 +21,7 @@ public class Grasshopper extends Consumer
+     //   Max sustenance level of the grasshopper:
+     private static final int MAX_SUSTENANCE_LEVEL = 150;
+     //   The prey this grasshopper hunts:
+-    private static final ArrayList<Class> PREY
+-    = new ArrayList<>(List.of(StarGrass.class));
++    private static final List<Class<? extends Actor>> PREY = List.of(StarGrass.class);
+     /**
+      * Create a new grasshopper. A grasshopper may be created with age
+      * zero (a new born) or with a random age.
+@@ -35,8 +33,13 @@ public class Grasshopper extends Consumer
+     public Grasshopper(boolean randomAge, Field field, Location location)
+     {
+         super(field, location, PREY, CONSUMPTION_WORTH, BREEDING_PROBABILITY,
+-              MAX_BIRTHS_AT_ONCE, MAX_AGE, BREEDING_AGE,MAX_SUSTENANCE_LEVEL,false,true);
++              MAX_BIRTHS_AT_ONCE, MAX_AGE, BREEDING_AGE, MAX_SUSTENANCE_LEVEL, false);
+         
+         setStartingAge(randomAge);
+     }
++
++    protected Actor createChild(Field field, Location location)
++    {
++        return new Grasshopper(false, field, location);
++    }
+ }
+diff --git a/HarvesterAnt.java b/HarvesterAnt.java
+index d66c11d..600fb8d 100644
+--- a/HarvesterAnt.java
++++ b/HarvesterAnt.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.ArrayList;
+ 
+ /**
+  * A simple model of a harvester ant.
+@@ -22,8 +21,7 @@ public class HarvesterAnt extends Consumer
+     //   Max sustenance level of the termite:
+     private static final int MAX_SUSTENANCE_LEVEL = 50;
+     //   The prey this termite hunts:
+-    private static final ArrayList<Class> PREY
+-    = new ArrayList<>(List.of(RedOatGrass.class,StarGrass.class));
++    private static final List<Class<? extends Actor>> PREY = List.of(RedOatGrass.class, StarGrass.class);
+ 
+     /**
+      * Create a new harvester ant. A harvester ant may be created with age
+@@ -36,8 +34,13 @@ public class HarvesterAnt extends Consumer
+     public HarvesterAnt(boolean randomAge, Field field, Location location)
+     {
+         super(field, location, PREY, CONSUMPTION_WORTH, BREEDING_PROBABILITY,
+-              MAX_BIRTHS_AT_ONCE, MAX_AGE, BREEDING_AGE,MAX_SUSTENANCE_LEVEL,false,true);
++              MAX_BIRTHS_AT_ONCE, MAX_AGE, BREEDING_AGE, MAX_SUSTENANCE_LEVEL, false);
+         
+         setStartingAge(randomAge);
+     }
++
++    protected Actor createChild(Field field, Location location)
++    {
++        return new HarvesterAnt(false, field, location);
++    }
+ }
+diff --git a/Impala.java b/Impala.java
+index 4f3e69b..1f29609 100644
+--- a/Impala.java
++++ b/Impala.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.ArrayList;
+ 
+ /**
+  * A simple model of an impala.
+@@ -22,8 +21,7 @@ public class Impala extends Consumer
+     //   Max sustenance level of the impala:
+     private static final int MAX_SUSTENANCE_LEVEL = 55;
+     //   The prey this impala hunts:
+-    private static final ArrayList<Class> PREY
+-    = new ArrayList<>(List.of(Acacia.class));
++    private static final List<Class<? extends Actor>> PREY = List.of(Acacia.class);
+ 
+     /**
+      * Create a new impala. A impala may be created with age
+@@ -36,8 +34,13 @@ public class Impala extends Consumer
+     public Impala(boolean randomAge, Field field, Location location)
+     {
+         super(field, location, PREY, CONSUMPTION_WORTH, BREEDING_PROBABILITY,
+-              MAX_BIRTHS_AT_ONCE, MAX_AGE, BREEDING_AGE,MAX_SUSTENANCE_LEVEL,false,true);
++              MAX_BIRTHS_AT_ONCE, MAX_AGE, BREEDING_AGE, MAX_SUSTENANCE_LEVEL, false);
+         
+         setStartingAge(randomAge);
+     }
++
++    protected Actor createChild(Field field, Location location)
++    {
++        return new Impala(false, field, location);
++    }
+ }
+diff --git a/Mongoose.java b/Mongoose.java
+index 5d75f3d..2a5dff6 100644
+--- a/Mongoose.java
++++ b/Mongoose.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.ArrayList;
+ 
+ /**
+  * A simple model of a mongoose.
+@@ -22,8 +21,7 @@ public class Mongoose extends Consumer
+     //   Max sustenance level of the mongoose:
+     private static final int MAX_SUSTENANCE_LEVEL = 40;
+     //   The prey this mongoose hunts:
+-    private static final ArrayList<Class> PREY
+-    = new ArrayList<>(List.of(Grasshopper.class,HarvesterAnt.class));
++    private static final List<Class<? extends Actor>> PREY = List.of(Grasshopper.class, HarvesterAnt.class);
+ 
+     /**
+      * Create a new mongoose. A mongoose may be created with age
+@@ -36,8 +34,13 @@ public class Mongoose extends Consumer
+     public Mongoose(boolean randomAge, Field field, Location location)
+     {
+         super(field, location, PREY, CONSUMPTION_WORTH, BREEDING_PROBABILITY,
+-              MAX_BIRTHS_AT_ONCE, MAX_AGE, BREEDING_AGE,MAX_SUSTENANCE_LEVEL,true,false);
++              MAX_BIRTHS_AT_ONCE, MAX_AGE, BREEDING_AGE, MAX_SUSTENANCE_LEVEL, true);
+         
+         setStartingAge(randomAge);
+     }
++
++    protected Actor createChild(Field field, Location location)
++    {
++        return new Mongoose(false, field, location);
++    }
+ }
+diff --git a/Pangolin.java b/Pangolin.java
+index a45cebd..f027f34 100644
+--- a/Pangolin.java
++++ b/Pangolin.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.ArrayList;
+ 
+ /**
+  * A simple model of a pangolin.
+@@ -22,8 +21,7 @@ public class Pangolin extends Consumer
+     //   Max sustenance level of the pangolin:
+     private static final int MAX_SUSTENANCE_LEVEL = 50;
+     //   The prey this pangolin hunts:
+-    private static final ArrayList<Class> PREY
+-    = new ArrayList<>(List.of(Termite.class,Impala.class));
++    private static final List<Class<? extends Actor>> PREY = List.of(Termite.class, Impala.class);
+ 
+     /**
+      * Create a new pangolin. A pangolin may be created with age
+@@ -36,8 +34,13 @@ public class Pangolin extends Consumer
+     public Pangolin(boolean randomAge, Field field, Location location)
+     {
+         super(field, location, PREY, CONSUMPTION_WORTH, BREEDING_PROBABILITY,
+-              MAX_BIRTHS_AT_ONCE, MAX_AGE, BREEDING_AGE,MAX_SUSTENANCE_LEVEL,true,false);
++              MAX_BIRTHS_AT_ONCE, MAX_AGE, BREEDING_AGE, MAX_SUSTENANCE_LEVEL, true);
+         
+         setStartingAge(randomAge);
+     }
++
++    protected Actor createChild(Field field, Location location)
++    {
++        return new Pangolin(false, field, location);
++    }
+ }
+diff --git a/Producer.java b/Producer.java
+index 4a0e030..31d5b43 100644
+--- a/Producer.java
++++ b/Producer.java
+@@ -8,7 +8,7 @@ import java.util.List;
+ public abstract class Producer extends Actor
+ {
+     // The % of the normal breeding probability when there is no rain:
+-    private double noRainBreedingProbabilityPercentage = 0.2;
++    private static final double NO_RAIN_BREEDING_PROBABILITY_MULTIPLIER = 0.2;
+     /**
+      * Create a new producer at a location in the field.
+      * 
+@@ -47,33 +47,25 @@ public abstract class Producer extends Actor
+      */
+     protected void giveBirth(List<Actor> newProducers)
+     {
+-        // Get a list of free adjacent locations:
+         Field field = getField();
+         List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        
+-        // Work out the number of births this producer will have this step:
+         int births = breed();
+-        
+-        // Add each birth into an adjacent location:
++
+         for (int b = 0; b < births && free.size() > 0; b++)
+         {
+             Location location = free.remove(0);
+-            
+-            try
+-            {
+-                Actor child = this.getClass()
+-                              .getDeclaredConstructor(Field.class,
+-                                                      Location.class)
+-                              .newInstance(field, location);
+-                
+-                newProducers.add(child);
+-            }
+-            catch (java.lang.Exception e)
+-            {
+-                continue;
+-            }
++            newProducers.add(createChild(field, location));
+         }
+     }
++
++    /**
++     * Create a newborn producer of this species.
++     *
++     * @param field The field the child will be placed in.
++     * @param location The child's starting location.
++     * @return A new producer instance.
++     */
++    protected abstract Actor createChild(Field field, Location location);
+         
+     /**
+      * Generate a number representing the number of births,
+@@ -88,7 +80,9 @@ public abstract class Producer extends Actor
+         // Decrease breeding probability if there is no rain:
+         double actualBreedingProbability = getBreedingProbability();
+         
+-        if (!WeatherSystem.getIsRaining()) actualBreedingProbability *= noRainBreedingProbabilityPercentage;
++        if (!WeatherSystem.getIsRaining()) {
++            actualBreedingProbability *= NO_RAIN_BREEDING_PROBABILITY_MULTIPLIER;
++        }
+         
+         // Calculate number of births:
+         if (rand.nextDouble() <= actualBreedingProbability)
+diff --git a/RedOatGrass.java b/RedOatGrass.java
+index 733a97e..d07ff63 100644
+--- a/RedOatGrass.java
++++ b/RedOatGrass.java
+@@ -26,4 +26,9 @@ public class RedOatGrass extends Producer
+         super(field, location, CONSUMPTION_WORTH, BREEDING_PROBABILITY,
+               MAX_BIRTHS_AT_ONCE,MAX_AGE);
+     }
++
++    protected Actor createChild(Field field, Location location)
++    {
++        return new RedOatGrass(field, location);
++    }
+ }
+diff --git a/StarGrass.java b/StarGrass.java
+index 5fd6a80..340f0d3 100644
+--- a/StarGrass.java
++++ b/StarGrass.java
+@@ -26,4 +26,9 @@ public class StarGrass extends Producer
+         super(field, location, CONSUMPTION_WORTH, BREEDING_PROBABILITY,
+               MAX_BIRTHS_AT_ONCE,MAX_AGE);
+     }
++
++    protected Actor createChild(Field field, Location location)
++    {
++        return new StarGrass(field, location);
++    }
+ }
+diff --git a/Termite.java b/Termite.java
+index cc87196..26bdb27 100644
+--- a/Termite.java
++++ b/Termite.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.ArrayList;
+ 
+ /**
+  * A simple model of a termite.
+@@ -22,8 +21,7 @@ public class Termite extends Consumer
+     //   Max sustenance level of the termite:
+     private static final int MAX_SUSTENANCE_LEVEL = 50;
+     //   The prey this termite hunts:
+-    private static final ArrayList<Class> PREY
+-    = new ArrayList<>(List.of(RedOatGrass.class,StarGrass.class));
++    private static final List<Class<? extends Actor>> PREY = List.of(RedOatGrass.class, StarGrass.class);
+ 
+     /**
+      * Create a new termite. A termite may be created with age
+@@ -36,8 +34,13 @@ public class Termite extends Consumer
+     public Termite(boolean randomAge, Field field, Location location)
+     {
+         super(field, location, PREY, CONSUMPTION_WORTH, BREEDING_PROBABILITY,
+-              MAX_BIRTHS_AT_ONCE, MAX_AGE, BREEDING_AGE,MAX_SUSTENANCE_LEVEL,false,true);
++              MAX_BIRTHS_AT_ONCE, MAX_AGE, BREEDING_AGE, MAX_SUSTENANCE_LEVEL, false);
+         
+         setStartingAge(randomAge);
+     }
++
++    protected Actor createChild(Field field, Location location)
++    {
++        return new Termite(false, field, location);
++    }
+ }

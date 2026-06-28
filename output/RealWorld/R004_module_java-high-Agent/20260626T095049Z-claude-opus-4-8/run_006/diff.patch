@@ -1,0 +1,296 @@
+diff --git a/Animal.java b/Animal.java
+index 7a2dc18..d76a310 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -20,8 +20,6 @@ public abstract class Animal extends Organism implements Actor
+     protected int foodLevel;
+     protected Gender sex;
+ 
+-    protected static final Random rand = Randomizer.getRandom();
+-
+     // An animal is either male or female
+     protected enum Gender {
+         MALE,
+@@ -77,37 +75,14 @@ public abstract class Animal extends Organism implements Actor
+         incrementHunger();
+         if(isAlive()) {
+             giveBirth(newAnimals, environment);
+-            // Move towards a source of food if found.
+-            Location newLocation = findFood(environment);
+-            if(newLocation == null) {
+-                // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-
+-            // list of adjacent locations that contain an instance of Grass
+-            List<Location> adjacentGrassSpots = getField().adjacentLocationsWithSpecies(getLocation(), Grass.class);
+-
+-            if(newLocation != null) {
+-                // See if it was possible to move.
+-                setLocation(newLocation);
+-            }
+-            else if (adjacentGrassSpots.size() > 0) {
+-                // if there is grass adjacent to the animal, clear the current location
+-                // and move to a random location that contained grass
+-                getField().clear(getLocation());
+-                setLocation(adjacentGrassSpots.get(rand.nextInt(adjacentGrassSpots.size())));
+-            }
+-            else if (diesFromOvercrowding()) {
+-                // Overcrowding
+-                setDead();
+-            }
++            // Move towards a source of food if found, otherwise wander.
++            moveToTargetOrWander(findFood(environment));
+ 
+             if(isDiseased() && getDisease().getLethalityRate() <= rand.nextDouble()){
+                 // every step, check if the Animal is diseased
+                 // if it is Diseased, and a random double is less than the lethality rate, the Animal dies
+                 setDead();
+             }
+-
+         }
+     }
+ 
+@@ -207,16 +182,6 @@ public abstract class Animal extends Organism implements Actor
+         }
+     }
+ 
+-    /**
+-     * Whether this animal dies when it cannot find anywhere to move (i.e. it is
+-     * overcrowded). Most animals do; apex species may override this to survive.
+-     * @return true if overcrowding is fatal for this species.
+-     */
+-    protected boolean diesFromOvercrowding()
+-    {
+-        return true;
+-    }
+-
+     /**
+      * Check whether this animal is to give birth at this step.
+      * New births are made into free adjacent locations.
+diff --git a/Hunter.java b/Hunter.java
+index 930ae4a..65e67bd 100644
+--- a/Hunter.java
++++ b/Hunter.java
+@@ -1,83 +1,60 @@
+ import java.util.*;
+ 
+ /**
+- * A simple model of a hunter. 
++ * A simple model of a hunter.
+  * Hunters hunt all of the species in the simulation.
++ *
++ * A hunter occupies the field like an organism (position, movement) but is never
++ * eaten, never breeds and never dies of natural causes - it simply roams,
++ * killing adjacent prey.
++ *
+  * @version 2022.03.02
+  */
+-public class Hunter implements Actor
++public class Hunter extends Organism implements Actor
+ {
+-    private static boolean alive;
+-    private Field field;
+-    private Location location;
+-
+-    private Random rand = Randomizer.getRandom();
+-    // A hunter hunts every species. 
++    // A hunter hunts every species.
+     private static final Set<Class> DIET = new HashSet<>(Arrays.asList(Deer.class, Mouse.class, Wolf.class, Coyote.class, Eagle.class));
+ 
+-
+     /**
+      * Creates a new hunter.
+      * @param field The field currently occupied.
+      * @param location  The location within the field.
+-     * @param environment The environment that the hunter resides in. 
++     * @param environment The environment that the hunter resides in.
+      */
+     public Hunter(Field field, Location location, Environment environment)
+     {
+-        alive = true;
+-        this.field = field;
+-        setLocation(location);
++        super(field, location);
+     }
+ 
+     /**
+-     * Returns true if the hunter is alive. 
++     * A hunter is never eaten, so its food value is unused.
+      */
+-    public boolean isAlive() 
++    protected int getFoodValue()
+     {
+-        return alive;
++        return 0;
+     }
+ 
+     /**
+-     * Makes the hunter hunt for nearby animals. 
+-     * @param environment The environment that the hunter resides in. 
+-     * @param newActors A list to receive new actors. 
++     * Hunters are not killed by overcrowding.
+      */
+-    public void act(List<Actor> newActors, Environment environment)
++    @Override
++    protected boolean diesFromOvercrowding()
+     {
+-        if(isAlive()) {
+-            Location newLocation = findPrey();
+-            if(newLocation == null) {
+-                // No animals found - try to move to a free location.
+-                newLocation = field.freeAdjacentLocation(location);
+-            }
+-            List<Location> adjacentGrassSpots = field.adjacentLocationsWithSpecies(location, Grass.class);
+-
+-            // See if it was possible to move.
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else if (adjacentGrassSpots.size() > 0) {
+-                field.clear(location);
+-                setLocation(adjacentGrassSpots.get(rand.nextInt(adjacentGrassSpots.size())));
+-            }
+-
+-        }
++        return false;
+     }
+ 
+     /**
+-     * Place the hunter at the new location in the given field.
+-     * @param newLocation The hunter's new location.
++     * Makes the hunter hunt for nearby animals, then move.
++     * @param newActors A list to receive new actors.
++     * @param environment The environment that the hunter resides in.
+      */
+-    protected void setLocation(Location newLocation)
++    public void act(List<Actor> newActors, Environment environment)
+     {
+-        if(location != null) {
+-            field.clear(location);
++        if(isAlive()) {
++            moveToTargetOrWander(findPrey());
+         }
+-        location = newLocation;
+-        field.place(this, newLocation);
+     }
+ 
+-
+     /**
+      * Look for animals adjacent to the current location.
+      * Only the first live animal is killed.
+@@ -85,8 +62,8 @@ public class Hunter implements Actor
+      */
+     private Location findPrey()
+     {
+-        Field field = this.field;
+-        List<Location> adjacent = field.adjacentLocations(location);
++        Field field = getField();
++        List<Location> adjacent = field.adjacentLocations(getLocation());
+         Iterator<Location> it = adjacent.iterator();
+         while(it.hasNext()) {
+             Location where = it.next();
+diff --git a/Organism.java b/Organism.java
+index c0c3e02..2ee384b 100644
+--- a/Organism.java
++++ b/Organism.java
+@@ -1,11 +1,16 @@
++import java.util.List;
++import java.util.Random;
++
+ /**
+  * This class represents shared characteristics of organisms
+- * in the simulation. 
++ * in the simulation.
+  *
+  * @version 2022.03.2
+  */
+ public abstract class Organism {
+-    
++
++    // A shared random number generator for movement and other behaviour.
++    protected static final Random rand = Randomizer.getRandom();
+ 
+     // Whether the organism is alive or not.
+     private boolean alive;
+@@ -13,8 +18,8 @@ public abstract class Organism {
+     private Field field;
+     // The organism's position in the field.
+     private Location location;
+-    
+-    // Whether the organism has a disease 
++
++    // Whether the organism has a disease
+     private Disease disease = null;
+     private boolean hasDisease = false;
+ 
+@@ -112,4 +117,47 @@ public abstract class Organism {
+         this.disease = disease;
+         hasDisease = true;
+     }
++
++    /**
++     * Whether this organism dies when it cannot find anywhere to move (i.e. it
++     * is overcrowded). Mobile organisms that should survive overcrowding (apex
++     * species, hunters) override this.
++     * @return true if overcrowding is fatal.
++     */
++    protected boolean diesFromOvercrowding()
++    {
++        return true;
++    }
++
++    /**
++     * Move to the given target location; if there is none, wander to a free
++     * adjacent cell, or onto adjacent grass, or (if nothing is available and the
++     * organism dies from overcrowding) die in place.
++     * @param target The preferred destination, or null if none was found.
++     */
++    protected void moveToTargetOrWander(Location target)
++    {
++        if(target == null) {
++            // No target found - try to move to a free location.
++            target = getField().freeAdjacentLocation(getLocation());
++        }
++
++        // adjacent locations that contain an instance of Grass
++        List<Location> adjacentGrassSpots = getField().adjacentLocationsWithSpecies(getLocation(), Grass.class);
++
++        if(target != null) {
++            // See if it was possible to move.
++            setLocation(target);
++        }
++        else if(adjacentGrassSpots.size() > 0) {
++            // if there is grass adjacent, clear the current location and move
++            // onto a random location that contained grass
++            getField().clear(getLocation());
++            setLocation(adjacentGrassSpots.get(rand.nextInt(adjacentGrassSpots.size())));
++        }
++        else if(diesFromOvercrowding()) {
++            // Overcrowding
++            setDead();
++        }
++    }
+ }
+diff --git a/Plant.java b/Plant.java
+index 7877cee..a73a55c 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -1,5 +1,3 @@
+-import java.util.Random;
+-
+ /**
+  * A class representing shared characteristics of plants.
+  *
+@@ -15,9 +13,8 @@ public abstract class Plant extends Organism implements Actor
+ 
+     // Implementing abstract methods to return fields to be used by the superclass
+     public int getStepsPerStage(){ return STEPS_PER_STAGE; }
+-    protected static final Random rand = Randomizer.getRandom();
+-    
+-    
++
++
+     /**
+      * Create a new plant at location in field.
+      *

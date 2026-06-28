@@ -1,0 +1,275 @@
+diff --git a/Animal.java b/Animal.java
+index 79a0f46..4d9c609 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -188,25 +188,25 @@ public abstract class Animal extends Locatable implements Simulatable, Breedable
+ 
+ 
+     /**
+-     * This will create the new animals if the animal is a female, is near to a male and the required probability is correct
+-     * @param animalType the type of the animal that this animal should breed with 
+-     * @param newAnimals the list which will contian the new animlas 
+-     * @param animalCreator a function of type (Location) -> Animal (conforms to CreateAnimal). This function will create the animals
++     * Spawn offspring if conditions are met: a compatible mate is nearby and
++     * the breeding probability check passes.  New entities are registered via
++     * {@link StepContext#spawn(Simulatable)} rather than appended to a list.
++     * @param numberOfAnimals population counter used by the breeding formula
++     * @param animalType      the species class to search for mates
++     * @param context         the current step context (receives spawned young)
++     * @param animalCreator   factory for creating one offspring at a location
+      */
+-    protected void giveBirth(Counter numberOfAnimals, Class animalType, List<Simulatable> newAnimals, CreateAnimal animalCreator)
++    protected void giveBirth(Counter numberOfAnimals, Class animalType,
++                             StepContext context, CreateAnimal animalCreator)
+     {
+-        // New foxes are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+         Field field = getField();
+-        List <Animal> potentialMates = getPotentialMates(animalType);
++        List<Animal> potentialMates = getPotentialMates(animalType);
+         List<Location> free = field.getFreeAdjacentLocations(getLocation());
+         for (Animal i : potentialMates) {
+             int births = breed(numberOfAnimals.getCount());
+-            for(int b = 0; b < births && free.size() > 0; b++) {
++            for (int b = 0; b < births && free.size() > 0; b++) {
+                 Location loc = free.remove(0);
+-                // Hawk young = new Hawk(false, field, loc);
+-                Simulatable young = animalCreator.initialise(loc);
+-                newAnimals.add(young);
++                context.spawn(animalCreator.initialise(loc));
+             }
+         }
+     }
+@@ -298,15 +298,14 @@ public abstract class Animal extends Locatable implements Simulatable, Breedable
+      * Shared act logic for all animals: age, hunger, disease, breeding, and movement.
+      * Subclasses supply species-specific behaviour via the abstract hooks above.
+      */
+-    public void act(List<Simulatable> newAnimals, SimulatorState currentState) {
++    public void act(StepContext context) {
+         incrementAge(getMaxAge());
+-        Field f = getField();
+-        if (rand.nextDouble() <= currentState.getAggregatedProbabilityReduction()) {
++        if (rand.nextDouble() <= context.getActivityReduction()) {
+             incrementHunger();
+             if (isAlive()) {
+                 giveNearbyAnimalsDisease();
+-                Counter numberOfAnimal = currentState.getCurrentStats(getClass());
+-                giveBirth(numberOfAnimal, getClass(), newAnimals, loc -> createOffspring(loc));
++                Counter count = context.getPopulationCount(getClass());
++                giveBirth(count, getClass(), context, loc -> createOffspring(loc));
+                 applyDiseaseEffects();
+                 moveToNewLocation(getEats(), getMaxHunger());
+             }
+diff --git a/Grass.java b/Grass.java
+index 1158747..30e8229 100644
+--- a/Grass.java
++++ b/Grass.java
+@@ -42,16 +42,14 @@ class Grass extends Locatable implements Eatable, Simulatable, Displayable {
+ 	 * @param newGrass all grass that has been created
+ 	 * @param currentState the simulators current state
+ 	 */ 
+-	public void act(List<Simulatable> newGrass, SimulatorState currentState) {
+-		if (currentState.getCurrentWeather().precipitates()) {
+-			rainAmount ++; //Increment rain count if it has rained
++	public void act(StepContext context) {
++		if (context.getCurrentWeather().precipitates()) {
++			rainAmount++;
+ 		}
+-
+ 		if (isAlive()) {
+-			//If the animal is alive, it should try to grow. 
+ 			Grass newGrasslet = grow();
+ 			if (newGrasslet != null) {
+-				newGrass.add(newGrasslet);
++				context.spawn(newGrasslet);
+ 			}
+ 		}
+ 	}
+diff --git a/Simulatable.java b/Simulatable.java
+index f52ce04..1c25151 100644
+--- a/Simulatable.java
++++ b/Simulatable.java
+@@ -1,29 +1,21 @@
+-
+-import java.util.List;
+-
+-
+-/** 
+- * This is an interface which enforces all functionality requried to add a player to the sim 
+- * 
++/**
++ * Enforces all functionality required to add a player to the simulation.
++ *
+  * @version 2.9.2
+  */
+ interface Simulatable {
+ 
+-
+-	/**
+-	 * Should be called to define a players actions and how they respond to the environment 
+-	 */ 
+-	public void act(List<Simulatable> newAnimals, SimulatorState currentState);
+-
+-	/**
+-	 * Should return if a player is alive
+-	 */ 
+-	public boolean isAlive();
+-    
+     /**
+-     * Will kill the player
++     * Defines a player's actions for one simulation step.
++     * Environmental conditions and spawn registration are accessed through
++     * {@code context} rather than passed as separate parameters.
++     * @param context the context for this step
+      */
+-    public void setDead();
++    void act(StepContext context);
+ 
++    /** @return true if the player is still alive */
++    boolean isAlive();
+ 
+-}
+\ No newline at end of file
++    /** Remove the player from the simulation. */
++    void setDead();
++}
+diff --git a/SimulationStepContext.java b/SimulationStepContext.java
+new file mode 100644
+index 0000000..17c1958
+--- /dev/null
++++ b/SimulationStepContext.java
+@@ -0,0 +1,62 @@
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++
++/**
++ * Production implementation of {@link StepContext} used by {@link Simulator}.
++ *
++ * <p>Wraps the current {@link SimulatorState} to answer environmental queries,
++ * and collects entities spawned during a step in an internal list.  Once all
++ * actors have acted, {@link Simulator} calls {@link #getSpawned()} to merge
++ * the new entities into the main population — no shared mutable list is
++ * threaded through {@code act} calls.</p>
++ */
++class SimulationStepContext implements StepContext
++{
++    private final SimulatorState state;
++    private final List<Simulatable> spawned = new ArrayList<>();
++
++    SimulationStepContext(SimulatorState state)
++    {
++        this.state = state;
++    }
++
++    @Override
++    public double getActivityReduction()
++    {
++        return state.getAggregatedProbabilityReduction();
++    }
++
++    @Override
++    public Weather getCurrentWeather()
++    {
++        return state.getCurrentWeather();
++    }
++
++    /**
++     * Returns the population counter for the given class.
++     * If no count has been recorded yet (e.g. at startup), returns a
++     * zero-count {@link Counter} so callers never need to null-check.
++     */
++    @Override
++    public Counter getPopulationCount(Class entityClass)
++    {
++        Counter c = state.getCurrentStats(entityClass);
++        return c != null ? c : new Counter(entityClass.getName());
++    }
++
++    @Override
++    public void spawn(Simulatable newborn)
++    {
++        spawned.add(newborn);
++    }
++
++    /**
++     * Returns all entities spawned during this step, in registration order.
++     * Called once by {@link Simulator} after all actors have acted.
++     */
++    List<Simulatable> getSpawned()
++    {
++        return Collections.unmodifiableList(spawned);
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index 200ff9b..05168dd 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -93,15 +93,15 @@ public class Simulator
+     {
+         step++;
+         state.setCurrentStats(stats.getCounters());
+-        List<Simulatable> newAnimals = new ArrayList<>();
++        SimulationStepContext context = new SimulationStepContext(state);
+         for(Iterator<Simulatable> it = animals.iterator(); it.hasNext(); ) {
+             Simulatable animal = it.next();
+-            animal.act(newAnimals, state);
++            animal.act(context);
+             if(!animal.isAlive()) {
+                 it.remove();
+             }
+         }
+-        animals.addAll(newAnimals);
++        animals.addAll(context.getSpawned());
+ 
+         stats.update(field);
+         view.showStatus(step, field, timeOfDay, state.getCurrentWeather(), stats.getSummary());
+diff --git a/StepContext.java b/StepContext.java
+new file mode 100644
+index 0000000..a3eae41
+--- /dev/null
++++ b/StepContext.java
+@@ -0,0 +1,43 @@
++/**
++ * Provides an actor with everything it needs during a single simulation step,
++ * without exposing the full {@link SimulatorState}.
++ *
++ * <p>Implementors of {@link Simulatable#act(StepContext)} use this interface
++ * to query environmental conditions, look up population statistics, and
++ * register newly spawned entities.  Because the interface is narrow and
++ * self-contained, actors can be tested in isolation by supplying a simple
++ * stub implementation rather than a fully wired {@link SimulatorState}.</p>
++ *
++ * <p>The production implementation is {@link SimulationStepContext}.</p>
++ */
++interface StepContext
++{
++    /**
++     * Returns the combined environmental activity multiplier for this step.
++     * A value of 1.0 means full activity; lower values reduce the probability
++     * that an actor takes any action.
++     */
++    double getActivityReduction();
++
++    /**
++     * Returns the current weather state, allowing actors to respond to
++     * precipitation or other weather-dependent conditions.
++     */
++    Weather getCurrentWeather();
++
++    /**
++     * Returns the population counter for the given entity class at the
++     * start of this step.  Never returns {@code null}; if no count has
++     * been recorded yet a zero-count {@link Counter} is returned.
++     * @param entityClass the class whose count is requested
++     */
++    Counter getPopulationCount(Class entityClass);
++
++    /**
++     * Registers a newly created entity to be added to the simulation after
++     * the current step completes.  Replaces the old out-parameter pattern
++     * where actors appended directly to a shared mutable list.
++     * @param newborn the entity to add
++     */
++    void spawn(Simulatable newborn);
++}

@@ -1,0 +1,369 @@
+diff --git a/Main.java b/Main.java
+index e1478cd..728b2f6 100644
+--- a/Main.java
++++ b/Main.java
+@@ -1,15 +1,22 @@
+-import java.util.ArrayList;
+-import java.util.List;
+-
+ /**
+  * This class is used to start the simulation
+  * @version 2022.03.2
+  */
+ public class Main {
+-    private static List<Double[]> allCombs = new ArrayList<>();
+-
+     public static void main(String[] args) {
+         Simulator sim = new Simulator();
++        SimulatorView view = new SimulatorView(sim.getConfig().getDepth(), sim.getConfig().getWidth());
++        for(Class<?> cls : SimulationInfo.DEFAULT_COLOR_MAP.keySet()) {
++            view.setColor(cls, SimulationInfo.DEFAULT_COLOR_MAP.get(cls));
++        }
++        sim.addSimulationListener(view);
++        view.addLongButtonListener(e -> runLongSimulation(sim));
++        view.addOneStepButtonListener(e -> sim.runOneStep());
++        view.addStopButtonListener(e -> sim.stopSimulation());
++        view.addResetButtonListener(e -> {
++            sim.stopSimulation();
++            sim.reset();
++        });
+         //runSim(sim);
+         // Uncomment above line to have the simulation run as soon as the window is rendered
+     }
+@@ -18,5 +25,18 @@ public class Main {
+     public static void runSim(Simulator sim) {
+         sim.runLongSimulation();
+     }
+-}
+ 
++    private static void runLongSimulation(Simulator sim)
++    {
++        Thread runLongSimThread = new Thread("SimulationRunThread"){
++            public void run() { sim.runLongSimulation(); }
++        };
++
++        if(!sim.isPlayingSimulation()) {
++            runLongSimThread.start();
++        }
++        else {
++            System.out.println("Stop the simulation first");
++        }
++    }
++}
+diff --git a/SimulationEvent.java b/SimulationEvent.java
+new file mode 100644
+index 0000000..fcc3a45
+--- /dev/null
++++ b/SimulationEvent.java
+@@ -0,0 +1,45 @@
++/**
++ * Event data published by the simulator after state changes.
++ */
++public class SimulationEvent
++{
++    private final Simulator source;
++    private final int step;
++    private final Field field;
++    private final WeatherType weather;
++    private final String timeText;
++
++    public SimulationEvent(Simulator source, int step, Field field, WeatherType weather, String timeText)
++    {
++        this.source = source;
++        this.step = step;
++        this.field = field;
++        this.weather = weather;
++        this.timeText = timeText;
++    }
++
++    public Simulator getSource()
++    {
++        return source;
++    }
++
++    public int getStep()
++    {
++        return step;
++    }
++
++    public Field getField()
++    {
++        return field;
++    }
++
++    public WeatherType getWeather()
++    {
++        return weather;
++    }
++
++    public String getTimeText()
++    {
++        return timeText;
++    }
++}
+diff --git a/SimulationListener.java b/SimulationListener.java
+new file mode 100644
+index 0000000..a7e4e16
+--- /dev/null
++++ b/SimulationListener.java
+@@ -0,0 +1,17 @@
++/**
++ * Observer for simulation state changes.
++ */
++public interface SimulationListener
++{
++    default void stepCompleted(SimulationEvent event)
++    {
++    }
++
++    default void simulationReset(SimulationEvent event)
++    {
++    }
++
++    default void populationChanged(SimulationEvent event)
++    {
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index a48eeeb..2695757 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -1,4 +1,3 @@
+-import java.awt.event.ActionListener;
+ import java.util.*;
+ import java.util.function.Consumer;
+ 
+@@ -23,14 +22,16 @@ public class Simulator
+     private final Field field;
+     // The current step of the simulation.
+     private int step;
+-    // A graphical view of the simulation.
+-    private final SimulatorView view;
+     // Controls time progression and weather updates.
+     private final EnvironmentController environmentController;
+     // Environment in the simulation.
+     private final Environment environment;
+     // Factories used to create initial actors in population order.
+     private final Map<Class<?>, ActorFactory> actorFactories;
++    // Observers interested in simulation state changes.
++    private final List<SimulationListener> listeners;
++    // Statistics used to determine whether the simulation remains viable.
++    private final FieldStats viabilityStats;
+     // Number of hunters created in the current population.
+     private int hunterCount;
+ 
+@@ -100,20 +101,10 @@ public class Simulator
+         environmentController = new EnvironmentController();
+         environment = environmentController.getEnvironment();
+ 
+-        // Create a view of the state of each location in the field.
+-        view = new SimulatorView(config.getDepth(), config.getWidth());
+-        for(Class cls : SimulationInfo.DEFAULT_COLOR_MAP.keySet()) {
+-            view.setColor(cls, SimulationInfo.DEFAULT_COLOR_MAP.get(cls));
+-        }
+-
+-        // adding additional buttons to the GUI
+-        view.addLongButtonListener(longButtonListener);
+-        view.addOneStepButtonListener(startButtonListener);
+-        view.addStopButtonListener(stopButtonListener);
+-        view.addResetButtonListener(resetButtonListener);
+-
+         actorFactories = new LinkedHashMap<>();
+         registerActorFactories();
++        listeners = new ArrayList<>();
++        viabilityStats = new FieldStats();
+ 
+         // Setup a valid starting point.
+         reset();
+@@ -129,12 +120,9 @@ public class Simulator
+         simulate(remainingSteps);
+     }
+ 
+-    /**
+-     * Whenever the startButton is pressed,the simulateOneStep()
+-     * method is called.
+-     */
+-    private ActionListener startButtonListener = e -> {
+-        if(playingSimulation){
++    public void runOneStep()
++    {
++        if(playingSimulation) {
+             System.out.println("Stop the simulation first");
+         }
+         else {
+@@ -142,39 +130,34 @@ public class Simulator
+             simulateOneStep();
+             playingSimulation = false;
+         }
+-    };
++    }
+ 
+-    /**
+-     * Whenever the stopButton is pressed, the simulation is stopped.
+-     */
+-    private ActionListener stopButtonListener = e -> {
++    public void stopSimulation()
++    {
+         playingSimulation = false;
+         Thread.currentThread().interrupt();
+-    };
++    }
+ 
+-    /**
+-     * Whenever the resetButton is pressed, the simulation is reset.
+-     */
+-    private ActionListener resetButtonListener = e -> {
+-        playingSimulation = false;
+-        reset();
+-    };
++    public boolean isPlayingSimulation()
++    {
++        return playingSimulation;
++    }
+ 
+-    /**
+-     * Whenever the longButton is pressed,runLongSimulation() is called.
+-     */
+-    private ActionListener longButtonListener = e -> {
+-        Thread runLongSimThread = new Thread("SimulationRunThread"){
+-            public void run() { runLongSimulation(); }
+-        };
++    public SimulationConfig getConfig()
++    {
++        return config;
++    }
+ 
+-        if (!playingSimulation){
+-            runLongSimThread.start();
+-        }
+-        else{
+-            System.out.println("Stop the simulation first");
+-        }
+-    };
++    public void addSimulationListener(SimulationListener listener)
++    {
++        listeners.add(Objects.requireNonNull(listener, "listener"));
++        listener.simulationReset(createEvent());
++    }
++
++    public void removeSimulationListener(SimulationListener listener)
++    {
++        listeners.remove(listener);
++    }
+ 
+ 
+     /**
+@@ -189,12 +172,12 @@ public class Simulator
+ 
+         int backupCounter = 1;
+         while(playingSimulation){
+-            for(int step = 1; step <= numSteps && view.isViable(field); step++) {
++            for(int step = 1; step <= numSteps && isViable(); step++) {
+                 simulateOneStep();
+                 backupCounter++;
+ //            delay(60);   // uncomment this to run more slowly
+             }
+-            if(!view.isViable(field)){
++            if(!isViable()){
+                 // System.out.println("STEPS COMPLETED: "+backupCounter);
+                 // uncomment this while optimizing for population stability
+                 Thread.currentThread().interrupt();
+@@ -256,7 +239,8 @@ public class Simulator
+         actors.addAll(newActors);
+         plantGrassInPatches();
+ 
+-        view.showStatus(step, environmentController.getCurrentWeather().toString(), environmentController.getCurrentTimeString(), field);
++        notifyPopulationChanged();
++        notifyStepCompleted();
+     }
+ 
+     /**
+@@ -283,8 +267,8 @@ public class Simulator
+         populate();
+         environmentController.reset();
+ 
+-        // Show the starting state in the view.
+-        view.showStatus(step, environmentController.getCurrentWeather().toString(), environmentController.getCurrentTimeString(), field);
++        notifySimulationReset();
++        notifyPopulationChanged();
+     }
+ 
+     /**
+@@ -365,6 +349,45 @@ public class Simulator
+         return SimulationConfig.withDimensions(depth, width);
+     }
+ 
++    private boolean isViable()
++    {
++        return viabilityStats.isViable(field);
++    }
++
++    private void notifyStepCompleted()
++    {
++        SimulationEvent event = createEvent();
++        for(SimulationListener listener : listeners) {
++            listener.stepCompleted(event);
++        }
++    }
++
++    private void notifySimulationReset()
++    {
++        SimulationEvent event = createEvent();
++        for(SimulationListener listener : listeners) {
++            listener.simulationReset(event);
++        }
++    }
++
++    private void notifyPopulationChanged()
++    {
++        SimulationEvent event = createEvent();
++        for(SimulationListener listener : listeners) {
++            listener.populationChanged(event);
++        }
++    }
++
++    private SimulationEvent createEvent()
++    {
++        return new SimulationEvent(
++                this,
++                step,
++                field,
++                environmentController.getCurrentWeather(),
++                environmentController.getCurrentTimeString());
++    }
++
+     /**
+      * Pause for a given time.
+      * @param millisec  The time to pause for, in milliseconds
+diff --git a/SimulatorView.java b/SimulatorView.java
+index f0f400b..abb1371 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -14,7 +14,7 @@ import javax.swing.JFrame;
+  *
+  * @version 2022.03.3
+  */
+-public class SimulatorView extends JFrame
++public class SimulatorView extends JFrame implements SimulationListener
+ {
+     private static final Color EMPTY_COLOR = Color.white;
+     private static final Color UNKNOWN_COLOR = Color.gray;
+@@ -141,6 +141,18 @@ public class SimulatorView extends JFrame
+         return stats.isViable(field);
+     }
+ 
++    @Override
++    public void stepCompleted(SimulationEvent event)
++    {
++        showStatus(event.getStep(), event.getWeather().toString(), event.getTimeText(), event.getField());
++    }
++
++    @Override
++    public void simulationReset(SimulationEvent event)
++    {
++        showStatus(event.getStep(), event.getWeather().toString(), event.getTimeText(), event.getField());
++    }
++
+     private Color getColor(Class<?> animalClass)
+     {
+         if(!controlPanel.isSpeciesSelected(animalClass)) {

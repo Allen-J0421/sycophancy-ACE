@@ -1,0 +1,336 @@
+diff --git a/Ageable.java b/Ageable.java
+index d94445b..a2b50dd 100644
+--- a/Ageable.java
++++ b/Ageable.java
+@@ -1,18 +1,21 @@
+ /**
+- * Mixin for organisms whose lifetime is age-limited.
++ * Mixin for organisms whose lifecycle advances over time.
+  *
+  * @version 26/02/2022
+  */
+ public interface Ageable extends OrganismContext
+ {
+-    AgeState getAgeState();
++    void applyAgeProgression();
+ 
+-    default void ageOneStep()
++    default boolean shouldDieFromAge()
+     {
+-        AgeState ageState = getAgeState();
+-        ageState.setAge(ageState.getAge() + 1);
++        return false;
++    }
+ 
+-        if(ageState.getAge() > ageState.getMaxAge()) {
++    default void ageOneStep()
++    {
++        applyAgeProgression();
++        if(shouldDieFromAge()) {
+             markDead();
+         }
+     }
+diff --git a/Animal.java b/Animal.java
+index 02eb23b..18dd39d 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -1,3 +1,4 @@
++import java.util.Iterator;
+ import java.util.List;
+ /**
+  * A class representing shared characteristics of animals.
+@@ -204,7 +205,7 @@ public abstract class Animal extends LivingOrganism
+      */
+     protected boolean canBreed()
+     {
+-        return canBreedNow();
++        return ageState.getAge() >= breedingState.getBreedingAge();
+     }
+ 
+     /**
+@@ -274,6 +275,16 @@ public abstract class Animal extends LivingOrganism
+         return ageState;
+     }
+ 
++    public void applyAgeProgression()
++    {
++        ageState.setAge(ageState.getAge() + 1);
++    }
++
++    public boolean shouldDieFromAge()
++    {
++        return ageState.getAge() > ageState.getMaxAge();
++    }
++
+     public HungerState getHungerState()
+     {
+         return hungerState;
+@@ -309,9 +320,32 @@ public abstract class Animal extends LivingOrganism
+         setDead();
+     }
+ 
+-    public Animal spawnOffspring(Location location, boolean isInfected, boolean isImmune)
++    public Class<?> getBreedingSpaceType()
++    {
++        return Animal.class;
++    }
++
++    public int determineOffspringCount(int availableLocations)
+     {
+-        return createOffspring(location, isInfected, isImmune);
++        return breed();
++    }
++
++    public LivingOrganism spawnOffspringAt(Location location)
++    {
++        boolean offspringIsInfected = diseaseState.isInfected();
++        boolean offspringIsImmune = diseaseState.isImmune();
++
++        if (!diseaseState.isImmune() && diseaseState.isInfected() && rand.nextDouble() < 0.15) 
++        {
++            offspringIsImmune = true;
++            offspringIsInfected = false;
++        }
++        else if (diseaseState.isImmune() && rand.nextDouble() < 0.9)
++        {
++            offspringIsImmune = false;
++        }
++
++        return createOffspring(location, offspringIsInfected, offspringIsImmune);
+     }
+ 
+     public Location locateFoodSource()
+@@ -323,4 +357,29 @@ public abstract class Animal extends LivingOrganism
+     {
+         setLocation(newLocation);
+     }
++
++    private int calculateBirths()
++    {
++        int births = 0;
++        
++        Field field = getField();
++        List<Location> adjacent = field.adjacentLocations(getLocation());
++        Iterator<Location> it = adjacent.iterator();
++        
++        while(it.hasNext()) 
++        {
++            Location where = it.next();
++            Animal animal = field.getObjectAt(where, Animal.class);
++            
++            if (animal != null && this.getClass().equals(animal.getClass())) 
++            {
++                if(!animal.getBreedingState().isFemale()) 
++                {
++                    births = rand.nextInt(breedingState.getMaxLitterSize()) + 1;
++                }
++            }
++        }
++        
++        return births;
++    }
+ }
+diff --git a/Breedable.java b/Breedable.java
+index 0e764f1..3abd1cc 100644
+--- a/Breedable.java
++++ b/Breedable.java
+@@ -1,74 +1,28 @@
+-import java.util.Iterator;
+ import java.util.List;
+-import java.util.Random;
+ 
+ /**
+  * Mixin for organisms that reproduce through nearby free locations.
+  *
+  * @version 26/02/2022
+  */
+-public interface Breedable extends OrganismContext, Ageable
++public interface Breedable extends OrganismContext
+ {
+-    Random RANDOM = Randomizer.getRandom();
++    Class<?> getBreedingSpaceType();
+ 
+-    BreedingState getBreedingState();
++    int determineOffspringCount(int availableLocations);
+ 
+-    DiseaseState getDiseaseState();
+-
+-    Animal spawnOffspring(Location location, boolean isInfected, boolean isImmune);
+-
+-    default boolean canBreedNow()
+-    {
+-        return getAgeState().getAge() >= getBreedingState().getBreedingAge();
+-    }
++    LivingOrganism spawnOffspringAt(Location location);
+ 
+     default void populateOffspring(List<LivingOrganism> newAnimals)
+     {
+         Field field = currentField();
+-        List<Location> free = field.getFreeAdjacentLocations(currentLocation(), Animal.class);
+-        int births = calculateBirths();
++        List<Location> free = field.getFreeAdjacentLocations(currentLocation(), getBreedingSpaceType());
++        int births = determineOffspringCount(free.size());
+ 
+         for(int b = 0; b < births && free.size() > 0; b++) 
+         {
+             Location loc = free.remove(0);
+-            DiseaseState diseaseState = getDiseaseState();
+-            boolean offspringIsInfected = diseaseState.isInfected();
+-            boolean offspringIsImmune = diseaseState.isImmune();
+-
+-            if (!diseaseState.isImmune() && diseaseState.isInfected() && RANDOM.nextDouble() < 0.15) 
+-            {
+-                offspringIsImmune = true;
+-                offspringIsInfected = false;
+-            }
+-            else if (diseaseState.isImmune() && RANDOM.nextDouble() < 0.9)
+-            {
+-                offspringIsImmune = false;
+-            }
+-
+-            newAnimals.add(spawnOffspring(loc, offspringIsInfected, offspringIsImmune));
++            newAnimals.add(spawnOffspringAt(loc));
+         }
+     }
+-
+-    default int calculateBirths()
+-    {
+-        Field field = currentField();
+-        List<Location> adjacent = field.adjacentLocations(currentLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-
+-        while(it.hasNext()) 
+-        {
+-            Location where = it.next();
+-            Animal animal = field.getObjectAt(where, Animal.class);
+-
+-            if (animal != null && this.getClass().equals(animal.getClass())) 
+-            {
+-                if(!animal.getBreedingState().isFemale()) 
+-                {
+-                    return RANDOM.nextInt(getBreedingState().getMaxLitterSize()) + 1;
+-                }
+-            }
+-        }
+-
+-        return 0;
+-    }
+ }
+diff --git a/Plant.java b/Plant.java
+index ee93a8a..bb8cdf0 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.Iterator;
+ 
+ /**
+  * Plants can grow, be can be partially eaten, they can be completely eaten and die, plants
+@@ -7,7 +6,7 @@ import java.util.Iterator;
+  *
+  * @version 26/02/2022
+  */
+-public class Plant extends LivingOrganism
++public class Plant extends LivingOrganism implements Ageable, Breedable
+ {
+     // its current health percentage
+     private double healthPercentage;
+@@ -55,7 +54,7 @@ public class Plant extends LivingOrganism
+      */
+     public void act(List<LivingOrganism> newPlants)
+     {
+-        incrementAge();
++        ageOneStep();
+         if(!getTime().isNight()) 
+         {
+             if(isAlive()) 
+@@ -109,11 +108,7 @@ public class Plant extends LivingOrganism
+      */
+     protected void incrementAge() 
+     {
+-        healthPercentage += GROWTH_RATE;
+-        if (healthPercentage > 1.0) 
+-        {
+-            healthPercentage = 1.0;
+-        }
++        ageOneStep();
+     }
+ 
+     /**
+@@ -160,15 +155,7 @@ public class Plant extends LivingOrganism
+      */
+     protected void populate(List<LivingOrganism> newPlants)
+     {
+-        // Get a list of adjacent free locations.
+-        Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation(), Plant.class);
+-        
+-        // New plants are spread into adjacent locations.
+-        for(int b = 0; free.size() > 0; b++) 
+-        {
+-            newPlants.add(createOffspring(free));
+-        }
++        populateOffspring(newPlants);
+     }
+     
+     /**
+@@ -177,13 +164,52 @@ public class Plant extends LivingOrganism
+      * @param free List of free locations to spawn
+      * @return Returns a new plant object.
+      */
+-    private Plant createOffspring(List<Location> free) 
++    private Plant createOffspring(Location location) 
+     {
+-        Location loc = free.remove(0);
+-        Plant offspring = null;
+-        
+-        offspring = new Plant(false, getField(), loc);
+-        
+-        return offspring;
++        return new Plant(false, getField(), location);
++    }
++
++    public void applyAgeProgression()
++    {
++        healthPercentage += GROWTH_RATE;
++        if (healthPercentage > 1.0) 
++        {
++            healthPercentage = 1.0;
++        }
++    }
++
++    public Field currentField()
++    {
++        return getField();
++    }
++
++    public Location currentLocation()
++    {
++        return getLocation();
++    }
++
++    public boolean organismIsAlive()
++    {
++        return isAlive();
++    }
++
++    public void markDead()
++    {
++        setDead();
++    }
++
++    public Class<?> getBreedingSpaceType()
++    {
++        return Plant.class;
++    }
++
++    public int determineOffspringCount(int availableLocations)
++    {
++        return availableLocations;
++    }
++
++    public LivingOrganism spawnOffspringAt(Location location)
++    {
++        return createOffspring(location);
+     }
+ }

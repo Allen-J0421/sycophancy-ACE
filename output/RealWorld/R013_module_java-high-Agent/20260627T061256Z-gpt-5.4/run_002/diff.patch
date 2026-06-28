@@ -1,0 +1,883 @@
+diff --git a/Animal.java b/Animal.java
+index e7c391a..2ffc909 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -1,5 +1,7 @@
+ import java.util.List;
+ import java.util.Random;
++import java.util.function.Consumer;
++import java.util.function.Predicate;
+ 
+ /**
+  * A class representing shared characteristics of animals.
+@@ -38,6 +40,20 @@ public abstract class Animal extends Organism
+      * @param weather The current weather.
+      */
+     abstract public void act(List<Animal> newAnimals, int step, Weather weather);
++
++    /**
++     * Return the food value this animal provides when eaten.
++     */
++    abstract public int foodValue();
++
++    /**
++     * A factory for creating offspring at a specific location.
++     */
++    @FunctionalInterface
++    protected interface OffspringFactory
++    {
++        Animal create(Field field, Location location);
++    }
+     
+     /**
+      * update the animal's burn status.
+@@ -81,4 +97,116 @@ public abstract class Animal extends Organism
+     {
+         return gender;
+     }
++
++    /**
++     * Return adjacent locations around this animal.
++     */
++    protected final List<Location> adjacentLocations(int radius)
++    {
++        return getField().adjacentLocations(getLocation(), radius);
++    }
++
++    /**
++     * Return free adjacent locations around this animal.
++     */
++    protected final List<Location> freeAdjacentLocations()
++    {
++        return getField().getFreeAdjacentLocations(getLocation());
++    }
++
++    /**
++     * Find a free adjacent location around this animal.
++     */
++    protected final Location freeAdjacentLocation()
++    {
++        return getField().freeAdjacentLocation(getLocation());
++    }
++
++    /**
++     * Move to the new location or die if there is nowhere to go.
++     */
++    protected final void moveToOrDie(Location newLocation)
++    {
++        if(newLocation != null) {
++            setLocation(newLocation);
++        }
++        else {
++            setDead();
++        }
++    }
++
++    /**
++     * Determine how many offspring are produced this step.
++     */
++    protected final int calculateBirths(int age, int breedingAge,
++                                        double breedingProbability, int maxLitterSize)
++    {
++        if(age >= breedingAge && rand.nextDouble() <= breedingProbability) {
++            return rand.nextInt(maxLitterSize) + 1;
++        }
++        return 0;
++    }
++
++    /**
++     * Add offspring into available adjacent locations.
++     */
++    protected final void addOffspring(List<Animal> newAnimals, int births,
++                                      OffspringFactory offspringFactory)
++    {
++        Field field = getField();
++        List<Location> free = freeAdjacentLocations();
++        for(int b = 0; b < births && free.size() > 0; b++) {
++            Location location = free.remove(0);
++            newAnimals.add(offspringFactory.create(field, location));
++        }
++    }
++
++    /**
++     * Check whether a mate of the same species is nearby.
++     */
++    protected final boolean hasAdjacentMate(Class<? extends Animal> animalClass, int radius)
++    {
++        for(Location where : adjacentLocations(radius)) {
++            Object animal = getField().getObjectAt(where);
++            if(animalClass.isInstance(animal)) {
++                Animal mate = (Animal) animal;
++                if(mate.getGender() != getGender()) {
++                    return true;
++                }
++            }
++        }
++        return false;
++    }
++
++    /**
++     * Find the first adjacent location containing a matching target.
++     */
++    protected final <T> Location findAdjacentLocation(Class<T> targetClass, int radius,
++                                                      Predicate<T> predicate)
++    {
++        for(Location where : adjacentLocations(radius)) {
++            Object target = getField().getObjectAt(where);
++            if(targetClass.isInstance(target)) {
++                T candidate = targetClass.cast(target);
++                if(predicate.test(candidate)) {
++                    return where;
++                }
++            }
++        }
++        return null;
++    }
++
++    /**
++     * Apply an action to each adjacent matching target.
++     */
++    protected final <T> void forEachAdjacent(Class<T> targetClass, int radius,
++                                             Consumer<T> action)
++    {
++        for(Location where : adjacentLocations(radius)) {
++            Object target = getField().getObjectAt(where);
++            if(targetClass.isInstance(target)) {
++                action.accept(targetClass.cast(target));
++            }
++        }
++    }
+ }
+diff --git a/Cat.java b/Cat.java
+index d43eea8..d57cb00 100644
+--- a/Cat.java
++++ b/Cat.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.Iterator;
+ import java.util.Random;
+ 
+ /**
+@@ -74,16 +73,9 @@ public class Cat extends Animal
+             Location newLocation = findFood();
+             if(newLocation == null) { 
+                 // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            // See if it was possible to move.
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                // Overcrowding.
+-                setDead();
++                newLocation = freeAdjacentLocation();
+             }
++            moveToOrDie(newLocation);
+         }
+     }
+ 
+@@ -116,22 +108,14 @@ public class Cat extends Animal
+      */
+     private Location findFood()
+     {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            if(animal instanceof Mouse) {
+-                Mouse mouse = (Mouse) animal;
+-                if(mouse.isAlive()) { 
+-                    mouse.setDead();
+-                    foodLevel = foodLevel + mouse.foodValue();
+-                    return where;
+-                }
++        return findAdjacentLocation(Mouse.class, 1, mouse -> {
++            if(mouse.isAlive()) {
++                mouse.setDead();
++                foodLevel = foodLevel + mouse.foodValue();
++                return true;
+             }
+-        }
+-        return null;
++            return false;
++        });
+     }
+     
+     /**
+@@ -141,16 +125,7 @@ public class Cat extends Animal
+      */
+     private void giveBirth(List<Animal> newCats)
+     {
+-        // New Cats are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+-        Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        int births = breed();
+-        for(int b = 0; b < births && free.size() > 0; b++) {
+-            Location loc = free.remove(0);
+-            Cat young = new Cat(false, field, loc);
+-            newCats.add(young);
+-        }
++        addOffspring(newCats, breed(), (field, location) -> new Cat(false, field, location));
+     }
+         
+     /**
+@@ -160,20 +135,7 @@ public class Cat extends Animal
+      */
+     private int breed()
+     {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
+-    }
+-
+-    /**
+-     * A Cat can breed if it has reached the breeding age.
+-     * @return true if the cat can breed.
+-     */
+-    private boolean canBreed()
+-    {
+-        return age >= BREEDING_AGE;
++        return calculateBirths(age, BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE);
+     }
+ 
+     /**
+diff --git a/Deer.java b/Deer.java
+index 546cce4..ffd9758 100644
+--- a/Deer.java
++++ b/Deer.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.Iterator;
+ import java.util.Random;
+ 
+ /**
+@@ -81,17 +80,10 @@ public class Deer extends Animal
+ 
+             if(newLocation == null) { 
+                 // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
++                newLocation = freeAdjacentLocation();
+             }
+ 
+-            // See if it was possible to move.            
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                // Overcrowding.
+-                setDead();
+-            }
++            moveToOrDie(newLocation);
+         }
+     }
+ 
+@@ -114,31 +106,8 @@ public class Deer extends Animal
+      */
+     private void giveBirth(List<Animal> newDeers)
+     {
+-
+-        boolean breedingPair = false;
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 2);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            if(animal instanceof Deer) {
+-                Deer deer = (Deer) animal;
+-                if(deer.getGender() != getGender()) {
+-                    breedingPair = true;
+-                    break;
+-                }
+-            }
+-        }
+-
+-        // New Deers are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        int births = breed();
+-        for(int b = 0; b < births && free.size() > 0 && breedingPair; b++) {
+-            Location loc = free.remove(0);
+-            Deer young = new Deer(false, field, loc);
+-            newDeers.add(young);
++        if(hasAdjacentMate(Deer.class, 2)) {
++            addOffspring(newDeers, breed(), (field, location) -> new Deer(false, field, location));
+         }
+     }
+         
+@@ -149,11 +118,7 @@ public class Deer extends Animal
+      */
+     private int breed()
+     {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
++        return calculateBirths(age, BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE);
+     }
+ 
+     /**
+@@ -174,33 +139,16 @@ public class Deer extends Animal
+      */
+     private Location findFood()
+     {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object plant = field.getObjectAt(where);
+-            if(plant instanceof Grass) {
+-                Grass grass = (Grass) plant;
+-                if(grass.isAlive()) { 
+-                    if (grass.getSize()>12 && foodLevel<30){
+-                        grass.decrementSize();
+-                        foodLevel+=20;
+-                    }
+-                    return where;
++        return findAdjacentLocation(Grass.class, 1, grass -> {
++            if(grass.isAlive()) {
++                if(grass.getSize() > 12 && foodLevel < 30) {
++                    grass.decrementSize();
++                    foodLevel += 20;
+                 }
++                return true;
+             }
+-        }
+-        return null;
+-    }
+-    
+-    /**
+-     * A Deer can breed if it has reached the breeding age.
+-     * @return true if the Deer can breed, false otherwise.
+-     */
+-    private boolean canBreed()
+-    {
+-        return age >= BREEDING_AGE;
++            return false;
++        });
+     }
+ 
+ 
+diff --git a/Lion.java b/Lion.java
+index 2a57754..c787964 100644
+--- a/Lion.java
++++ b/Lion.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.Iterator;
+ import java.util.Random;
+ 
+ /**
+@@ -82,17 +81,11 @@ public class Lion extends Animal
+             }
+             if(newLocation == null) { 
+                 // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
++                newLocation = freeAdjacentLocation();
+             }
+             // See if it was possible to move.
+             if (step % 4 != 0) {
+-                if(newLocation != null) {
+-                    setLocation(newLocation);
+-                }
+-                else {
+-                    // Overcrowding.
+-                    setDead(); 
+-                }
++                moveToOrDie(newLocation);
+             } 
+         }
+     }
+@@ -126,46 +119,22 @@ public class Lion extends Animal
+      */
+     private Location findFood()
+     {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            if(animal instanceof Deer) {
+-                Deer deer = (Deer) animal;
+-                if(deer.isAlive()) { 
+-                    deer.setDead();
+-                    foodLevel = foodLevel + deer.foodValue();
+-                    return where;
+-                }
+-            }
+-            else if(animal instanceof Cat) {
+-                Cat cat = (Cat) animal;
+-                if(cat.isAlive()) { 
+-                    cat.setDead();
+-                    foodLevel = foodLevel + cat.foodValue();
+-                    return where;
+-                }
+-            }
+-            else if(animal instanceof Owl) {
+-                Owl owl = (Owl) animal;
+-                if(owl.isAlive()) { 
+-                    owl.setDead();
+-                    foodLevel = foodLevel + owl.foodValue();
+-                    return where;
+-                }
+-            }
+-            else if(animal instanceof Mouse) {
+-                Mouse mouse = (Mouse) animal;
+-                if(mouse.isAlive()) { 
+-                        mouse.setDead();
+-                    foodLevel = foodLevel + mouse.foodValue();
+-                    return where;
+-                }
+-            }             
++        Location preyLocation = eat(Deer.class);
++        if(preyLocation != null) {
++            return preyLocation;
++        }
++
++        preyLocation = eat(Cat.class);
++        if(preyLocation != null) {
++            return preyLocation;
+         }
+-        return null;
++
++        preyLocation = eat(Owl.class);
++        if(preyLocation != null) {
++            return preyLocation;
++        }
++
++        return eat(Mouse.class);
+     }
+     
+     /**
+@@ -175,32 +144,9 @@ public class Lion extends Animal
+      * @param newLions A list to return newly born Lions.
+      */
+     private void giveBirth(List<Animal> newLions)
+-    {        
+-        boolean breedingPair = false;
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 2);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            if(animal instanceof Lion) {
+-                Lion lion = (Lion) animal;
+-                if(lion.getGender() != getGender()) {
+-                    breedingPair = true;
+-                    break;
+-                }
+-            }
+-        }
+-        
+-        // New Lions are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+-        //Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        int births = breed();
+-        for(int b = 0; b < births && free.size() > 0 && breedingPair; b++) {
+-            Location loc = free.remove(0);
+-            Lion young = new Lion(false, field, loc);
+-            newLions.add(young);
++    {
++        if(hasAdjacentMate(Lion.class, 2)) {
++            addOffspring(newLions, breed(), (field, location) -> new Lion(false, field, location));
+         }
+     }
+         
+@@ -211,19 +157,29 @@ public class Lion extends Animal
+      */
+     private int breed()
+     {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
++        return calculateBirths(age, BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE);
++    }
++
++    /**
++     * Hunt a specific prey species adjacent to this lion.
++     */
++    private <T extends Animal> Location eat(Class<T> preyClass)
++    {
++        return findAdjacentLocation(preyClass, 1, prey -> {
++            if(prey.isAlive()) {
++                prey.setDead();
++                foodLevel = foodLevel + prey.foodValue();
++                return true;
++            }
++            return false;
++        });
+     }
+ 
+     /**
+-     * A Lion can breed if it has reached the breeding age.
+-     * @return true if the Lion can breed.
++     * @return lion's food value.
+      */
+-    private boolean canBreed()
++    public int foodValue()
+     {
+-        return age >= BREEDING_AGE;
++        return FOOD_VALUE;
+     }
+ }
+diff --git a/Mouse.java b/Mouse.java
+index 3bbb838..7a61270 100644
+--- a/Mouse.java
++++ b/Mouse.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.Iterator;
+ import java.util.Random;
+ 
+ /**
+@@ -77,20 +76,11 @@ public class Mouse extends Animal
+         if(isAlive()) {
+             // Infected mouse will spread the disease to other mouse.
+             if (getInfected() != 0){
+-                Field field = getField();
+-                List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
+-                Iterator<Location> it = adjacent.iterator();
+-                while(it.hasNext()) {
+-                    Location where = it.next();
+-                    Object animal = field.getObjectAt(where);
+-                    if(animal instanceof Mouse) {
+-                        Mouse mouse = (Mouse) animal;
+-                        if(mouse.getInfected() == 0) { 
+-                            mouse.infect();
+-                            //break;
+-                        }
++                forEachAdjacent(Mouse.class, 1, mouse -> {
++                    if(mouse.getInfected() == 0) {
++                        mouse.infect();
+                     }
+-                }
++                });
+                 diseaseRecover();
+             }
+             else {
+@@ -103,16 +93,10 @@ public class Mouse extends Animal
+ 
+             if(newLocation == null) { 
+                 // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
++                newLocation = freeAdjacentLocation();
+             }
+ 
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                // Overcrowding.
+-                setDead();
+-            }       
++            moveToOrDie(newLocation);
+         }                    
+     }
+ 
+@@ -135,16 +119,7 @@ public class Mouse extends Animal
+      */
+     private void giveBirth(List<Animal> newMice)
+     {
+-        // New rabbits are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+-        Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        int births = breed();
+-        for(int b = 0; b < births && free.size() > 0; b++) {
+-            Location loc = free.remove(0);
+-            Mouse young = new Mouse(false, field, loc);
+-            newMice.add(young);
+-        }
++        addOffspring(newMice, breed(), (field, location) -> new Mouse(false, field, location));
+     }
+ 
+     /**
+@@ -154,21 +129,13 @@ public class Mouse extends Animal
+      */
+     private Location findFood()
+     {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object plant = field.getObjectAt(where);
+-            if(plant instanceof Grass) {
+-                Grass grass = (Grass) plant;
+-                if(grass.isAlive()) { 
+-                    foodLevel+=2;
+-                }
+-                return where;                
++        return findAdjacentLocation(Grass.class, 1, grass -> {
++            if(grass.isAlive()) {
++                foodLevel += 2;
++                return true;
+             }
+-        }
+-        return null;
++            return false;
++        });
+     }
+     
+     /**
+@@ -178,20 +145,7 @@ public class Mouse extends Animal
+      */
+     private int breed()
+     {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
+-    }
+-
+-    /**
+-     * A mouse can breed if it has reached the breeding age.
+-     * @return true if the mouse can breed, false otherwise.
+-     */
+-    private boolean canBreed()
+-    {
+-        return age >= BREEDING_AGE;
++        return calculateBirths(age, BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE);
+     }
+     
+     /**
+diff --git a/Owl.java b/Owl.java
+index 77abb59..f7c810f 100644
+--- a/Owl.java
++++ b/Owl.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.Iterator;
+ import java.util.Random;
+ 
+ /**
+@@ -74,16 +73,9 @@ public class Owl extends Animal
+             Location newLocation = findFood();
+             if(newLocation == null) { 
+                 // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            // See if it was possible to move.
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else {
+-                // Overcrowding.
+-                setDead();
++                newLocation = freeAdjacentLocation();
+             }
++            moveToOrDie(newLocation);
+         }
+     }
+ 
+@@ -116,22 +108,14 @@ public class Owl extends Animal
+      */
+     private Location findFood()
+     {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            if(animal instanceof Mouse) {
+-                Mouse mouse = (Mouse) animal;
+-                if(mouse.isAlive()) { 
+-                    mouse.setDead();
+-                    foodLevel = foodLevel + mouse.foodValue();
+-                    return where;
+-                }
++        return findAdjacentLocation(Mouse.class, 1, mouse -> {
++            if(mouse.isAlive()) {
++                mouse.setDead();
++                foodLevel = foodLevel + mouse.foodValue();
++                return true;
+             }
+-        }
+-        return null;
++            return false;
++        });
+     }
+     
+     /**
+@@ -141,16 +125,7 @@ public class Owl extends Animal
+      */
+     private void giveBirth(List<Animal> newOwls)
+     {
+-        // New Owls are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+-        Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        int births = breed();
+-        for(int b = 0; b < births && free.size() > 0; b++) {
+-            Location loc = free.remove(0);
+-            Owl young = new Owl(false, field, loc);
+-            newOwls.add(young);
+-        }
++        addOffspring(newOwls, breed(), (field, location) -> new Owl(false, field, location));
+     }
+         
+     /**
+@@ -160,20 +135,7 @@ public class Owl extends Animal
+      */
+     private int breed()
+     {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY) {
+-            births = rand.nextInt(MAX_LITTER_SIZE) + 1;
+-        }
+-        return births;
+-    }
+-
+-    /**
+-     * A Owl can breed if it has reached the breeding age.
+-     * @return true if the owl can breed.
+-     */
+-    private boolean canBreed()
+-    {
+-        return age >= BREEDING_AGE;
++        return calculateBirths(age, BREEDING_AGE, BREEDING_PROBABILITY, MAX_LITTER_SIZE);
+     }
+ 
+     /**
+diff --git a/Simulator.java b/Simulator.java
+index 83f9115..17e5a7d 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -3,6 +3,7 @@ import java.util.List;
+ import java.util.ArrayList;
+ import java.util.Iterator;
+ import java.awt.Color;
++import java.util.function.Function;
+ 
+ /**
+  * A simple predator-prey simulator, based on a rectangular field
+@@ -71,12 +72,7 @@ public class Simulator
+ 
+         // Create a view of the state of each location in the field.
+         view = new SimulatorView(depth, width);
+-        view.setColor(Deer.class, Color.BLUE);
+-        view.setColor(Lion.class, Color.RED);
+-        view.setColor(Mouse.class, Color.YELLOW);
+-        view.setColor(Owl.class, Color.ORANGE);
+-        view.setColor(Cat.class, Color.PINK);
+-        view.setColor(Grass.class, Color.GREEN);
++        configureViewColors();
+         
+         // Setup a valid starting point.
+         reset();
+@@ -164,37 +160,28 @@ public class Simulator
+         field.clear();
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+-                if(rand.nextDouble() <= LION_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Lion lion = new Lion(true, field, location);
+-                    animals.add(lion);
++                if(tryPopulateAnimal(rand, LION_CREATION_PROBABILITY,
++                                     location -> new Lion(true, field, location), row, col)) {
++                    continue;
+                 }
+-                else if(rand.nextDouble() <= DEER_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Deer deer = new Deer(true, field, location);
+-                    animals.add(deer);
++                if(tryPopulateAnimal(rand, DEER_CREATION_PROBABILITY,
++                                     location -> new Deer(true, field, location), row, col)) {
++                    continue;
+                 }
+-                else if(rand.nextDouble() <= OWL_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Owl owl = new Owl(true, field, location);
+-                    animals.add(owl);
++                if(tryPopulateAnimal(rand, OWL_CREATION_PROBABILITY,
++                                     location -> new Owl(true, field, location), row, col)) {
++                    continue;
+                 }
+-                else if(rand.nextDouble() <= MOUSE_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Mouse mouse = new Mouse(true, field, location);
+-                    animals.add(mouse);
++                if(tryPopulateAnimal(rand, MOUSE_CREATION_PROBABILITY,
++                                     location -> new Mouse(true, field, location), row, col)) {
++                    continue;
+                 }
+-                else if(rand.nextDouble() <= CAT_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Cat cat = new Cat(true, field, location);
+-                    animals.add(cat);
++                if(tryPopulateAnimal(rand, CAT_CREATION_PROBABILITY,
++                                     location -> new Cat(true, field, location), row, col)) {
++                    continue;
+                 }
+-                else if(rand.nextDouble() <= GRASS_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Grass grass = new Grass(true, field, location);
+-                    plants.add(grass);
+-                }
+-                // else leave the location empty.
++                tryPopulatePlant(rand, GRASS_CREATION_PROBABILITY,
++                                 location -> new Grass(true, field, location), row, col);
+             }
+         }
+     }
+@@ -221,4 +208,45 @@ public class Simulator
+     {
+         weather = Weather.random(Randomizer.getRandom());
+     }
++
++    /**
++     * Configure display colors for each species.
++     */
++    private void configureViewColors()
++    {
++        view.setColor(Deer.class, Color.BLUE);
++        view.setColor(Lion.class, Color.RED);
++        view.setColor(Mouse.class, Color.YELLOW);
++        view.setColor(Owl.class, Color.ORANGE);
++        view.setColor(Cat.class, Color.PINK);
++        view.setColor(Grass.class, Color.GREEN);
++    }
++
++    /**
++     * Try to populate an animal into the given field location.
++     */
++    private boolean tryPopulateAnimal(Random rand, double probability,
++                                      Function<Location, Animal> factory,
++                                      int row, int col)
++    {
++        if(rand.nextDouble() <= probability) {
++            animals.add(factory.apply(new Location(row, col)));
++            return true;
++        }
++        return false;
++    }
++
++    /**
++     * Try to populate a plant into the given field location.
++     */
++    private boolean tryPopulatePlant(Random rand, double probability,
++                                     Function<Location, Plant> factory,
++                                     int row, int col)
++    {
++        if(rand.nextDouble() <= probability) {
++            plants.add(factory.apply(new Location(row, col)));
++            return true;
++        }
++        return false;
++    }
+ }

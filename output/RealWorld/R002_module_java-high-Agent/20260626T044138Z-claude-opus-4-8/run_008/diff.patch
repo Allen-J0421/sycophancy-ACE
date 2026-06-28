@@ -1,0 +1,489 @@
+diff --git a/Populator.java b/Populator.java
+index 1f41fdd..0431441 100644
+--- a/Populator.java
++++ b/Populator.java
+@@ -55,9 +55,9 @@ public class Populator {
+     /**
+      * Constructor for the populator.
+      *
+-     * @param view A given SimulatorView.
++     * @param view A given SimulationView.
+      */
+-    public Populator(SimulatorView view) {
++    public Populator(SimulationView view) {
+         // Register the display colour of each species with the view.
+         for (SpawnRule rule : SPAWN_RULES) {
+             view.setColor(rule.species, rule.color);
+diff --git a/SimulationEngine.java b/SimulationEngine.java
+new file mode 100644
+index 0000000..af7ff0a
+--- /dev/null
++++ b/SimulationEngine.java
+@@ -0,0 +1,154 @@
++import java.util.ArrayList;
++import java.util.Iterator;
++import java.util.List;
++
++/**
++ * This file is part of the Predator-Prey Simulation.
++ *
++ * Drives the predator-prey simulation: it owns the simulation state (the field,
++ * the organisms, the current step, time and weather) and advances it each step.
++ *
++ * The engine talks to the view only through the {@link SimulationView}
++ * abstraction, so the simulation logic is decoupled from any particular GUI
++ * (such as the Swing/JFrame-based SimulatorView).
++ *
++ * @version 2022.03.02
++ */
++public class SimulationEngine
++{
++    // List of organisms in the field.
++    private final List<Entity> organisms;
++    // The current state of the field.
++    private final Field field;
++    // The view used to display the simulation and report viability.
++    private final SimulationView view;
++    // The current step of the simulation.
++    private int step;
++    // The current hour of the simulation.
++    private int hour;
++    // Indicates current state of time in the simulation.
++    private TimeOfDay currentTime;
++    // The current weather in the simulation.
++    private Weather currentWeather;
++
++    /**
++     * Create a simulation engine for a field of the given size, displayed
++     * through the given view.
++     *
++     * @param depth Depth of the field. Must be greater than zero.
++     * @param width Width of the field. Must be greater than zero.
++     * @param view The view used to display the simulation.
++     */
++    public SimulationEngine(int depth, int width, SimulationView view)
++    {
++        this.organisms = new ArrayList<>();
++        this.field = new Field(depth, width);
++        this.view = view;
++
++        // Setup a valid starting point
++        reset();
++    }
++
++    /**
++     * Run the simulation from its current state for a reasonably long period,
++     * (4000 steps).
++     */
++    public void runLongSimulation()
++    {
++        simulate(4000);
++    }
++
++    /**
++     * Run the simulation from its current state for the given number of steps.
++     * Stop before the given number of steps if it ceases to be viable.
++     * @param numSteps The number of steps to run for.
++     */
++    public void simulate(int numSteps)
++    {
++        for(int s = 1; s <= numSteps && view.isViable(field); s++) {
++            simulateOneStep();
++            delay(5);   // uncomment this to run more slowly
++        }
++    }
++
++    /**
++     * Run the simulation from its current state for a single step.
++     * Iterate over the whole field updating the state of each organism.
++     */
++    public void simulateOneStep()
++    {
++        step++;
++
++        // Provide space for newborn organisms.
++        List<Entity> newOrganisms = new ArrayList<>();
++        // Let all organisms act.
++        for(Iterator<Entity> it = organisms.iterator(); it.hasNext(); ) {
++            Entity entity = it.next();
++            Organism organism = (Organism) entity;
++
++            organism.act(newOrganisms, currentWeather, currentTime);
++
++            if(organism.isRemoved()) {
++                it.remove();
++            }
++        }
++
++        // Add the newly born organisms to the main list.
++        organisms.addAll(newOrganisms);
++
++        int day = step/120 +1;
++        hour = (step/5) % 24 + 1;
++
++
++        view.showStatus(step, field);
++        view.updateTimeLabel(day,hour);
++        view.updateEnvironmentLabel(currentWeather, currentTime);
++
++        // every hour, generate new weather if we are done with current weather
++        if (step % 5 == 0) {
++            currentWeather.generate();
++        }
++
++        // update time
++        if ((hour % 4 == 0) && (step % 5 == 0)) {
++            currentTime = currentTime.next();
++        }
++    }
++
++    public int getHour() {
++        return hour;
++    }
++
++    /**
++     * Reset the simulation to a starting position.
++     */
++    public void reset()
++    {
++        step = 0;
++
++        currentTime = TimeOfDay.SUNRISE;
++        currentWeather = new Weather(WeatherType.SUN); // make this random at start
++
++        organisms.clear();
++
++        Populator populator = new Populator(view);
++        populator.populate(organisms, field);
++
++        // Show the starting state in the view.
++        view.showStatus(step, field);
++    }
++
++    /**
++     * Pause for a given time.
++     * @param millisec  The time to pause for, in milliseconds
++     */
++    private void delay(int millisec)
++    {
++        try {
++            Thread.sleep(millisec);
++        }
++        catch (InterruptedException ie) {
++            // wake up
++        }
++    }
++}
+diff --git a/SimulationView.java b/SimulationView.java
+new file mode 100644
+index 0000000..2e6ba58
+--- /dev/null
++++ b/SimulationView.java
+@@ -0,0 +1,55 @@
++import java.awt.Color;
++
++/**
++ * This file is part of the Predator-Prey Simulation.
++ *
++ * An abstraction of the view that displays the simulation. The simulation
++ * engine drives a SimulationView without depending on any particular GUI
++ * toolkit, so the Swing/JFrame-based {@link SimulatorView} can be swapped for
++ * an alternative (for example a headless or test view) without changing the
++ * simulation logic.
++ *
++ * @version 2022.03.02
++ */
++public interface SimulationView {
++
++    /**
++     * Register the colour used to draw a given species.
++     *
++     * @param animalClass The species' Class object.
++     * @param color The colour to use for that species.
++     */
++    void setColor(Class<?> animalClass, Color color);
++
++    /**
++     * Display the current state of the field.
++     *
++     * @param step Which iteration step it is.
++     * @param field The field whose status is to be displayed.
++     */
++    void showStatus(int step, Field field);
++
++    /**
++     * Determine whether the simulation should continue to run.
++     *
++     * @param field The field to inspect.
++     * @return true if the simulation is still viable.
++     */
++    boolean isViable(Field field);
++
++    /**
++     * Display the current day and hour.
++     *
++     * @param day The current day.
++     * @param hour The current hour.
++     */
++    void updateTimeLabel(int day, int hour);
++
++    /**
++     * Display the current weather and time of day.
++     *
++     * @param weather The current weather.
++     * @param time The current time of day.
++     */
++    void updateEnvironmentLabel(Weather weather, TimeOfDay time);
++}
+diff --git a/Simulator.java b/Simulator.java
+index eebef11..8189c16 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -1,10 +1,10 @@
+-import java.util.ArrayList;
+-import java.util.Iterator;
+-import java.util.List;
+-
+ /**
+- * A simple predator-prey simulator, based on a rectangular field
+- * containing rabbits and foxes.
++ * A simple predator-prey simulator, based on a rectangular field of organisms.
++ *
++ * This class is a thin entry point: it wires the Swing-based {@link
++ * SimulatorView} to a {@link SimulationEngine} (which holds all the simulation
++ * logic) and delegates to it. The engine itself depends only on the {@link
++ * SimulationView} abstraction, so the simulation is decoupled from the GUI.
+  *
+  * @version 2022.03.02
+  */
+@@ -16,20 +16,8 @@ public class Simulator
+     // The default depth of the grid.
+     private static final int DEFAULT_DEPTH = 200;
+ 
+-    // List of organisms in the field.
+-    private List<Entity> organisms;
+-    // The current state of the field.
+-    private Field field;
+-    // The current step of the simulation.
+-    private int step;
+-    // A graphical view of the simulation.
+-    private SimulatorView view;
+-    // The current hour of the simulation.
+-    private int hour;
+-    // Indicates current state of time in the simulation.
+-    private TimeOfDay currentTime;
+-
+-    private Weather currentWeather;
++    // The engine that runs the simulation.
++    private final SimulationEngine engine;
+ 
+     /**
+      * Construct a simulation field with default size.
+@@ -38,7 +26,7 @@ public class Simulator
+     {
+         this(DEFAULT_DEPTH, DEFAULT_WIDTH);
+     }
+-    
++
+     /**
+      * Create a simulation field with the given size.
+      * @param depth Depth of the field. Must be greater than zero.
+@@ -52,86 +40,41 @@ public class Simulator
+             depth = DEFAULT_DEPTH;
+             width = DEFAULT_WIDTH;
+         }
+-        
+-        organisms = new ArrayList<>();
+-        field = new Field(depth, width);
+ 
+-        // Create a view of the state of each location in the field.
+-        view = new SimulatorView(depth, width);
+-
+-        // Setup a valid starting point
+-        reset();
++        // Create the GUI view and hand it to the engine through the
++        // SimulationView abstraction.
++        SimulatorView view = new SimulatorView(depth, width);
++        engine = new SimulationEngine(depth, width, view);
+     }
+-    
++
+     /**
+      * Run the simulation from its current state for a reasonably long period,
+      * (4000 steps).
+      */
+     public void runLongSimulation()
+     {
+-        simulate(4000);
++        engine.runLongSimulation();
+     }
+-    
++
+     /**
+      * Run the simulation from its current state for the given number of steps.
+-     * Stop before the given number of steps if it ceases to be viable.
+      * @param numSteps The number of steps to run for.
+      */
+     public void simulate(int numSteps)
+     {
+-        for(int step = 1; step <= numSteps && view.isViable(field); step++) {
+-            simulateOneStep();
+-            delay(5);   // uncomment this to run more slowly
+-        }
++        engine.simulate(numSteps);
+     }
+-    
++
+     /**
+      * Run the simulation from its current state for a single step.
+-     * Iterate over the whole field updating the state of each
+-     * fox and rabbit.
+      */
+     public void simulateOneStep()
+     {
+-        step++;
+-
+-        // Provide space for newborn organisms.
+-        List<Entity> newOrganisms = new ArrayList<>();
+-        // Let all rabbits act.
+-        for(Iterator<Entity> it = organisms.iterator(); it.hasNext(); ) {
+-            Entity entity = it.next();
+-            Organism organism = (Organism) entity;
+-
+-            organism.act(newOrganisms, currentWeather, currentTime);
+-
+-            if(organism.isRemoved()) {
+-                it.remove();
+-            }
+-        }
+-               
+-        // Add the newly born foxes and rabbits to the main lists.
+-        organisms.addAll(newOrganisms);
+-
+-        int day = step/120 +1;
+-        hour = (step/5) % 24 + 1;
+-
+-
+-        view.showStatus(step, field);
+-        view.updateTimeLabel(day,hour);
+-        view.updateEnvironmentLabel(currentWeather, currentTime);
+-
+-        // every hour, generate new weather if we are done with current weather
+-        if (step % 5 == 0) {
+-            currentWeather.generate();
+-        }
+-
+-        // update time
+-        if ((hour % 4 == 0) && (step % 5 == 0)) {
+-            currentTime = currentTime.next();
+-        }
++        engine.simulateOneStep();
+     }
+ 
+     public int getHour() {
+-        return hour;
++        return engine.getHour();
+     }
+ 
+     /**
+@@ -139,31 +82,6 @@ public class Simulator
+      */
+     public void reset()
+     {
+-        step = 0;
+-
+-        currentTime = TimeOfDay.SUNRISE;
+-        currentWeather = new Weather(WeatherType.SUN); // make this random at start
+-
+-        organisms.clear();
+-
+-        Populator populator = new Populator(view);
+-        populator.populate(organisms, field);
+-        
+-        // Show the starting state in the view.
+-        view.showStatus(step, field);
+-    }
+-    
+-    /**
+-     * Pause for a given time.
+-     * @param millisec  The time to pause for, in milliseconds
+-     */
+-    private void delay(int millisec)
+-    {
+-        try {
+-            Thread.sleep(millisec);
+-        }
+-        catch (InterruptedException ie) {
+-            // wake up
+-        }
++        engine.reset();
+     }
+ }
+diff --git a/SimulatorView.java b/SimulatorView.java
+index ed915ae..b8e0861 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -12,7 +12,7 @@ import java.util.Map;
+  *
+  * @version 2022.03.02
+  */
+-public class SimulatorView extends JFrame
++public class SimulatorView extends JFrame implements SimulationView
+ {
+     // Colors used for empty locations.
+     private static final Color EMPTY_COLOR = Color.white;
+@@ -31,7 +31,7 @@ public class SimulatorView extends JFrame
+     private FieldView fieldView;
+     
+     // A map for storing colors for participants in the simulation
+-    private Map<Class, Color> colors;
++    private Map<Class<?>, Color> colors;
+     // A statistics object computing and storing simulation information
+     private FieldStats stats;
+ 
+@@ -77,7 +77,8 @@ public class SimulatorView extends JFrame
+      * @param animalClass The animal's Class object.
+      * @param color The color to be used for the given class.
+      */
+-    public void setColor(Class animalClass, Color color)
++    @Override
++    public void setColor(Class<?> animalClass, Color color)
+     {
+         colors.put(animalClass, color);
+     }
+@@ -93,7 +94,7 @@ public class SimulatorView extends JFrame
+     /**
+      * @return The color to be used for a given class of animal.
+      */
+-    private Color getColor(Class animalClass)
++    private Color getColor(Class<?> animalClass)
+     {
+         Color col = colors.get(animalClass);
+         if(col == null) {
+@@ -110,6 +111,7 @@ public class SimulatorView extends JFrame
+      * @param step Which iteration step it is.
+      * @param field The field whose status is to be displayed.
+      */
++    @Override
+     public void showStatus(int step, Field field)
+     {
+         if(!isVisible()) {
+@@ -142,15 +144,18 @@ public class SimulatorView extends JFrame
+      * Determine whether the simulation should continue to run.
+      * @return true If there is more than one species alive.
+      */
++    @Override
+     public boolean isViable(Field field)
+     {
+         return stats.isViable(field);
+     }
+ 
++    @Override
+     public void updateTimeLabel(int day, int hour){
+         timeLabel.setText(TIME_DAY_PREFIX + (day) + " " + TIME_HOUR_PREFIX + (hour));
+     }
+ 
++    @Override
+     public void updateEnvironmentLabel(Weather weather, TimeOfDay time) {
+         environmentLabel.setText(WEATHER_PREFIX + weather.getType().toString() + " " + TIME_OF_DAY_PREFIX + time);
+     }

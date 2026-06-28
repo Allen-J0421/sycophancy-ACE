@@ -1,0 +1,334 @@
+diff --git a/Grass.java b/Grass.java
+index 274a1bc..1158747 100644
+--- a/Grass.java
++++ b/Grass.java
+@@ -43,7 +43,7 @@ class Grass extends Locatable implements Eatable, Simulatable, Displayable {
+ 	 * @param currentState the simulators current state
+ 	 */ 
+ 	public void act(List<Simulatable> newGrass, SimulatorState currentState) {
+-		if (currentState.getCurrentWeather() == Weather.Rainy) {
++		if (currentState.getCurrentWeather().precipitates()) {
+ 			rainAmount ++; //Increment rain count if it has rained
+ 		}
+ 
+diff --git a/RandomWeatherSystem.java b/RandomWeatherSystem.java
+new file mode 100644
+index 0000000..e83d9c3
+--- /dev/null
++++ b/RandomWeatherSystem.java
+@@ -0,0 +1,44 @@
++import java.util.Random;
++
++/**
++ * Default {@link WeatherSystem} implementation.
++ *
++ * On each {@link #step()} call, transitions to a uniformly-random weather
++ * state with probability {@code CHANGE_PROBABILITY}; otherwise the current
++ * state is retained.
++ */
++class RandomWeatherSystem implements WeatherSystem
++{
++    private static final double CHANGE_PROBABILITY = 0.01;
++    private static final Random rand = Randomizer.getRandom();
++
++    private Weather current;
++
++    /**
++     * @param initial the starting weather state
++     */
++    RandomWeatherSystem(Weather initial)
++    {
++        this.current = initial;
++    }
++
++    @Override
++    public Weather getCurrent()
++    {
++        return current;
++    }
++
++    @Override
++    public void set(Weather weather)
++    {
++        current = weather;
++    }
++
++    @Override
++    public void step()
++    {
++        if (rand.nextDouble() <= CHANGE_PROBABILITY) {
++            current = Weather.values()[rand.nextInt(Weather.values().length)];
++        }
++    }
++}
+diff --git a/SimulatorState.java b/SimulatorState.java
+index e01da21..88e4523 100644
+--- a/SimulatorState.java
++++ b/SimulatorState.java
+@@ -1,80 +1,91 @@
+-import java.util.Random;
+ import java.util.Map;
+ 
+ /**
+- * This stores the current state of the simulator. All environmental factors affecting the players are stored in here
+- * 
++ * Stores the current environmental state of the simulator.
++ *
++ * Weather management is delegated to a {@link WeatherSystem} strategy,
++ * which can be supplied at construction time.  The default strategy is
++ * {@link RandomWeatherSystem}.  All other callers ({@link Simulator},
++ * {@link Animal}, {@link Grass}) use the same public API as before.
++ *
+  * @version 13.7.6
+  */
+ class SimulatorState {
+ 
+-	private double currentNormalisedTime = 0; //The normalised time is the time formatted as a probability 
+-	private Weather currentWeather = Weather.Sunny; //The weather of the sim defaulted to sunny 
+-	private Map<Class, Counter> counters;
++    private double currentNormalisedTime = 0;
++    private final WeatherSystem weatherSystem;
++    private Map<Class, Counter> counters;
+ 
+-	private static final double WEATHER_CHANGE_PROBABILITY = 0.01;  //The probability with which the weather changes
+-	private static final Random rand = Randomizer.getRandom();
++    /** Constructs a state using the default {@link RandomWeatherSystem}. */
++    SimulatorState()
++    {
++        this(new RandomWeatherSystem(Weather.Sunny));
++    }
+ 
++    /**
++     * Constructs a state using the supplied weather strategy.
++     * @param weatherSystem the strategy that controls weather transitions
++     */
++    SimulatorState(WeatherSystem weatherSystem)
++    {
++        this.weatherSystem = weatherSystem;
++    }
+ 
+-	/**
+-	 * Set the normalised time of the state 
+-	 * @param time the normalised time
+-	 */ 
+-	public void setNormalisedTime(double time) {
+-		currentNormalisedTime = time;
+-	}
++    /**
++     * Set the normalised time (0–1) for this step.
++     * @param time the normalised time
++     */
++    public void setNormalisedTime(double time)
++    {
++        currentNormalisedTime = time;
++    }
+ 
+-	/**
+-	 * This changes the current weather if it meets a probability. 
+-	 * It will not always do this 
+-	 */ 
+-	public void changeCurrentWeather() {
+-		if (rand.nextDouble() <= WEATHER_CHANGE_PROBABILITY) {
+-			int nextWeatherIndex = rand.nextInt(Weather.values().length);
+-		    setCurrentWeather(Weather.values()[nextWeatherIndex]);
+-		}
+-	}
++    /** Advance the weather by one step via the active strategy. */
++    public void changeCurrentWeather()
++    {
++        weatherSystem.step();
++    }
+ 
+-	/**
+-	 * This forces a weather change and sets the weather. 
+-	 * @param weather the weather to set.
+-	 */
+-	public void setCurrentWeather(Weather weather){
+-		currentWeather = weather;
+-	}
++    /**
++     * Force the weather to a specific state (e.g., on simulation reset).
++     * @param weather the state to set
++     */
++    public void setCurrentWeather(Weather weather)
++    {
++        weatherSystem.set(weather);
++    }
+ 
+-	/**
+-	 * @return the current weather of the sim 
+-	 */ 
+-	public Weather getCurrentWeather() {
+-		return currentWeather;
+-	}
++    /** @return the current weather state */
++    public Weather getCurrentWeather()
++    {
++        return weatherSystem.getCurrent();
++    }
+ 
++    /**
++     * @return the population counter for the given animal class, or null if
++     *         no count has been recorded yet
++     */
++    public Counter getCurrentStats(Class forAnimal)
++    {
++        return counters.get(forAnimal);
++    }
+ 
+-	/**
+-	 * @return the counters for all animals in the sim
+-	 */ 
+-	public Counter getCurrentStats(Class forAnimal) {
+-		return counters.get(forAnimal);
+-	}
++    /**
++     * Replace the population counters (called each step by {@link Simulator}).
++     * @param counter the new counters map
++     */
++    public void setCurrentStats(Map<Class, Counter> counter)
++    {
++        counters = counter;
++    }
+ 
+-
+-	/**
+-	 * set the current population statists
+-	 * @param counter the counts
+-	 */ 
+-	public void setCurrentStats(Map<Class, Counter> counter) {
+-		counters = counter;
+-	}
+-
+-
+-
+-	/**
+-	 * Aggragated probability reduction is all the rductions combined into one varaible. 
+-	 * This makes working out how all environmental factors will affect an animal easier. 
+-	 * @return the aggrated probabiltiy reduction
+-	 */
+-	public double getAggregatedProbabilityReduction() {
+-		return (currentNormalisedTime + getCurrentWeather().getReductionFactor()) / 2;
+-	}
+-}
+\ No newline at end of file
++    /**
++     * Returns a 0–1 value combining the time-of-day and weather effects.
++     * A value of 1 means full activity; lower values suppress animal actions.
++     * @return the aggregated probability multiplier for this step
++     */
++    public double getAggregatedProbabilityReduction()
++    {
++        return (currentNormalisedTime + weatherSystem.getCurrent().getActivityReduction()) / 2;
++    }
++}
+diff --git a/Weather.java b/Weather.java
+index 8821610..162ebae 100644
+--- a/Weather.java
++++ b/Weather.java
+@@ -1,34 +1,50 @@
+-
+-
+ /**
+- * Weather enum represents all weathers that the simulator has. 
+- * It also shows the probability reductions that a particular weather has on the players
+- * 
++ * Enumeration of all weather states that the simulator supports.
++ *
++ * Each constant declares its full behavioural profile as constructor arguments,
++ * so the effect of adding or adjusting a weather type is localised to this
++ * file.  Consumers query named properties ({@link #getActivityReduction()},
++ * {@link #precipitates()}) rather than comparing against specific constants,
++ * which means new weather types automatically participate in all existing
++ * behaviour without requiring changes to consumers.
++ *
+  * @version 8.6.5
+  */
+-
+ enum Weather {
+-	Rainy(0.5),
+-	Sunny(1),
+-	Cloudy(0.85),
+-	Stormy(0.2);
+ 
+-	private double reductionFactor; 
++    //                     activityReduction  precipitates
++    Rainy  (0.50,          true),
++    Sunny  (1.00,          false),
++    Cloudy (0.85,          false),
++    Stormy (0.20,          false);
++
++    /** 0–1 multiplier applied to animal activity probability. 1 = full activity. */
++    private final double  activityReduction;
+ 
++    /** Whether this weather type produces rainfall (e.g., triggers grass growth). */
++    private final boolean precipitates;
+ 
+-	/**
+-	 * @return the probability reduction that a weather has on the players
+-	 */
+-	public double getReductionFactor() {
+-        return this.reductionFactor;
++    Weather(double activityReduction, boolean precipitates)
++    {
++        this.activityReduction = activityReduction;
++        this.precipitates      = precipitates;
+     }
+-  
++
+     /**
+-     * Constructor for a weather 
+-     * @param reductionFactor the probability reduction that a weather has on the players
++     * @return a 0–1 multiplier: 1 means no suppression, lower values reduce
++     *         the probability that animals act on a given step
+      */
+-    private Weather(double reductionFactor) {
+-        this.reductionFactor = reductionFactor;
++    public double getActivityReduction()
++    {
++        return activityReduction;
+     }
+ 
+-}
+\ No newline at end of file
++    /**
++     * @return true if this weather type produces rain (grass growth bonus,
++     *         etc.); false otherwise
++     */
++    public boolean precipitates()
++    {
++        return precipitates;
++    }
++}
+diff --git a/WeatherSystem.java b/WeatherSystem.java
+new file mode 100644
+index 0000000..c949c98
+--- /dev/null
++++ b/WeatherSystem.java
+@@ -0,0 +1,26 @@
++/**
++ * Strategy interface for weather management.
++ *
++ * Implementations decide which {@link Weather} state is current and how
++ * transitions occur.  The default implementation ({@link RandomWeatherSystem})
++ * picks the next state at random; alternative strategies (seasonal patterns,
++ * deterministic test fixtures, etc.) can be substituted at construction time
++ * via {@link SimulatorState#SimulatorState(WeatherSystem)}.
++ */
++interface WeatherSystem
++{
++    /** @return the current weather state */
++    Weather getCurrent();
++
++    /**
++     * Force the weather to a specific state (e.g., for simulation reset).
++     * @param weather the state to set
++     */
++    void set(Weather weather);
++
++    /**
++     * Advance the weather by one simulation step.
++     * Implementations may transition to a new state or remain unchanged.
++     */
++    void step();
++}

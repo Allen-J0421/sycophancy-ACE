@@ -1,0 +1,512 @@
+diff --git a/Actor.java b/Actor.java
+index a00f8f9..69ed9e0 100644
+--- a/Actor.java
++++ b/Actor.java
+@@ -14,7 +14,7 @@ public abstract class Actor
+     // Whether the actor is alive or not.
+     protected boolean alive;
+     // The actor's field.
+-    protected Field field;
++    protected Field<Actor> field;
+     // The actor's position in the field.
+     protected Location location;
+     // Whether the actor can overlap with other actors in a particular field
+@@ -34,7 +34,7 @@ public abstract class Actor
+      * @param field The field the actor is currently in
+      * @param location The actors location on the field
+      */
+-    protected Actor(Field field, Location location)
++    protected Actor(Field<Actor> field, Location location)
+     {
+         alive = true;
+         this.field = field;
+@@ -222,7 +222,7 @@ public abstract class Actor
+      * 
+      * @return The actor's field.
+      */
+-    protected Field getField()
++    protected Field<Actor> getField()
+     {
+         return field;
+     }
+@@ -236,4 +236,18 @@ public abstract class Actor
+     {
+         return overlap;
+     }
++
++    /**
++     * Whether this actor overwrites whatever already occupies a cell when it is
++     * placed onto the field. Returns a constant per actor type (it reads no
++     * instance state), so it is safe for Field to consult even while the actor
++     * is still being constructed. This lets Field decide placement without
++     * referring to concrete actor classes. By default actors do not overwrite.
++     *
++     * @return true if this actor may overwrite an existing occupant when placed.
++     */
++    protected boolean canOverwrite()
++    {
++        return false;
++    }
+ }
+diff --git a/Animal.java b/Animal.java
+index 9867a90..f3e308e 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -52,7 +52,7 @@ public abstract class Animal extends Actor
+      * @param infected Boolean value determining if the animal is infected or not.
+      * 
+      */
+-    protected Animal(Field field, Location location, boolean infected)
++    protected Animal(Field<Actor> field, Location location, boolean infected)
+     {
+         super(field, location);
+         // infects animal if infected.
+@@ -108,6 +108,18 @@ public abstract class Animal extends Actor
+         }
+     }
+ 
++    /**
++     * Animals overwrite whatever occupies a cell when they are placed (the
++     * previous behaviour of the {@code instanceof Animal} check in Field).
++     *
++     * @return true; animals may overwrite an existing occupant when placed.
++     */
++    @Override
++    protected boolean canOverwrite()
++    {
++        return true;
++    }
++
+     /**
+      * Sets the maximum age of the animal.
+      * 
+@@ -201,7 +213,7 @@ public abstract class Animal extends Actor
+      * @param field The field the object is in.
+      * @return Boolean value, true if mate is found and is of age, false otherwise.
+      */
+-    private boolean canBreed(Field field) 
++    private boolean canBreed(Field<Actor> field) 
+     {
+         // Find all adjacent locations.
+         List<Location> adjacentLocations = field.adjacentLocations(getLocation()); 
+@@ -273,7 +285,7 @@ public abstract class Animal extends Actor
+      */
+     protected Location findFood(List<Class> listOfPrey)
+     {
+-        Field field = getField();
++        Field<Actor> field = getField();
+         List<Location> adjacent = field.adjacentLocations(getLocation());
+         List<Location> availablePrey = new ArrayList<>();
+ 
+@@ -336,7 +348,7 @@ public abstract class Animal extends Actor
+      * @param field The field the object is currently in.
+      * @return The number of births (may be zero).
+      */
+-    private int breed(Field field) 
++    private int breed(Field<Actor> field) 
+     {
+         int births = 0;
+         if (canBreed(field) && rand.nextDouble() <= BREEDING_PROBABILITY * effectBreedingProbability()) {
+@@ -355,7 +367,7 @@ public abstract class Animal extends Actor
+     {
+         // New animals are born into adjacent locations.
+         // Get a list of adjacent free locations.
+-        Field field = getField();
++        Field<Actor> field = getField();
+         List<Location> free = field.getFreeAdjacentLocations(getLocation());
+         int births = breed(field);
+         for (int b = 0; b < births && !free.isEmpty(); b++) {
+@@ -373,7 +385,7 @@ public abstract class Animal extends Actor
+      * @param location The location the offspring is born at.
+      * @return A newly born animal of the same species as this one.
+      */
+-    protected abstract Animal createOffspring(Field field, Location location);
++    protected abstract Animal createOffspring(Field<Actor> field, Location location);
+ 
+     /**
+      * If infected, checks for adjacent animals, providing the chance for them to be infected.
+diff --git a/Dodo.java b/Dodo.java
+index 84e554b..392f183 100644
+--- a/Dodo.java
++++ b/Dodo.java
+@@ -43,7 +43,7 @@ public class Dodo extends Animal
+      * @param location  The location within the field.
+      * @param infected  Boolean value determining if the animal is infected or not
+      */
+-    protected Dodo(boolean randomAge, Field field, Location location, boolean infected)
++    protected Dodo(boolean randomAge, Field<Actor> field, Location location, boolean infected)
+     {
+         super(field, location, infected);
+ 
+@@ -59,7 +59,7 @@ public class Dodo extends Animal
+      * @param location The location the offspring is born at.
+      * @return A new born dodo.
+      */
+-    protected Animal createOffspring(Field field, Location location)
++    protected Animal createOffspring(Field<Actor> field, Location location)
+     {
+         return new Dodo(false, field, location, false);
+     }
+@@ -115,7 +115,7 @@ public class Dodo extends Animal
+      */
+     private Location chargePredator()
+     {
+-        Field field = getField();
++        Field<Actor> field = getField();
+         List<Location> adjacent = field.adjacentLocations(getLocation());
+         List<Location> charge = new ArrayList<>();
+ 
+diff --git a/Field.java b/Field.java
+index 80f35a7..9b43f72 100644
+--- a/Field.java
++++ b/Field.java
+@@ -10,8 +10,8 @@ import java.util.Random;
+  *
+  * @version (28/02/2022)
+  */
+-public class Field
+-{   
++public class Field<T extends Actor>
++{
+     // A random number generator for providing random locations.
+     private static final Random rand = Randomizer.getRandom();
+ 
+@@ -26,19 +26,22 @@ public class Field
+     // The depth and width of the field.
+     private int depth, width;
+     // Storage for the actors.
+-    private Object[][] field;
++    private T[][] field;
+ 
+     /**
+      * Represent a field of the given dimensions.
+-     * 
++     *
+      * @param depth The depth of the field.
+      * @param width The width of the field.
+      */
++    @SuppressWarnings("unchecked")
+     public Field(int depth, int width)
+     {
+         this.depth = depth;
+         this.width = width;
+-        field = new Object[depth][width];
++        // The backing array is created as Actor[][] (the type-parameter bound)
++        // and viewed as T[][]; only values of type T are ever stored in it.
++        field = (T[][]) new Actor[depth][width];
+     }
+ 
+     /**
+@@ -46,7 +49,7 @@ public class Field
+      */
+     public void clear()
+     {
+-        for(Object[] row : field) {
++        for(T[] row : field) {
+             Arrays.fill(row, null);
+         }
+     }
+@@ -70,7 +73,7 @@ public class Field
+      * @param row Row coordinate of the location.
+      * @param col Column coordinate of the location.
+      */
+-    public void place(Object actor, int row, int col)
++    public void place(T actor, int row, int col)
+     {
+         place(actor, new Location(row, col));
+     }
+@@ -83,9 +86,14 @@ public class Field
+      * @param actor The actor to be placed.
+      * @param location Where to place the actor.
+      */
+-    public void place(Object actor, Location location)
++    public void place(T actor, Location location)
+     {
+-        if((actor instanceof Animal) || (getObjectAt(location) == null)){
++        // An actor that "can overwrite" (e.g. an animal) may replace whatever is
++        // already there; otherwise (e.g. a plant) it may only occupy an empty
++        // cell. canOverwrite is a polymorphic per-type constant, so this keeps
++        // Field independent of concrete actor types (it previously checked
++        // `actor instanceof Animal`).
++        if((actor != null && actor.canOverwrite()) || (getObjectAt(location) == null)){
+             field[location.getRow()][location.getCol()] = actor;
+         }
+     }
+@@ -96,7 +104,7 @@ public class Field
+      * @param location Where in the field.
+      * @return The actor at the given location, or null if there is none.
+      */
+-    public Object getObjectAt(Location location)
++    public T getObjectAt(Location location)
+     {
+         return getObjectAt(location.getRow(), location.getCol());
+     }
+@@ -108,7 +116,7 @@ public class Field
+      * @param col The desired column.
+      * @return The actor at the given location, or null if there is none.
+      */
+-    public Object getObjectAt(int row, int col)
++    public T getObjectAt(int row, int col)
+     {
+         return field[row][col];
+     }
+@@ -139,13 +147,14 @@ public class Field
+         List<Location> free = new LinkedList<>();
+         List<Location> adjacent = adjacentLocations(location);
+         // if actor at current location allows for overlap (for weather, disease, etc.)
+-        if (((Actor) getObjectAt(location)).getOverlap() ){
++        if (getObjectAt(location).getOverlap()){
+             return adjacent;
+         }
+         else{
+             for(Location next : adjacent) {
+                 // if no actor at next location or actor at next location allows for overlap
+-                if ((getObjectAt(next) == null) || (((Actor)getObjectAt(next)).getOverlap() ) ) {
++                T occupant = getObjectAt(next);
++                if ((occupant == null) || (occupant.getOverlap())) {
+                     free.add(next);
+                 }
+             }
+diff --git a/FieldStats.java b/FieldStats.java
+index 97b473e..daa412c 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -35,7 +35,7 @@ public class FieldStats
+      * 
+      * @return A string describing what is in the field.
+      */
+-    public String getPopulationDetails(Field field)
++    public String getPopulationDetails(Field<Actor> field)
+     {
+         StringBuffer buffer = new StringBuffer();
+         if(!countsValid) {
+@@ -95,7 +95,7 @@ public class FieldStats
+      * 
+      * @return true If there is more than one species alive.
+      */
+-    public boolean isViable(Field field)
++    public boolean isViable(Field<Actor> field)
+     {
+         // How many counts are non-zero.
+         int nonZero = 0;
+@@ -123,7 +123,7 @@ public class FieldStats
+      * 
+      * @param field The field to generate the stats for.
+      */
+-    private void generateCounts(Field field)
++    private void generateCounts(Field<Actor> field)
+     {
+         reset();
+         for(int row = 0; row < field.getDepth(); row++) {
+diff --git a/Human.java b/Human.java
+index 90f1a3b..17107ad 100644
+--- a/Human.java
++++ b/Human.java
+@@ -41,7 +41,7 @@ public class Human extends Animal
+      * @param location  The location within the field.
+      * @param infected  Boolean value determining if the animal is infected or not.
+      */
+-    protected Human(boolean randomAge, Field field, Location location, boolean infected)
++    protected Human(boolean randomAge, Field<Actor> field, Location location, boolean infected)
+     {
+         super(field, location, infected);
+ 
+@@ -57,7 +57,7 @@ public class Human extends Animal
+      * @param location The location the offspring is born at.
+      * @return A new born human.
+      */
+-    protected Animal createOffspring(Field field, Location location)
++    protected Animal createOffspring(Field<Actor> field, Location location)
+     {
+         return new Human(false, field, location, false);
+     }
+diff --git a/Monkey.java b/Monkey.java
+index e5beae6..aa00012 100644
+--- a/Monkey.java
++++ b/Monkey.java
+@@ -40,7 +40,7 @@ public class Monkey extends Animal
+      * @param location  The location within the field.
+      * @param infected  Boolean value determining if the animal is infected or not
+      */
+-    protected Monkey(boolean randomAge, Field field, Location location, boolean infected)
++    protected Monkey(boolean randomAge, Field<Actor> field, Location location, boolean infected)
+     {
+         super(field, location, infected);
+ 
+@@ -56,7 +56,7 @@ public class Monkey extends Animal
+      * @param location The location the offspring is born at.
+      * @return A new born monkey.
+      */
+-    protected Animal createOffspring(Field field, Location location)
++    protected Animal createOffspring(Field<Actor> field, Location location)
+     {
+         return new Monkey(false, field, location, false);
+     }
+diff --git a/Pig.java b/Pig.java
+index ac38831..da44ec1 100644
+--- a/Pig.java
++++ b/Pig.java
+@@ -40,7 +40,7 @@ public class Pig extends Animal
+      * @param location  The location within the field.
+      * @param infected  Boolean value determining if the animal is infected or not
+      */
+-    protected Pig(boolean randomAge, Field field, Location location, boolean infected)
++    protected Pig(boolean randomAge, Field<Actor> field, Location location, boolean infected)
+     {
+         super(field, location, infected);
+ 
+@@ -56,7 +56,7 @@ public class Pig extends Animal
+      * @param location The location the offspring is born at.
+      * @return A new born pig.
+      */
+-    protected Animal createOffspring(Field field, Location location)
++    protected Animal createOffspring(Field<Actor> field, Location location)
+     {
+         return new Pig(false, field, location, false);
+     }
+diff --git a/Plant.java b/Plant.java
+index 760b631..816be5d 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -38,7 +38,7 @@ public class Plant extends Actor
+      * @param location  The location within the field.
+      * @param overlap   Whether or not an actor is allowed to overlap with other actors.
+      */
+-    public Plant(boolean randomAge, Field field, Location location)
++    public Plant(boolean randomAge, Field<Actor> field, Location location)
+     {
+         super(field, location);
+         setOverlap(true);
+@@ -102,7 +102,7 @@ public class Plant extends Actor
+     {
+         // New plants are born into adjacent locations.
+         // Get a list of adjacent free locations.
+-        Field field = getField();
++        Field<Actor> field = getField();
+         List<Location> free = field.getFreeAdjacentLocations(getLocation());
+         int births = breed();
+         for(int b = 0; b < births && free.size() > 0; b++) {
+diff --git a/Simulator.java b/Simulator.java
+index 386a096..a08dec9 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -46,7 +46,7 @@ public class Simulator
+     // List of actors in the field.
+     private List<Actor> actors;
+     // The current state of the field.
+-    private Field field;
++    private Field<Actor> field;
+     // The current step of the simulation.
+     private int step;
+     // The number of steps the simulation will make
+@@ -98,7 +98,7 @@ public class Simulator
+ 
+         executorService = new Executor(Runtime.getRuntime().availableProcessors());
+         actors = new ArrayList<>();
+-        field = new Field(depth, width);
++        field = new Field<>(depth, width);
+         this.numSteps = 0;
+         // 1000 milliseconds
+         timeDelayIndex = 2;
+@@ -452,7 +452,7 @@ public class Simulator
+      * 
+      * @return The field used in the current simulation
+      */
+-    public Field getField()
++    public Field<Actor> getField()
+     {
+         return field;
+     }
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 5369edb..b7fb408 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -236,7 +236,7 @@ public class SimulatorView extends JFrame
+      * @param actorClass The actor's Class object, 
+      * @param field The field in the simulator view.
+      */
+-    private void toggleColor(Class actorClass, Field field)
++    private void toggleColor(Class actorClass, Field<Actor> field)
+     {
+         if(EMPTY_COLOR.equals(colors.get(actorClass))){
+             colors.replace(actorClass, baseColors.get(actorClass));
+@@ -253,7 +253,7 @@ public class SimulatorView extends JFrame
+      * 
+      * @param field The field in the simulator view.
+      */
+-    private void resetViewColor(Field field){
++    private void resetViewColor(Field<Actor> field){
+         baseColors.forEach((key,entry) -> colors.replace(key,entry)); 
+         updatePanel(field, false);
+     }
+@@ -295,7 +295,7 @@ public class SimulatorView extends JFrame
+      * @param weather The current weather of the board.
+      * @param virusCount The number of currently infected animals.
+      */
+-    public void showStatus(int step, int totalSteps, Field field, Weather weather, int virusCount)
++    public void showStatus(int step, int totalSteps, Field<Actor> field, Weather weather, int virusCount)
+     {
+         if(!isVisible()) {
+             setVisible(true);
+@@ -320,7 +320,7 @@ public class SimulatorView extends JFrame
+      * @param field The field the viewer is currently representing.
+      * @param newStep Defines whether a new step has occured or not.
+      */
+-    private void updatePanel(Field field, boolean newStep)
++    private void updatePanel(Field<Actor> field, boolean newStep)
+     {
+         fieldView.preparePaint();
+ 
+@@ -350,7 +350,7 @@ public class SimulatorView extends JFrame
+      * @param field The field the viewer is displaying.
+      * @return true If there is more than one species alive.
+      */
+-    public boolean isViable(Field field)
++    public boolean isViable(Field<Actor> field)
+     {
+         return stats.isViable(field);
+     }
+diff --git a/Species.java b/Species.java
+index b1a5aa3..0c3f95f 100644
+--- a/Species.java
++++ b/Species.java
+@@ -23,7 +23,7 @@ public enum Species
+     @FunctionalInterface
+     private interface Spawner
+     {
+-        Animal spawn(Field field, Location location, boolean infected);
++        Animal spawn(Field<Actor> field, Location location, boolean infected);
+     }
+ 
+     // The probability this species is created at any given grid position.
+@@ -53,7 +53,7 @@ public enum Species
+      * @param infected Whether the new animal starts infected.
+      * @return The newly created animal.
+      */
+-    public Animal create(Field field, Location location, boolean infected)
++    public Animal create(Field<Actor> field, Location location, boolean infected)
+     {
+         return spawner.spawn(field, location, infected);
+     }
+diff --git a/Tortoise.java b/Tortoise.java
+index 939544e..b54072e 100644
+--- a/Tortoise.java
++++ b/Tortoise.java
+@@ -41,7 +41,7 @@ public class Tortoise extends Animal
+      * @param overlap   Whether or not an actor is allowed to overlap with other actors
+      * @param infected  Boolean value determining if the animal is infected or not
+      */
+-    protected Tortoise(boolean randomAge, Field field, Location location, boolean infected)
++    protected Tortoise(boolean randomAge, Field<Actor> field, Location location, boolean infected)
+     {
+         super(field, location, infected);
+ 
+@@ -57,7 +57,7 @@ public class Tortoise extends Animal
+      * @param location The location the offspring is born at.
+      * @return A new born tortoise.
+      */
+-    protected Animal createOffspring(Field field, Location location)
++    protected Animal createOffspring(Field<Actor> field, Location location)
+     {
+         return new Tortoise(false, field, location, false);
+     }

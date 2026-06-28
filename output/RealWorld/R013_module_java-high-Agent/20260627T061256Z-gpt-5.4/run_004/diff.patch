@@ -1,0 +1,452 @@
+diff --git a/Animal.java b/Animal.java
+index 519fe77..60b0df5 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -1,7 +1,5 @@
+ import java.util.List;
+ import java.util.Random;
+-import java.util.function.Consumer;
+-import java.util.function.Predicate;
+ 
+ /**
+  * A class representing shared characteristics of animals.
+@@ -102,30 +100,6 @@ public abstract class Animal extends Organism
+         return gender;
+     }
+ 
+-    /**
+-     * Return adjacent locations around this animal.
+-     */
+-    protected final List<Location> adjacentLocations(int radius)
+-    {
+-        return getField().adjacentLocations(getLocation(), radius);
+-    }
+-
+-    /**
+-     * Return free adjacent locations around this animal.
+-     */
+-    protected final List<Location> freeAdjacentLocations()
+-    {
+-        return getField().getFreeAdjacentLocations(getLocation());
+-    }
+-
+-    /**
+-     * Find a free adjacent location around this animal.
+-     */
+-    protected final Location freeAdjacentLocation()
+-    {
+-        return getField().freeAdjacentLocation(getLocation());
+-    }
+-
+     /**
+      * Move to the new location or die if there is nowhere to go.
+      */
+@@ -244,46 +218,11 @@ public abstract class Animal extends Organism
+     protected final boolean hasAdjacentMate(Class<? extends Animal> animalClass, int radius)
+     {
+         for(Location where : adjacentLocations(radius)) {
+-            Object animal = getField().getObjectAt(where);
+-            if(animalClass.isInstance(animal)) {
+-                Animal mate = (Animal) animal;
+-                if(mate.getGender() != getGender()) {
+-                    return true;
+-                }
++            Animal mate = getObjectAt(where, animalClass);
++            if(mate != null && mate.getGender() != getGender()) {
++                return true;
+             }
+         }
+         return false;
+     }
+-
+-    /**
+-     * Find the first adjacent location containing a matching target.
+-     */
+-    protected final <T> Location findAdjacentLocation(Class<T> targetClass, int radius,
+-                                                      Predicate<T> predicate)
+-    {
+-        for(Location where : adjacentLocations(radius)) {
+-            Object target = getField().getObjectAt(where);
+-            if(targetClass.isInstance(target)) {
+-                T candidate = targetClass.cast(target);
+-                if(predicate.test(candidate)) {
+-                    return where;
+-                }
+-            }
+-        }
+-        return null;
+-    }
+-
+-    /**
+-     * Apply an action to each adjacent matching target.
+-     */
+-    protected final <T> void forEachAdjacent(Class<T> targetClass, int radius,
+-                                             Consumer<T> action)
+-    {
+-        for(Location where : adjacentLocations(radius)) {
+-            Object target = getField().getObjectAt(where);
+-            if(targetClass.isInstance(target)) {
+-                action.accept(targetClass.cast(target));
+-            }
+-        }
+-    }
+ }
+diff --git a/Field.java b/Field.java
+index 0fdeeca..7e7c76b 100644
+--- a/Field.java
++++ b/Field.java
+@@ -1,5 +1,4 @@
+ import java.util.Collections;
+-import java.util.Iterator;
+ import java.util.LinkedList;
+ import java.util.List;
+ import java.util.Random;
+@@ -87,6 +86,17 @@ public class Field
+     {
+         return getObjectAt(location.getRow(), location.getCol());
+     }
++
++    /**
++     * Return the object at the given location if it matches the requested type.
++     * @param location Where in the field.
++     * @param type The expected type.
++     * @return The object at the location cast to the given type, or null.
++     */
++    public <T> T getObjectAt(Location location, Class<T> type)
++    {
++        return getObjectAt(location.getRow(), location.getCol(), type);
++    }
+     
+     /**
+      * Return the animal at the given location, if any.
+@@ -98,6 +108,22 @@ public class Field
+     {
+         return field[row][col];
+     }
++
++    /**
++     * Return the object at the given location if it matches the requested type.
++     * @param row The desired row.
++     * @param col The desired column.
++     * @param type The expected type.
++     * @return The object at the location cast to the given type, or null.
++     */
++    public <T> T getObjectAt(int row, int col, Class<T> type)
++    {
++        Object object = getObjectAt(row, col);
++        if(type.isInstance(object)) {
++            return type.cast(object);
++        }
++        return null;
++    }
+     
+     /**
+      * Generate a random location that is adjacent to the
+diff --git a/Grass.java b/Grass.java
+index d478692..abd69b5 100644
+--- a/Grass.java
++++ b/Grass.java
+@@ -1,5 +1,4 @@
+ import java.util.List;
+-import java.util.Iterator;
+ import java.util.Random;
+ 
+ /**
+@@ -64,24 +63,10 @@ public class Grass extends Plant
+                 steppeFired = false;
+             }
+             else {
+-                getSteppeFire();
+-                if (steppeFire()==true && getLocation() != null) {                
+-                    Field field = getField();
+-                    List<Location> adjacent = field.adjacentLocations(getLocation(), 1);
+-                    Iterator<Location> it = adjacent.iterator();
+-                    while(it.hasNext()) {
+-                        Location where = it.next();
+-                        Object creature = field.getObjectAt(where);
+-                        if(creature instanceof Grass) {
+-                            Grass grass = (Grass) creature;
+-                            grass.getSteppeFire();                        
+-                        }
+-                        if(creature instanceof Animal) {
+-                            Animal animal = (Animal) creature;
+-                            animal.burn();                        
+-                        }
+-                    }
+-            
++                ignite();
++                if(steppeFire()) {
++                    forEachAdjacent(Grass.class, 1, Grass::ignite);
++                    forEachAdjacent(Animal.class, 1, Animal::burn);
+                     decrementSize();                
+                 }
+             }
+@@ -113,7 +98,7 @@ public class Grass extends Plant
+     /**
+      * Grass can become steppe fire.
+      */
+-    private void getSteppeFire()
++    private void ignite()
+     {
+         if(rand.nextDouble() <= STEPPE_FIRE_PROBABILITY) {
+             steppeFired = true;
+diff --git a/Organism.java b/Organism.java
+index 89ac5a8..175fa17 100644
+--- a/Organism.java
++++ b/Organism.java
+@@ -1,3 +1,7 @@
++import java.util.List;
++import java.util.function.Consumer;
++import java.util.function.Predicate;
++
+ /**
+  * Shared lifecycle and field-position state for all organisms in the
+  * simulation.
+@@ -77,4 +81,65 @@ public abstract class Organism
+     {
+         return field;
+     }
++
++    /**
++     * Return adjacent locations around this organism.
++     */
++    protected final List<Location> adjacentLocations(int radius)
++    {
++        return field.adjacentLocations(location, radius);
++    }
++
++    /**
++     * Return free adjacent locations around this organism.
++     */
++    protected final List<Location> freeAdjacentLocations()
++    {
++        return field.getFreeAdjacentLocations(location);
++    }
++
++    /**
++     * Find a free adjacent location around this organism.
++     */
++    protected final Location freeAdjacentLocation()
++    {
++        return field.freeAdjacentLocation(location);
++    }
++
++    /**
++     * Return the object at a location if it matches the requested type.
++     */
++    protected final <T> T getObjectAt(Location targetLocation, Class<T> type)
++    {
++        return field.getObjectAt(targetLocation, type);
++    }
++
++    /**
++     * Find the first adjacent location containing a matching target.
++     */
++    protected final <T> Location findAdjacentLocation(Class<T> targetClass, int radius,
++                                                      Predicate<T> predicate)
++    {
++        for(Location where : adjacentLocations(radius)) {
++            T candidate = getObjectAt(where, targetClass);
++            if(candidate != null && predicate.test(candidate)) {
++                return where;
++            }
++        }
++        return null;
++    }
++
++    /**
++     * Apply an action to each adjacent matching target.
++     */
++    protected final <T> void forEachAdjacent(Class<T> targetClass, int radius,
++                                             Consumer<T> action)
++    {
++        for(Location where : adjacentLocations(radius)) {
++            T candidate = getObjectAt(where, targetClass);
++            if(candidate != null) {
++                action.accept(candidate);
++            }
++        }
++    }
+ }
+diff --git a/Simulator.java b/Simulator.java
+index 17e5a7d..9cb277c 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -3,6 +3,8 @@ import java.util.List;
+ import java.util.ArrayList;
+ import java.util.Iterator;
+ import java.awt.Color;
++import java.util.Arrays;
++import java.util.function.Consumer;
+ import java.util.function.Function;
+ 
+ /**
+@@ -43,6 +45,8 @@ public class Simulator
+     private Weather weather;
+     // A graphical view of the simulation.
+     private SimulatorView view;
++    // Species definitions used for population and color registration.
++    private List<SpeciesDefinition> speciesDefinitions;
+     
+     /**
+      * Construct a simulation field with default size.
+@@ -72,6 +76,7 @@ public class Simulator
+ 
+         // Create a view of the state of each location in the field.
+         view = new SimulatorView(depth, width);
++        speciesDefinitions = createSpeciesDefinitions();
+         configureViewColors();
+         
+         // Setup a valid starting point.
+@@ -160,28 +165,12 @@ public class Simulator
+         field.clear();
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+-                if(tryPopulateAnimal(rand, LION_CREATION_PROBABILITY,
+-                                     location -> new Lion(true, field, location), row, col)) {
+-                    continue;
++                Location location = new Location(row, col);
++                for(SpeciesDefinition species : speciesDefinitions) {
++                    if(species.tryPopulate(rand, location)) {
++                        break;
++                    }
+                 }
+-                if(tryPopulateAnimal(rand, DEER_CREATION_PROBABILITY,
+-                                     location -> new Deer(true, field, location), row, col)) {
+-                    continue;
+-                }
+-                if(tryPopulateAnimal(rand, OWL_CREATION_PROBABILITY,
+-                                     location -> new Owl(true, field, location), row, col)) {
+-                    continue;
+-                }
+-                if(tryPopulateAnimal(rand, MOUSE_CREATION_PROBABILITY,
+-                                     location -> new Mouse(true, field, location), row, col)) {
+-                    continue;
+-                }
+-                if(tryPopulateAnimal(rand, CAT_CREATION_PROBABILITY,
+-                                     location -> new Cat(true, field, location), row, col)) {
+-                    continue;
+-                }
+-                tryPopulatePlant(rand, GRASS_CREATION_PROBABILITY,
+-                                 location -> new Grass(true, field, location), row, col);
+             }
+         }
+     }
+@@ -214,39 +203,94 @@ public class Simulator
+      */
+     private void configureViewColors()
+     {
+-        view.setColor(Deer.class, Color.BLUE);
+-        view.setColor(Lion.class, Color.RED);
+-        view.setColor(Mouse.class, Color.YELLOW);
+-        view.setColor(Owl.class, Color.ORANGE);
+-        view.setColor(Cat.class, Color.PINK);
+-        view.setColor(Grass.class, Color.GREEN);
++        for(SpeciesDefinition species : speciesDefinitions) {
++            species.configureView(view);
++        }
+     }
+ 
+     /**
+-     * Try to populate an animal into the given field location.
++     * Create the species definitions used by the simulation.
+      */
+-    private boolean tryPopulateAnimal(Random rand, double probability,
+-                                      Function<Location, Animal> factory,
+-                                      int row, int col)
++    private List<SpeciesDefinition> createSpeciesDefinitions()
+     {
+-        if(rand.nextDouble() <= probability) {
+-            animals.add(factory.apply(new Location(row, col)));
+-            return true;
+-        }
+-        return false;
++        return Arrays.asList(
++            animalSpecies(LION_CREATION_PROBABILITY, Lion.class, Color.RED,
++                          location -> new Lion(true, field, location)),
++            animalSpecies(DEER_CREATION_PROBABILITY, Deer.class, Color.BLUE,
++                          location -> new Deer(true, field, location)),
++            animalSpecies(OWL_CREATION_PROBABILITY, Owl.class, Color.ORANGE,
++                          location -> new Owl(true, field, location)),
++            animalSpecies(MOUSE_CREATION_PROBABILITY, Mouse.class, Color.YELLOW,
++                          location -> new Mouse(true, field, location)),
++            animalSpecies(CAT_CREATION_PROBABILITY, Cat.class, Color.PINK,
++                          location -> new Cat(true, field, location)),
++            plantSpecies(GRASS_CREATION_PROBABILITY, Grass.class, Color.GREEN,
++                         location -> new Grass(true, field, location))
++        );
++    }
++
++    /**
++     * Create an animal species definition.
++     */
++    private <T extends Animal> SpeciesDefinition animalSpecies(double probability, Class<T> type,
++                                                               Color color,
++                                                               Function<Location, T> factory)
++    {
++        return new SpeciesDefinition(probability, type, color, factory,
++                                     organism -> animals.add(type.cast(organism)));
+     }
+ 
+     /**
+-     * Try to populate a plant into the given field location.
++     * Create a plant species definition.
+      */
+-    private boolean tryPopulatePlant(Random rand, double probability,
+-                                     Function<Location, Plant> factory,
+-                                     int row, int col)
++    private <T extends Plant> SpeciesDefinition plantSpecies(double probability, Class<T> type,
++                                                             Color color,
++                                                             Function<Location, T> factory)
+     {
+-        if(rand.nextDouble() <= probability) {
+-            plants.add(factory.apply(new Location(row, col)));
+-            return true;
++        return new SpeciesDefinition(probability, type, color, factory,
++                                     organism -> plants.add(type.cast(organism)));
++    }
++
++    /**
++     * The population and presentation settings for one species.
++     */
++    private final class SpeciesDefinition
++    {
++        private final double creationProbability;
++        private final Class<? extends Organism> organismClass;
++        private final Color color;
++        private final Function<Location, ? extends Organism> factory;
++        private final Consumer<Organism> registrar;
++
++        private SpeciesDefinition(double creationProbability, Class<? extends Organism> organismClass,
++                                  Color color, Function<Location, ? extends Organism> factory,
++                                  Consumer<Organism> registrar)
++        {
++            this.creationProbability = creationProbability;
++            this.organismClass = organismClass;
++            this.color = color;
++            this.factory = factory;
++            this.registrar = registrar;
++        }
++
++        /**
++         * Register the species color with the view.
++         */
++        private void configureView(SimulatorView simulatorView)
++        {
++            simulatorView.setColor(organismClass, color);
++        }
++
++        /**
++         * Try to create a new organism at the given location.
++         */
++        private boolean tryPopulate(Random rand, Location location)
++        {
++            if(rand.nextDouble() <= creationProbability) {
++                registrar.accept(factory.apply(location));
++                return true;
++            }
++            return false;
+         }
+-        return false;
+     }
+ }

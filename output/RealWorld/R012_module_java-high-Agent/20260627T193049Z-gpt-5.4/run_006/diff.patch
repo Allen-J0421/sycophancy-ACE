@@ -1,0 +1,290 @@
+diff --git a/FieldStats.java b/FieldStats.java
+index ba8e2bb..e9f8d6f 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -5,22 +5,13 @@
+  */
+ public class FieldStats
+ {
+-    private final SimulationRulesEngine rules;
+-
+     /**
+-     * Construct a FieldStats object.
+-     */
+-    public FieldStats(SimulationRulesEngine rules)
+-    {
+-        this.rules = rules;
+-    }
+-
+-    /**
+-     * Get details of what is in the current snapshot.
++     * Get details of what is in the current simulation state.
+      * @return A string describing the visible field state.
+      */
+-    public String getPopulationDetails(FieldSnapshot snapshot, int step)
++    public String getPopulationDetails(SimulationState state)
+     {
++        FieldSnapshot snapshot = state.getFieldSnapshot();
+         StringBuffer buffer = new StringBuffer();
+         for(Species species : snapshot.getPresentSpecies()) {
+             buffer.append(species.getDisplayName());
+@@ -28,17 +19,8 @@ public class FieldStats
+             buffer.append(snapshot.getPopulationCount(species));
+             buffer.append(' ');
+         }
+-        buffer.append("Weather: " + rules.getCurrentWeather());
+-        buffer.append(" Time: " + rules.getTimeOfDay(step).getDisplayName());
++        buffer.append("Weather: " + state.getCurrentWeather());
++        buffer.append(" Time: " + state.getTimeOfDay().getDisplayName());
+         return buffer.toString();
+     }
+-    
+-    /**
+-     * Determine whether the simulation is still viable.
+-     * @return true If there is more than one species alive.
+-     */
+-    public boolean isViable(FieldSnapshot snapshot)
+-    {
+-        return snapshot.getActiveSpeciesCount() > 1;
+-    }
+ }
+diff --git a/HeadlessSimulationView.java b/HeadlessSimulationView.java
+index 13a32e6..b14b8f6 100644
+--- a/HeadlessSimulationView.java
++++ b/HeadlessSimulationView.java
+@@ -17,7 +17,7 @@ public class HeadlessSimulationView implements SimulationDisplay
+     public HeadlessSimulationView(SimulationRulesEngine rules)
+     {
+         colors = new LinkedHashMap<>();
+-        stats = new FieldStats(rules);
++        stats = new FieldStats();
+         infoText = "";
+         populationText = "";
+     }
+@@ -32,15 +32,10 @@ public class HeadlessSimulationView implements SimulationDisplay
+         infoText = text;
+     }
+ 
+-    public void showStatus(int step, FieldSnapshot snapshot)
++    public void showStatus(SimulationState state)
+     {
+-        this.step = step;
+-        populationText = stats.getPopulationDetails(snapshot, step);
+-    }
+-
+-    public boolean isViable(FieldSnapshot snapshot)
+-    {
+-        return stats.isViable(snapshot);
++        step = state.getStep();
++        populationText = stats.getPopulationDetails(state);
+     }
+ 
+     public String getInfoText()
+diff --git a/SimulationDisplay.java b/SimulationDisplay.java
+index edcb397..a32d7fc 100644
+--- a/SimulationDisplay.java
++++ b/SimulationDisplay.java
+@@ -9,7 +9,5 @@ public interface SimulationDisplay
+ 
+     void setInfoText(String text);
+ 
+-    void showStatus(int step, FieldSnapshot snapshot);
+-
+-    boolean isViable(FieldSnapshot snapshot);
++    void showStatus(SimulationState state);
+ }
+diff --git a/SimulationState.java b/SimulationState.java
+new file mode 100644
+index 0000000..e097ec6
+--- /dev/null
++++ b/SimulationState.java
+@@ -0,0 +1,49 @@
++/**
++ * Immutable query object describing the current simulation state.
++ *
++ * @version 2022.03.02
++ */
++public class SimulationState
++{
++    private final int step;
++    private final FieldSnapshot fieldSnapshot;
++    private final String currentWeather;
++    private final TimeOfDay timeOfDay;
++    private final boolean viable;
++
++    public SimulationState(int step, FieldSnapshot fieldSnapshot,
++                           String currentWeather, TimeOfDay timeOfDay,
++                           boolean viable)
++    {
++        this.step = step;
++        this.fieldSnapshot = fieldSnapshot;
++        this.currentWeather = currentWeather;
++        this.timeOfDay = timeOfDay;
++        this.viable = viable;
++    }
++
++    public int getStep()
++    {
++        return step;
++    }
++
++    public FieldSnapshot getFieldSnapshot()
++    {
++        return fieldSnapshot;
++    }
++
++    public String getCurrentWeather()
++    {
++        return currentWeather;
++    }
++
++    public TimeOfDay getTimeOfDay()
++    {
++        return timeOfDay;
++    }
++
++    public boolean isViable()
++    {
++        return viable;
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index e7eda74..639d1e3 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -132,6 +132,40 @@ public class Simulator
+     {
+         return step;
+     }
++
++    /**
++     * Return an immutable view of the current simulation state.
++     *
++     * @return The current simulation state.
++     */
++    public SimulationState getState()
++    {
++        FieldSnapshot snapshot = field.createSnapshot();
++        return new SimulationState(step, snapshot,
++                                   rules.getCurrentWeather(),
++                                   rules.getTimeOfDay(step),
++                                   snapshot.getActiveSpeciesCount() > 1);
++    }
++
++    /**
++     * Return a snapshot of the field without updating the display.
++     *
++     * @return The current field snapshot.
++     */
++    public FieldSnapshot getFieldSnapshot()
++    {
++        return getState().getFieldSnapshot();
++    }
++
++    /**
++     * Determine whether the simulation is still viable.
++     *
++     * @return True if more than one species is alive.
++     */
++    public boolean isViable()
++    {
++        return getState().isViable();
++    }
+     
+     // Functional methods
+     
+@@ -151,7 +185,7 @@ public class Simulator
+      */
+     public void simulate(int numSteps)
+     {
+-        for(int step = 1; step <= numSteps && view.isViable(field.createSnapshot()); step++) {
++        for(int step = 1; step <= numSteps && isViable(); step++) {
+             simulateOneStep();
+             //delay(60);   // uncomment this to run more slowly
+         }
+@@ -182,7 +216,7 @@ public class Simulator
+                    
+         // Add the newly born organisms to the main lists.
+         organisms.addAll(newOrganisms);
+-        view.showStatus(step, field.createSnapshot());
++        view.showStatus(getState());
+     }
+         
+     /**
+@@ -196,7 +230,7 @@ public class Simulator
+         rules.reset();
+         
+         // Show the starting state in the view.
+-        view.showStatus(step, field.createSnapshot());
++        view.showStatus(getState());
+     }
+     
+     /**
+diff --git a/SimulatorView.java b/SimulatorView.java
+index d949aa5..0f46fe0 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -34,13 +34,8 @@ public class SimulatorView implements SimulationDisplay
+         delegate.setInfoText(text);
+     }
+ 
+-    public void showStatus(int step, FieldSnapshot snapshot)
++    public void showStatus(SimulationState state)
+     {
+-        delegate.showStatus(step, snapshot);
+-    }
+-
+-    public boolean isViable(FieldSnapshot snapshot)
+-    {
+-        return delegate.isViable(snapshot);
++        delegate.showStatus(state);
+     }
+ }
+diff --git a/SwingSimulationView.java b/SwingSimulationView.java
+index 84081ac..8aa7b88 100644
+--- a/SwingSimulationView.java
++++ b/SwingSimulationView.java
+@@ -37,7 +37,7 @@ public class SwingSimulationView extends JFrame implements SimulationDisplay
+     public SwingSimulationView(int height, int width, SimulationRulesEngine rules)
+     {
+         this.rules = rules;
+-        stats = new FieldStats(rules);
++        stats = new FieldStats();
+         colors = new LinkedHashMap<>();
+ 
+         setTitle("Animal Simulation");
+@@ -91,13 +91,15 @@ public class SwingSimulationView extends JFrame implements SimulationDisplay
+         infoLabel.setText(text);
+     }
+ 
+-    public void showStatus(int step, FieldSnapshot snapshot)
++    public void showStatus(SimulationState state)
+     {
+         if(!isVisible()) {
+             setVisible(true);
+         }
+ 
+-        stepLabel.setText(STEP_PREFIX + step);
++        FieldSnapshot snapshot = state.getFieldSnapshot();
++
++        stepLabel.setText(STEP_PREFIX + state.getStep());
+         fieldView.preparePaint();
+ 
+         for(int row = 0; row < snapshot.getDepth(); row++) {
+@@ -112,15 +114,10 @@ public class SwingSimulationView extends JFrame implements SimulationDisplay
+             }
+         }
+ 
+-        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(snapshot, step));
++        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(state));
+         fieldView.repaint();
+     }
+ 
+-    public boolean isViable(FieldSnapshot snapshot)
+-    {
+-        return stats.isViable(snapshot);
+-    }
+-
+     private void setSunny()
+     {
+         rules.setWeather("Sunny");

@@ -1,0 +1,310 @@
+diff --git a/Initializer.java b/Initializer.java
+index fecc402..1948c09 100644
+--- a/Initializer.java
++++ b/Initializer.java
+@@ -3,6 +3,7 @@ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.HashMap;
+ import java.util.List;
++import java.util.Map;
+ import java.util.Random;
+ 
+ /**
+@@ -33,8 +34,6 @@ public class Initializer
+     private ArrayList<Color> listOfColorsForAnimals;
+     // The index of the next color from the list used for an animal.
+     private int idxOfColorToUseNext;
+-    // List of species to evolve in the field.
+-    private List<Species> speciesToEvolveInSimulation;
+     // To read habitat related data.
+     private final HabitatCSVReader habitatReader;
+     // To read animal related data.
+@@ -58,7 +57,6 @@ public class Initializer
+      */
+     public Initializer()
+     {
+-        speciesToEvolveInSimulation = new ArrayList<>();
+         habitatReader = new HabitatCSVReader();
+         animalReader = new AnimalCSVReader();
+         plantReader = new PlantCSVReader();
+@@ -96,17 +94,21 @@ public class Initializer
+     {
+         SimulationStep simulatorStepCounter = new SimulationStep();
+         Field field = new Field(DEFAULT_DEPTH, DEFAULT_WIDTH);
+-        ClimateScenarios chosenClimateChangeScenario = createChosenClimateChangeScenario(scenarioName);
+-        Habitat simulationHabitat = createHabitat(chosenHabitat, simulatorStepCounter, chosenClimateChangeScenario);
+-        if (getNumberOfPlants() + getNumberOfAnimals(animalsToCreate) > calculateFieldArea()) {
+-            errorThrower.throwMessage("Too many animals were added for this habitat, please reduce the number of animals and try again");
++        Habitat simulationHabitat = createHabitat(chosenHabitat, simulatorStepCounter, createChosenClimateChangeScenario(scenarioName));
++        if (simulationHabitat == null) {
+             return null;
+         }
++
++        if (!validatePopulationCapacity(animalsToCreate)) {
++            return null;
++        }
++
++        List<Species> speciesToEvolveInSimulation = new ArrayList<>();
+         view = new SimulatorView(DEFAULT_DEPTH, DEFAULT_WIDTH, handler);
+-        populateWithAnimals(animalsToCreate, field);
+-        populateWithPlants(field);
++        populateWithAnimals(speciesToEvolveInSimulation, animalsToCreate, field);
++        populateWithPlants(speciesToEvolveInSimulation, field);
+         Time timeObject = new Time(simulatorStepCounter, DEFAULT_START_TIME);
+-        return new Simulator(simulationHabitat, timeObject ,speciesToEvolveInSimulation, field, simulatorStepCounter, view);
++        return new Simulator(simulationHabitat, timeObject, speciesToEvolveInSimulation, field, simulatorStepCounter, view);
+     }
+ 
+     /**
+@@ -119,16 +121,14 @@ public class Initializer
+      */
+     private Habitat createHabitat (String habitatName, SimulationStep simulatorStepCounter, ClimateScenarios climateChangeScenario)
+     {
+-        if (habitatName != null) {
+-            habitatReader.extractDataFor(habitatName);
+-            Habitat chosenHabitat = new Habitat(simulatorStepCounter, climateChangeScenario ,habitatReader.getSpringTemperatures(), habitatReader.getSummerTemperatures(), habitatReader.getAutumnTemperatures(), habitatReader.getWinterTemperatures());
+-            habitatPlantConcentration = habitatReader.getPlantConcentration();
+-            return chosenHabitat;
+-        }
+-        else {
++        if (habitatName == null) {
+             errorThrower.throwMessage("Habitat name was not specified successfully.");
+             return null;
+         }
++
++        habitatReader.extractDataFor(habitatName);
++        habitatPlantConcentration = habitatReader.getPlantConcentration();
++        return new Habitat(simulatorStepCounter, climateChangeScenario, habitatReader.getSpringTemperatures(), habitatReader.getSummerTemperatures(), habitatReader.getAutumnTemperatures(), habitatReader.getWinterTemperatures());
+     }
+ 
+     /**
+@@ -139,53 +139,76 @@ public class Initializer
+      * @param animalsToCreate (HashMap<String, Integer>) The names and number of chosen animals.
+      * @param field (Field) The field in which the animals will evolve.
+      */
+-    private void populateWithAnimals(HashMap<String, Integer> animalsToCreate, Field field)
++    private void populateWithAnimals(List<Species> speciesToPopulate, HashMap<String, Integer> animalsToCreate, Field field)
+     {
+         idxOfColorToUseNext = 0;
+-        Location freeLocationToPlaceAnimal;
+ 
+-        for(String animalName : animalsToCreate.keySet()) {
+-            animalReader.extractDataFor(animalName);
+-            if (animalsToCreate.get(animalName) != 0)
+-            {
+-                // Retrieve appropriate data.
+-                String name = animalReader.getName();
+-                int maximumTemperature = animalReader.getMaximumTemperature();
+-                int minimumTemperature = animalReader.getMinimumTemperature();
+-                int maxAge = animalReader.getMaximumAge();
+-                int breedingAge = animalReader.getBreedingAge();
+-                double breedingProbability = animalReader.getBreedingProbability();
+-                int maxLitterSize = animalReader.getMaxLitterSize();
+-                int nutritionalValue = animalReader.getNutritionalValue();
+-                boolean hibernates = animalReader.canHibernate();
+-                boolean isNocturnal = animalReader.isNocturnal();
++        for (Map.Entry<String, Integer> animalEntry : animalsToCreate.entrySet()) {
++            animalReader.extractDataFor(animalEntry.getKey());
++            int numberToCreate = animalEntry.getValue();
++            if (numberToCreate <= 0) {
++                continue;
++            }
+ 
+-                if (animalReader.isPredator()) {
+-                    // Predator object should be created, retrieving appropriate data.
+-                    int strength = animalReader.getStrength();
++            String speciesName = animalReader.getName();
++            addAnimalsForTemplateSpecies(speciesToPopulate, field, numberToCreate);
++            view.setColor(speciesName, listOfColorsForAnimals.get(idxOfColorToUseNext));
++            idxOfColorToUseNext++;
++        }
++    }
+ 
+-                    // Creating the right number of Predator objects.
+-                    for (int i = 0; i < animalsToCreate.get(animalName); i++) {
+-                        freeLocationToPlaceAnimal = findAvailableLocation(field);
+-                        Predator newPredator = new Predator(strength, field, freeLocationToPlaceAnimal, name, maximumTemperature, minimumTemperature, nutritionalValue, breedingProbability, maxAge, breedingAge, maxLitterSize, RANDOM_ANIMAL_AGE, hibernates, isNocturnal);
+-                        speciesToEvolveInSimulation.add(newPredator);
+-                    }
+-                }
+-                else {
+-                    // Animal object should be created
+-                    // Creating the right number of Animal objects.
+-                    for (int i = 0; i < animalsToCreate.get(animalName); i++) {
+-                        freeLocationToPlaceAnimal = findAvailableLocation(field);
+-                        Animal newAnimal = new Animal(field, freeLocationToPlaceAnimal, name, maximumTemperature, minimumTemperature, nutritionalValue, breedingProbability, maxAge, breedingAge, maxLitterSize, RANDOM_ANIMAL_AGE, hibernates, isNocturnal);
+-                        speciesToEvolveInSimulation.add(newAnimal);
+-                    }
+-                }
++    /**
++     * Create the requested number of animals or predators for the currently selected template species.
++     *
++     * @param speciesToPopulate the simulation species list.
++     * @param field the simulation field.
++     * @param numberToCreate the number of individuals to create.
++     */
++    private void addAnimalsForTemplateSpecies(List<Species> speciesToPopulate, Field field, int numberToCreate)
++    {
++        for (int i = 0; i < numberToCreate; i++) {
++            Species createdSpecies = createAnimalFromTemplate(field);
++            speciesToPopulate.add(createdSpecies);
++        }
++    }
+ 
+-                // Setting the color for this species.
+-                view.setColor(name, listOfColorsForAnimals.get(idxOfColorToUseNext));
+-                idxOfColorToUseNext ++;
+-            }
++    /**
++     * Create one animal or predator instance from the currently loaded animal template.
++     *
++     * @param field the simulation field.
++     * @return the created species instance.
++     */
++    private Species createAnimalFromTemplate(Field field)
++    {
++        Location location = findAvailableLocation(field);
++        if (animalReader.isPredator()) {
++            return createPredator(field, location);
+         }
++        return createAnimal(field, location);
++    }
++
++    /**
++     * Create an animal from the currently loaded template.
++     *
++     * @param field the simulation field.
++     * @param location the location where the animal will be placed.
++     * @return the created animal.
++     */
++    private Animal createAnimal(Field field, Location location)
++    {
++        return new Animal(field, location, animalReader.getName(), animalReader.getMaximumTemperature(), animalReader.getMinimumTemperature(), animalReader.getNutritionalValue(), animalReader.getBreedingProbability(), animalReader.getMaximumAge(), animalReader.getBreedingAge(), animalReader.getMaxLitterSize(), RANDOM_ANIMAL_AGE, animalReader.canHibernate(), animalReader.isNocturnal());
++    }
++
++    /**
++     * Create a predator from the currently loaded template.
++     *
++     * @param field the simulation field.
++     * @param location the location where the predator will be placed.
++     * @return the created predator.
++     */
++    private Predator createPredator(Field field, Location location)
++    {
++        return new Predator(animalReader.getStrength(), field, location, animalReader.getName(), animalReader.getMaximumTemperature(), animalReader.getMinimumTemperature(), animalReader.getNutritionalValue(), animalReader.getBreedingProbability(), animalReader.getMaximumAge(), animalReader.getBreedingAge(), animalReader.getMaxLitterSize(), RANDOM_ANIMAL_AGE, animalReader.canHibernate(), animalReader.isNocturnal());
+     }
+ 
+     /**
+@@ -197,20 +220,20 @@ public class Initializer
+      */
+     private ClimateScenarios createChosenClimateChangeScenario(String scenarioName)
+     {
+-        ClimateScenarios chosenScenario;
+-        if (scenarioName.equals(CLIMATE_CHANGE_SCENARIO_NAMES.get(3))) {
+-            chosenScenario = ClimateScenarios.SCENARIO4;
+-        }
+-        else if (scenarioName.equals(CLIMATE_CHANGE_SCENARIO_NAMES.get(2))) {
+-            chosenScenario = ClimateScenarios.SCENARIO3;
+-        }
+-        else if (scenarioName.equals(CLIMATE_CHANGE_SCENARIO_NAMES.get(1))) {
+-            chosenScenario = ClimateScenarios.SCENARIO2;
++        if (scenarioName == null) {
++            return ClimateScenarios.SCENARIO1;
+         }
+-        else{
+-            chosenScenario = ClimateScenarios.SCENARIO1;
++
++        switch (scenarioName) {
++            case "high":
++                return ClimateScenarios.SCENARIO4;
++            case "medium":
++                return ClimateScenarios.SCENARIO3;
++            case "low":
++                return ClimateScenarios.SCENARIO2;
++            default:
++                return ClimateScenarios.SCENARIO1;
+         }
+-        return chosenScenario;
+     }
+ 
+     /**
+@@ -247,9 +270,8 @@ public class Initializer
+      *
+      * @param field (Field) The simulation's field.
+      */
+-    private void populateWithPlants(Field field)
++    private void populateWithPlants(List<Species> speciesToPopulate, Field field)
+     {
+-        Location freeLocationToPlacePlant;
+         plantReader.extractDataFor(DEFAULT_PLANT_NAME);
+         String name = plantReader.getName();
+         int maximumTemperature = plantReader.getMaximumTemperature();
+@@ -258,13 +280,29 @@ public class Initializer
+         double reproductionProbability = plantReader.getReproductionProbability();
+         int maxHealth = plantReader.getMaxHealth();
+         for (int i = 0; i< getNumberOfPlants(); i++) {
+-            freeLocationToPlacePlant = findAvailableLocation(field);
+-            Plant createdPlant = new Plant(field, freeLocationToPlacePlant, name, maximumTemperature, minimumTemperature, nutritionalValue, reproductionProbability, maxHealth);
+-            speciesToEvolveInSimulation.add(createdPlant);
++            speciesToPopulate.add(createPlant(field, findAvailableLocation(field), name, maximumTemperature, minimumTemperature, nutritionalValue, reproductionProbability, maxHealth));
+         }
+         view.setColor(name, DEFAULT_PLANT_COLOR);
+     }
+ 
++    /**
++     * Create a plant from the currently loaded template.
++     *
++     * @param field the simulation field.
++     * @param location the location where the plant will be placed.
++     * @param name the plant name.
++     * @param maximumTemperature the maximum survivable temperature.
++     * @param minimumTemperature the minimum survivable temperature.
++     * @param nutritionalValue the nutritional value.
++     * @param reproductionProbability the reproduction probability.
++     * @param maxHealth the maximum plant health.
++     * @return the created plant.
++     */
++    private Plant createPlant(Field field, Location location, String name, int maximumTemperature, int minimumTemperature, int nutritionalValue, double reproductionProbability, int maxHealth)
++    {
++        return new Plant(field, location, name, maximumTemperature, minimumTemperature, nutritionalValue, reproductionProbability, maxHealth);
++    }
++
+     /**
+      * Calculate the total number of plants to be created.
+      *
+@@ -284,12 +322,26 @@ public class Initializer
+     private int getNumberOfAnimals(HashMap<String, Integer> animalsToCreate)
+     {
+         int totalNumber = 0;
+-        for (String animalName : animalsToCreate.keySet()) {
+-            totalNumber += animalsToCreate.get(animalName);
++        for (Integer count : animalsToCreate.values()) {
++            totalNumber += count;
+         }
+         return totalNumber;
+     }
+ 
++    /**
++     * Validate that the requested population fits into the available field area.
++     *
++     * @param animalsToCreate the requested animal counts.
++     */
++    private boolean validatePopulationCapacity(HashMap<String, Integer> animalsToCreate)
++    {
++        if (getNumberOfPlants() + getNumberOfAnimals(animalsToCreate) > calculateFieldArea()) {
++            errorThrower.throwMessage("Too many animals were added for this habitat, please reduce the number of animals and try again");
++            return false;
++        }
++        return true;
++    }
++
+     /**
+      * Populate the list of colors to use for animals with 25 colors. 25 animals can therefore be created
+      * , other colors be added to implement more animal choices.
+@@ -322,4 +374,4 @@ public class Initializer
+         listOfColorsForAnimals.add(Color.decode("0x008B8B"));
+         listOfColorsForAnimals.add(Color.decode("0xADD8E6"));
+     }
+-}
+\ No newline at end of file
++}

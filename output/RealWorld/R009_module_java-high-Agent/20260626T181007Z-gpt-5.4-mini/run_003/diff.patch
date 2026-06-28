@@ -1,0 +1,1721 @@
+diff --git a/src/main/java/safari/Animal.java b/src/main/java/safari/Animal.java
+index f6deecd..af119c1 100644
+--- a/src/main/java/safari/Animal.java
++++ b/src/main/java/safari/Animal.java
+@@ -1,9 +1,8 @@
+ package safari;
+ 
+-import java.util.List;
+-import java.util.Random;
+ import java.util.Iterator;
+-import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
+ 
+ /**
+  * A class representing shared characteristics of animals.
+@@ -12,63 +11,74 @@ import java.util.HashMap;
+  */
+ public abstract class Animal extends Actor
+ {
++    private final SpeciesType speciesType;
++    private final SpeciesConfig speciesConfig;
++
+     private double foodLevel;
+     private boolean isGirl;
+     private boolean isHealthy;
+-    //the number of steps an animal takes when infected.
++    // The number of steps an animal takes when infected.
+     private int infectedStepCounter;
+-    //how many steps animal needs to wait before it can breed again.
++    // How many steps an animal needs to wait before it can breed again.
+     private int timeLeftUntilBreedingAgain = 0;
++
+     /**
+      * Create a new animal at location in field.
+-     * 
++     *
++     * @param speciesType The animal species.
++     * @param randomAge True if the animal should start with a random age.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+-    public Animal(Field field, Location location)
++    protected Animal(SpeciesType speciesType, boolean randomAge, Field field, Location location)
+     {
+-        super(field,location);
++        super(field, location);
++        this.speciesType = speciesType;
++        this.speciesConfig = SpeciesFactory.config(speciesType);
+         setRandomGender();
+         isHealthy = true;
+         infectedStepCounter = 0;
+-        timeLeftUntilBreedingAgain= getRandom().nextInt(getMaxTimeUntilBreedingAgain());
+-        if(!isGirl){
+-        timeLeftUntilBreedingAgain = 0;
++        if(randomAge) {
++            setAge(getRandom().nextInt(speciesConfig.maxAge()));
++            setFoodLevel(getRandom().nextInt(speciesConfig.randomFoodUpperBound()));
++        }
++        else {
++            setAge(0);
++            setFoodLevel(speciesConfig.initialFoodLevel());
++        }
++        timeLeftUntilBreedingAgain = getRandom().nextInt(speciesConfig.maxTimeUntilBreedingAgain());
++        if(!isGirl) {
++            timeLeftUntilBreedingAgain = 0;
+         }
++        setGrowthLevel(getAge() / speciesConfig.initialGrowthScale());
+     }
+ 
+     /**
+-     * Make this animal act - that is: make it do
+-     * whatever it wants/needs to do.
++     * Make this animal act - that is: make it do whatever it wants or needs to do.
+      * @param newAnimals A list to receive newly born animals.
+      * @param simulator The simulator.
+      */
+-    public void act(List<Actor> newAnimals, Simulator simulator){
+-        Location newLocation = null;
+-        switch(simulator.getWeather()){
+-            case SUNNY:
+-                newLocation = findFood(getSunnyFindingFoodProbability());
+-                break;
+-            case RAINY:
+-                newLocation = findFood(getRainyFindingFoodProbability());
+-                break;
+-            case FOGGY:
+-                newLocation = findFood(getFoggyFindingFoodProbability());
+-                break;
+-            default:
+-                findFood(getRandom().nextDouble());
+-                break;
+-        }
+-        if(newLocation == null) { 
+-            // No food found - try to move to a free location.
+-            newLocation = getField().freeAdjacentLocation(getLocation());
+-        }
+-        if(newLocation != null) {
+-            setLocation(newLocation);
++    public void act(List<Actor> newAnimals, Simulator simulator)
++    {
++        if(!simulator.isDay()) {
++            return;
+         }
+-        else {
+-            // Overcrowding.
+-            setDead();
++
++        setGrowthLevel(speciesConfig.actGrowthIncrement());
++        incrementAge(simulator.getSteps());
++        incrementHunger();
++        if(isActive()) {
++            giveBirth(newAnimals);
++            Location newLocation = findFood(speciesConfig.foodFindingProbability(simulator.getWeather()));
++            if(newLocation == null) {
++                newLocation = getField().freeAdjacentLocation(getLocation());
++            }
++            if(newLocation != null) {
++                setLocation(newLocation);
++            }
++            else {
++                setDead();
++            }
+         }
+     }
+ 
+@@ -78,15 +88,9 @@ public abstract class Animal extends Actor
+      */
+     protected boolean canBreed()
+     {
+-        return getAge() >= getBreedingAge();
++        return getAge() >= speciesConfig.breedingAge();
+     }
+ 
+-    /**
+-     * Get breeding age of an animal.
+-     * @return int. Breeding age of the animal;
+-     */
+-    abstract protected int getBreedingAge();
+-
+     /**
+      * Check whether or not this animal is to give birth at this step.
+      * New births will be made into free adjacent locations.
+@@ -94,48 +98,33 @@ public abstract class Animal extends Actor
+      */
+     protected void giveBirth(List<Actor> newAnimals)
+     {
+-        // New animals are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+         Field field = getField();
+         List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        if (timeLeftUntilBreedingAgain != 0){
+-            timeLeftUntilBreedingAgain --;
++        if(timeLeftUntilBreedingAgain != 0) {
++            timeLeftUntilBreedingAgain--;
+         }
+         int births = breed();
+-        for(int b = 0; b < births && free.size() > 0; b++) {
++        for(int b = 0; b < births && !free.isEmpty(); b++) {
+             Location loc = free.remove(0);
+-            Animal young = getAnimal();
+-            Animal baby = null;
+-            if(young instanceof Gazelle){
+-                baby = new Gazelle(false, field, loc);
+-            }else if(young instanceof Jaguar){
+-                baby = new Jaguar(false, field, loc);
+-            }else if(young instanceof Cheetah){
+-                baby = new Cheetah(false, field, loc);
+-            }else if(young instanceof Lion){
+-                baby = new Lion(false, field, loc);
+-            }else if(young instanceof Zebra){
+-                baby = new Zebra(false, field, loc);
+-            }
+-            if(!getHealth()){
+-                baby.setUnhealthy(); //setting the baby to be unhealthy if the parent is unhealthy.
++            Animal baby = SpeciesFactory.create(speciesType, false, field, loc);
++            if(!getHealth()) {
++                baby.setUnhealthy();
+             }
+             newAnimals.add(baby);
+         }
+     }
+ 
+     /**
+-     * Generate a number representing the number of births,
+-     * if it can breed.
+-     * Females can mate with a male even  regardless of the males breeding time .
++     * Generate a number representing the number of births, if it can breed.
++     * Females can mate with a male even regardless of the male's breeding time.
+      * @return The number of births (may be zero).
+      */
+     protected int breed()
+     {
+         int births = 0;
+-        if(canBreed()  && findMate() && getRandom().nextDouble() <= getBreedingProbability() && timeLeftUntilBreedingAgain == 0) {
+-            births = getRandom().nextInt(getMaxLitterSize()) + 1;
+-            timeLeftUntilBreedingAgain = getMaxTimeUntilBreedingAgain();
++        if(canBreed() && findMate() && getRandom().nextDouble() <= speciesConfig.breedingProbability() && timeLeftUntilBreedingAgain == 0) {
++            births = getRandom().nextInt(speciesConfig.maxLitterSize()) + 1;
++            timeLeftUntilBreedingAgain = speciesConfig.maxTimeUntilBreedingAgain();
+         }
+         return births;
+     }
+@@ -149,15 +138,13 @@ public abstract class Animal extends Actor
+         Field field = getField();
+         List<Location> adjacent = field.adjacentLocations(getLocation());
+         Iterator<Location> it = adjacent.iterator();
+-        Animal currentAnimal = getAnimal();
+         while(it.hasNext()) {
+             Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            if (animal != null && animal.getClass() == currentAnimal.getClass()){
+-                Animal mate = (Animal) animal;
+-                if(isActive() && currentAnimal.getIsGirl() && !mate.getIsGirl() && mate.canBreed()){
+-                    if(!currentAnimal.getHealth() || !mate.getHealth()){
+-                        currentAnimal.setUnhealthy();
++            Object occupant = field.getObjectAt(where);
++            if(occupant instanceof Animal mate && mate.speciesType == speciesType) {
++                if(isActive() && getIsGirl() && !mate.getIsGirl() && mate.canBreed()) {
++                    if(!getHealth() || !mate.getHealth()) {
++                        setUnhealthy();
+                         mate.setUnhealthy();
+                     }
+                     return true;
+@@ -167,38 +154,22 @@ public abstract class Animal extends Actor
+         return false;
+     }
+ 
+-    /**
+-     * Returns the breeding probability of the animal
+-     * @return breeding probability of the animal.
+-     */
+-    abstract protected double getBreedingProbability();
+-
+-    /**
+-     * Returns the maximum number of babies the animal can give birth to at once.
+-     * @return max litter size of the animal.
+-     */
+-    abstract protected int getMaxLitterSize();
+-
+-    /**
+-     * Returns the current animal occupying the location.
+-     * @return the current animal.
+-     */
+-    abstract protected Animal getAnimal();
+-
+     /**
+      * Returns the animal's current food level.
+      * @return the animal's food level.
+      */
+-    protected double getFoodLevel(){
++    protected double getFoodLevel()
++    {
+         return foodLevel;
+     }
+ 
+     /**
+      * Sets the animal's food level.
+-     * @param food level The amount of food the animal gets.
++     * @param foodLevel The amount of food the animal gets.
+      */
+-    protected void setFoodLevel(double foodlevel){
+-        this.foodLevel += foodlevel ; 
++    protected void setFoodLevel(double foodLevel)
++    {
++        this.foodLevel += foodLevel;
+     }
+ 
+     /**
+@@ -213,37 +184,29 @@ public abstract class Animal extends Actor
+     }
+ 
+     /**
+-     * Look for preys adjacent to the current location.
++     * Look for prey adjacent to the current location.
+      * Only the first live prey is eaten.
+      * @param probability The probability the animal finds prey.
+      * @return Where food was found, or null if it wasn't.
+      */
+     protected Location findFood(double probability)
+     {
+-
+         Field field = getField();
+         List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-       
+-        if(getRandom().nextDouble() < probability && getFoodLevel() < getMaxFoodLevel()){
+-            while(it.hasNext()) {
+-                Location where = it.next();
+-                Object animal = field.getObjectAt(where);
+-                if(animal != null && animal  instanceof Actor){
+-                    Actor currentAnimal = (Actor) animal;
+-                    for(Actor prey: getFood().keySet())
+-                    {
+-                        if(prey.getClass() == currentAnimal.getClass()){
+-                            if (currentAnimal instanceof Animal){
+-                                Animal current = (Animal)currentAnimal;
+-                                if(!current.getHealth()){
+-                                    setUnhealthy();
+-                                }
++
++        if(getRandom().nextDouble() < probability && getFoodLevel() < speciesConfig.maxFoodLevel()) {
++            for(Location where : adjacent) {
++                Object occupant = field.getObjectAt(where);
++                if(occupant instanceof Actor currentAnimal) {
++                    for(Map.Entry<Class<? extends Actor>, Integer> prey : speciesConfig.food().entrySet()) {
++                        if(prey.getKey() == currentAnimal.getClass()) {
++                            if(currentAnimal instanceof Animal current && !current.getHealth()) {
++                                setUnhealthy();
+                             }
+                             currentAnimal.setDead();
+-                            setFoodLevel(getFood().get(prey)  + currentAnimal.getGrowthLevel());
+-                            if(getFoodLevel() > getMaxFoodLevel()){
+-                                setFoodLevel(getMaxFoodLevel() - getFoodLevel());
++                            setFoodLevel(prey.getValue() + currentAnimal.getGrowthLevel());
++                            if(getFoodLevel() > speciesConfig.maxFoodLevel()) {
++                                setFoodLevel(speciesConfig.maxFoodLevel() - getFoodLevel());
+                             }
+                             return where;
+                         }
+@@ -254,32 +217,28 @@ public abstract class Animal extends Actor
+         return null;
+     }
+ 
+-    /**
+-     * Returns the HashMap which contains what prey the animal eats and the amount of food each prey gives.
+-     * @return The HashMap which contains the Actor and an Integer.
+-     */
+-    abstract protected HashMap<Actor, Integer> getFood();
+-
+     /**
+      * Uses a random generator to assign if the animal is female or not.
+-     * @return True if the animal is a female.
+      */
+-    protected void setRandomGender(){
++    protected void setRandomGender()
++    {
+         isGirl = getRandom().nextDouble() > 0.5;
+     }
+ 
+     /**
+      * Returns true if the animal is a female.
+-     * @return boolean. True if the animal is a female.
++     * @return true if the animal is a female.
+      */
+-    protected boolean getIsGirl(){
++    protected boolean getIsGirl()
++    {
+         return isGirl;
+     }
+ 
+     /**
+      * The animal has been infected.
+      */
+-    protected void setUnhealthy(){
++    protected void setUnhealthy()
++    {
+         isHealthy = false;
+     }
+ 
+@@ -287,21 +246,23 @@ public abstract class Animal extends Actor
+      * Returns whether the animal is healthy or not.
+      * @return true if the animal is healthy.
+      */
+-    protected boolean getHealth(){
++    protected boolean getHealth()
++    {
+         return isHealthy;
+     }
+ 
+     /**
+      * Increase the age. This could result in the animal's death.
+      * If the animal is unhealthy it also increases the infected step counter.
+-     * After 5 steps inthe infectedStepCounter this may result in the animal's death.
+-     * @param step. The number of steps in the simulation.
++     * After 5 steps in the infectedStepCounter this may result in the animal's death.
++     * @param step The number of steps in the simulation.
+      */
+     protected void incrementAge(int step)
+     {
+         super.incrementAge(step);
+-        if(!getHealth()){
+-            infectedStepCounter++;}
++        if(!getHealth()) {
++            infectedStepCounter++;
++        }
+ 
+         if(infectedStepCounter == 5) {
+             setDead();
+@@ -309,32 +270,11 @@ public abstract class Animal extends Actor
+     }
+ 
+     /**
+-     * Gets the max food level of an animal.
+-     * @return Maximum food level of the current animal.
++     * Gets the maximum age for this animal.
++     * @return The maximum age of the current animal.
+      */
+-    abstract protected double getMaxFoodLevel();
+-
+-    /**
+-     * Gets the max time an animal needs to wait before it can breed again.
+-     * @return Maximum time the animal waits before it can breed again.
+-     */
+-    abstract protected int getMaxTimeUntilBreedingAgain();
+-
+-    /**
+-     * Gets the probability the animal will find food when it is sunny
+-     * @return The probability the animal will find food when it is sunny
+-     */
+-    abstract protected double getSunnyFindingFoodProbability();
+-
+-    /**
+-     * Gets the probability the animal will find food when it is rainy
+-     * @return The probability the animal will find food when it is rainy
+-     */
+-    abstract protected double getRainyFindingFoodProbability();
+-
+-    /**
+-     * Gets the probability the animal will find food when it is foggy
+-     * @return The probability the animal will find food when it is foggy
+-     */
+-    abstract protected double getFoggyFindingFoodProbability();
++    protected int getMaxAge()
++    {
++        return speciesConfig.maxAge();
++    }
+ }
+diff --git a/src/main/java/safari/Cheetah.java b/src/main/java/safari/Cheetah.java
+index b7804f6..0b9a4b2 100644
+--- a/src/main/java/safari/Cheetah.java
++++ b/src/main/java/safari/Cheetah.java
+@@ -1,189 +1,21 @@
+ package safari;
+ 
+-import java.util.List;
+-import java.util.Iterator;
+-import java.util.Random;
+-import java.util.HashMap;
+ /**
+  * A simple model of a Cheetah.
+- * Cheetahs age, move, eat zebras, breed and die.
+  *
+  * @version 2022.03.01
+  */
+ public class Cheetah extends Predator
+ {
+-    // Characteristics shared by all Cheetahs (class variables).
+-
+-    // The age at which a Cheetah can start to breed.
+-    private static final int BREEDING_AGE = 2;
+-    // The age to which a Cheetah can live.
+-    private static final  int MAX_AGE = 1200;
+-    // The likelihood of a Cheetah breeding.
+-    private static  double BREEDING_PROBABILITY = 0.4196975694969952;  
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 4;
+-    private static final int MAX_TIME_UNTIL_BREEDING_AGAIN = 11;
+-    // The minimum food value of a single prey. In effect, this is the
+-    // number of steps a Cheetah can go before it has to eat again.
+-    // Cheetahs have 2 prey
+-    private static final int ZEBRA_FOOD_VALUE = 34; 
+-    private static final int GAZELLE_FOOD_VALUE = 33;
+-    private static final double MAX_FOOD_LEVEL = 40;
+-    
+-    // The likelihood of a Cheetah finding food depending on the weather.
+-    private static final double SUNNY_FINDING_FOOD_PROBABILITY = 0.9;
+-    private static final double RAINY_FINDING_FOOD_PROBABILITY = 0.8;
+-    private static final double FOGGY_FINDING_FOOD_PROBABILITY = 0.7;
+-
+-    // Individual characteristics (instance fields).
+-    private HashMap<Actor, Integer> food;
+     /**
+-     * Create a Cheetah. A Cheetah can be created as a new born (age zero
+-     * and not hungry) or with a random age and food level.
+-     * 
+-     * @param randomAge If true,the Cheetah will have a random age and hunger level.
++     * Create a new Cheetah.
++     *
++     * @param randomAge If true, the Cheetah will have a random age.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+     public Cheetah(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        if(randomAge) {
+-            setAge(getRandom().nextInt(MAX_AGE));
+-            setFoodLevel(getRandom().nextInt(ZEBRA_FOOD_VALUE));
+-        }
+-        else {
+-            setAge(0);
+-            setFoodLevel(ZEBRA_FOOD_VALUE);
+-        }
+-        food = new HashMap<>();
+-        setGrowthLevel(getAge()/102.0);
+-        addFood(field);
+-    }
+-
+-    /**
+-     * This is what the Cheetah does most of the time: it hunts for
+-     * zebras. In the process, it might breed, die of hunger,
+-     * die of infection or die of old age.
+-     * 
+-     * @param newCheetahs A list to return newly born Cheetahs.
+-     * @param simulator The simulator.
+-     */
+-    public void act(List<Actor> newCheetahs, Simulator simulator)
+-    {
+-        setGrowthLevel(0.012);
+-        if(simulator.isDay()){
+-            incrementAge(simulator.getSteps());
+-            incrementHunger();
+-            if(isActive()) {
+-                giveBirth(newCheetahs);  
+-                super.act(newCheetahs,simulator);
+-            }
+-        }else{
+-            //space for potential night activities
+-        }
+-    }
+-
+-    /**
+-     * Returns the maximum number of babies the cheetah can give birth to at once.
+-     * @return the max litter size of the cheetah.
+-     */
+-    protected int getMaxLitterSize(){
+-        return MAX_LITTER_SIZE;
+-    }
+-
+-    /**
+-     * Returns the breeding probability of the cheetah.
+-     * @return the breeding probability of the cheetah.
+-     */
+-    protected double getBreedingProbability(){
+-        return BREEDING_PROBABILITY;
+-    }
+-
+-    /**
+-     * Returns the current cheetah occupying the location.
+-     * @return the current cheetah.
+-     */
+-    protected Animal getAnimal(){
+-        return this;
+-    }
+-
+-    /**
+-     * Get breeding age of a cheetah.
+-     * @return The breeding age of the cheetah.
+-     */
+-    protected int getBreedingAge(){
+-        return BREEDING_AGE;
+-    }
+-
+-    /**
+-     * Gets the max age of a cheetah.
+-     * @return The max age of the cheetah.
+-     */
+-    protected int getMaxAge(){
+-        return MAX_AGE;
+-    }
+-
+-    /**
+-     * Adds the food the cheetah eats & the corresponding food value to a hashMap.
+-     * @param field The field the cheetah is in.
+-     */
+-    private void addFood(Field field){
+-        Location tempLocation = new Location(0,0);
+-        Zebra zebra = new Zebra(true,field,tempLocation );
+-        food.put(zebra, ZEBRA_FOOD_VALUE);
+-        zebra.setDead();
+-        //Location tempLocation = new Location(0,0);
+-        Gazelle gazelle = new Gazelle(true,field,tempLocation );
+-        food.put(gazelle, GAZELLE_FOOD_VALUE);
+-        gazelle.setDead();
+-    }
+-
+-    /**
+-     * Returns the HashMap which contains what food the cheetah eats and the amount of food each prey gives.
+-     * @return The HashMap which contains the Actor and an Integer.
+-     */   
+-    protected HashMap<Actor, Integer> getFood(){
+-        return food;
+-    }
+-
+-    /**
+-     * Gets the maximum food level a cheetah can have.
+-     * @return Max food level of the cheetah.
+-     */
+-    protected double getMaxFoodLevel(){
+-        return MAX_FOOD_LEVEL;
+-    }
+-    
+-    /**
+-     * Gets the maximum time a cheetah needs to wait until it can breed again
+-     * @return Max time before the cheetah can breed again.
+-     */
+-    protected int getMaxTimeUntilBreedingAgain(){
+-        return MAX_TIME_UNTIL_BREEDING_AGAIN;
+-    }
+-    
+-    /**
+-     * Gets the probability the gazelle will find food when it is sunny
+-     * @return The probability the gazelle will find food when it is sunny
+-     */
+-    protected double getSunnyFindingFoodProbability(){
+-        return SUNNY_FINDING_FOOD_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Gets the probability the gazelle will find food when it is rainy
+-     * @return The probability the gazelle will find food when it is rainy
+-     */
+-    protected double getRainyFindingFoodProbability(){
+-        return RAINY_FINDING_FOOD_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Gets the probability the cheetah will find food when it is foggy
+-     * @return The probability the cheetah will find food when it is foggy
+-     */
+-    protected double getFoggyFindingFoodProbability(){
+-        return FOGGY_FINDING_FOOD_PROBABILITY;
++        super(SpeciesType.CHEETAH, randomAge, field, location);
+     }
+ }
+diff --git a/src/main/java/safari/Gazelle.java b/src/main/java/safari/Gazelle.java
+index f99579b..7662bd1 100644
+--- a/src/main/java/safari/Gazelle.java
++++ b/src/main/java/safari/Gazelle.java
+@@ -1,183 +1,21 @@
+ package safari;
+ 
+-import java.util.List;
+-import java.util.Random;
+-import java.util.Iterator;
+-import java.util.HashMap;
+-
+ /**
+  * A simple model of a Gazelle.
+- * Gazelles age, move,eat grass, breed, and die.
+  *
+  * @version 2022.03.01
+  */
+ public class Gazelle extends Animal
+ {
+-    // Characteristics shared by all Gazelles (class variables).
+-
+-    // The age at which a Gazelle can start to breed.
+-    private static final int BREEDING_AGE = 2;
+-    // The age to which a Gazelle can live.
+-    private static final  int MAX_AGE  = 80;
+-    // The likelihood of a Gazelle breeding.
+-    private static final double BREEDING_PROBABILITY = 0.8900995; 
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 7;
+-    private static final int MAX_TIME_UNTIL_BREEDING_AGAIN = 2;
+-    //The minimum food value of the grass. In effect, this is the
+-    // number of steps a Gazelle can go before it has to eat again.
+-    private static final int GRASS_FOOD_VALUE = 14; //8 //15
+-    //maximum food a gazelle can eat.
+-    private static final double MAX_FOOD_LEVEL = 28; //60 //160
+-    
+-    // The likelihood of a Gazelle finding food depending on the weather.
+-    private static final double SUNNY_FINDING_FOOD_PROBABILITY = 1;
+-    private static final double RAINY_FINDING_FOOD_PROBABILITY = 1;
+-    private static final double FOGGY_FINDING_FOOD_PROBABILITY = 1;
+-
+-    // Individual characteristics (instance fields).
+-    private HashMap<Actor, Integer> food;
+     /**
+-     * Create a new Gazelle. A Gazelle may be created with age
+-     * zero (a new born) or with a random age.
+-     * 
++     * Create a new Gazelle.
++     *
+      * @param randomAge If true, the Gazelle will have a random age.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+     public Gazelle(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        setAge(0);
+-        setFoodLevel(GRASS_FOOD_VALUE);
+-        if(randomAge) {
+-            setAge(getRandom().nextInt(MAX_AGE));
+-            setFoodLevel(getRandom().nextInt(GRASS_FOOD_VALUE));
+-        }
+-        food = new HashMap<>();
+-        setGrowthLevel(getAge()/75.0);
+-        addFood(field);
+-    }
+-
+-    /**
+-     * This is what the Gazelle does most of the time: it finds
+-     * grass to eat. In the process, it might breed, die of hunger,
+-     * die of disease or die of old age.
+-     * 
+-     * @param newGazelles A list to return newly born Gazelles.
+-     * @param simulator The simulator.
+-     */
+-    public void act(List<Actor> newGazelles, Simulator simulator)
+-    {
+-        setGrowthLevel(0.012);
+-        if(simulator.isDay()){
+-            incrementAge(simulator.getSteps());
+-            incrementHunger();
+-            if(isActive()) {
+-                giveBirth(newGazelles);  
+-                super.act(newGazelles,simulator);
+-            }
+-        }else{
+-            //space for potential night activities
+-        }
+-    }
+-
+-    /**
+-     * Returns the maximum number of babies the gazelle can give birth to at once.
+-     * @return max litter size of the gazelle.
+-     */
+-    protected int getMaxLitterSize(){
+-        return MAX_LITTER_SIZE;
+-    }
+-
+-    /**
+-     * Returns the breeding probability of the gazelle
+-     * @return breeding probability of the gazelle.
+-     */
+-    protected double getBreedingProbability(){
+-        return BREEDING_PROBABILITY;
+-    }
+-
+-    /**
+-     * Get breeding age of a gazelle.
+-     * @return Breeding age of the gazelle;
+-     */
+-    protected int getBreedingAge(){
+-        return BREEDING_AGE;
+-    }
+-
+-    /**
+-     * Gets the max age of a gazelle.
+-     * @return Max age of the gazelle.
+-     */
+-    protected int getMaxAge(){
+-        return MAX_AGE;
+-    }
+-
+-    /**
+-     * Returns the current gazelle occupying the location.
+-     * @return the current gazelle.
+-     */
+-    protected Animal getAnimal(){
+-        return this;
+-    }
+-
+-    /**
+-     * Adds the food the gazelle eats & the corresponding food value to a hashMap.
+-     * @param field The field the gazelle is in.
+-     */
+-    private void addFood(Field field){
+-        Location tempLocation = new Location(0,0);
+-        Plants grass = new Grass(true,field,tempLocation );
+-        food.put(grass, GRASS_FOOD_VALUE);
+-        grass.setDead();
+-    }
+-
+-    /**
+-     * Returns the HashMap which contains what food the gazelle eats and the amount of food each plant gives.
+-     * @return The HashMap which contains the Actor and an Integer.
+-     */
+-    protected HashMap<Actor, Integer> getFood(){
+-        return food;
+-    }
+-
+-    /**
+-     * Gets the maximum food level a gazelle can have.
+-     * @return Max food level of the gazelle.
+-     */
+-    protected double getMaxFoodLevel(){
+-        return MAX_FOOD_LEVEL;
+-    }
+-    
+-    /**
+-     * Gets the maximum time a gazelle needs to wait until it can breed again
+-     * @return Max time before the gazelle can breed again.
+-     */
+-    protected int getMaxTimeUntilBreedingAgain(){
+-        return MAX_TIME_UNTIL_BREEDING_AGAIN;
+-    }
+-    
+-    /**
+-     * Gets the probability the gazelle will find food when it is sunny
+-     * @return The probability the gazelle will find food when it is sunny
+-     */
+-    protected double getSunnyFindingFoodProbability(){
+-        return SUNNY_FINDING_FOOD_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Gets the probability the gazelle will find food when it is rainy
+-     * @return The probability the gazelle will find food when it is rainy
+-     */
+-    protected double getRainyFindingFoodProbability(){
+-        return RAINY_FINDING_FOOD_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Gets the probability the gazelle will find food when it is foggy
+-     * @return The probability the gazelle will find food when it is foggy
+-     */
+-    protected double getFoggyFindingFoodProbability(){
+-        return FOGGY_FINDING_FOOD_PROBABILITY;
++        super(SpeciesType.GAZELLE, randomAge, field, location);
+     }
+ }
+diff --git a/src/main/java/safari/Jaguar.java b/src/main/java/safari/Jaguar.java
+index 95cc448..3dd1da3 100644
+--- a/src/main/java/safari/Jaguar.java
++++ b/src/main/java/safari/Jaguar.java
+@@ -1,183 +1,21 @@
+ package safari;
+ 
+-import java.util.Random;
+-import java.util.HashMap;
+-import java.util.List;
+-
+ /**
+  * A simple model of a Jaguar.
+- * Jaguars age, move, eat gazelle, and die.
+  *
+  * @version 2022.03.01
+  */
+ public class Jaguar extends Predator
+ {
+-    // Characteristics shared by all Jaguars (class variables).
+-
+-    // The age at which a Jaguar can start to breed.
+-    private static final int BREEDING_AGE = 10;
+-    // The age to which a Jaguar can live.
+-    private static final  int MAX_AGE  = 1000;
+-    // The likelihood of a Jaguar breeding.
+-    private static final double BREEDING_PROBABILITY = 0.2; 
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 5;
+-    private static final int MAX_TIME_UNTIL_BREEDING_AGAIN = 6;
+-    //The minimum food value of the gazelle. In effect, this is the
+-    // number of steps a Jaguar can go before it has to eat again.
+-    private static final int GAZELLE_FOOD_VALUE = 35; 
+-    private static final double MAX_FOOD_LEVEL = 39; 
+-    
+-    // The likelihood of a Jaguar finding food depending on the weather.
+-    private static final double SUNNY_FINDING_FOOD_PROBABILITY = 1;
+-    private static final double RAINY_FINDING_FOOD_PROBABILITY = 0.7;
+-    private static final double FOGGY_FINDING_FOOD_PROBABILITY = 0.4;
+-
+-    // Individual characteristics (instance fields).
+-    private HashMap<Actor, Integer> food;
+     /**
+-     * Create a Jaguar. A Jaguar can be created as a new born (age zero
+-     * and not hungry) or with a random age and food level.
+-     * 
+-     * @param randomAge If true, the Jaguar will have random age and hunger level.
++     * Create a new Jaguar.
++     *
++     * @param randomAge If true, the Jaguar will have a random age.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+     public Jaguar(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        if(randomAge) {
+-            setAge(getRandom().nextInt(MAX_AGE));
+-            setFoodLevel(getRandom().nextInt(GAZELLE_FOOD_VALUE));
+-        }
+-        else {
+-            setAge( 0);
+-            setFoodLevel(GAZELLE_FOOD_VALUE);
+-        }
+-        food = new HashMap<>();
+-        setGrowthLevel(getAge()/89.0);
+-        addFood(field);
+-    }
+-
+-    /**
+-     * This is what the Jaguar does most of the time: it finds
+-     * gazelle to eat. In the process, it might breed, die of hunger,
+-     * die of disease or die of old age.
+-     * 
+-     * @param newJaguars A list to return newly born Jaguars.
+-     * @param simulator The simulator.
+-     */
+-    public void act(List<Actor> newJaguars, Simulator simulator)
+-    {
+-        setGrowthLevel(0.013);
+-        if(simulator.isDay()){
+-            incrementAge(simulator.getSteps());
+-            incrementHunger();
+-            if(isActive()) {
+-                giveBirth(newJaguars);  
+-                super.act(newJaguars,simulator);
+-            }
+-        }else{
+-            //space for potential night activities
+-        }
+-    }
+-
+-    /**
+-     * Returns the maximum number of babies the jaguar can give birth to at once.
+-     * @return max litter size of the jaguar.
+-     */
+-    protected int getMaxLitterSize(){
+-        return MAX_LITTER_SIZE;
+-    }
+-
+-    /**
+-     * Returns the breeding probability of the jaguar
+-     * @return breeding probability of the jaguar.
+-     */
+-    protected double getBreedingProbability(){
+-        return BREEDING_PROBABILITY;
+-    }
+-
+-    /**
+-     * Returns the current jaguar occupying the location.
+-     * @return the current jaguar.
+-     */
+-    protected Animal getAnimal(){
+-        return this;
+-    }
+-
+-    /**
+-     * Get breeding age of a jaguar.
+-     * @return Breeding age of the jaguar;
+-     */
+-    protected int getBreedingAge(){
+-        return BREEDING_AGE;
+-    }
+-
+-    /**
+-     * Gets the max age of a jaguar.
+-     * @return Max age of the jaguar.
+-     */
+-    protected int getMaxAge(){
+-        return MAX_AGE;
+-    }
+-
+-    /**
+-     * Adds the food the jaguar eats & the corresponding food value to a hashMap.
+-     * @param field The field the jaguar is in.
+-     */
+-    private void addFood(Field field){
+-        Location tempLocation = new Location(0,0);
+-        Gazelle gazelle = new Gazelle(true,field,tempLocation );
+-        food.put(gazelle, GAZELLE_FOOD_VALUE);
+-        gazelle.setDead();
+-    }
+-
+-    /**
+-     * Returns the HashMap which contains what food the jaguar eats and the amount of food each gazelle gives.
+-     * @return The HashMap which contains the Actor and an Integer.
+-     */
+-    protected HashMap<Actor, Integer> getFood(){
+-        return food;
+-    }
+-
+-    /**
+-     * Gets the maximum food level a jaguar can have.
+-     * @return Max food level of the jaguar.
+-     */
+-    protected double getMaxFoodLevel(){
+-        return MAX_FOOD_LEVEL;
+-    }
+-
+-    /**
+-     * Gets the maximum time a jaguar needs to wait until it can breed again
+-     * @return Max time before the jaguar can breed again.
+-     */
+-    protected int getMaxTimeUntilBreedingAgain(){
+-        return MAX_TIME_UNTIL_BREEDING_AGAIN;
+-    }
+-    
+-    /**
+-     * Gets the probability the jaguar will find food when it is sunny
+-     * @return The probability the jaguar will find food when it is sunny
+-     */
+-    protected double getSunnyFindingFoodProbability(){
+-        return SUNNY_FINDING_FOOD_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Gets the probability the jaguar will find food when it is rainy
+-     * @return The probability the jaguar will find food when it is rainy
+-     */
+-    protected double getRainyFindingFoodProbability(){
+-        return RAINY_FINDING_FOOD_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Gets the probability the jaguar will find food when it is foggy
+-     * @return The probability the jaguar will find food when it is foggy
+-     */
+-    protected double getFoggyFindingFoodProbability(){
+-        return FOGGY_FINDING_FOOD_PROBABILITY;
++        super(SpeciesType.JAGUAR, randomAge, field, location);
+     }
+ }
+diff --git a/src/main/java/safari/Lion.java b/src/main/java/safari/Lion.java
+index bf21342..97bbd03 100644
+--- a/src/main/java/safari/Lion.java
++++ b/src/main/java/safari/Lion.java
+@@ -1,191 +1,21 @@
+ package safari;
+ 
+-import java.util.List;
+-import java.util.Iterator;
+-import java.util.Random;
+-import java.util.HashMap;
+-
+ /**
+  * A simple model of a Lion.
+- * Lions age, move, eat gazelle & cheetahs, breed and die.
+  *
+  * @version 2022.03.01
+  */
+ public class Lion extends Predator
+ {
+-    // Characteristics shared by all Lions (class variables).
+-
+-    // The age at which a Lions can start to breed.
+-    private static final int BREEDING_AGE = 15;
+-    // The age to which a Lion can live.
+-    private static final  int MAX_AGE = 1500;
+-    // The likelihood of a Lion breeding.
+-    private static final double BREEDING_PROBABILITY = 0.40752995; 
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 2;
+-    private static final int MAX_TIME_UNTIL_BREEDING_AGAIN =20;
+-    // The minimum food value of a single prey. In effect, this is the
+-    // number of steps a Lion can go before it has to eat again.
+-    //Lions have 2 prey.
+-    private static final int PREY_GAZELLE_FOOD_VALUE = 24;
+-    private static final int PREY_CHEETAH_FOOD_VALUE = 25;
+-
+-    private static final double MAX_FOOD_LEVEL = 50;
+-    
+-    // The likelihood of a Lion finding food depending on the weather.
+-
+-    private static final double SUNNY_FINDING_FOOD_PROBABILITY = 1;
+-    private static final double RAINY_FINDING_FOOD_PROBABILITY = 0.9;
+-    private static final double FOGGY_FINDING_FOOD_PROBABILITY = 0.8;
+-
+-    // Individual characteristics (instance fields).
+-    private HashMap<Actor, Integer> food;
+     /**
+-     * Create a Lion. A Lion can be created as a new born (age zero
+-     * and not hungry) or with a random age and food level.
+-     * 
+-     * @param randomAge If true, the Lion will have random age and hunger level.
++     * Create a new Lion.
++     *
++     * @param randomAge If true, the Lion will have a random age.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+     public Lion(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        if(randomAge) {
+-            setAge(getRandom().nextInt(MAX_AGE));
+-            setFoodLevel(getRandom().nextInt(PREY_CHEETAH_FOOD_VALUE));
+-        }
+-        else {
+-            setAge( 0);
+-            setFoodLevel(PREY_CHEETAH_FOOD_VALUE);
+-        }
+-        food = new HashMap<>();
+-        setGrowthLevel(getAge()/100.0);
+-        addFood(field);
+-    }
+-
+-    /**
+-     * This is what the Lion does most of the time: it hunts for
+-     * gazelle & cheetahs. In the process, it might breed, die of hunger,
+-     * die of disease or die of old age.
+-     * 
+-     * @param newLions A list to return newly born Lions.
+-     * @param simulator The simulator.
+-     */
+-    public void act(List<Actor> newLions,Simulator simulator)
+-    {
+-        setGrowthLevel(0.01);
+-        if(simulator.isDay()){
+-            incrementAge(simulator.getSteps());
+-            incrementHunger();
+-            if(isActive()) {
+-                giveBirth(newLions);  
+-                super.act(newLions,simulator);
+-            }
+-        }else{
+-            //space for potential night activities
+-        }
+-    }
+-
+-    /**
+-     * Returns the maximum number of babies the lion can give birth to at once.
+-     * @return max litter size of the lion.
+-     */
+-    protected int getMaxLitterSize(){
+-        return MAX_LITTER_SIZE;
+-    }
+-
+-    /**
+-     * Returns the breeding probability of the lion
+-     * @return breeding probability of the lion.
+-     */
+-    protected double getBreedingProbability(){
+-        return BREEDING_PROBABILITY;
+-    }
+-
+-    /**
+-     * Returns the current lion occupying the location.
+-     * @return the current lion.
+-     */
+-    protected Animal getAnimal(){
+-        return this;
+-    }
+-
+-    /**
+-     * Get breeding age of a lion.
+-     * @return int. Breeding age of the lion;
+-     */
+-    protected int getBreedingAge(){
+-        return BREEDING_AGE;
+-    }
+-
+-    /**
+-     * Gets the max age of a lion.
+-     * @return int. Max age of the lion.
+-     */
+-    protected int getMaxAge(){
+-        return MAX_AGE;
+-    }
+-
+-    /**
+-     * Adds the food the lion eats & the corresponding food value to a hashMap
+-     * @param field The field the lion is in
+-     */
+-    private void addFood(Field field){
+-        Location tempLocation = new Location(0,0);
+-        Gazelle gazelle = new Gazelle(true,field,tempLocation );
+-        food.put(gazelle, PREY_GAZELLE_FOOD_VALUE);
+-        gazelle.setDead();
+-        Cheetah cheetah = new Cheetah(true,field,tempLocation );
+-        food.put(cheetah, PREY_CHEETAH_FOOD_VALUE);
+-        cheetah.setDead();
+-    }
+-
+-    /**
+-     * Returns the HashMap which contains what food the lion eats and the amount of food each prey gives.
+-     * @return The HashMap which contains the Actor and an Integer.
+-     */   
+-    protected HashMap<Actor, Integer> getFood(){
+-        return food;
+-    }
+-
+-    /**
+-     * Gets the maximum food level a lion can have.
+-     * @return Max food level of the lion.
+-     */
+-    protected double getMaxFoodLevel(){
+-        return MAX_FOOD_LEVEL;
+-    }
+-
+-    /**
+-     * Gets the maximum time a lion needs to wait until it can breed again
+-     * @return Max time before the lion can breed again.
+-     */
+-    protected int getMaxTimeUntilBreedingAgain(){
+-        return MAX_TIME_UNTIL_BREEDING_AGAIN;
+-    }
+-    
+-    /**
+-     * Gets the probability the lion will find food when it is sunny
+-     * @return The probability the lion will find food when it is sunny
+-     */
+-    protected double getSunnyFindingFoodProbability(){
+-        return SUNNY_FINDING_FOOD_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Gets the probability the lion will find food when it is rainy
+-     * @return The probability the lion will find food when it is rainy
+-     */
+-    protected double getRainyFindingFoodProbability(){
+-        return RAINY_FINDING_FOOD_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Gets the probability the lion will find food when it is foggy
+-     * @return The probability the lion will find food when it is foggy
+-     */
+-    protected double getFoggyFindingFoodProbability(){
+-        return FOGGY_FINDING_FOOD_PROBABILITY;
++        super(SpeciesType.LION, randomAge, field, location);
+     }
+ }
+diff --git a/src/main/java/safari/Predator.java b/src/main/java/safari/Predator.java
+index 36b5294..fc47c50 100644
+--- a/src/main/java/safari/Predator.java
++++ b/src/main/java/safari/Predator.java
+@@ -1,27 +1,27 @@
+ package safari;
+ 
+ import java.util.Iterator;
+-import java.util.Random;
+ import java.util.List;
+ 
+ /**
+  * A class representing additional characteristics for predators.
+- * Inlucdes an additional method for carnivores which allow them to step
+- * on the grass without eating it.
++ * It adds a fallback behavior that lets carnivores stand on top of plants.
+  *
+  * @version 2022.03.01
+  */
+ public abstract class Predator extends Animal
+ {
+-
+     /**
+      * Create a new predator at location in field.
+-     * 
++     *
++     * @param speciesType The predator species.
++     * @param randomAge True if the predator should start with a random age.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+-     *
+-     */public Predator(Field field, Location location){
+-        super(field, location);
++     */
++    protected Predator(SpeciesType speciesType, boolean randomAge, Field field, Location location)
++    {
++        super(speciesType, randomAge, field, location);
+     }
+ 
+     /**
+@@ -32,14 +32,14 @@ public abstract class Predator extends Animal
+      */
+     protected Location findFood(double probability)
+     {
+-        if (super.findFood(probability) == null){
++        if(super.findFood(probability) == null) {
+             Field field = getField();
+             List<Location> adjacent = field.adjacentLocations(getLocation());
+             Iterator<Location> it = adjacent.iterator();
+             while(it.hasNext()) {
+                 Location where = it.next();
+                 Object actor = field.getObjectAt(where);
+-                if(actor != null && actor  instanceof Plants){
++                if(actor instanceof Plants) {
+                     return where;
+                 }
+             }
+diff --git a/src/main/java/safari/Simulator.java b/src/main/java/safari/Simulator.java
+index 99d3ce7..4b8c0fb 100644
+--- a/src/main/java/safari/Simulator.java
++++ b/src/main/java/safari/Simulator.java
+@@ -190,22 +190,18 @@ public class Simulator
+             for(int col = 0; col < field.getWidth(); col++) {
+                 if(rand.nextDouble() <= LION_CREATION_PROBABILITY) {
+                     Location location = new Location(row, col);
+-                    Animal lion = new Lion(true, field, location);
+-                    animals.add(lion);
++                    animals.add(SpeciesFactory.create(SpeciesType.LION, true, field, location));
+                 }
+                 else if(rand.nextDouble() <= CHEETAH_CREATION_PROBABILITY) {
+                     Location location = new Location(row, col);
+-                    Animal cheetah = new Cheetah(true, field, location);
+-                    animals.add(cheetah);
++                    animals.add(SpeciesFactory.create(SpeciesType.CHEETAH, true, field, location));
+                 }
+                 else if(rand.nextDouble() <= GAZELLE_CREATION_PROBABILITY) {
+                     Location location = new Location(row, col);
+-                    Animal gazelle = new Gazelle(true, field, location);
+-                    animals.add(gazelle);
++                    animals.add(SpeciesFactory.create(SpeciesType.GAZELLE, true, field, location));
+                 }else if(rand.nextDouble() <= JAGUAR_CREATION_PROBABILITY) {
+                     Location location = new Location(row, col);
+-                    Animal jaguar = new Jaguar(true, field, location);
+-                    animals.add(jaguar);
++                    animals.add(SpeciesFactory.create(SpeciesType.JAGUAR, true, field, location));
+                 }else if(rand.nextDouble() <= PLANT_CREATION_PROBABILITY) {
+                     Location location = new Location(row, col);
+                     Plants grass = new Grass(true, field, location);
+@@ -213,8 +209,7 @@ public class Simulator
+                 }
+                 else if(rand.nextDouble() <= ZEBRA_CREATION_PROBABILITY) {
+                     Location location = new Location(row, col);
+-                    Animal zebra = new Zebra(true, field, location);
+-                    animals.add(zebra);
++                    animals.add(SpeciesFactory.create(SpeciesType.ZEBRA, true, field, location));
+                 }else if(rand.nextDouble() <= HUNTER_CREATION_PROBABILITY) {
+                     Location location = new Location(row, col);
+                     Hunter hunter = new Hunter(field, location);
+diff --git a/src/main/java/safari/SpeciesConfig.java b/src/main/java/safari/SpeciesConfig.java
+new file mode 100644
+index 0000000..db9eb2d
+--- /dev/null
++++ b/src/main/java/safari/SpeciesConfig.java
+@@ -0,0 +1,34 @@
++package safari;
++
++import java.util.Map;
++
++/**
++ * Immutable configuration for one species.
++ */
++record SpeciesConfig(
++    SpeciesType type,
++    int breedingAge,
++    int maxAge,
++    double breedingProbability,
++    int maxLitterSize,
++    int maxTimeUntilBreedingAgain,
++    int initialFoodLevel,
++    int randomFoodUpperBound,
++    double maxFoodLevel,
++    double initialGrowthScale,
++    double actGrowthIncrement,
++    Map<Weather, Double> foodFindingProbabilities,
++    Map<Class<? extends Actor>, Integer> food
++)
++{
++    SpeciesConfig
++    {
++        foodFindingProbabilities = Map.copyOf(foodFindingProbabilities);
++        food = Map.copyOf(food);
++    }
++
++    double foodFindingProbability(Weather weather)
++    {
++        return foodFindingProbabilities.getOrDefault(weather, 0.0);
++    }
++}
+diff --git a/src/main/java/safari/SpeciesFactory.java b/src/main/java/safari/SpeciesFactory.java
+new file mode 100644
+index 0000000..0e563b6
+--- /dev/null
++++ b/src/main/java/safari/SpeciesFactory.java
+@@ -0,0 +1,155 @@
++package safari;
++
++import java.util.EnumMap;
++import java.util.Map;
++
++/**
++ * Central registry for species configuration and construction.
++ */
++final class SpeciesFactory
++{
++    private static final Map<SpeciesType, SpeciesConfig> CONFIGS = new EnumMap<>(SpeciesType.class);
++
++    static {
++        CONFIGS.put(
++            SpeciesType.GAZELLE,
++            new SpeciesConfig(
++                SpeciesType.GAZELLE,
++                2,
++                80,
++                0.8900995,
++                7,
++                2,
++                14,
++                14,
++                28,
++                75.0,
++                0.012,
++                Map.of(
++                    Weather.SUNNY, 1.0,
++                    Weather.RAINY, 1.0,
++                    Weather.FOGGY, 1.0
++                ),
++                Map.of(Grass.class, 14)
++            )
++        );
++        CONFIGS.put(
++            SpeciesType.ZEBRA,
++            new SpeciesConfig(
++                SpeciesType.ZEBRA,
++                2,
++                160,
++                0.27587999058995,
++                4,
++                15,
++                19,
++                19,
++                28,
++                67.0,
++                0.015,
++                Map.of(
++                    Weather.SUNNY, 1.0,
++                    Weather.RAINY, 1.0,
++                    Weather.FOGGY, 1.0
++                ),
++                Map.of(Grass.class, 19)
++            )
++        );
++        CONFIGS.put(
++            SpeciesType.CHEETAH,
++            new SpeciesConfig(
++                SpeciesType.CHEETAH,
++                2,
++                1200,
++                0.4196975694969952,
++                4,
++                11,
++                34,
++                34,
++                40,
++                102.0,
++                0.012,
++                Map.of(
++                    Weather.SUNNY, 0.9,
++                    Weather.RAINY, 0.8,
++                    Weather.FOGGY, 0.7
++                ),
++                Map.of(
++                    Zebra.class, 34,
++                    Gazelle.class, 33
++                )
++            )
++        );
++        CONFIGS.put(
++            SpeciesType.LION,
++            new SpeciesConfig(
++                SpeciesType.LION,
++                15,
++                1500,
++                0.40752995,
++                2,
++                20,
++                25,
++                25,
++                50,
++                100.0,
++                0.01,
++                Map.of(
++                    Weather.SUNNY, 1.0,
++                    Weather.RAINY, 0.9,
++                    Weather.FOGGY, 0.8
++                ),
++                Map.of(
++                    Gazelle.class, 24,
++                    Cheetah.class, 25
++                )
++            )
++        );
++        CONFIGS.put(
++            SpeciesType.JAGUAR,
++            new SpeciesConfig(
++                SpeciesType.JAGUAR,
++                10,
++                1000,
++                0.2,
++                5,
++                6,
++                35,
++                35,
++                39,
++                89.0,
++                0.013,
++                Map.of(
++                    Weather.SUNNY, 1.0,
++                    Weather.RAINY, 0.7,
++                    Weather.FOGGY, 0.4
++                ),
++                Map.of(Gazelle.class, 35)
++            )
++        );
++    }
++
++    private SpeciesFactory()
++    {
++    }
++
++    static SpeciesConfig config(SpeciesType type)
++    {
++        SpeciesConfig config = CONFIGS.get(type);
++        if(config == null) {
++            throw new IllegalArgumentException("Unknown species type: " + type);
++        }
++        return config;
++    }
++
++    static Animal create(SpeciesType type, boolean randomAge, Field field, Location location)
++    {
++        return switch(type) {
++            case GAZELLE -> new Gazelle(randomAge, field, location);
++            case ZEBRA -> new Zebra(randomAge, field, location);
++            case CHEETAH -> new Cheetah(randomAge, field, location);
++            case LION -> new Lion(randomAge, field, location);
++            case JAGUAR -> new Jaguar(randomAge, field, location);
++        };
++    }
++}
+diff --git a/src/main/java/safari/SpeciesType.java b/src/main/java/safari/SpeciesType.java
+new file mode 100644
+index 0000000..f084c29
+--- /dev/null
++++ b/src/main/java/safari/SpeciesType.java
+@@ -0,0 +1,13 @@
++package safari;
++
++/**
++ * Enumerates the animal species handled by the shared species factory.
++ */
++public enum SpeciesType
++{
++    GAZELLE,
++    ZEBRA,
++    CHEETAH,
++    LION,
++    JAGUAR
++}
+diff --git a/src/main/java/safari/Zebra.java b/src/main/java/safari/Zebra.java
+index e5a72d5..b63fa92 100644
+--- a/src/main/java/safari/Zebra.java
++++ b/src/main/java/safari/Zebra.java
+@@ -1,183 +1,21 @@
+ package safari;
+ 
+-import java.util.List;
+-import java.util.Random;
+-import java.util.Iterator;
+-import java.util.HashMap;
+-
+ /**
+  * A simple model of a Zebra.
+- * Zebras age, move, eat grass, breed, and die.
+  *
+  * @version 2022.03.01
+  */
+ public class Zebra extends Animal
+ {
+-    // Characteristics shared by all Zebra (class variables).
+-
+-    // The age at which a Zebra can start to breed.
+-    private static final int BREEDING_AGE = 2;
+-    // The age to which a Zebra can live.
+-    private static final  int MAX_AGE = 160;
+-    // The likelihood of a Zebra breeding.
+-    private static final double BREEDING_PROBABILITY =0.27587999058995; //0.2587998058995
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 4;
+-    private static final int MAX_TIME_UNTIL_BREEDING_AGAIN =15;
+-    //The minimum food value of the grass. In effect, this is the
+-    // number of steps a Zebra can go before it has to eat again.
+-    private static final int GRASS_FOOD_VALUE = 19; 
+-    private static final double MAX_FOOD_LEVEL = 28; 
+-    
+-    // The likelihood of a Zebra finding food depending on the weather.
+-    private static final double SUNNY_FINDING_FOOD_PROBABILITY = 1;
+-    private static final double RAINY_FINDING_FOOD_PROBABILITY = 1;
+-    private static final double FOGGY_FINDING_FOOD_PROBABILITY = 1;
+-
+-    // Individual characteristics (instance fields).
+-    private HashMap<Actor, Integer> food;
+     /**
+-     * Create a new Zebra. A Zebra may be created with age
+-     * zero (a new born) or with a random age.
+-     * 
+-     * @param randomAge If true, the Zebra will have a random age and hunger level.
++     * Create a new Zebra.
++     *
++     * @param randomAge If true, the Zebra will have a random age.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+     public Zebra(boolean randomAge, Field field, Location location)
+     {
+-        super(field, location);
+-        setAge(0);
+-        setFoodLevel(GRASS_FOOD_VALUE);
+-        if(randomAge) {
+-            setAge(getRandom().nextInt(MAX_AGE));
+-            setFoodLevel(getRandom().nextInt(GRASS_FOOD_VALUE));
+-        }
+-        food = new HashMap<>();
+-        setGrowthLevel(getAge()/67.0);
+-        addFood( field);
+-    }
+-
+-    /**
+-     * This is what the Zebra does most of the time: it finds
+-     * grass to eat. In the process, it might breed, die of hunger,
+-     * die of disease or die of old age.
+-     * 
+-     * @param newZebras A list to return newly born Zebras.
+-     * @param simulator The simulator.
+-     */
+-    public void act(List<Actor> newZebra, Simulator simulator)
+-    {
+-        setGrowthLevel(0.015);
+-        if(simulator.isDay()){
+-            incrementAge(simulator.getSteps());
+-            incrementHunger();
+-            if(isActive()) {
+-                giveBirth(newZebra); 
+-                super.act(newZebra,simulator);
+-            }
+-        }else{
+-            //space for potential night activities
+-        }
+-    }
+-
+-    /**
+-     * Returns the maximum number of babies the zebra can give birth to at once.
+-     * @return The max litter size of the zebra.
+-     */
+-    protected int getMaxLitterSize(){
+-        return MAX_LITTER_SIZE;
+-    }
+-
+-    /**
+-     * Returns the breeding probability of the zebra
+-     * @return The breeding probability of the zebra.
+-     */
+-    protected double getBreedingProbability(){
+-        return BREEDING_PROBABILITY;
+-    }
+-
+-    /**
+-     * Get breeding age of a zebra.
+-     * @return The breeding age of the zebra.
+-     */
+-    protected int getBreedingAge(){
+-        return BREEDING_AGE;
+-    }
+-
+-    /**
+-     * Gets the max age of a zebra.
+-     * @return The max age of the zebra.
+-     */
+-    protected int getMaxAge(){
+-        return MAX_AGE;
+-    }
+-
+-    /**
+-     * Returns the current zebra occupying the location.
+-     * @return The current zebra.
+-     */
+-    protected Animal getAnimal(){
+-        return this;
+-    }
+-
+-    /**
+-     * Adds the food the zebra eats & the corresponding food value to a hashMap.
+-     * @param field The field the zebra is in.
+-     */
+-    private void addFood(Field field){
+-        Location tempLocation = new Location(0,0);
+-        Plants grass = new Grass(true,field,tempLocation );
+-        food.put(grass, GRASS_FOOD_VALUE);
+-        grass.setDead();
+-    }
+-
+-    /**
+-     * Returns the HashMap which contains what food the zebra eats and the amount of food each plant gives.
+-     * @return The HashMap which contains the Actor and an Integer.
+-     */
+-    protected HashMap<Actor, Integer> getFood(){
+-        return food;
+-    }
+-
+-    /**
+-     * Gets the maximum food level a zebra can have.
+-     * @return Max food level of the zebra.
+-     */
+-    protected double getMaxFoodLevel(){
+-        return MAX_FOOD_LEVEL;
+-    }
+-    
+-    /**
+-     * Gets the maximum time a zebra needs to wait until it can breed again
+-     * @return Max time before the zebra can breed again.
+-     */
+-    protected int getMaxTimeUntilBreedingAgain(){
+-        return MAX_TIME_UNTIL_BREEDING_AGAIN;
+-    }
+-    
+-    /**
+-
+-     * Gets the probability the zebra will find food when it is sunny
+-     * @return The probability the zebra will find food when it is sunny
+-     */
+-    protected double getSunnyFindingFoodProbability(){
+-        return SUNNY_FINDING_FOOD_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Gets the probability the zebra will find food when it is rainy
+-     * @return The probability the zebra will find food when it is rainy
+-     */
+-    protected double getRainyFindingFoodProbability(){
+-        return RAINY_FINDING_FOOD_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Gets the probability the zebra will find food when it is foggy
+-     * @return The probability the zebra will find food when it is foggy
+-     */
+-    protected double getFoggyFindingFoodProbability(){
+-        return FOGGY_FINDING_FOOD_PROBABILITY;
++        super(SpeciesType.ZEBRA, randomAge, field, location);
+     }
+-}
+\ No newline at end of file
++}

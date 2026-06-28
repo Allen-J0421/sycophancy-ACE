@@ -1,0 +1,568 @@
+diff --git a/src/main/java/safari/Actor.java b/src/main/java/safari/Actor.java
+index ee7bedb..aba5b84 100644
+--- a/src/main/java/safari/Actor.java
++++ b/src/main/java/safari/Actor.java
+@@ -51,7 +51,7 @@ public abstract class Actor
+     protected void setLocation(Location newLocation)
+     {
+         if(location != null) {
+-            field.clear(location);
++            field.clear(this);
+         }
+         location = newLocation;
+         field.place(this, newLocation);
+@@ -99,11 +99,12 @@ public abstract class Actor
+     protected void setDead()
+     {
+         setAlive(false);
+-        if(getLocation() != null) {
+-            getField().clear(getLocation());
+-            location = null ;
+-            field = null;
++        Field currentField = field;
++        if(currentField != null && location != null) {
++            currentField.clear(this);
+         }
++        location = null;
++        field = null;
+     }
+ 
+     /**
+@@ -166,6 +167,15 @@ public abstract class Actor
+     protected void setGrowthLevel(double value){
+         growthLevel = value + growthLevel;
+     }
++
++    /**
++     * Indicates whether the actor can be traversed by blocking actors.
++     * @return true if the actor is traversable.
++     */
++    protected boolean isTraversable()
++    {
++        return false;
++    }
+     
+     /**
+      * Returns the shared random generator object
+@@ -174,4 +184,4 @@ public abstract class Actor
+     protected Random getRandom(){
+         return rand;
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/main/java/safari/Animal.java b/src/main/java/safari/Animal.java
+index 2c6bf2d..17f5e3d 100644
+--- a/src/main/java/safari/Animal.java
++++ b/src/main/java/safari/Animal.java
+@@ -140,7 +140,7 @@ public abstract class Animal extends Actor
+         Iterator<Location> it = adjacent.iterator();
+         while(it.hasNext()) {
+             Location where = it.next();
+-            Object occupant = field.getObjectAt(where);
++            Actor occupant = field.getActorAt(where);
+             if(occupant instanceof Animal mate && mate.speciesType == speciesType) {
+                 if(isActive() && getIsGirl() && !mate.getIsGirl() && mate.canBreed()) {
+                     if(!getHealth() || !mate.getHealth()) {
+@@ -196,7 +196,7 @@ public abstract class Animal extends Actor
+ 
+         if(getRandom().nextDouble() < probability && getFoodLevel() < speciesConfig.maxFoodLevel()) {
+             for(Location where : adjacent) {
+-                Object occupant = field.getObjectAt(where);
++                Actor occupant = field.getActorAt(where);
+                 if(occupant instanceof Actor currentAnimal) {
+                     for(Map.Entry<Class<? extends Actor>, Integer> prey : speciesConfig.food().entrySet()) {
+                         if(prey.getKey() == currentAnimal.getClass()) {
+diff --git a/src/main/java/safari/Field.java b/src/main/java/safari/Field.java
+index aecbb2c..3724702 100644
+--- a/src/main/java/safari/Field.java
++++ b/src/main/java/safari/Field.java
+@@ -1,14 +1,13 @@
+ package safari;
+ 
+ import java.util.Collections;
+-import java.util.Iterator;
+ import java.util.LinkedList;
+ import java.util.List;
+ import java.util.Random;
+ 
+ /**
+  * Represent a rectangular grid of field positions.
+- * Each position is able to store a single animal.
++ * Each position can store one blocking actor and one traversable actor.
+  *
+  * @version 2016.02.29
+  */
+@@ -18,9 +17,11 @@ public class Field
+     private static final Random rand = Randomizer.getRandom();
+     
+     // The depth and width of the field.
+-    private int depth, width;
+-    // Storage for the animals.
+-    private Object[][] field;
++    private final int depth, width;
++    // Storage for blocking actors, such as animals and hunters.
++    private final Actor[][] occupants;
++    // Storage for traversable actors, such as grass.
++    private final Actor[][] traversableActors;
+ 
+     /**
+      * Represent a field of the given dimensions.
+@@ -31,7 +32,8 @@ public class Field
+     {
+         this.depth = depth;
+         this.width = width;
+-        field = new Object[depth][width];
++        occupants = new Actor[depth][width];
++        traversableActors = new Actor[depth][width];
+     }
+     
+     /**
+@@ -41,7 +43,8 @@ public class Field
+     {
+         for(int row = 0; row < depth; row++) {
+             for(int col = 0; col < width; col++) {
+-                field[row][col] = null;
++                occupants[row][col] = null;
++                traversableActors[row][col] = null;
+             }
+         }
+     }
+@@ -52,7 +55,29 @@ public class Field
+      */
+     public void clear(Location location)
+     {
+-        field[location.getRow()][location.getCol()] = null;
++        occupants[location.getRow()][location.getCol()] = null;
++        traversableActors[location.getRow()][location.getCol()] = null;
++    }
++
++    /**
++     * Clear the given actor from the field.
++     * @param actor The actor to clear.
++     */
++    public void clear(Actor actor)
++    {
++        if(actor == null) {
++            return;
++        }
++        Location location = actor.getLocation();
++        if(location == null) {
++            return;
++        }
++        if(actor.isTraversable()) {
++            traversableActors[location.getRow()][location.getCol()] = null;
++        }
++        else {
++            occupants[location.getRow()][location.getCol()] = null;
++        }
+     }
+     
+     /**
+@@ -63,9 +88,9 @@ public class Field
+      * @param row Row coordinate of the location.
+      * @param col Column coordinate of the location.
+      */
+-    public void place(Object animal, int row, int col)
++    public void place(Actor actor, int row, int col)
+     {
+-        place(animal, new Location(row, col));
++        place(actor, new Location(row, col));
+     }
+     
+     /**
+@@ -75,30 +100,71 @@ public class Field
+      * @param animal The animal to be placed.
+      * @param location Where to place the animal.
+      */
+-    public void place(Object animal, Location location)
++    public void place(Actor actor, Location location)
+     {
+-        field[location.getRow()][location.getCol()] = animal;
++        if(actor == null || location == null) {
++            return;
++        }
++        if(actor.isTraversable()) {
++            traversableActors[location.getRow()][location.getCol()] = actor;
++        }
++        else {
++            occupants[location.getRow()][location.getCol()] = actor;
++        }
+     }
+     
+     /**
+-     * Return the animal at the given location, if any.
++     * Return the visible actor at the given location, if any.
+      * @param location Where in the field.
+-     * @return The animal at the given location, or null if there is none.
++     * @return The actor at the given location, or null if there is none.
+      */
+-    public Object getObjectAt(Location location)
++    public Actor getActorAt(Location location)
+     {
+-        return getObjectAt(location.getRow(), location.getCol());
++        return getActorAt(location.getRow(), location.getCol());
+     }
+     
+     /**
+-     * Return the animal at the given location, if any.
++     * Return the visible actor at the given location, if any.
+      * @param row The desired row.
+      * @param col The desired column.
+-     * @return The animal at the given location, or null if there is none.
++     * @return The actor at the given location, or null if there is none.
++     */
++    public Actor getActorAt(int row, int col)
++    {
++        if(occupants[row][col] != null) {
++            return occupants[row][col];
++        }
++        return traversableActors[row][col];
++    }
++
++    /**
++     * Return the blocking actor at the given location, if any.
++     * @param location Where in the field.
++     * @return The blocking actor at the location, or null.
++     */
++    public Actor getOccupantAt(Location location)
++    {
++        return occupants[location.getRow()][location.getCol()];
++    }
++
++    /**
++     * Return the traversable actor at the given location, if any.
++     * @param location Where in the field.
++     * @return The traversable actor at the location, or null.
++     */
++    public Actor getTraversableActorAt(Location location)
++    {
++        return traversableActors[location.getRow()][location.getCol()];
++    }
++
++    /**
++     * Determine whether a location has a blocking occupant.
++     * @param location The location to inspect.
++     * @return true if the location is blocked by an occupant.
+      */
+-    public Object getObjectAt(int row, int col)
++    public boolean isOccupied(Location location)
+     {
+-        return field[row][col];
++        return getOccupantAt(location) != null;
+     }
+     
+     /**
+@@ -125,7 +191,24 @@ public class Field
+         List<Location> free = new LinkedList<>();
+         List<Location> adjacent = adjacentLocations(location);
+         for(Location next : adjacent) {
+-            if(getObjectAt(next) == null) {
++            if(getOccupantAt(next) == null) {
++                free.add(next);
++            }
++        }
++        return free;
++    }
++
++    /**
++     * Get a shuffled list of the free adjacent locations for traversable actors.
++     * @param location Get locations adjacent to this.
++     * @return A list of free adjacent locations for ground-cover actors.
++     */
++    public List<Location> getFreeAdjacentTraversableLocations(Location location)
++    {
++        List<Location> free = new LinkedList<>();
++        List<Location> adjacent = adjacentLocations(location);
++        for(Location next : adjacent) {
++            if(getTraversableActorAt(next) == null) {
+                 free.add(next);
+             }
+         }
+@@ -187,6 +270,16 @@ public class Field
+         return locations;
+     }
+ 
++    /**
++     * Return whether a location can accept a new traversable actor.
++     * @param location The location to check.
++     * @return true if no traversable actor is present.
++     */
++    public boolean isFreeForTraversableActor(Location location)
++    {
++        return getTraversableActorAt(location) == null;
++    }
++
+     /**
+      * Return the depth of the field.
+      * @return The depth of the field.
+diff --git a/src/main/java/safari/FieldStats.java b/src/main/java/safari/FieldStats.java
+index 4da4301..9c6dca0 100644
+--- a/src/main/java/safari/FieldStats.java
++++ b/src/main/java/safari/FieldStats.java
+@@ -1,6 +1,5 @@
+ package safari;
+ 
+-import java.awt.Color;
+ import java.util.HashMap;
+ 
+ /**
+@@ -34,11 +33,11 @@ public class FieldStats
+      * @param simulator. The current simulator the simulation is being run on.
+      * @return A string listing what is in the field.
+      */
+-    public String getPopulationDetails(Field field, Simulator simulator)
++    public String getPopulationDetails(Field field)
+     {
+         StringBuffer buffer = new StringBuffer();
+         if(!countsValid) {
+-            generateCounts(field, simulator);
++            generateCounts(field);
+         }
+         for(Class key : counters.keySet()) {
+             Counter info = counters.get(key);
+@@ -68,8 +67,11 @@ public class FieldStats
+      * @param actor The object of animal to increment.
+      * @param simulator. The current simulator the simulation is being run on.
+      */
+-    public void incrementCount(Object actor, Simulator simulator)
++    public void incrementCount(Actor actor)
+     {
++        if(actor == null) {
++            return;
++        }
+         Class animalClass = actor.getClass();
+         Counter count = counters.get(animalClass);
+         if(count == null) {
+@@ -79,11 +81,6 @@ public class FieldStats
+             counters.put(animalClass, count);
+         }
+         count.increment();
+-        if (simulator.getSteps() != 0){
+-            if(actor instanceof Grass){
+-                count.setCount(simulator.getNoOfGrass());
+-            }
+-        }
+     }
+ 
+     /**
+@@ -101,12 +98,12 @@ public class FieldStats
+      * @param simulator The current simulator the simulation is being run on.
+      * @return true If there is more than one species alive.
+      */
+-    public boolean isViable(Field field, Simulator simulator)
++    public boolean isViable(Field field)
+     {
+         // How many counts are non-zero.
+         int nonZero = 0;
+         if(!countsValid) {
+-            generateCounts(field, simulator);
++            generateCounts(field);
+         }
+         for(Class key : counters.keySet()) {
+             Counter info = counters.get(key);
+@@ -125,15 +122,14 @@ public class FieldStats
+      * @param field The field to generate the stats for.
+      * @param simulator The current simulator the simulation is being run on.
+      */
+-    private void generateCounts(Field field, Simulator simulator)
++    private void generateCounts(Field field)
+     {
+         reset();
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+-                Object animal = field.getObjectAt(row, col);
+-                if(animal != null) {
+-                    incrementCount(animal, simulator);
+-                }
++                Location location = new Location(row, col);
++                incrementCount(field.getTraversableActorAt(location));
++                incrementCount(field.getOccupantAt(location));
+             }
+         }
+         countsValid = true;
+diff --git a/src/main/java/safari/Grass.java b/src/main/java/safari/Grass.java
+index cae31c2..cd93789 100644
+--- a/src/main/java/safari/Grass.java
++++ b/src/main/java/safari/Grass.java
+@@ -47,18 +47,7 @@ public class Grass extends Plants
+         setGrowthLevel(0.05);
+         if(simulator.isDay()){
+             if(isActive()) {
+-                 Field field = getField();
+-                //sets the location to show the grass once the actor on top of it has moved.
+-                if (field.getObjectAt(getLocation()) == null ){
+-                    setLocation(getLocation());
+-                }else if (field.getObjectAt(getLocation()) != this && (field.getObjectAt(getLocation()) instanceof Plants)){
+-                    Object grassObject = field.getObjectAt(getLocation());
+-                    Plants grassPlant = (Plants)grassObject;
+-                    grassPlant.setDead();
+-                    setLocation(getLocation());
+-
+-                }
+-                
++                Field field = getField();
+                 switch(simulator.getWeather()){
+                     case SUNNY:
+                         increaseSunLevel();
+@@ -74,7 +63,7 @@ public class Grass extends Plants
+                     default:
+                         break;
+                 }
+-                List<Location> free = field.getFreeAdjacentLocations(getLocation());
++                List<Location> free = field.getFreeAdjacentTraversableLocations(getLocation());
+                 int births = growth(simulator.getSteps());
+                 for(int b = 0; b < births && free.size() > 0; b++) {
+                     Location loc = free.remove(0);
+diff --git a/src/main/java/safari/Hunter.java b/src/main/java/safari/Hunter.java
+index 1f076ed..fff5314 100644
+--- a/src/main/java/safari/Hunter.java
++++ b/src/main/java/safari/Hunter.java
+@@ -76,16 +76,16 @@ public class Hunter extends Actor
+      * @param probability The probability the hunting is successful.
+      */
+     private void hunt(double probability){
+-        if(getRandom().nextDouble() < probability){
+-            Field field = getField();
+-            List<Location> adjacent = field.adjacentLocations(getLocation());
+-            Iterator<Location> it = adjacent.iterator();
+-            for(int i = 0; i< SHOTS; i++){
+-                Location where = it.next();
+-                Object animal = field.getObjectAt(where);
+-                if( animal != null && (animal instanceof Lion  || animal instanceof Cheetah)){
+-                    Animal currentAnimal = (Animal) animal;
+-                    if(currentAnimal.isActive()) { 
++            if(getRandom().nextDouble() < probability){
++                Field field = getField();
++                List<Location> adjacent = field.adjacentLocations(getLocation());
++                Iterator<Location> it = adjacent.iterator();
++                for(int i = 0; i< SHOTS; i++){
++                    Location where = it.next();
++                    Actor animal = field.getActorAt(where);
++                    if( animal != null && (animal instanceof Lion  || animal instanceof Cheetah)){
++                        Animal currentAnimal = (Animal) animal;
++                        if(currentAnimal.isActive()) { 
+                         currentAnimal.setDead();
+                         break;
+                     }
+diff --git a/src/main/java/safari/Plants.java b/src/main/java/safari/Plants.java
+index bd3004c..16c2f97 100644
+--- a/src/main/java/safari/Plants.java
++++ b/src/main/java/safari/Plants.java
+@@ -110,4 +110,10 @@ public abstract class Plants extends Actor
+             setDead();
+         }
+     }
++
++    @Override
++    protected boolean isTraversable()
++    {
++        return true;
++    }
+ }
+diff --git a/src/main/java/safari/Predator.java b/src/main/java/safari/Predator.java
+index fc47c50..bf83989 100644
+--- a/src/main/java/safari/Predator.java
++++ b/src/main/java/safari/Predator.java
+@@ -38,7 +38,7 @@ public abstract class Predator extends Animal
+             Iterator<Location> it = adjacent.iterator();
+             while(it.hasNext()) {
+                 Location where = it.next();
+-                Object actor = field.getObjectAt(where);
++                Actor actor = field.getActorAt(where);
+                 if(actor instanceof Plants) {
+                     return where;
+                 }
+diff --git a/src/main/java/safari/Simulator.java b/src/main/java/safari/Simulator.java
+index f04a17b..84d51df 100644
+--- a/src/main/java/safari/Simulator.java
++++ b/src/main/java/safari/Simulator.java
+@@ -36,7 +36,6 @@ public class Simulator
+     private Weather weather;
+     private int numberOfDays;
+     private static final Random rand = Randomizer.getRandom();
+-    private int noOfGrass; // keeps count of the no.of grass species in the field.
+     /**
+      * Construct a simulation field with default size.
+      */
+@@ -134,14 +133,11 @@ public class Simulator
+             }
+         }
+         animals.addAll(newAnimals);
+-        noOfGrass = 0;
+         for(Iterator<Actor> it = plants.iterator(); it.hasNext(); ) {
+             Actor plants = it.next();
+             plants.act(newGrass,this);
+             if(! plants.isActive()) {
+                 it.remove();
+-            }else if(plants instanceof Plants){
+-                noOfGrass++;
+             }
+         }
+         plants.addAll(newGrass);
+@@ -244,14 +240,6 @@ public class Simulator
+         }
+     }
+     
+-    /**
+-     * Returns the number of grass in the plants arrayList.
+-     * @return number of grass in arraylist.
+-     */
+-    public int getNoOfGrass(){
+-        return noOfGrass;
+-    }
+-    
+     /**
+      * Returns the number of days.
+      * @return  number of days.
+diff --git a/src/main/java/safari/SimulatorView.java b/src/main/java/safari/SimulatorView.java
+index 5433cf2..6a52b5e 100644
+--- a/src/main/java/safari/SimulatorView.java
++++ b/src/main/java/safari/SimulatorView.java
+@@ -184,15 +184,16 @@ public class SimulatorView extends JFrame
+ 
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+-                Object actor = field.getObjectAt(row, col);
++                Location location = new Location(row, col);
++                Actor surfaceActor = field.getTraversableActorAt(location);
++                Actor occupant = field.getOccupantAt(location);
++                Actor actor = field.getActorAt(row, col);
+                 if(actor != null) {
+-                    stats.incrementCount(actor, simulator);
++                    stats.incrementCount(surfaceActor);
++                    stats.incrementCount(occupant);
+                     fieldView.drawMark(col, row, getColor(actor.getClass()));
+-                    if(actor instanceof Animal){
+-                        Animal animal = (Animal) actor;
+-                        if (!animal.getHealth()){
+-                            infectedPopulationCount ++;
+-                        }
++                    if(actor instanceof Animal animal && !animal.getHealth()){
++                        infectedPopulationCount ++;
+                     }
+                 }
+                 else {
+@@ -208,7 +209,7 @@ public class SimulatorView extends JFrame
+         }
+ 
+         infoLabel.setText(" " + simulator.getWeather() + "        " + INFECTION_PREFIX + infectedPopulationCount );
+-        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(field, simulator));
++        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(field));
+         fieldView.repaint();
+     }
+ 
+@@ -218,7 +219,7 @@ public class SimulatorView extends JFrame
+      */
+     public boolean isViable(Field field)
+     {
+-        return stats.isViable(field, simulator);
++        return stats.isViable(field);
+     }
+ 
+     /**
+@@ -326,4 +327,3 @@ public class SimulatorView extends JFrame
+         }
+     }
+ }
+-

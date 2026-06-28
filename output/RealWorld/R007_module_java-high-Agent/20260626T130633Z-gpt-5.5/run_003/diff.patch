@@ -1,0 +1,430 @@
+diff --git a/FieldView.java b/FieldView.java
+new file mode 100644
+index 0000000..1f89cc1
+--- /dev/null
++++ b/FieldView.java
+@@ -0,0 +1,185 @@
++import java.awt.Color;
++import java.awt.Dimension;
++import java.awt.Graphics;
++import java.awt.Image;
++import java.awt.image.BufferedImage;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import javax.swing.JPanel;
++
++/**
++ * A graphical component that renders the simulation field.
++ */
++public class FieldView extends JPanel
++{
++    private static final int GRID_VIEW_SCALING_FACTOR = 6;
++
++    // Colors used for empty locations.
++    private static final Color EMPTY_COLOR = Color.white;
++    // Color used for objects that have no defined color.
++    private static final Color UNKNOWN_COLOR = Color.gray;
++    // Colour used for objects that are infected by disease.
++    private static final Color INFECTED_COLOR = Color.green;
++
++    private final int gridWidth;
++    private final int gridHeight;
++    private int xScale;
++    private int yScale;
++    private Dimension size;
++    private Graphics graphics;
++    private Image fieldImage;
++
++    // A map for storing colors for participants in the simulation.
++    private final Map<Class, Color> colors;
++
++    /**
++     * Create a new FieldView component.
++     */
++    public FieldView(int height, int width)
++    {
++        gridHeight = height;
++        gridWidth = width;
++        size = new Dimension(0, 0);
++        colors = new LinkedHashMap<>();
++    }
++
++    /**
++     * Define a color to be used for a given class of animal.
++     * @param animalClass The animal's Class object.
++     * @param color The color to be used for the given class.
++     */
++    public void setColor(Class animalClass, Color color)
++    {
++        colors.put(animalClass, color);
++    }
++
++    /**
++     * Render the current field contents.
++     * @param field The field whose contents should be drawn.
++     * @param weather The current weather state.
++     * @param stats Statistics to update while traversing the field.
++     */
++    public void render(Field field, Weather weather, FieldStats stats)
++    {
++        preparePaint();
++
++        for(int row = 0; row < field.getDepth(); row++) {
++            for(int col = 0; col < field.getWidth(); col++) {
++                Object creature = field.getObjectAt(row, col);
++                drawFieldLocation(col, row, creature, weather.getStormStart(), stats);
++            }
++        }
++
++        if(weather.getStormStart()) {
++            drawStormColor(field, weather);
++        }
++
++        repaint();
++    }
++
++    /**
++     * Tell the GUI manager how big we would like to be.
++     */
++    @Override
++    public Dimension getPreferredSize()
++    {
++        return new Dimension(gridWidth * GRID_VIEW_SCALING_FACTOR,
++                             gridHeight * GRID_VIEW_SCALING_FACTOR);
++    }
++
++    /**
++     * Prepare for a new round of painting. Since the component
++     * may be resized, compute the scaling factor again.
++     */
++    private void preparePaint()
++    {
++        if(fieldImage == null || !size.equals(getSize())) {
++            size = getSize();
++            fieldImage = new BufferedImage(Math.max(1, size.width), Math.max(1, size.height),
++                                           BufferedImage.TYPE_INT_RGB);
++            graphics = fieldImage.getGraphics();
++
++            xScale = size.width / gridWidth;
++            if(xScale < 1) {
++                xScale = GRID_VIEW_SCALING_FACTOR;
++            }
++            yScale = size.height / gridHeight;
++            if(yScale < 1) {
++                yScale = GRID_VIEW_SCALING_FACTOR;
++            }
++        }
++    }
++
++    /**
++     * Draw a single field location and update population statistics.
++     */
++    private void drawFieldLocation(int col, int row, Object creature, boolean stormStarted, FieldStats stats)
++    {
++        if(creature == null) {
++            drawMark(col, row, EMPTY_COLOR);
++            return;
++        }
++
++        stats.incrementCount(creature.getClass());
++        if(!stormStarted && creature instanceof Animal) {
++            Animal animal = (Animal) creature;
++            if(animal.getIsInfected() && !animal.getIsImmuned()) {
++                drawMark(col, row, INFECTED_COLOR);
++                return;
++            }
++        }
++
++        drawMark(col, row, getColor(creature.getClass()));
++    }
++
++    /**
++     * Draw the colour of the storm.
++     */
++    private void drawStormColor(Field field, Weather weather)
++    {
++        List<Location> stormLocation =
++            field.adjacentLocationsIncludingSelf(weather.getRandomLocation(), weather.getStormScope());
++        for(Location location : stormLocation) {
++            drawMark(location.getCol(), location.getRow(), getColor(Weather.class));
++        }
++    }
++
++    /**
++     * @return The color to be used for a given class of animal.
++     */
++    private Color getColor(Class animalClass)
++    {
++        Color color = colors.get(animalClass);
++        return color == null ? UNKNOWN_COLOR : color;
++    }
++
++    /**
++     * Paint one grid location on this field in a given color.
++     */
++    private void drawMark(int x, int y, Color color)
++    {
++        graphics.setColor(color);
++        graphics.fillRect(x * xScale, y * yScale, xScale - 1, yScale - 1);
++    }
++
++    /**
++     * The field view component needs to be redisplayed. Copy the
++     * internal image to screen.
++     */
++    @Override
++    public void paintComponent(Graphics graphics)
++    {
++        super.paintComponent(graphics);
++        if(fieldImage != null) {
++            Dimension currentSize = getSize();
++            if(size.equals(currentSize)) {
++                graphics.drawImage(fieldImage, 0, 0, null);
++            }
++            else {
++                // Rescale the previous image.
++                graphics.drawImage(fieldImage, 0, 0, currentSize.width, currentSize.height, null);
++            }
++        }
++    }
++}
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 044414e..654fdf9 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -1,11 +1,5 @@
+ import java.awt.*;
+-import java.awt.event.*;
+ import javax.swing.*;
+-import java.util.LinkedHashMap;
+-import java.util.Map;
+-import java.util.List;
+-import java.util.Iterator;
+-
+ 
+ /**
+  * A graphical view of the simulation grid.
+@@ -18,19 +12,6 @@ import java.util.Iterator;
+  */
+ public class SimulatorView extends JFrame
+ {
+-    // Colors used for empty locations.
+-    private static final Color EMPTY_COLOR = Color.white;
+-
+-    // Color used for objects that have no defined color.
+-    private static final Color UNKNOWN_COLOR = Color.gray;
+-    
+-    // Colour used for underwater storm
+-    private static final Color UNDERWATERSTORM_COLOR = Color.blue;
+-    
+-    // Colour used for objects that are infected by disease;
+-    private static final Color INFECTED_COLOR = Color.green;
+-    
+-
+     private final String STEP_PREFIX = "Step: ";
+     private final String POPULATION_PREFIX = "Population: ";
+     private final String DAYOFTIME_PREFIX = "Time: It's ";
+@@ -40,8 +21,6 @@ public class SimulatorView extends JFrame
+     private JLabel stepLabel, population, infoLabel, diseaseLabel;
+     private FieldView fieldView;
+     
+-    // A map for storing colors for participants in the simulation
+-    private Map<Class, Color> colors;
+     // A statistics object computing and storing simulation information
+     private FieldStats stats;
+ 
+@@ -53,7 +32,6 @@ public class SimulatorView extends JFrame
+     public SimulatorView(int height, int width)
+     {
+         stats = new FieldStats();
+-        colors = new LinkedHashMap<>();
+ 
+         setTitle("Underwater Environment Simulation");
+         stepLabel = new JLabel(STEP_PREFIX, JLabel.CENTER);
+@@ -88,7 +66,7 @@ public class SimulatorView extends JFrame
+      */
+     public void setColor(Class animalClass, Color color)
+     {
+-        colors.put(animalClass, color);
++        fieldView.setColor(animalClass, color);
+     }
+ 
+     /**
+@@ -99,21 +77,6 @@ public class SimulatorView extends JFrame
+         infoLabel.setText(text);
+     }
+ 
+-    /**
+-     * @return The color to be used for a given class of animal.
+-     */
+-    private Color getColor(Class animalClass)
+-    {
+-        Color col = colors.get(animalClass);
+-        if(col == null) {
+-            // no color defined for this class
+-            return UNKNOWN_COLOR;
+-        }
+-        else {
+-            return col;
+-        }
+-    }
+-
+     /**
+      * Show the current status of the field.
+      * @param step Which iteration step it is.
+@@ -133,41 +96,10 @@ public class SimulatorView extends JFrame
+                             + "        Storm: " + (weather.getStormStart()? "exists": "subsides"));
+         diseaseLabel.setText(POPULATION_DIE_OF_DISEASE_PREFIX + Animal.populationDieOfDisease);
+         stats.reset();
+-        
+-        fieldView.preparePaint();
+-
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
+-                Object creature = field.getObjectAt(row, col);
+-                if(creature != null && weather.getStormStart() == false) {
+-                    stats.incrementCount(creature.getClass());
+-                    if(creature instanceof Animal){
+-                     Animal ani = (Animal)creature;
+-                        if(ani.getIsInfected() && !ani.getIsImmuned())
+-                            fieldView.drawMark(col, row, INFECTED_COLOR);
+-                        else 
+-                            fieldView.drawMark(col, row, getColor(creature.getClass()));
+-                    }
+-                    else
+-                        fieldView.drawMark(col, row, getColor(creature.getClass()));
+-                }
+-                else if(creature != null && weather.getStormStart() == true) {
+-                    stats.incrementCount(creature.getClass());
+-                    fieldView.drawMark(col, row, getColor(creature.getClass())); 
+-                    drawStormColor(field, weather);
+-                }
+-                else {
+-                    fieldView.drawMark(col, row, EMPTY_COLOR);
+-                }   
+-                    
+-            }
+-        }
+-                
+-            
++        fieldView.render(field, weather, stats);
+         
+         stats.countFinished();
+         population.setText(POPULATION_PREFIX + stats.getPopulationDetails(field));
+-        fieldView.repaint();
+     }
+     
+     /**
+@@ -178,111 +110,4 @@ public class SimulatorView extends JFrame
+     {
+         return stats.isViable(field);
+     }
+-    
+-    /**
+-     * Draw the colour of the storm, and the range of the storm is given by storm scope of 
+-     * the object of Weather class.
+-     * 
+-     * @param field The field where the weather might happen and to be displayed.
+-     * @param weather the object of Weather class
+-     */
+-    private void drawStormColor(Field field, Weather weather) {
+-        List<Location> stormLocation = field.adjacentLocationsIncludingSelf(weather.getRandomLocation(),weather.getStormScope());
+-        Iterator<Location> it = stormLocation.iterator();
+-        while(it.hasNext() ) {
+-            Location location = it.next();
+-            fieldView.drawMark(location.getCol(),location.getRow(),getColor(Weather.class));
+-        }
+-        
+-    }
+-  
+-   
+-    /**
+-     * Provide a graphical view of a rectangular field. This is 
+-     * a nested class (a class defined inside a class) which
+-     * defines a custom component for the user interface. This
+-     * component displays the field.
+-     * This is rather advanced GUI stuff - you can ignore this 
+-     * for your project if you like.
+-     */
+-    private class FieldView extends JPanel
+-    {
+-        private final int GRID_VIEW_SCALING_FACTOR = 6;
+-
+-        private int gridWidth, gridHeight;
+-        private int xScale, yScale;
+-        Dimension size;
+-        private Graphics g;
+-        private Image fieldImage;
+-
+-        /**
+-         * Create a new FieldView component.
+-         */
+-        public FieldView(int height, int width)
+-        {
+-            gridHeight = height;
+-            gridWidth = width;
+-            size = new Dimension(0, 0);
+-        }
+-
+-        /**
+-         * Tell the GUI manager how big we would like to be.
+-         */
+-        public Dimension getPreferredSize()
+-        {
+-            return new Dimension(gridWidth * GRID_VIEW_SCALING_FACTOR,
+-                                 gridHeight * GRID_VIEW_SCALING_FACTOR);
+-        }
+-        
+-  
+-
+-        /**
+-         * Prepare for a new round of painting. Since the component
+-         * may be resized, compute the scaling factor again.
+-         */
+-        public void preparePaint()
+-        {
+-            if(! size.equals(getSize())) {  // if the size has changed...
+-                size = getSize();
+-                fieldImage = fieldView.createImage(size.width, size.height);
+-                g = fieldImage.getGraphics();
+-
+-                xScale = size.width / gridWidth;
+-                if(xScale < 1) {
+-                    xScale = GRID_VIEW_SCALING_FACTOR;
+-                }
+-                yScale = size.height / gridHeight;
+-                if(yScale < 1) {
+-                    yScale = GRID_VIEW_SCALING_FACTOR;
+-                }
+-            }
+-        }
+-        
+-        /**
+-         * Paint on grid location on this field in a given color.
+-         */
+-        public void drawMark(int x, int y, Color color)
+-        {
+-            g.setColor(color);
+-            g.fillRect(x * xScale, y * yScale, xScale-1, yScale-1);
+-        }
+-
+-        /**
+-         * The field view component needs to be redisplayed. Copy the
+-         * internal image to screen.
+-         */
+-        public void paintComponent(Graphics g)
+-        {
+-            if(fieldImage != null) {
+-                Dimension currentSize = getSize();
+-                if(size.equals(currentSize)) {
+-                    g.drawImage(fieldImage, 0, 0, null);
+-                }
+-                else {
+-                    // Rescale the previous image.
+-                    g.drawImage(fieldImage, 0, 0, currentSize.width, currentSize.height, null);
+-                }
+-            }
+-        }
+-    }
+ }

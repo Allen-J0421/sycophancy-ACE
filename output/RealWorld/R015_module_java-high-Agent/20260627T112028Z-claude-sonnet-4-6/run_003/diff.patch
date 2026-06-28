@@ -1,0 +1,548 @@
+diff --git a/FieldStats.java b/FieldStats.java
+index 73c95e1..97faf7c 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -1,140 +1,89 @@
+-import java.awt.Color;
+ import java.util.HashMap;
+-import java.lang.Math;
+ 
+ /**
+- * This class collects and provides some statistical data on the state 
+- * of a field. It is flexible: it will create and maintain a counter 
+- * for any class of object that is found within the field.
++ * Collects and provides statistical data on the state of a field.
++ *
++ * Call {@link #update(Field)} to refresh all counts from the current field
++ * state. All other methods return values from the most recent update and
++ * require no Field reference.
+  *
+  * @version 2016.02.29
+  */
+ public class FieldStats
+ {
+-    // Counters for each type of entity (fox, rabbit, etc.) in the simulation.
+-    private HashMap<Class, Counter> counters;
+-    // Whether the counters are currently up to date.
+-    private boolean countsValid;
+-
+-    /**
+-     * Construct a FieldStats object.
+-     */
+-    public FieldStats()
+-    {
+-        // Set up a collection for counters for each type of animal that
+-        // we might find
+-        counters = new HashMap<>();
+-        countsValid = true;
+-    }
++    private HashMap<Class, Counter> counters = new HashMap<>();
+ 
+     /**
+-     * Get details of what is in the field.
+-     * @return A string describing what is in the field.
++     * Scan the field and refresh all counts.
++     * Also counts diseases carried by {@link Infectable} occupants.
++     * @param field the field to scan
+      */
+-    public String getPopulationDetails(Field field)
++    public void update(Field field)
+     {
+-        StringBuffer buffer = new StringBuffer();
+-        if(!countsValid) {
+-            generateCounts(field);
++        for (Counter c : counters.values()) {
++            c.reset();
+         }
+-        for(Class key : counters.keySet()) {
+-            Counter info = counters.get(key);
+-            buffer.append(info.getName());
+-            buffer.append(": ");
+-            buffer.append(info.getCount());
+-            buffer.append(' ');
++        for (int row = 0; row < field.getDepth(); row++) {
++            for (int col = 0; col < field.getWidth(); col++) {
++                Object item = field.getObjectAt(row, col);
++                if (item != null) {
++                    incrementCount(item.getClass());
++                    if (item instanceof Infectable) {
++                        Disease disease = ((Infectable) item).getDisease();
++                        if (disease != null) {
++                            incrementCount(disease.getClass());
++                        }
++                    }
++                }
++            }
+         }
+-        return buffer.toString();
+     }
+ 
+-
+-    /**
+-     * get the raw details of what is in the field for population statistic measuring 
+-     * @return A hashmap of all the poplulation counters.
+-     */
+-    public HashMap<Class, Counter> getPopulationDetails() {
+-        return counters;
+-    }
+-    
+     /**
+-     * Invalidate the current set of statistics; reset all 
+-     * counts to zero.
++     * Return the raw counters keyed by class, reflecting the most recent
++     * {@link #update(Field)} call.
++     * @return the population counters
+      */
+-    public void reset()
++    public HashMap<Class, Counter> getCounters()
+     {
+-        countsValid = false;
+-        for(Class key : counters.keySet()) {
+-            Counter count = counters.get(key);
+-            count.reset();
+-        }
++        return counters;
+     }
+ 
+     /**
+-     * Increment the count for one class of animal.
+-     * @param animalClass The class of animal to increment.
++     * Return a human-readable summary of all population counts.
++     * @return formatted population string
+      */
+-    public void incrementCount(Class animalClass)
++    public String getSummary()
+     {
+-        Counter count = counters.get(animalClass);
+-        if(count == null) {
+-            // We do not have a counter for this species yet.
+-            // Create one.
+-            count = new Counter(animalClass.getName());
+-            counters.put(animalClass, count);
++        StringBuilder sb = new StringBuilder();
++        for (Counter info : counters.values()) {
++            sb.append(info.getName()).append(": ").append(info.getCount()).append(' ');
+         }
+-        count.increment();
+-    }
+-
+-    /**
+-     * Indicate that an animal count has been completed.
+-     */
+-    public void countFinished()
+-    {
+-        countsValid = true;
++        return sb.toString();
+     }
+ 
+     /**
+      * Determine whether the simulation is still viable.
+-     * I.e., should it continue to run.
+-     * @return true If there is more than one species alive.
++     * @return true if more than one species has a non-zero count
+      */
+-    public boolean isViable(Field field)
++    public boolean isViable()
+     {
+-        // How many counts are non-zero.
+         int nonZero = 0;
+-        if(!countsValid) {
+-            generateCounts(field);
+-        }
+-        for(Class key : counters.keySet()) {
+-            Counter info = counters.get(key);
+-            if(info.getCount() > 0) {
++        for (Counter info : counters.values()) {
++            if (info.getCount() > 0) {
+                 nonZero++;
+             }
+         }
+         return nonZero > 1;
+     }
+-    
+-    /**
+-     * Generate counts of the number of foxes and rabbits.
+-     * These are not kept up to date as foxes and rabbits
+-     * are placed in the field, but only when a request
+-     * is made for the information.
+-     * @param field The field to generate the stats for.
+-     */
+-    private void generateCounts(Field field)
+-    {
+-        reset();
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
+-
+-                Object item = field.getObjectAt(row, col);
+ 
+-                if(item != null) {
+-                    
+-                    incrementCount(item.getClass());
+-                }
+-            }
++    private void incrementCount(Class clazz)
++    {
++        Counter c = counters.get(clazz);
++        if (c == null) {
++            c = new Counter(clazz.getName());
++            counters.put(clazz, c);
+         }
+-        countsValid = true;
++        c.increment();
+     }
+ }
+diff --git a/Simulator.java b/Simulator.java
+index d60a0e4..200ff9b 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -14,18 +14,13 @@ public class Simulator
+     private static final int DEFAULT_WIDTH = 120;
+     private static final int DEFAULT_DEPTH = 80;
+ 
+-    private SimulatorState state = new SimulatorState();  
++    private SimulatorState state = new SimulatorState();
++    private TimeTracker timeOfDay = new TimeTracker();
++    private FieldStats stats = new FieldStats();
+ 
+-
+-    private TimeTracker timeOfDay = new TimeTracker(); 
+-
+-    // List of animals in the field.
+     private List<Simulatable> animals;
+-    // The current state of the field.
+     private Field field;
+-    // The current step of the simulation.
+     private int step;
+-    // A graphical view of the simulation.
+     private SimulatorView view;
+     
+ 
+@@ -82,7 +77,7 @@ public class Simulator
+      */
+     public void simulate(int numSteps)
+     {
+-        for(int step = 1; step <= numSteps && view.isViable(field); step++) {
++        for(int step = 1; step <= numSteps && stats.isViable(); step++) {
+             simulateOneStep();
+             // delay(60);   // uncomment this to run more slowly
+         }
+@@ -97,23 +92,19 @@ public class Simulator
+     public void simulateOneStep()
+     {
+         step++;
+-        state.setCurrentStats(view.getCurrentStats());
+-        // Provide space for newborn animals.
+-        List<Simulatable> newAnimals = new ArrayList<>();        
+-        // Let all rabbits act.
++        state.setCurrentStats(stats.getCounters());
++        List<Simulatable> newAnimals = new ArrayList<>();
+         for(Iterator<Simulatable> it = animals.iterator(); it.hasNext(); ) {
+             Simulatable animal = it.next();
+-            // System.out.println(state.getAggregatedProbabilityReduction());
+             animal.act(newAnimals, state);
+-            if(! animal.isAlive()) {
++            if(!animal.isAlive()) {
+                 it.remove();
+             }
+         }
+-               
+-        // Add the newly born foxes and rabbits to the main lists.
+         animals.addAll(newAnimals);
+ 
+-        view.showStatus(step, field, timeOfDay, state.getCurrentWeather());
++        stats.update(field);
++        view.showStatus(step, field, timeOfDay, state.getCurrentWeather(), stats.getSummary());
+         state.setNormalisedTime(timeOfDay.normalisedTime());
+         state.changeCurrentWeather();
+         
+@@ -129,9 +120,8 @@ public class Simulator
+         animals.clear();
+         state.setCurrentWeather(Weather.Sunny);
+         populate();
+-        
+-        // Show the starting state in the view.
+-        view.showStatus(step, field, timeOfDay, state.getCurrentWeather());
++        stats.update(field);
++        view.showStatus(step, field, timeOfDay, state.getCurrentWeather(), stats.getSummary());
+     }
+     
+     /**
+diff --git a/SimulatorView.java b/SimulatorView.java
+index a4797f3..6808100 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -1,15 +1,11 @@
+ import java.awt.*;
+ import java.awt.event.*;
+ import javax.swing.*;
+-import java.util.LinkedHashMap;
+-import java.util.Map;
+ 
+ /**
+  * A graphical view of the simulation grid.
+- * The view displays a colored rectangle for each location 
+- * representing its contents. It uses a default background color.
+- * Colors for each type of species can be defined using the
+- * setColor method.
++ * This class is responsible solely for rendering — statistical data is
++ * computed externally (by {@link FieldStats}) and passed in as a string.
+  *
+  * @version 2016.02.29
+  */
+@@ -18,22 +14,12 @@ public class SimulatorView extends JFrame
+     // Colors used for empty locations.
+     private Color emptyColor = Color.white;
+ 
+-    // Color used for objects that have no defined color.
+-    private static final Color UNKNOWN_COLOR = Color.gray;
+-
+     private final String STEP_PREFIX = "Step: ";
+     private final String POPULATION_PREFIX = "Population: ";
+     private final String WEATHER_PREFIX = "Weather: ";
+     private final String TIME_PREFIX = "Time: ";
+     private JLabel stepLabel, populationLabel, infoLabel, timeLabel, weatherLabel;
+     private FieldView fieldView;
+-    
+-    // A map for storing colors for participants in the simulation
+-    // private Map<Class, Color> colors;
+-    // A statistics object computing and storing simulation information
+-    private FieldStats stats;
+-
+-    
+ 
+     /**
+      * Create a view of the given width and height.
+@@ -42,23 +28,19 @@ public class SimulatorView extends JFrame
+      */
+     public SimulatorView(int height, int width)
+     {
+-        stats = new FieldStats();
+-        // colors = new LinkedHashMap<>();
+-
+         setTitle("Fox and Rabbit Simulation");
+         stepLabel = new JLabel(STEP_PREFIX, JLabel.CENTER);
+         infoLabel = new JLabel("  ", JLabel.CENTER);
+         timeLabel = new JLabel("", JLabel.CENTER);
+         populationLabel = new JLabel(POPULATION_PREFIX, JLabel.CENTER);
+         weatherLabel = new JLabel(WEATHER_PREFIX, JLabel.CENTER);
+-        
+-        
++
+         setLocation(100, 50);
+-        
++
+         fieldView = new FieldView(height, width);
+ 
+         Container contents = getContentPane();
+-        
++
+         JPanel topInfoPane = new JPanel(new BorderLayout());
+             topInfoPane.add(stepLabel, BorderLayout.WEST);
+             topInfoPane.add(timeLabel, BorderLayout.EAST);
+@@ -75,21 +57,6 @@ public class SimulatorView extends JFrame
+         setVisible(true);
+     }
+ 
+-    public Map<Class, Counter> getCurrentStats()
+-    {
+-        return stats.getPopulationDetails();
+-    }
+-    
+-    /**
+-     * Define a color to be used for a given class of animal.
+-     * @param animalClass The animal's Class object.
+-     * @param color The color to be used for the given class.
+-     */
+-    // public void setColor(Class animalClass, Color color)
+-    // {
+-    //     colors.put(animalClass, color);
+-    // }
+-
+     /**
+      * Display a short information label at the top of the window.
+      */
+@@ -98,88 +65,52 @@ public class SimulatorView extends JFrame
+         infoLabel.setText(text);
+     }
+ 
+-    /**
+-     * @return The color to be used for a given class of animal.
+-     */
+-    // private Color getColor(Class animalClass)
+-    // {
+-    //     Color col = colors.get(animalClass);
+-    //     if(col == null) {
+-    //         // no color defined for this class
+-    //         return UNKNOWN_COLOR;
+-    //     }
+-    //     else {
+-    //         return col;
+-    //     }
+-    // }
+-
+     /**
+      * Show the current status of the field.
+-     * @param step Which iteration step it is.
+-     * @param field The field whose status is to be displayed.
++     * @param step             Which iteration step it is.
++     * @param field            The field whose contents are to be drawn.
++     * @param timeOfDay        The current time tracker.
++     * @param weather          The current weather.
++     * @param populationSummary Pre-computed population summary string from FieldStats.
+      */
+-    public void showStatus(int step, Field field, TimeTracker timeOfDay, Weather weather)
++    public void showStatus(int step, Field field, TimeTracker timeOfDay, Weather weather,
++                           String populationSummary)
+     {
+-        if(!isVisible()) {
++        if (!isVisible()) {
+             setVisible(true);
+         }
+ 
+-            
+         stepLabel.setText(STEP_PREFIX + step);
+-        stats.reset();
+-        
+         fieldView.preparePaint();
+ 
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
+-
++        for (int row = 0; row < field.getDepth(); row++) {
++            for (int col = 0; col < field.getWidth(); col++) {
+                 Object animal = field.getObjectAt(row, col);
+-                if(animal != null && animal instanceof Displayable) {
+-                    Displayable item = (Displayable)animal;
+-                    stats.incrementCount(animal.getClass());
+-                    if (item instanceof Infectable) {
+-                        Infectable potentiallyDiseasedItem = (Infectable)item;
+-                        Disease disease = potentiallyDiseasedItem.getDisease();
+-                        if (disease != null) {
+-                            stats.incrementCount(disease.getClass());
+-                        }
+-                        
+-                    }
+-
++                if (animal instanceof Displayable) {
++                    Displayable item = (Displayable) animal;
+                     fieldView.drawMark(col, row, item.getColor(), item.getBorderColor());
+-                }
+-                else {
++                } else {
+                     fieldView.drawMark(col, row, emptyColor, null);
+                 }
+             }
+         }
+-        stats.countFinished();
+ 
+-        populationLabel.setText(POPULATION_PREFIX + stats.getPopulationDetails(field));
++        populationLabel.setText(POPULATION_PREFIX + populationSummary);
+         fieldView.repaint();
+         timeOfDay.incrementTime();
+         timeLabel.setText(TIME_PREFIX + timeOfDay.getPrettyTime());
+         weatherLabel.setText(WEATHER_PREFIX + weather.name());
+ 
+-        int smallTime = (int)Math.round(timeOfDay.normalisedTime() * 255);
++        int smallTime = (int) Math.round(timeOfDay.normalisedTime() * 255);
+         emptyColor = new Color(smallTime, smallTime, smallTime);
+     }
+ 
+     /**
+-     * Determine whether the simulation should continue to run.
+-     * @return true If there is more than one species alive.
+-     */
+-    public boolean isViable(Field field)
+-    {
+-        return stats.isViable(field);
+-    }
+-    
+-    /**
+-     * Provide a graphical view of a rectangular field. This is 
++     * Provide a graphical view of a rectangular field. This is
+      * a nested class (a class defined inside a class) which
+      * defines a custom component for the user interface. This
+      * component displays the field.
+-     * This is rather advanced GUI stuff - you can ignore this 
++     * This is rather advanced GUI stuff - you can ignore this
+      * for your project if you like.
+      */
+     private class FieldView extends JPanel
+@@ -200,7 +131,7 @@ public class SimulatorView extends JFrame
+             gridHeight = height;
+             gridWidth = width;
+             size = new Dimension(0, 0);
+-            super.setBackground(new Color(0,0,0));
++            super.setBackground(new Color(0, 0, 0));
+         }
+ 
+         /**
+@@ -212,44 +143,42 @@ public class SimulatorView extends JFrame
+                                  gridHeight * GRID_VIEW_SCALING_FACTOR);
+         }
+ 
+-
+         /**
+          * Prepare for a new round of painting. Since the component
+          * may be resized, compute the scaling factor again.
+          */
+         public void preparePaint()
+         {
+-            if(! size.equals(getSize())) {  // if the size has changed...
++            if (!size.equals(getSize())) {
+                 size = getSize();
+                 fieldImage = fieldView.createImage(size.width, size.height);
+                 g = fieldImage.getGraphics();
+ 
+                 xScale = size.width / gridWidth;
+-                if(xScale < 1) {
++                if (xScale < 1) {
+                     xScale = GRID_VIEW_SCALING_FACTOR;
+                 }
+                 yScale = size.height / gridHeight;
+-                if(yScale < 1) {
++                if (yScale < 1) {
+                     yScale = GRID_VIEW_SCALING_FACTOR;
+                 }
+             }
+         }
+-        
++
+         /**
+-         * Paint on grid location on this field in a given color.
++         * Paint one grid location on this field in a given color.
+          */
+         public void drawMark(int x, int y, Color color, Color borderColor)
+         {
+-            //If the border color is specified set it. If not, make it gray (which overrites any previously set border colors)
+             if (borderColor != null) {
+                 g.setColor(borderColor);
+             } else {
+                 g.setColor(Color.GRAY);
+             }
+-            g.drawRect(x * xScale, y * yScale, xScale-1, yScale-1);    
+-            
++            g.drawRect(x * xScale, y * yScale, xScale - 1, yScale - 1);
++
+             g.setColor(color);
+-            g.fillRect(x * xScale, y * yScale, xScale-1, yScale-1);
++            g.fillRect(x * xScale, y * yScale, xScale - 1, yScale - 1);
+         }
+ 
+         /**
+@@ -258,13 +187,11 @@ public class SimulatorView extends JFrame
+          */
+         public void paintComponent(Graphics g)
+         {
+-            if(fieldImage != null) {
++            if (fieldImage != null) {
+                 Dimension currentSize = getSize();
+-                if(size.equals(currentSize)) {
++                if (size.equals(currentSize)) {
+                     g.drawImage(fieldImage, 0, 0, null);
+-                }
+-                else {
+-                    // Rescale the previous image.
++                } else {
+                     g.drawImage(fieldImage, 0, 0, currentSize.width, currentSize.height, null);
+                 }
+             }

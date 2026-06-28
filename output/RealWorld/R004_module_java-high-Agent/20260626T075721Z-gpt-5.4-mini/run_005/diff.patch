@@ -1,0 +1,284 @@
+diff --git a/AdjacentTargetSearch.java b/AdjacentTargetSearch.java
+new file mode 100644
+index 0000000..41fe2e8
+--- /dev/null
++++ b/AdjacentTargetSearch.java
+@@ -0,0 +1,22 @@
++import java.util.function.Predicate;
++
++/**
++ * Shared adjacency scan helper used by target-acquisition policies.
++ */
++public final class AdjacentTargetSearch
++{
++    private AdjacentTargetSearch()
++    {
++    }
++
++    public static Location findMatchingLocation(Field field, Location origin, Predicate<Object> matcher)
++    {
++        for(Location location : field.adjacentLocations(origin)) {
++            Object occupant = field.getObjectAt(location);
++            if(matcher.test(occupant)) {
++                return location;
++            }
++        }
++        return null;
++    }
++}
+diff --git a/Animal.java b/Animal.java
+index d05777b..c34ec29 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -8,6 +8,7 @@ import java.util.stream.Collectors;
+  */
+ public abstract class Animal extends MobileForager implements Edible
+ {
++    private static final TargetAcquisitionPolicy TARGET_POLICY = new AnimalTargetAcquisitionPolicy();
+ 
+     protected int age;
+     protected boolean isNocturnal;
+@@ -102,47 +103,7 @@ public abstract class Animal extends MobileForager implements Edible
+     @Override
+     protected Location locateTargetLocation()
+     {
+-        contractDiseaseFromAdjacentOrganisms();
+-        Location foodLocation = findAdjacentLocationMatching(animal ->
+-                animal instanceof Edible && DIET().contains(animal.getClass()));
+-        if(foodLocation == null) {
+-            return null;
+-        }
+-
+-        Organism food = (Organism) getField().getObjectAt(foodLocation);
+-        if (food.isDiseased() &&  food.getDisease().getDiseaseType() == DiseaseType.FOODBORNE && food.getDisease().getPropagationRate() <= rand.nextDouble())
+-        {
+-            // contracts disease from food if it has a disease and that disease is foodborne
+-            setDisease(food.getDisease());
+-        }
+-        if(food.isAlive())
+-        {
+-            food.setDead();
+-            int newFoodLevel = foodLevel + ((Edible) food).getFoodValue();
+-
+-            // caps the food level at the maximum
+-            foodLevel = Math.min(newFoodLevel, MAX_FOOD_LEVEL());
+-        }
+-        return foodLocation;
+-    }
+-
+-    /**
+-     * Contract disease from the first adjacent infected organism that can transmit it.
+-     */
+-    private void contractDiseaseFromAdjacentOrganisms()
+-    {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        for(Location loc : adjacent){
+-            if(field.getObjectAt(loc) != null && !(field.getObjectAt(loc) instanceof Hunter)){
+-                Organism organism = (Organism) field.getObjectAt(loc);
+-                if (organism.isDiseased() && organism.getDisease().getDiseaseType() != DiseaseType.CONTACT && organism.getDisease().getPropagationRate() <= rand.nextDouble()){
+-                    // contracts the first contact disease it encounters amongst the adjacent animals
+-                    this.setDisease(organism.getDisease());
+-                    break;
+-                }
+-            }
+-        }
++        return TARGET_POLICY.acquireTarget(this);
+     }
+ 
+     /**
+diff --git a/AnimalTargetAcquisitionPolicy.java b/AnimalTargetAcquisitionPolicy.java
+new file mode 100644
+index 0000000..c3e31f9
+--- /dev/null
++++ b/AnimalTargetAcquisitionPolicy.java
+@@ -0,0 +1,55 @@
++import java.util.List;
++
++/**
++ * Animal-specific target acquisition logic.
++ */
++public final class AnimalTargetAcquisitionPolicy implements TargetAcquisitionPolicy
++{
++    @Override
++    public Location acquireTarget(MobileForager forager)
++    {
++        Animal animal = (Animal) forager;
++        contractDiseaseFromAdjacentOrganisms(animal);
++
++        Location foodLocation = AdjacentTargetSearch.findMatchingLocation(
++                animal.getField(),
++                animal.getLocation(),
++                occupant -> occupant instanceof Edible && animal.DIET().contains(occupant.getClass())
++        );
++        if(foodLocation == null) {
++            return null;
++        }
++
++        Organism food = (Organism) animal.getField().getObjectAt(foodLocation);
++        if (food.isDiseased()
++                && food.getDisease().getDiseaseType() == DiseaseType.FOODBORNE
++                && food.getDisease().getPropagationRate() <= Randomizer.getRandom().nextDouble())
++        {
++            animal.setDisease(food.getDisease());
++        }
++        if(food.isAlive())
++        {
++            food.setDead();
++            int newFoodLevel = animal.foodLevel + ((Edible) food).getFoodValue();
++            animal.foodLevel = Math.min(newFoodLevel, animal.MAX_FOOD_LEVEL());
++        }
++        return foodLocation;
++    }
++
++    private void contractDiseaseFromAdjacentOrganisms(Animal animal)
++    {
++        Field field = animal.getField();
++        List<Location> adjacent = field.adjacentLocations(animal.getLocation());
++        for(Location loc : adjacent){
++            if(field.getObjectAt(loc) != null && !(field.getObjectAt(loc) instanceof Hunter)){
++                Organism organism = (Organism) field.getObjectAt(loc);
++                if (organism.isDiseased()
++                        && organism.getDisease().getDiseaseType() != DiseaseType.CONTACT
++                        && organism.getDisease().getPropagationRate() <= Randomizer.getRandom().nextDouble()){
++                    animal.setDisease(organism.getDisease());
++                    break;
++                }
++            }
++        }
++    }
++}
+diff --git a/Eagle.java b/Eagle.java
+index 2eb8a68..aab572d 100644
+--- a/Eagle.java
++++ b/Eagle.java
+@@ -125,7 +125,7 @@ public class Eagle extends Animal
+             return null;
+         }
+ 
+-        Location preyLocation = findAdjacentLocationMatching(animal ->
++        Location preyLocation = AdjacentTargetSearch.findMatchingLocation(getField(), getLocation(), animal ->
+                 animal != null && DIET.contains(animal.getClass()));
+         if(preyLocation == null) {
+             return null;
+@@ -139,7 +139,7 @@ public class Eagle extends Animal
+         if(food.isAlive())
+         {
+             food.setDead();
+-            int newFoodLevel = foodLevel + food.getFoodValue();
++            int newFoodLevel = foodLevel + ((Edible) food).getFoodValue();
+             foodLevel = Math.min(newFoodLevel, MAX_FOOD_LEVEL());
+         }
+         return preyLocation;
+diff --git a/Hunter.java b/Hunter.java
+index 7069925..280d580 100644
+--- a/Hunter.java
++++ b/Hunter.java
+@@ -7,8 +7,7 @@ import java.util.*;
+  */
+ public class Hunter extends MobileForager
+ {
+-    // A hunter hunts every species. 
+-    private static final Set<Class<?>> DIET = Set.of(Deer.class, Mouse.class, Wolf.class, Coyote.class, Eagle.class);
++    private static final TargetAcquisitionPolicy TARGET_POLICY = new HunterTargetAcquisitionPolicy();
+ 
+ 
+     /**
+@@ -36,17 +35,7 @@ public class Hunter extends MobileForager
+     @Override
+     protected Location locateTargetLocation()
+     {
+-        Location preyLocation = findAdjacentLocationMatching(animal ->
+-                animal != null && DIET.contains(animal.getClass()));
+-        if(preyLocation == null) {
+-            return null;
+-        }
+-
+-        Animal food = (Animal) getField().getObjectAt(preyLocation);
+-        if(food.isAlive()) {
+-            food.setDead();
+-        }
+-        return preyLocation;
++        return TARGET_POLICY.acquireTarget(this);
+     }
+ 
+     @Override
+diff --git a/HunterTargetAcquisitionPolicy.java b/HunterTargetAcquisitionPolicy.java
+new file mode 100644
+index 0000000..52afd75
+--- /dev/null
++++ b/HunterTargetAcquisitionPolicy.java
+@@ -0,0 +1,29 @@
++/**
++ * Hunter-specific target acquisition logic.
++ */
++public final class HunterTargetAcquisitionPolicy implements TargetAcquisitionPolicy
++{
++    private static final java.util.Set<Class<?>> DIET = java.util.Set.of(
++            Deer.class, Mouse.class, Wolf.class, Coyote.class, Eagle.class
++    );
++
++    @Override
++    public Location acquireTarget(MobileForager forager)
++    {
++        Hunter hunter = (Hunter) forager;
++        Location preyLocation = AdjacentTargetSearch.findMatchingLocation(
++                hunter.getField(),
++                hunter.getLocation(),
++                occupant -> occupant != null && DIET.contains(occupant.getClass())
++        );
++        if(preyLocation == null) {
++            return null;
++        }
++
++        Animal food = (Animal) hunter.getField().getObjectAt(preyLocation);
++        if(food.isAlive()) {
++            food.setDead();
++        }
++        return preyLocation;
++    }
++}
+diff --git a/MobileForager.java b/MobileForager.java
+index 3e35aa5..90a3fb2 100644
+--- a/MobileForager.java
++++ b/MobileForager.java
+@@ -1,6 +1,5 @@
+ import java.util.List;
+ import java.util.Random;
+-import java.util.function.Predicate;
+ 
+ /**
+  * Shared movement template for organisms that search adjacent cells for a target,
+@@ -62,19 +61,4 @@ public abstract class MobileForager extends Organism
+         setDead();
+     }
+ 
+-    /**
+-     * Find the first adjacent location whose occupant matches the predicate.
+-     * Adjacent locations are already shuffled by the field, so the first match
+-     * preserves the existing random-selection behavior.
+-     */
+-    protected final Location findAdjacentLocationMatching(Predicate<Object> matcher)
+-    {
+-        for(Location location : getField().adjacentLocations(getLocation())) {
+-            Object occupant = getField().getObjectAt(location);
+-            if(matcher.test(occupant)) {
+-                return location;
+-            }
+-        }
+-        return null;
+-    }
+ }
+diff --git a/TargetAcquisitionPolicy.java b/TargetAcquisitionPolicy.java
+new file mode 100644
+index 0000000..ee79ee7
+--- /dev/null
++++ b/TargetAcquisitionPolicy.java
+@@ -0,0 +1,7 @@
++/**
++ * Strategy for selecting a target location for a mobile forager.
++ */
++public interface TargetAcquisitionPolicy
++{
++    Location acquireTarget(MobileForager forager);
++}

@@ -1,0 +1,219 @@
+diff --git a/Animal.java b/Animal.java
+index 945128e..f7e2e8f 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -19,10 +19,10 @@ public abstract class Animal extends Creature
+     private boolean isImmuned;
+ 
+     // Track the first step at which the animal is infected.
+-    protected int infectionStartStep;
++    private int infectionStartStep;
+ 
+     // Total population that has died of disease.
+-    public static int populationDieOfDisease = 0;
++    private static int diseaseDeathCount = 0;
+ 
+     // Age and food level shared by all animal subclasses.
+     protected int age;
+@@ -195,13 +195,19 @@ public abstract class Animal extends Creature
+         if(getIsInfected() && !getIsImmuned()) {
+             if(Randomizer.getRandom().nextDouble() <= disease.MORTALITY_RATE) {
+                 setDead();
+-                populationDieOfDisease++;
++                diseaseDeathCount++;
+                 return true;
+             }
+         }
+         return false;
+     }
+ 
++    /** Return the total number of animals that have died of disease in this run. */
++    public static int getDiseaseDeathCount() { return diseaseDeathCount; }
++
++    /** Reset the disease-death counter (call when the simulation resets). */
++    public static void resetDiseaseDeathCount() { diseaseDeathCount = 0; }
++
+     // -----------------------------------------------------------------------
+     // Accessors.
+     // -----------------------------------------------------------------------
+diff --git a/Disease.java b/Disease.java
+index f1f09bb..457f2f5 100644
+--- a/Disease.java
++++ b/Disease.java
+@@ -1,9 +1,9 @@
+ import java.util.List;
+-import java.util.Iterator;
+ 
+ /**
+  * Models a disease outbreak: randomly infects a fraction of the animal population,
+  * then spreads animal-to-animal via proximity during normal movement.
++ * Manages its own spread lifecycle — Simulator does not need to inspect or set state directly.
+  *
+  * @version 2022/03/02
+  */
+@@ -27,8 +27,11 @@ public class Disease
+         isSpread = false;
+     }
+ 
+-    public boolean getIsSpread()           { return isSpread; }
+-    public void    setIsSpread(boolean bl) { isSpread = bl;   }
++    /** Reset disease state; call when the simulation resets between runs. */
++    public void reset()
++    {
++        isSpread = false;
++    }
+ 
+     /**
+      * Potentially trigger a new outbreak. If no disease is currently spreading and the
+@@ -36,9 +39,9 @@ public class Disease
+      * @param creatures All creatures currently in the simulation.
+      * @param step      The current simulation step (recorded as each animal's infection start).
+      */
+-    protected void creationSourceOfInfection(List<Creature> creatures, int step)
++    public void creationSourceOfInfection(List<Creature> creatures, int step)
+     {
+-        if(getIsSpread() || Randomizer.getRandom().nextDouble() > DISEASE_OCCURENCE_PROBABILITY) {
++        if(isSpread || Randomizer.getRandom().nextDouble() > DISEASE_OCCURENCE_PROBABILITY) {
+             return;
+         }
+         for(Creature creature : creatures) {
+@@ -46,9 +49,29 @@ public class Disease
+                 Animal animal = (Animal) creature;
+                 if(Randomizer.getRandom().nextDouble() <= INFECTION_RATE) {
+                     animal.infect(step);
+-                    setIsSpread(true);
++                    isSpread = true;
+                 }
+             }
+         }
+     }
++
++    /**
++     * Check whether the current outbreak has run its course.
++     * The disease is considered over when no infected, non-immune animal remains.
++     * Should be called once per step after all creatures have acted.
++     * @param creatures All creatures currently in the simulation.
++     */
++    public void updateSpreadState(List<Creature> creatures)
++    {
++        if(!isSpread) return;
++        for(Creature creature : creatures) {
++            if(creature instanceof Animal) {
++                Animal ani = (Animal) creature;
++                if(ani.getIsInfected() && !ani.getIsImmuned()) {
++                    return; // at least one infected, non-immune animal remains
++                }
++            }
++        }
++        isSpread = false;
++    }
+ }
+diff --git a/FieldStats.java b/FieldStats.java
+index f81564d..aebd683 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -24,7 +24,7 @@ public class FieldStats
+      */
+     public String getPopulationDetails(Field field)
+     {
+-        StringBuffer buffer = new StringBuffer();
++        StringBuilder buffer = new StringBuilder();
+         if(!countsValid) {
+             generateCounts(field);
+         }
+diff --git a/Simulator.java b/Simulator.java
+index 0a8a982..f49654b 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -127,6 +127,7 @@ public class Simulator
+     public void simulateOneStep()
+     {
+         step++;
++        boolean dayTime = timeOfDay();
+ 
+         double totalOxygenInvolved = 0;
+ 
+@@ -135,7 +136,7 @@ public class Simulator
+         List<Creature> newCreatures = new ArrayList<>();
+         for(Iterator<Creature> it = creatures.iterator(); it.hasNext(); ) {
+             Creature creature = it.next();
+-            totalOxygenInvolved += creature.act(newCreatures, timeOfDay(), oxygenLevel, disease, step);
++            totalOxygenInvolved += creature.act(newCreatures, dayTime, oxygenLevel, disease, step);
+             if(!creature.isAlive()) {
+                 it.remove();
+             }
+@@ -149,13 +150,9 @@ public class Simulator
+         }
+ 
+         oxygenLevel += totalOxygenInvolved;
+-
+-        if(disease.getIsSpread()) {
+-            disease.setIsSpread(identifyIfDiseaseStops());
+-        }
+-
++        disease.updateSpreadState(creatures);
+         creatures.addAll(newCreatures);
+-        view.showStatus(step, field, timeOfDay(), weather, oxygenLevel);
++        view.showStatus(step, field, dayTime, weather, oxygenLevel);
+     }
+ 
+     /**
+@@ -167,7 +164,8 @@ public class Simulator
+         creatures.clear();
+         populate();
+         oxygenLevel = 1;
+-        Animal.populationDieOfDisease = 0;
++        disease.reset();
++        Animal.resetDiseaseDeathCount();
+         view.showStatus(step, field, timeOfDay(), weather, oxygenLevel);
+     }
+ 
+@@ -213,20 +211,4 @@ public class Simulator
+         return (step % 10) < 5;
+     }
+ 
+-    /**
+-     * Return true if at least one infected, non-immune animal still exists in the field.
+-     * When no such animal remains the disease has run its course.
+-     */
+-    public boolean identifyIfDiseaseStops()
+-    {
+-        for(Creature creature : creatures) {
+-            if(creature instanceof Animal) {
+-                Animal ani = (Animal) creature;
+-                if(ani.getIsInfected() && !ani.getIsImmuned()) {
+-                    return true;
+-                }
+-            }
+-        }
+-        return false;
+-    }
+ }
+diff --git a/SimulatorView.java b/SimulatorView.java
+index f573f5b..cc88227 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -69,14 +69,6 @@ public class SimulatorView extends JFrame
+         colors.put(animalClass, color);
+     }
+ 
+-    /**
+-     * Display a short information label at the top of the window.
+-     */
+-    public void setInfoText(String text)
+-    {
+-        infoLabel.setText(text);
+-    }
+-
+     /**
+      * Show the current status of the field.
+      */
+@@ -90,7 +82,7 @@ public class SimulatorView extends JFrame
+         infoLabel.setText("It is: " + (timeOfDay ? "daytime" : "night ")
+                 + "        Oxygen Level: " + (int)(oxygenLevel * 100) + "%"
+                 + "        Storm: " + (weather.isStormActive() ? "exists" : "subsides"));
+-        diseaseLabel.setText(POPULATION_DIE_OF_DISEASE_PREFIX + Animal.populationDieOfDisease);
++        diseaseLabel.setText(POPULATION_DIE_OF_DISEASE_PREFIX + Animal.getDiseaseDeathCount());
+ 
+         stats.reset();
+         fieldView.preparePaint();

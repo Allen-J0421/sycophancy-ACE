@@ -1,0 +1,538 @@
+diff --git a/DefaultSimulationDisplayStrategy.java b/DefaultSimulationDisplayStrategy.java
+new file mode 100644
+index 0000000..c734b60
+--- /dev/null
++++ b/DefaultSimulationDisplayStrategy.java
+@@ -0,0 +1,122 @@
++import java.awt.Color;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.Map;
++import java.util.Set;
++
++/**
++ * Default rendering strategy for the simulator UI.
++ */
++public class DefaultSimulationDisplayStrategy implements SimulationDisplayStrategy
++{
++    private static final Color EMPTY_COLOR = Color.white;
++    private static final Color UNKNOWN_COLOR = Color.gray;
++    private static final Color INFECTED_COLOR = Color.green;
++    private static final Color STORM_COLOR = Color.blue;
++
++    private static final String DAYTIME_TEXT = "daytime";
++    private static final String NIGHT_TEXT = "night";
++
++    private final Map<Class<?>, Color> colors;
++    private final FieldStats stats;
++
++    public DefaultSimulationDisplayStrategy()
++    {
++        colors = new HashMap<>();
++        stats = new FieldStats();
++        registerDefaultColors();
++    }
++
++    @Override
++    public void setColor(Class<?> animalClass, Color color)
++    {
++        colors.put(animalClass, color);
++    }
++
++    @Override
++    public String formatInfoText(SimulationDisplayContext context)
++    {
++        return "It is: " + (context.isTimeOfDay() ? DAYTIME_TEXT : NIGHT_TEXT)
++            + "        Oxygen Level: " + (int)(context.getOxygenLevel() * 100) + "%"
++            + "        Storm: " + (context.getWeather().getStormStart() ? "exists" : "subsides");
++    }
++
++    @Override
++    public String formatPopulationText(Field field)
++    {
++        return stats.getPopulationDetails(field);
++    }
++
++    @Override
++    public void render(SimulationDisplayContext context, GridCanvas canvas)
++    {
++        Field field = context.getField();
++        stats.reset();
++        canvas.preparePaint();
++
++        Set<Location> stormLocations = stormLocations(context);
++        for(int row = 0; row < field.getDepth(); row++) {
++            for(int col = 0; col < field.getWidth(); col++) {
++                Location location = new Location(row, col);
++                Object creature = field.getObjectAt(row, col);
++                Color color = EMPTY_COLOR;
++
++                if(creature != null) {
++                    stats.incrementCount(creature.getClass());
++                    color = colorFor(creature);
++                }
++
++                if(stormLocations.contains(location)) {
++                    color = STORM_COLOR;
++                }
++
++                canvas.drawMark(col, row, color);
++            }
++        }
++
++        stats.countFinished();
++        canvas.repaint();
++    }
++
++    @Override
++    public boolean isViable(Field field)
++    {
++        return stats.isViable(field);
++    }
++
++    private void registerDefaultColors()
++    {
++        setColor(Cod.class, Color.ORANGE);
++        setColor(Salmon.class, Color.YELLOW);
++        setColor(Seaweed.class, Color.RED);
++        setColor(Shark.class, Color.BLACK);
++        setColor(Whale.class, Color.PINK);
++        setColor(Weather.class, STORM_COLOR);
++    }
++
++    private Color colorFor(Object creature)
++    {
++        if(creature instanceof Animal) {
++            Animal animal = (Animal)creature;
++            if(animal.getIsInfected() && !animal.getIsImmuned()) {
++                return INFECTED_COLOR;
++            }
++        }
++
++        Color color = colors.get(creature.getClass());
++        if(color == null) {
++            return UNKNOWN_COLOR;
++        }
++        return color;
++    }
++
++    private Set<Location> stormLocations(SimulationDisplayContext context)
++    {
++        Set<Location> locations = new HashSet<>();
++        Weather weather = context.getWeather();
++        if(weather.getStormStart() && weather.getRandomLocation() != null) {
++            locations.addAll(context.getField().adjacentLocationsIncludingSelf(weather.getRandomLocation(), weather.getStormScope()));
++        }
++        return locations;
++    }
++}
+diff --git a/GridCanvas.java b/GridCanvas.java
+new file mode 100644
+index 0000000..0afe0a9
+--- /dev/null
++++ b/GridCanvas.java
+@@ -0,0 +1,13 @@
++import java.awt.Color;
++
++/**
++ * Abstraction for a drawable simulation grid surface.
++ */
++public interface GridCanvas
++{
++    void preparePaint();
++
++    void drawMark(int x, int y, Color color);
++
++    void repaint();
++}
+diff --git a/SimulationDisplayContext.java b/SimulationDisplayContext.java
+new file mode 100644
+index 0000000..981de44
+--- /dev/null
++++ b/SimulationDisplayContext.java
+@@ -0,0 +1,45 @@
++/**
++ * Immutable state used to render a simulation frame.
++ */
++public final class SimulationDisplayContext
++{
++    private final int step;
++    private final Field field;
++    private final boolean timeOfDay;
++    private final Weather weather;
++    private final double oxygenLevel;
++
++    public SimulationDisplayContext(int step, Field field, boolean timeOfDay, Weather weather, double oxygenLevel)
++    {
++        this.step = step;
++        this.field = field;
++        this.timeOfDay = timeOfDay;
++        this.weather = weather;
++        this.oxygenLevel = oxygenLevel;
++    }
++
++    public int getStep()
++    {
++        return step;
++    }
++
++    public Field getField()
++    {
++        return field;
++    }
++
++    public boolean isTimeOfDay()
++    {
++        return timeOfDay;
++    }
++
++    public Weather getWeather()
++    {
++        return weather;
++    }
++
++    public double getOxygenLevel()
++    {
++        return oxygenLevel;
++    }
++}
+diff --git a/SimulationDisplayStrategy.java b/SimulationDisplayStrategy.java
+new file mode 100644
+index 0000000..c80d2bd
+--- /dev/null
++++ b/SimulationDisplayStrategy.java
+@@ -0,0 +1,17 @@
++import java.awt.Color;
++
++/**
++ * Strategy interface for rendering simulation frames and formatting display text.
++ */
++public interface SimulationDisplayStrategy
++{
++    void setColor(Class<?> animalClass, Color color);
++
++    String formatInfoText(SimulationDisplayContext context);
++
++    String formatPopulationText(Field field);
++
++    void render(SimulationDisplayContext context, GridCanvas canvas);
++
++    boolean isViable(Field field);
++}
+diff --git a/Simulator.java b/Simulator.java
+index ca5a84b..3efb8b5 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -2,7 +2,6 @@ import java.util.Random;
+ import java.util.List;
+ import java.util.ArrayList;
+ import java.util.Iterator;
+-import java.awt.Color;
+ 
+ /**
+  * A simple predator-prey simulator, based on a rectangular field
+@@ -79,13 +78,6 @@ public class Simulator
+         // Create a view of the state of each location in the field.
+         view = new SimulatorView(depth, width);
+ 
+-        view.setColor(Cod.class, Color.ORANGE);
+-        view.setColor(Salmon.class, Color.YELLOW);
+-        view.setColor(Seaweed.class, Color.RED);
+-        view.setColor(Shark.class, Color.BLACK);
+-        view.setColor(Whale.class, Color.PINK);
+-        view.setColor(Weather.class, Color.BLUE);
+-
+         // Setup a valid starting point.
+         reset();
+     }
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 044414e..14d2030 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -1,49 +1,21 @@
+ import java.awt.*;
+-import java.awt.event.*;
+ import javax.swing.*;
+-import java.util.LinkedHashMap;
+-import java.util.Map;
+-import java.util.List;
+-import java.util.Iterator;
+-
+ 
+ /**
+  * A graphical view of the simulation grid.
+- * The view displays a colored rectangle for each location 
+- * representing its contents. It uses a default background color.
+- * Colors for each type of species can be defined using the
+- * setColor method.
+  *
+  * @version 2022/03/02
+  */
+ public class SimulatorView extends JFrame
+ {
+-    // Colors used for empty locations.
+-    private static final Color EMPTY_COLOR = Color.white;
+-
+-    // Color used for objects that have no defined color.
+-    private static final Color UNKNOWN_COLOR = Color.gray;
+-    
+-    // Colour used for underwater storm
+-    private static final Color UNDERWATERSTORM_COLOR = Color.blue;
+-    
+-    // Colour used for objects that are infected by disease;
+-    private static final Color INFECTED_COLOR = Color.green;
+-    
++    private static final String STEP_PREFIX = "Step: ";
++    private static final String POPULATION_PREFIX = "Population: ";
++    private static final String DAYOFTIME_PREFIX = "Time: It's ";
++    private static final String POPULATION_DIE_OF_DISEASE_PREFIX = "Population died of disease: ";
+ 
+-    private final String STEP_PREFIX = "Step: ";
+-    private final String POPULATION_PREFIX = "Population: ";
+-    private final String DAYOFTIME_PREFIX = "Time: It's ";
+-    private final String POPULATION_DIE_OF_DISEASE_PREFIX = "Population died of disease: ";
+-    
+-    
+     private JLabel stepLabel, population, infoLabel, diseaseLabel;
+-    private FieldView fieldView;
+-    
+-    // A map for storing colors for participants in the simulation
+-    private Map<Class, Color> colors;
+-    // A statistics object computing and storing simulation information
+-    private FieldStats stats;
++    private final FieldView fieldView;
++    private final SimulationDisplayStrategy displayStrategy;
+ 
+     /**
+      * Create a view of the given width and height.
+@@ -52,22 +24,20 @@ public class SimulatorView extends JFrame
+      */
+     public SimulatorView(int height, int width)
+     {
+-        stats = new FieldStats();
+-        colors = new LinkedHashMap<>();
++        displayStrategy = new DefaultSimulationDisplayStrategy();
+ 
+         setTitle("Underwater Environment Simulation");
+         stepLabel = new JLabel(STEP_PREFIX, JLabel.CENTER);
+         infoLabel = new JLabel(DAYOFTIME_PREFIX + " ", JLabel.CENTER);
+         diseaseLabel = new JLabel(POPULATION_DIE_OF_DISEASE_PREFIX, JLabel.CENTER);
+-        
+         population = new JLabel(POPULATION_PREFIX, JLabel.CENTER);
+-        
++
+         setLocation(100, 50);
+-        
++
+         fieldView = new FieldView(height, width);
+ 
+         Container contents = getContentPane();
+-        
++
+         JPanel infoPane = new JPanel(new BorderLayout());
+         infoPane.add(stepLabel, BorderLayout.WEST);
+         infoPane.add(infoLabel, BorderLayout.CENTER);
+@@ -78,17 +48,15 @@ public class SimulatorView extends JFrame
+         pack();
+         setVisible(true);
+     }
+-    
+-    
+-    
++
+     /**
+      * Define a color to be used for a given class of animal.
+      * @param animalClass The animal's Class object.
+      * @param color The color to be used for the given class.
+      */
+-    public void setColor(Class animalClass, Color color)
++    public void setColor(Class<?> animalClass, Color color)
+     {
+-        colors.put(animalClass, color);
++        displayStrategy.setColor(animalClass, color);
+     }
+ 
+     /**
+@@ -99,21 +67,6 @@ public class SimulatorView extends JFrame
+         infoLabel.setText(text);
+     }
+ 
+-    /**
+-     * @return The color to be used for a given class of animal.
+-     */
+-    private Color getColor(Class animalClass)
+-    {
+-        Color col = colors.get(animalClass);
+-        if(col == null) {
+-            // no color defined for this class
+-            return UNKNOWN_COLOR;
+-        }
+-        else {
+-            return col;
+-        }
+-    }
+-
+     /**
+      * Show the current status of the field.
+      * @param step Which iteration step it is.
+@@ -123,95 +76,37 @@ public class SimulatorView extends JFrame
+      */
+     public void showStatus(int step, Field field, boolean timeOfDay, Weather weather, double oxygenLevel)
+     {
+-         if(!isVisible()) {
++        if(!isVisible()) {
+             setVisible(true);
+         }
+-            
++
++        SimulationDisplayContext context = new SimulationDisplayContext(step, field, timeOfDay, weather, oxygenLevel);
+         stepLabel.setText(STEP_PREFIX + step);
+-        infoLabel.setText("It is: " + (timeOfDay? "daytime": "night ") 
+-                            + "        Oxygen Level: " + (int)(oxygenLevel * 100) + "%"
+-                            + "        Storm: " + (weather.getStormStart()? "exists": "subsides"));
++        infoLabel.setText(displayStrategy.formatInfoText(context));
+         diseaseLabel.setText(POPULATION_DIE_OF_DISEASE_PREFIX + Animal.populationDieOfDisease);
+-        stats.reset();
+-        
+-        fieldView.preparePaint();
+-
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
+-                Object creature = field.getObjectAt(row, col);
+-                if(creature != null && weather.getStormStart() == false) {
+-                    stats.incrementCount(creature.getClass());
+-                    if(creature instanceof Animal){
+-                     Animal ani = (Animal)creature;
+-                        if(ani.getIsInfected() && !ani.getIsImmuned())
+-                            fieldView.drawMark(col, row, INFECTED_COLOR);
+-                        else 
+-                            fieldView.drawMark(col, row, getColor(creature.getClass()));
+-                    }
+-                    else
+-                        fieldView.drawMark(col, row, getColor(creature.getClass()));
+-                }
+-                else if(creature != null && weather.getStormStart() == true) {
+-                    stats.incrementCount(creature.getClass());
+-                    fieldView.drawMark(col, row, getColor(creature.getClass())); 
+-                    drawStormColor(field, weather);
+-                }
+-                else {
+-                    fieldView.drawMark(col, row, EMPTY_COLOR);
+-                }   
+-                    
+-            }
+-        }
+-                
+-            
+-        
+-        stats.countFinished();
+-        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(field));
+-        fieldView.repaint();
++        displayStrategy.render(context, fieldView);
++        population.setText(POPULATION_PREFIX + displayStrategy.formatPopulationText(field));
+     }
+-    
++
+     /**
+      * Determine whether the simulation should continue to run.
+      * @return true If there is more than one species alive.
+      */
+     public boolean isViable(Field field)
+     {
+-        return stats.isViable(field);
++        return displayStrategy.isViable(field);
+     }
+-    
+-    /**
+-     * Draw the colour of the storm, and the range of the storm is given by storm scope of 
+-     * the object of Weather class.
+-     * 
+-     * @param field The field where the weather might happen and to be displayed.
+-     * @param weather the object of Weather class
+-     */
+-    private void drawStormColor(Field field, Weather weather) {
+-        List<Location> stormLocation = field.adjacentLocationsIncludingSelf(weather.getRandomLocation(),weather.getStormScope());
+-        Iterator<Location> it = stormLocation.iterator();
+-        while(it.hasNext() ) {
+-            Location location = it.next();
+-            fieldView.drawMark(location.getCol(),location.getRow(),getColor(Weather.class));
+-        }
+-        
+-    }
+-  
+-   
++
+     /**
+-     * Provide a graphical view of a rectangular field. This is 
+-     * a nested class (a class defined inside a class) which
+-     * defines a custom component for the user interface. This
+-     * component displays the field.
+-     * This is rather advanced GUI stuff - you can ignore this 
+-     * for your project if you like.
++     * Provide a graphical view of a rectangular field.
+      */
+-    private class FieldView extends JPanel
++    private class FieldView extends JPanel implements GridCanvas
+     {
+         private final int GRID_VIEW_SCALING_FACTOR = 6;
+ 
+         private int gridWidth, gridHeight;
+         private int xScale, yScale;
+-        Dimension size;
++        private Dimension size;
+         private Graphics g;
+         private Image fieldImage;
+ 
+@@ -233,16 +128,13 @@ public class SimulatorView extends JFrame
+             return new Dimension(gridWidth * GRID_VIEW_SCALING_FACTOR,
+                                  gridHeight * GRID_VIEW_SCALING_FACTOR);
+         }
+-        
+-  
+ 
+         /**
+-         * Prepare for a new round of painting. Since the component
+-         * may be resized, compute the scaling factor again.
++         * Prepare for a new round of painting.
+          */
+         public void preparePaint()
+         {
+-            if(! size.equals(getSize())) {  // if the size has changed...
++            if(!size.equals(getSize())) {
+                 size = getSize();
+                 fieldImage = fieldView.createImage(size.width, size.height);
+                 g = fieldImage.getGraphics();
+@@ -257,29 +149,28 @@ public class SimulatorView extends JFrame
+                 }
+             }
+         }
+-        
++
+         /**
+          * Paint on grid location on this field in a given color.
+          */
+         public void drawMark(int x, int y, Color color)
+         {
+             g.setColor(color);
+-            g.fillRect(x * xScale, y * yScale, xScale-1, yScale-1);
++            g.fillRect(x * xScale, y * yScale, xScale - 1, yScale - 1);
+         }
+ 
+         /**
+-         * The field view component needs to be redisplayed. Copy the
+-         * internal image to screen.
++         * The field view component needs to be redisplayed.
+          */
+         public void paintComponent(Graphics g)
+         {
++            super.paintComponent(g);
+             if(fieldImage != null) {
+                 Dimension currentSize = getSize();
+                 if(size.equals(currentSize)) {
+                     g.drawImage(fieldImage, 0, 0, null);
+                 }
+                 else {
+-                    // Rescale the previous image.
+                     g.drawImage(fieldImage, 0, 0, currentSize.width, currentSize.height, null);
+                 }
+             }

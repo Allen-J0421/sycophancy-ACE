@@ -1,0 +1,364 @@
+diff --git a/FieldStats.java b/FieldStats.java
+index 36c1527..5f8362d 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -97,7 +97,7 @@ public class FieldStats
+         }
+         for(Class key : counters.keySet()) {
+             Counter info = counters.get(key);
+-            if(info.getCount() > 0 && info.getName() != "Grass") {
++            if(info.getCount() > 0 && !info.getName().equals("Grass")) {
+                 nonZero++;
+             }
+         }
+diff --git a/Simulator.java b/Simulator.java
+index 964644f..a9186c0 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -1,38 +1,39 @@
+ import java.util.Random;
+ import java.util.List;
+ import java.util.ArrayList;
++import java.util.Arrays;
+ import java.util.Iterator;
++import java.util.function.BiFunction;
+ import java.awt.Color;
+ 
+ /**
+  * A simple predator-prey simulator, based on a rectangular field
+  * containing rabbits and foxes.
+  *
+- * @version 2022.02.xx 
++ * @version 2022.02.xx
+  */
+ public class Simulator
+ {
+-    // Constants representing configuration information for the simulation.
+-    // The default width for the grid. 
++    // The default width for the grid.
+     private static final int DEFAULT_WIDTH = 120;
+-    // The default depth of the grid. 
++    // The default depth of the grid.
+     private static final int DEFAULT_DEPTH = 80;
+-    // The probability that a fox will be created in any given grid position.
+-    private static final double LION_CREATION_PROBABILITY = 0.01;
+-    // The probability that a rabbit will be created in any given grid position.
+-    private static final double DEER_CREATION_PROBABILITY = 0.02;    
+-    // The probability that a owl will be created in any given grid position.
+-    private static final double OWL_CREATION_PROBABILITY = 0.05;
+-    // The probability that a cat will be created in any given grid position.
+-    private static final double CAT_CREATION_PROBABILITY = 0.05;
+-    // The probability that a mouse will be created in any given grid position.
+-    private static final double MOUSE_CREATION_PROBABILITY = 0.04;    
+-    // The probability that a grass will be created in any given grid position.
+-    private static final double GRASS_CREATION_PROBABILITY = 0.4;    
++
++    // Registry of all entity types: creation probability, display colour, and factory.
++    // Entries are checked in order per cell; the first match wins (preserving the
++    // original else-if semantics). To add a new species, add one line here.
++    private static final List<EntitySpec> ENTITY_SPECS = Arrays.asList(
++        new EntitySpec(Lion.class,  0.01, Color.RED,    (f, l) -> new Lion(true, f, l),  true),
++        new EntitySpec(Deer.class,  0.02, Color.BLUE,   (f, l) -> new Deer(true, f, l),  true),
++        new EntitySpec(Owl.class,   0.05, Color.ORANGE, (f, l) -> new Owl(true, f, l),   true),
++        new EntitySpec(Mouse.class, 0.04, Color.YELLOW, (f, l) -> new Mouse(true, f, l), true),
++        new EntitySpec(Cat.class,   0.05, Color.PINK,   (f, l) -> new Cat(true, f, l),   true),
++        new EntitySpec(Grass.class, 0.40, Color.GREEN,  (f, l) -> new Grass(true, f, l), false)
++    );
+ 
+     // List of animals in the field.
+     private List<Animal> animals;
+-    // List of animals in the field.
++    // List of plants in the field.
+     private List<Plant> plants;
+     // The current state of the field.
+     private Field field;
+@@ -42,7 +43,7 @@ public class Simulator
+     private String weather;
+     // A graphical view of the simulation.
+     private SimulatorView view;
+-    
++
+     /**
+      * Construct a simulation field with default size.
+      */
+@@ -50,7 +51,7 @@ public class Simulator
+     {
+         this(DEFAULT_DEPTH, DEFAULT_WIDTH);
+     }
+-    
++
+     /**
+      * Create a simulation field with the given size.
+      * @param depth Depth of the field. Must be greater than zero.
+@@ -58,39 +59,35 @@ public class Simulator
+      */
+     public Simulator(int depth, int width)
+     {
+-        if(width <= 0 || depth <= 0) {
++        if (width <= 0 || depth <= 0) {
+             System.out.println("The dimensions must be greater than zero.");
+             System.out.println("Using default values.");
+             depth = DEFAULT_DEPTH;
+             width = DEFAULT_WIDTH;
+         }
+-        
++
+         animals = new ArrayList<>();
+-        plants = new ArrayList<>();
+-        field = new Field(depth, width);
++        plants  = new ArrayList<>();
++        field   = new Field(depth, width);
+ 
+-        // Create a view of the state of each location in the field.
+         view = new SimulatorView(depth, width);
+-        view.setColor(Deer.class, Color.BLUE);
+-        view.setColor(Lion.class, Color.RED);
+-        view.setColor(Mouse.class, Color.YELLOW);
+-        view.setColor(Owl.class, Color.ORANGE);
+-        view.setColor(Cat.class, Color.PINK);
+-        view.setColor(Grass.class, Color.GREEN);
+-        
++        for (EntitySpec spec : ENTITY_SPECS) {
++            view.setColor(spec.type, spec.color);
++        }
++
+         // Setup a valid starting point.
+         reset();
+     }
+-    
++
+     /**
+-     * Run the simulation from its current state for a reasonably long period,
++     * Run the simulation from its current state for a reasonably long period
+      * (4000 steps).
+      */
+     public void runLongSimulation()
+     {
+         simulate(4000);
+     }
+-    
++
+     /**
+      * Run the simulation from its current state for the given number of steps.
+      * Stop before the given number of steps if it ceases to be viable.
+@@ -98,48 +95,43 @@ public class Simulator
+      */
+     public void simulate(int numSteps)
+     {
+-        for(int step = 1; step <= numSteps && view.isViable(field); step++) {
++        for (int step = 1; step <= numSteps && view.isViable(field); step++) {
+             simulateOneStep();
+-            delay(60);   // uncomment this to run more slowly
++            delay(60);
+         }
+     }
+-    
++
+     /**
+      * Run the simulation from its current state for a single step.
+-     * Iterate over the whole field updating the state of each
+-     * fox and rabbit.
+      */
+     public void simulateOneStep()
+     {
+         step++;
+-        sim_weather();
+-        
++        updateWeather();
++
+         // Provide space for newborn animals.
+-        List<Animal> newAnimals = new ArrayList<>();        
+-        // Let all animals act.
+-        for(Iterator<Animal> it = animals.iterator(); it.hasNext(); ) {
++        List<Animal> newAnimals = new ArrayList<>();
++        for (Iterator<Animal> it = animals.iterator(); it.hasNext(); ) {
+             Animal animal = it.next();
+             animal.act(newAnimals, step, weather);
+-            if(! animal.isAlive()) {
++            if (!animal.isAlive()) {
+                 it.remove();
+             }
+         }
+-               
+-        // Add the newly born foxes and rabbits to the main lists.
+         animals.addAll(newAnimals);
+ 
+         // Let all plants act.
+-        for(Iterator<Plant> it = plants.iterator(); it.hasNext(); ) {
++        for (Iterator<Plant> it = plants.iterator(); it.hasNext(); ) {
+             Plant plant = it.next();
+             plant.act(step, weather);
+-            if(! plant.isAlive()) {
++            if (!plant.isAlive()) {
+                 it.remove();
+             }
+         }
+-        
++
+         view.showStatus(step, field, weather);
+     }
+-        
++
+     /**
+      * Reset the simulation to a starting position.
+      */
+@@ -149,94 +141,97 @@ public class Simulator
+         animals.clear();
+         plants.clear();
+         populate();
+-        sim_weather();
+-        
+-        // Show the starting state in the view.
++        updateWeather();
+         view.showStatus(step, field, weather);
+     }
+-    
++
+     /**
+-     * Randomly populate the field with Lions, Cats, Owls, Deers and mouses.
++     * Randomly populate the field using the ENTITY_SPECS registry.
++     * Each cell draws one random number per spec in order; the first spec
++     * whose probability threshold is met claims the cell.
+      */
+     private void populate()
+     {
+         Random rand = Randomizer.getRandom();
+         field.clear();
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
+-                if(rand.nextDouble() <= LION_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Lion lion = new Lion(true, field, location);
+-                    animals.add(lion);
+-                }
+-                else if(rand.nextDouble() <= DEER_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Deer deer = new Deer(true, field, location);
+-                    animals.add(deer);
+-                }
+-                else if(rand.nextDouble() <= OWL_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Owl owl = new Owl(true, field, location);
+-                    animals.add(owl);
+-                }
+-                else if(rand.nextDouble() <= MOUSE_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Mouse mouse = new Mouse(true, field, location);
+-                    animals.add(mouse);
++        for (int row = 0; row < field.getDepth(); row++) {
++            for (int col = 0; col < field.getWidth(); col++) {
++                Location location = new Location(row, col);
++                for (EntitySpec spec : ENTITY_SPECS) {
++                    if (rand.nextDouble() <= spec.probability) {
++                        Object entity = spec.factory.apply(field, location);
++                        if (spec.isAnimal) {
++                            animals.add((Animal) entity);
++                        } else {
++                            plants.add((Plant) entity);
++                        }
++                        break;
++                    }
+                 }
+-                else if(rand.nextDouble() <= CAT_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Cat cat = new Cat(true, field, location);
+-                    animals.add(cat);
+-                }
+-                else if(rand.nextDouble() <= GRASS_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Grass grass = new Grass(true, field, location);
+-                    plants.add(grass);
+-                }
+-                // else leave the location empty.
+             }
+         }
+     }
+-    
+-    /**
+-     * Pause for a given time.
+-     * @param millisec  The time to pause for, in milliseconds
+-     */
+-    private void delay(int millisec)
+-    {
+-        try {
+-            Thread.sleep(millisec);
+-        }
+-        catch (InterruptedException ie) {
+-            // wake up
+-        }
+-    }
+ 
+     /**
+-     * 
+-     * 
++     * Randomly select the weather for this step.
+      */
+-    private void sim_weather()
++    private void updateWeather()
+     {
+         Random rand = Randomizer.getRandom();
+-        if(rand.nextDouble() <= 0.33) {
++        if (rand.nextDouble() <= 0.33) {
+             weather = "Foggy";
+-        }
+-        else if (rand.nextDouble() <= 0.33) {
++        } else if (rand.nextDouble() <= 0.33) {
+             weather = "Rainy";
+-        }
+-        else {
++        } else {
+             weather = "Sunny";
+         }
+     }
+ 
+     /**
+-     * 
+-     * 
++     * @return the current weather.
+      */
+-    private String get_weather()
++    private String getWeather()
+     {
+         return weather;
+     }
++
++    /**
++     * Pause for a given time.
++     * @param millisec The time to pause for, in milliseconds.
++     */
++    private void delay(int millisec)
++    {
++        try {
++            Thread.sleep(millisec);
++        } catch (InterruptedException ie) {
++            // wake up
++        }
++    }
++
++    // -------------------------------------------------------------------------
++
++    /**
++     * Describes one entity type for use in the species registry.
++     * Bundles together the class (for colour registration), creation probability,
++     * display colour, a factory that constructs an instance, and a flag that
++     * distinguishes animals (which produce offspring) from plants (which don't).
++     */
++    private static class EntitySpec
++    {
++        final Class<?>                           type;
++        final double                             probability;
++        final Color                              color;
++        final BiFunction<Field, Location, Object> factory;
++        final boolean                            isAnimal;
++
++        EntitySpec(Class<?> type, double probability, Color color,
++                   BiFunction<Field, Location, Object> factory, boolean isAnimal)
++        {
++            this.type        = type;
++            this.probability = probability;
++            this.color       = color;
++            this.factory     = factory;
++            this.isAnimal    = isAnimal;
++        }
++    }
+ }

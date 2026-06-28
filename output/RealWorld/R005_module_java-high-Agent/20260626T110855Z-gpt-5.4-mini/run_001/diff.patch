@@ -1,0 +1,193 @@
+diff --git a/CSVReader.java b/CSVReader.java
+index d816a0b..8b0e43e 100644
+--- a/CSVReader.java
++++ b/CSVReader.java
+@@ -1,5 +1,6 @@
+ import java.io.BufferedReader;
+ import java.io.FileReader;
++import java.io.IOException;
+ import java.util.ArrayList;
+ 
+ /**
+@@ -27,7 +28,7 @@ public abstract class CSVReader
+     public void extractDataFor(String nameOfElementToLookFor)
+     {
+         resetParameters();
+-        String[] extractedData = getDataFor(nameOfElementToLookFor);
++        String[] extractedData = findRowFor(nameOfElementToLookFor);
+         if (extractedData != null) {
+             populateFields(extractedData);
+         } else {
+@@ -43,18 +44,19 @@ public abstract class CSVReader
+      * @param nameOfElementToLookFor (String) the name of the element which data must be extracted
+      * @return (String[]) the extracted data
+      */
+-    private String[] getDataFor(String nameOfElementToLookFor)
++    private String[] findRowFor(String nameOfElementToLookFor)
+     {
+-        try(BufferedReader br = new BufferedReader(new FileReader(getFileName()))) {
++        try (BufferedReader br = new BufferedReader(new FileReader(getFileName()))) {
+             // Skip first line as they are headers.
+-            String line = br.readLine();
+-            while ((line=br.readLine()) != null) {
+-                String[] attributes = line.split(",");
++            br.readLine();
++            String line;
++            while ((line = br.readLine()) != null) {
++                String[] attributes = line.split(",", -1);
+                 if (attributes[0].equals(nameOfElementToLookFor)) {
+                     return attributes;
+                 }
+             }
+-        } catch (Exception e) {
++        } catch (IOException e) {
+             System.out.println("Issue when parsing CSV");
+         }
+         return null;
+@@ -91,18 +93,19 @@ public abstract class CSVReader
+     public ArrayList<String> getChoicesList()
+     {
+         ArrayList<String> choicesList = new ArrayList<>();
+-        try(BufferedReader br = new BufferedReader(new FileReader(getFileName()))) {
++        try (BufferedReader br = new BufferedReader(new FileReader(getFileName()))) {
+             // Skip first line as they are headers.
+-            String line = br.readLine();
+-            while ((line=br.readLine()) != null) {
+-                String[] attributes = line.split(",");
++            br.readLine();
++            String line;
++            while ((line = br.readLine()) != null) {
++                String[] attributes = line.split(",", -1);
+                 choicesList.add(attributes[0]);
+             }
+-        } catch (Exception e) {
++        } catch (IOException e) {
+             e.printStackTrace();
+             System.out.println("Issue when parsing CSV");
+             return null;
+         }
+         return choicesList;
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/HabitatCSVReader.java b/HabitatCSVReader.java
+index a16135f..fa6ca6a 100644
+--- a/HabitatCSVReader.java
++++ b/HabitatCSVReader.java
+@@ -52,17 +52,21 @@ public class HabitatCSVReader extends CSVReader {
+         }
+ 
+         for(int i = 0; i < extractedData.length; i++) {
+-            if(i/2 == 0) {
+-                winterTemperatures[i%2] = Integer.parseInt(extractedData[i]);
+-            } else if (i/2 == 1) {
+-                springTemperatures[i%2] = Integer.parseInt(extractedData[i]);
+-            } else if (i/2 == 2) {
+-                summerTemperatures[i%2] = Integer.parseInt(extractedData[i]);
+-            } else if (i/2 == 3){
+-                autumnTemperatures[i%2] = Integer.parseInt(extractedData[i]);
++            int seasonIndex = i / 2;
++            int valueIndex = i % 2;
++            int parsedValue = Integer.parseInt(extractedData[i]);
++
++            if(seasonIndex == 0) {
++                winterTemperatures[valueIndex] = parsedValue;
++            } else if (seasonIndex == 1) {
++                springTemperatures[valueIndex] = parsedValue;
++            } else if (seasonIndex == 2) {
++                summerTemperatures[valueIndex] = parsedValue;
++            } else if (seasonIndex == 3) {
++                autumnTemperatures[valueIndex] = parsedValue;
+             }
+-            plantConcentration = Double.valueOf(extractedData[8]);
+         }
++        plantConcentration = Double.valueOf(extractedData[8]);
+     }
+ 
+     /**
+@@ -133,4 +137,4 @@ public class HabitatCSVReader extends CSVReader {
+     public double getPlantConcentration() {
+         return plantConcentration;
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/Simulator.java b/Simulator.java
+index 77ddd1a..2d3c09a 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -84,36 +84,52 @@ public class Simulator
+             simulationHabitat.habitatStep();
+             time.timeStep();
+ 
+-            // the following variables are added here to reduce method calls:
+             boolean isSpring = simulationHabitat.getIsSpring();
+             boolean isNight = time.getIsNight();
+             int currentTemperature = simulationHabitat.getCurrentTemperature();
+             boolean yearPassed = simulationHabitat.yearPassed();
+ 
+-            // Provide space for newborn species.
+-            List<Species> newSpecies = new ArrayList<>();
+-            // Let all species act.
+-            for(Iterator<Species> it = species.iterator(); it.hasNext(); )
+-            {
+-                Species specie = it.next();
+-                // Update the status of isSpring in the plants (done here to reduce coupling)
+-                if (specie instanceof Plant)
+-                {
+-                    Plant tempPlant = (Plant) specie;
+-                    if (tempPlant.getIsSpring() != isSpring) {
+-                        tempPlant.toggleIsSpring();
+-                    }
+-                }
++            synchronizePlantsWithSeason(isSpring);
++            List<Species> newbornSpecies = new ArrayList<>();
++            advanceSpecies(newbornSpecies, isNight, currentTemperature, yearPassed);
++            species.addAll(newbornSpecies);
++            view.showStatus(simStep.getCurrentStep(), time.timeString(), simulationHabitat.getCurrentSeason(), simulationHabitat.getCurrentTemperature(), field);
++        }
++    }
+ 
+-                specie.act(newSpecies, isNight, currentTemperature, yearPassed);
+-                if(! specie.isAlive()) {
+-                    it.remove();
++    /**
++     * Keep the plant season flag in sync with the habitat before the species act.
++     *
++     * @param isSpring true if the habitat is currently in spring.
++     */
++    private void synchronizePlantsWithSeason(boolean isSpring)
++    {
++        for (Species specie : species) {
++            if (specie instanceof Plant) {
++                Plant plant = (Plant) specie;
++                if (plant.getIsSpring() != isSpring) {
++                    plant.toggleIsSpring();
+                 }
+             }
++        }
++    }
+ 
+-            // Add the newly born species to the main lists.
+-            species.addAll(newSpecies);
+-            view.showStatus(simStep.getCurrentStep(), time.timeString(), simulationHabitat.getCurrentSeason(), simulationHabitat.getCurrentTemperature(), field);
++    /**
++     * Let every species act once and remove the dead ones from the simulation.
++     *
++     * @param newbornSpecies the list receiving newly created species.
++     * @param isNight true if it is currently night.
++     * @param currentTemperature the current temperature in the habitat.
++     * @param yearPassed true if a year has passed on this step.
++     */
++    private void advanceSpecies(List<Species> newbornSpecies, boolean isNight, int currentTemperature, boolean yearPassed)
++    {
++        for (Iterator<Species> it = species.iterator(); it.hasNext(); ) {
++            Species specie = it.next();
++            specie.act(newbornSpecies, isNight, currentTemperature, yearPassed);
++            if (!specie.isAlive()) {
++                it.remove();
++            }
+         }
+     }
+ 

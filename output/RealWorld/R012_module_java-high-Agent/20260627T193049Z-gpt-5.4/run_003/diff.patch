@@ -1,0 +1,506 @@
+diff --git a/Animal.java b/Animal.java
+index 5e33779..eb7b8f2 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -88,7 +88,7 @@ public abstract class Animal extends Organism
+             while (it.hasNext())
+             {
+                 Location where = it.next();
+-                Organism organism = field.getObjectAt(where);
++                Organism organism = (Organism) field.getOccupantAt(where);
+                 if (organism != null && organism.getSpecies() == getSpecies())
+                 {
+                     Animal animal = (Animal) organism;
+@@ -110,7 +110,7 @@ public abstract class Animal extends Organism
+         Iterator<Location> it = adjacent.iterator();
+         while(it.hasNext()) {
+             Location where = it.next();
+-            Organism target = field.getObjectAt(where);
++            Organism target = (Organism) field.getOccupantAt(where);
+             if (target != null) {
+                 if (attributes.getFoodSources().contains(target.getSpecies())
+                     && target.isAlive()
+diff --git a/Field.java b/Field.java
+index be0866e..9b25ea1 100644
+--- a/Field.java
++++ b/Field.java
+@@ -1,4 +1,5 @@
+ import java.util.Collections;
++import java.util.EnumMap;
+ import java.util.Iterator;
+ import java.util.LinkedList;
+ import java.util.List;
+@@ -17,8 +18,8 @@ public class Field
+     
+     // The depth and width of the field.
+     private int depth, width;
+-    // Storage for the organisms.
+-    private Organism[][] field;
++    // Storage for the field occupants.
++    private FieldOccupant[][] field;
+ 
+     /**
+      * Represent a field of the given dimensions.
+@@ -29,7 +30,7 @@ public class Field
+     {
+         this.depth = depth;
+         this.width = width;
+-        field = new Organism[depth][width];
++        field = new FieldOccupant[depth][width];
+     }
+     
+     /**
+@@ -61,9 +62,9 @@ public class Field
+      * @param row Row coordinate of the location.
+      * @param col Column coordinate of the location.
+      */
+-    public void place(Organism organism, int row, int col)
++    public void place(FieldOccupant occupant, int row, int col)
+     {
+-        place(organism, new Location(row, col));
++        place(occupant, new Location(row, col));
+     }
+     
+     /**
+@@ -73,28 +74,28 @@ public class Field
+      * @param animal The animal to be placed.
+      * @param location Where to place the animal.
+      */
+-    public void place(Organism organism, Location location)
++    public void place(FieldOccupant occupant, Location location)
+     {
+-        field[location.getRow()][location.getCol()] = organism;
++        field[location.getRow()][location.getCol()] = occupant;
+     }
+     
+     /**
+-     * Return the animal at the given location, if any.
++     * Return the occupant at the given location, if any.
+      * @param location Where in the field.
+-     * @return The animal at the given location, or null if there is none.
++     * @return The occupant at the given location, or null if there is none.
+      */
+-    public Organism getObjectAt(Location location)
++    public FieldOccupant getOccupantAt(Location location)
+     {
+-        return getObjectAt(location.getRow(), location.getCol());
++        return getOccupantAt(location.getRow(), location.getCol());
+     }
+     
+     /**
+-     * Return the animal at the given location, if any.
++     * Return the occupant at the given location, if any.
+      * @param row The desired row.
+      * @param col The desired column.
+-     * @return The animal at the given location, or null if there is none.
++     * @return The occupant at the given location, or null if there is none.
+      */
+-    public Organism getObjectAt(int row, int col)
++    public FieldOccupant getOccupantAt(int row, int col)
+     {
+         return field[row][col];
+     }
+@@ -123,7 +124,7 @@ public class Field
+         List<Location> free = new LinkedList<>();
+         List<Location> adjacent = adjacentLocations(location);
+         for(Location next : adjacent) {
+-            if(getObjectAt(next) == null) {
++            if(getOccupantAt(next) == null) {
+                 free.add(next);
+             }
+         }
+@@ -202,4 +203,34 @@ public class Field
+     {
+         return width;
+     }
++
++    /**
++     * Create an immutable snapshot of the current field state.
++     *
++     * @return A snapshot suitable for rendering and statistics.
++     */
++    public FieldSnapshot createSnapshot()
++    {
++        Species[][] occupantSpecies = new Species[depth][width];
++        EnumMap<Species, Integer> populationCounts = new EnumMap<>(Species.class);
++
++        for(int row = 0; row < depth; row++) {
++            for(int col = 0; col < width; col++) {
++                FieldOccupant occupant = field[row][col];
++                if(occupant != null) {
++                    Species species = occupant.getSpecies();
++                    occupantSpecies[row][col] = species;
++                    Integer currentCount = populationCounts.get(species);
++                    if(currentCount == null) {
++                        populationCounts.put(species, 1);
++                    }
++                    else {
++                        populationCounts.put(species, currentCount + 1);
++                    }
++                }
++            }
++        }
++
++        return new FieldSnapshot(depth, width, occupantSpecies, populationCounts);
++    }
+ }
+diff --git a/FieldOccupant.java b/FieldOccupant.java
+new file mode 100644
+index 0000000..23b7521
+--- /dev/null
++++ b/FieldOccupant.java
+@@ -0,0 +1,9 @@
++/**
++ * The minimal information the field needs from anything that can occupy a cell.
++ *
++ * @version 2022.03.02
++ */
++public interface FieldOccupant
++{
++    Species getSpecies();
++}
+diff --git a/FieldSnapshot.java b/FieldSnapshot.java
+new file mode 100644
+index 0000000..8a4da62
+--- /dev/null
++++ b/FieldSnapshot.java
+@@ -0,0 +1,56 @@
++import java.util.Collections;
++import java.util.EnumMap;
++import java.util.Set;
++
++/**
++ * Immutable representation of the field state for rendering and statistics.
++ *
++ * @version 2022.03.02
++ */
++public class FieldSnapshot
++{
++    private final int depth;
++    private final int width;
++    private final Species[][] occupants;
++    private final EnumMap<Species, Integer> populationCounts;
++
++    public FieldSnapshot(int depth, int width, Species[][] occupants,
++                         EnumMap<Species, Integer> populationCounts)
++    {
++        this.depth = depth;
++        this.width = width;
++        this.occupants = occupants;
++        this.populationCounts = new EnumMap<>(populationCounts);
++    }
++
++    public int getDepth()
++    {
++        return depth;
++    }
++
++    public int getWidth()
++    {
++        return width;
++    }
++
++    public Species getSpeciesAt(int row, int col)
++    {
++        return occupants[row][col];
++    }
++
++    public int getPopulationCount(Species species)
++    {
++        Integer count = populationCounts.get(species);
++        return count == null ? 0 : count.intValue();
++    }
++
++    public Set<Species> getPresentSpecies()
++    {
++        return Collections.unmodifiableSet(populationCounts.keySet());
++    }
++
++    public int getActiveSpeciesCount()
++    {
++        return populationCounts.size();
++    }
++}
+diff --git a/FieldStats.java b/FieldStats.java
+index 3a23e0c..3a8b9da 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -1,9 +1,5 @@
+-import java.util.EnumMap;
+-
+ /**
+- * This class collects and provides some statistical data on the state 
+- * of a field. It is flexible: it will create and maintain a counter 
+- * for any class of object that is found within the field.
++ * This class formats field snapshot data into user-facing statistics.
+  * 
+  * @version 2022.03.02
+  */
+@@ -11,10 +7,6 @@ public class FieldStats
+ {
+     // A shared weather object between the organisms and the simulator
+     public static final Weather weather = Weather.getWeather();
+-    // Counters for each type of entity (fox, rabbit, etc.) in the simulation.
+-    private EnumMap<Species, Counter> counters;
+-    // Whether the counters are currently up to date.
+-    private boolean countsValid;
+     // The step of the simulation
+     private int step;
+ 
+@@ -23,29 +15,21 @@ public class FieldStats
+      */
+     public FieldStats(int steps)
+     {
+-        // Set up a collection for counters for each type of animal that
+-        // we might find
+         step = steps;
+-        counters = new EnumMap<>(Species.class);
+-        countsValid = true;
+     }
+ 
+     /**
+-     * Get details of what is in the field.
+-     * @return A string describing what is in the field.
++     * Get details of what is in the current snapshot.
++     * @return A string describing the visible field state.
+      */
+-    public String getPopulationDetails(Field field)
++    public String getPopulationDetails(FieldSnapshot snapshot)
+     {
+         ++step;
+         StringBuffer buffer = new StringBuffer();
+-        if(!countsValid) {
+-            generateCounts(field);
+-        }
+-        for(Species species : counters.keySet()) {
+-            Counter info = counters.get(species);
+-            buffer.append(info.getName());
++        for(Species species : snapshot.getPresentSpecies()) {
++            buffer.append(species.getDisplayName());
+             buffer.append(": ");
+-            buffer.append(info.getCount());
++            buffer.append(snapshot.getPopulationCount(species));
+             buffer.append(' ');
+         }
+         buffer.append("Weather: " + weather.getCurrentWeather());
+@@ -62,80 +46,12 @@ public class FieldStats
+         return "Night";
+     }
+     
+-    /**
+-     * Invalidate the current set of statistics; reset all 
+-     * counts to zero.
+-     */
+-    public void reset()
+-    {
+-        countsValid = false;
+-        for(Species species : counters.keySet()) {
+-            Counter count = counters.get(species);
+-            count.reset();
+-        }
+-    }
+-
+-    /**
+-     * Increment the count for one class of animal.
+-     * @param animalClass The class of animal to increment.
+-     */
+-    public void incrementCount(Species species)
+-    {
+-        Counter count = counters.get(species);
+-        if(count == null) {
+-            count = new Counter(species.getDisplayName());
+-            counters.put(species, count);
+-        }
+-        count.increment();
+-    }
+-
+-    /**
+-     * Indicate that an animal count has been completed.
+-     */
+-    public void countFinished()
+-    {
+-        countsValid = true;
+-    }
+-
+     /**
+      * Determine whether the simulation is still viable.
+-     * I.e., should it continue to run.
+      * @return true If there is more than one species alive.
+      */
+-    public boolean isViable(Field field)
++    public boolean isViable(FieldSnapshot snapshot)
+     {
+-        // How many counts are non-zero.
+-        int nonZero = 0;
+-        if(!countsValid) {
+-            generateCounts(field);
+-        }
+-        for(Species species : counters.keySet()) {
+-            Counter info = counters.get(species);
+-            if(info.getCount() > 0) {
+-                nonZero++;
+-            }
+-        }
+-        return nonZero > 1;
+-    }
+-    
+-    /**
+-     * Generate counts of the number of foxes and rabbits.
+-     * These are not kept up to date as foxes and rabbits
+-     * are placed in the field, but only when a request
+-     * is made for the information.
+-     * @param field The field to generate the stats for.
+-     */
+-    private void generateCounts(Field field)
+-    {
+-        reset();
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
+-                Organism organism = field.getObjectAt(row, col);
+-                if(organism != null) {
+-                    incrementCount(organism.getSpecies());
+-                }
+-            }
+-        }
+-        countsValid = true;
++        return snapshot.getActiveSpeciesCount() > 1;
+     }
+ }
+diff --git a/InfectiousAnimal.java b/InfectiousAnimal.java
+index c165daa..7a862ee 100644
+--- a/InfectiousAnimal.java
++++ b/InfectiousAnimal.java
+@@ -35,7 +35,7 @@ public abstract class InfectiousAnimal extends Animal implements Infectable
+         Iterator<Location> it = adjacent.iterator();
+         while(it.hasNext()) {
+             Location where = it.next();
+-            Organism organism = field.getObjectAt(where);
++            Organism organism = (Organism) field.getOccupantAt(where);
+             if (organism != null) {
+                 if (organism instanceof Infectable && organism.isAlive()
+                     && getRand().nextDouble() <= SPREAD_PROBABILITY) {
+diff --git a/Organism.java b/Organism.java
+index 3fd3020..f630baf 100644
+--- a/Organism.java
++++ b/Organism.java
+@@ -8,7 +8,7 @@ import java.util.Random;
+  *
+  * @version 2022.03.02
+  */
+-public abstract class Organism
++public abstract class Organism implements FieldOccupant
+ {
+     // Shared lifecycle settings for this organism's species.
+     private final OrganismAttributes attributes;
+diff --git a/Simulator.java b/Simulator.java
+index 0ce560d..b33d123 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -128,7 +128,7 @@ public class Simulator
+      */
+     public void simulate(int numSteps)
+     {
+-        for(int step = 1; step <= numSteps && view.isViable(field); step++) {
++        for(int step = 1; step <= numSteps && view.isViable(field.createSnapshot()); step++) {
+             simulateOneStep();
+             //delay(60);   // uncomment this to run more slowly
+         }
+@@ -162,7 +162,7 @@ public class Simulator
+                    
+         // Add the newly born organisms to the main lists.
+         organisms.addAll(newOrganisms);
+-        view.showStatus(step, field);
++        view.showStatus(step, field.createSnapshot());
+     }
+         
+     /**
+@@ -176,7 +176,7 @@ public class Simulator
+         weather.resetWeather();
+         
+         // Show the starting state in the view.
+-        view.showStatus(step, field);
++        view.showStatus(step, field.createSnapshot());
+     }
+     
+     /**
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 6594aef..bbf99c6 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -107,9 +107,9 @@ public class SimulatorView extends JFrame
+     }
+     
+     /**
+-     * Define a color to be used for a given class of animal.
+-     * @param animalClass The animal's Class object.
+-     * @param color The color to be used for the given class.
++     * Define a color to be used for a given species.
++     * @param species The species to color.
++     * @param color The color to be used for the given species.
+      */
+     public void setColor(Species species, Color color)
+     {
+@@ -125,7 +125,7 @@ public class SimulatorView extends JFrame
+     }
+ 
+     /**
+-     * @return The color to be used for a given class of animal.
++     * @return The color to be used for a given species.
+      */
+     private Color getColor(Species species)
+     {
+@@ -142,34 +142,30 @@ public class SimulatorView extends JFrame
+     /**
+      * Show the current status of the field.
+      * @param step Which iteration step it is.
+-     * @param field The field whose status is to be displayed.
++     * @param snapshot The field snapshot whose status is to be displayed.
+      */
+-    public void showStatus(int step, Field field)
++    public void showStatus(int step, FieldSnapshot snapshot)
+     {
+         if(!isVisible()) {
+             setVisible(true);
+         }
+             
+         stepLabel.setText(STEP_PREFIX + step);
+-        stats.reset();
+-        
+         fieldView.preparePaint();
+ 
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
+-                Organism organism = field.getObjectAt(row, col);
+-                if(organism != null) {
+-                    stats.incrementCount(organism.getSpecies());
+-                    fieldView.drawMark(col, row, getColor(organism.getSpecies()));
++        for(int row = 0; row < snapshot.getDepth(); row++) {
++            for(int col = 0; col < snapshot.getWidth(); col++) {
++                Species species = snapshot.getSpeciesAt(row, col);
++                if(species != null) {
++                    fieldView.drawMark(col, row, getColor(species));
+                 }
+                 else {
+                     fieldView.drawMark(col, row, EMPTY_COLOR);
+                 }
+             }
+         }
+-        stats.countFinished();
+ 
+-        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(field));
++        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(snapshot));
+         fieldView.repaint();
+     }
+ 
+@@ -177,9 +173,9 @@ public class SimulatorView extends JFrame
+      * Determine whether the simulation should continue to run.
+      * @return true If there is more than one species alive.
+      */
+-    public boolean isViable(Field field)
++    public boolean isViable(FieldSnapshot snapshot)
+     {
+-        return stats.isViable(field);
++        return stats.isViable(snapshot);
+     }
+     
+     /**

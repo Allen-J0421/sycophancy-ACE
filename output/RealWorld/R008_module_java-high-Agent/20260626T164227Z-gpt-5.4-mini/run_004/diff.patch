@@ -1,0 +1,985 @@
+diff --git a/Animal.java b/Animal.java
+index 3457104..a275dd2 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -51,9 +51,9 @@ public abstract class Animal extends LivingOrganism
+      * @param infected Intial state if the animal is infected or not
+      * @param immmune Intial state if the animal is immune or not
+      */
+-    public Animal(Field field, Location location, boolean infected, boolean immune)
++    public Animal(Field field, Location location, boolean randomAge, boolean infected, boolean immune, SpeciesType speciesType)
+     {
+-        this(field, location, infected, immune, SimulationConfig.DEFAULT);
++        this(field, location, randomAge, infected, immune, speciesType, SimulationConfig.DEFAULT);
+     }
+ 
+     /**
+@@ -65,19 +65,28 @@ public abstract class Animal extends LivingOrganism
+      * @param immmune Intial state if the animal is immune or not
+      * @param config Shared simulation configuration.
+      */
+-    public Animal(Field field, Location location, boolean infected, boolean immune, SimulationConfig config)
++    public Animal(Field field, Location location, boolean randomAge, boolean infected, boolean immune, SpeciesType speciesType, SimulationConfig config)
+     {
+-        super(field, location, config);
+-        alive = true;
++        super(field, location, speciesType, config);
+         this.infected = infected;
+         this.immune = immune;
+-        
++
++        SimulationConfig.SpeciesConfig speciesConfig = speciesType.animalConfig(config);
++        breedingAge = speciesConfig.breedingAge;
++        maxAge = speciesConfig.maxAge;
++        breedingProbability = speciesConfig.breedingProbability;
++        maxLitterSize = speciesConfig.maxLitterSize;
++        maxFoodLevel = speciesConfig.maxFoodLevel;
++        foodValue = speciesConfig.foodValue;
++        movementProbability = speciesConfig.movementProbability;
+         diseaseProbability = config.diseaseProbability;
+         diseaseSpreadProbability = config.diseaseSpreadProbability;
+         deathFromInfectionProbability = config.deathFromInfectionProbability;
+         immuneProbability = config.immuneProbability;
+-        
++
+         isFemale = rand.nextBoolean();
++        age = speciesType.initialAge(randomAge, rand, config);
++        foodLevel = speciesType.initialFoodLevel(randomAge, rand, config);
+     }
+     
+     /**
+@@ -111,7 +120,7 @@ public abstract class Animal extends LivingOrganism
+         // of losing immunity.
+         else
+         {
+-        if(rand.nextDouble() <= config.immuneLossProbability) {
++            if(rand.nextDouble() <= config.immuneLossProbability) {
+                 immune = false;
+             }
+         }
+@@ -305,7 +314,11 @@ public abstract class Animal extends LivingOrganism
+      *
+      * @return A new animal of the same species.
+      */
+-    protected abstract Animal createOffspring(Location location, boolean inheritedInfection, boolean inheritedImmunity);
++    protected Animal createOffspring(Location location, boolean inheritedInfection, boolean inheritedImmunity)
++    {
++        OffspringHealthState healthState = inheritHealthState(inheritedInfection, inheritedImmunity);
++        return speciesType.createAnimal(field, location, false, healthState.isInfected(), healthState.isImmune(), config);
++    }
+ 
+     /**
+      * Determine how infection and immunity are inherited by an offspring.
+@@ -378,15 +391,9 @@ public abstract class Animal extends LivingOrganism
+         {
+             Location where = it.next();
+             Animal animal = (Animal) field.getObjectAt(where, Animal.class);
+-            Class typeOfOtherAnimal = null;
+-            
+-            if (field.getObjectAt(where, Animal.class) != null) 
+-            {
+-                typeOfOtherAnimal  = field.getObjectAt(where, Animal.class).getClass();
+-            }
+-            
+-            //checks to make sure they are of the same species
+-            if(this.getClass().equals(typeOfOtherAnimal)) 
++
++            // checks to make sure they are of the same species
++            if(animal != null && speciesType == animal.getSpeciesType()) 
+             {
+                 //checks to make the other animal is also a male
+                 if(animal.getIsFemale() == false) 
+diff --git a/Cheetah.java b/Cheetah.java
+index 7cab4fd..46693a4 100644
+--- a/Cheetah.java
++++ b/Cheetah.java
+@@ -38,38 +38,6 @@ public class Cheetah extends Predator
+      */
+     public Cheetah(boolean randomAge, Field field, Location location, boolean isInfected, boolean isImmune, SimulationConfig config)
+     {
+-        super(field, location, isInfected, isImmune, config);
+-        
+-        preyCatchingProbability = config.cheetah.preyCatchingProbability;
+-        breedingAge = config.cheetah.breedingAge;
+-        maxAge = config.cheetah.maxAge;
+-        breedingProbability = config.cheetah.breedingProbability;
+-        maxLitterSize = config.cheetah.maxLitterSize;
+-        maxFoodLevel = config.cheetah.maxFoodLevel;
+-        foodValue = config.cheetah.foodValue;
+-        movementProbability = config.cheetah.movementProbability;
+-        
+-        if (randomAge) 
+-        {
+-            age = rand.nextInt(config.cheetah.maxAge);
+-            foodLevel = rand.nextInt(config.cheetah.maxFoodLevel);
+-        }
+-        else
+-        {
+-            age = 0;
+-            
+-            // Chooses a random percentage between 0-18% of the max
+-            // food level to start at - prevents a self-sustaining
+-            // loop and add variability.
+-            double percentageOfMaxFoodLevel = rand.nextDouble() * config.cheetah.randomNewbornFoodLevelMaxFraction;
+-            foodLevel = (int) (percentageOfMaxFoodLevel * config.cheetah.maxFoodLevel);
+-        }
+-    }
+-
+-    @Override
+-    protected Animal createOffspring(Location location, boolean inheritedInfection, boolean inheritedImmunity)
+-    {
+-        OffspringHealthState healthState = inheritHealthState(inheritedInfection, inheritedImmunity);
+-        return new Cheetah(false, field, location, healthState.isInfected(), healthState.isImmune());
++        super(field, location, randomAge, isInfected, isImmune, SpeciesType.CHEETAH, config);
+     }
+ }
+diff --git a/FieldStats.java b/FieldStats.java
+index b12b721..17b7c12 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -1,6 +1,6 @@
+ package savannah.model;
+ 
+-import java.util.LinkedHashMap;
++import java.util.EnumMap;
+ import java.util.Map;
+ 
+ /**
+@@ -13,7 +13,7 @@ import java.util.Map;
+ public class FieldStats
+ {
+     // Counters for each type of entity (lion, zebra, etc.) in the simulation.
+-    private Map<Class<?>, Counter> counters;
++    private Map<SpeciesType, Counter> counters;
+     // Whether the counters are currently up to date.
+     private boolean countsValid;
+ 
+@@ -24,7 +24,7 @@ public class FieldStats
+     {
+         // Set up a collection for counters for each type of animal that
+         // we might find
+-        counters = new LinkedHashMap<>();
++        counters = new EnumMap<>(SpeciesType.class);
+         countsValid = true;
+     }
+ 
+@@ -41,7 +41,7 @@ public class FieldStats
+         if(!countsValid) {
+             generateCounts(field);
+         }
+-        for(Class<?> key : counters.keySet()) {
++        for(SpeciesType key : counters.keySet()) {
+             Counter info = counters.get(key);
+             buffer.append(info.getName());
+             buffer.append(": ");
+@@ -58,7 +58,7 @@ public class FieldStats
+     public void reset()
+     {
+         countsValid = false;
+-        for(Class<?> key : counters.keySet()) {
++        for(SpeciesType key : counters.keySet()) {
+             Counter count = counters.get(key);
+             count.reset();
+         }
+@@ -67,16 +67,16 @@ public class FieldStats
+     /**
+      * Increment the count for one object.
+      * 
+-     * @param objectType The class of animal to increment.
++     * @param speciesType The species to increment.
+      */
+-    public void incrementCount(Class<?> objectType)
++    public void incrementCount(SpeciesType speciesType)
+     {
+-        Counter count = counters.get(objectType);
++        Counter count = counters.get(speciesType);
+         if(count == null) {
+             // We do not have a counter for this species yet.
+             // Create one.
+-            count = new Counter(objectType.getName());
+-            counters.put(objectType, count);
++            count = new Counter(speciesType.getDisplayName());
++            counters.put(speciesType, count);
+         }
+         count.increment();
+     }
+@@ -104,7 +104,7 @@ public class FieldStats
+             generateCounts(field);
+         }
+         
+-        for(Class key : counters.keySet()) 
++        for(SpeciesType key : counters.keySet()) 
+         {
+             Counter info = counters.get(key);
+             if(info.getCount() > 0) 
+@@ -131,11 +131,16 @@ public class FieldStats
+         {
+             for(int col = 0; col < field.getWidth(); col++) 
+             {
+-                Object object = field.getObjectAt(row, col, Animal.class);
+-                
+-                if(object != null) 
++                Animal animal = (Animal) field.getObjectAt(row, col, Animal.class);
++                Plant plant = (Plant) field.getObjectAt(row, col, Plant.class);
++
++                if(animal != null) 
++                {
++                    incrementCount(animal.getSpeciesType());
++                }
++                if (plant != null)
+                 {
+-                    incrementCount(object.getClass());
++                    incrementCount(plant.getSpeciesType());
+                 }
+             }
+         }
+diff --git a/Giraffe.java b/Giraffe.java
+index cc5c1c5..89f4b24 100644
+--- a/Giraffe.java
++++ b/Giraffe.java
+@@ -38,32 +38,6 @@ public class Giraffe extends Prey
+      */
+     public Giraffe(boolean randomAge, Field field, Location location, boolean isInfected, boolean isImmune, SimulationConfig config)
+     {
+-        super(field, location, isInfected, isImmune, config);
+-        
+-        breedingAge = config.giraffe.breedingAge;
+-        maxAge = config.giraffe.maxAge;
+-        breedingProbability = config.giraffe.breedingProbability;
+-        maxLitterSize = config.giraffe.maxLitterSize;
+-        maxFoodLevel = config.giraffe.maxFoodLevel;
+-        foodValue = config.giraffe.foodValue;
+-        movementProbability = config.giraffe.movementProbability;
+-        
+-        if (randomAge) 
+-        {
+-            age = rand.nextInt(config.giraffe.maxAge);
+-            foodLevel = rand.nextInt(config.giraffe.maxFoodLevel);
+-        }
+-        else
+-        {
+-            age = 0;
+-            foodLevel = (int) (config.giraffe.newbornFoodLevelFraction * config.giraffe.maxFoodLevel);
+-        }
+-    }
+-
+-    @Override
+-    protected Animal createOffspring(Location location, boolean inheritedInfection, boolean inheritedImmunity)
+-    {
+-        OffspringHealthState healthState = inheritHealthState(inheritedInfection, inheritedImmunity);
+-        return new Giraffe(false, field, location, healthState.isInfected(), healthState.isImmune());
++        super(field, location, randomAge, isInfected, isImmune, SpeciesType.GIRAFFE, config);
+     }
+ }
+diff --git a/Lemur.java b/Lemur.java
+index 8d33fb9..9d589bb 100644
+--- a/Lemur.java
++++ b/Lemur.java
+@@ -38,32 +38,6 @@ public class Lemur extends Prey
+      */
+     public Lemur(boolean randomAge, Field field, Location location, boolean isInfected, boolean isImmune, SimulationConfig config)
+     {
+-        super(field, location, isInfected, isImmune, config);
+-        
+-        breedingAge = config.lemur.breedingAge;
+-        maxAge = config.lemur.maxAge;
+-        breedingProbability = config.lemur.breedingProbability;
+-        maxLitterSize = config.lemur.maxLitterSize;
+-        maxFoodLevel = config.lemur.maxFoodLevel;
+-        foodValue = config.lemur.foodValue;
+-        movementProbability = config.lemur.movementProbability;
+-        
+-        if (randomAge) 
+-        {
+-            age = rand.nextInt(config.lemur.maxAge);
+-            foodLevel = rand.nextInt(config.lemur.maxFoodLevel);
+-        }
+-        else
+-        {
+-            age = 0;
+-            foodLevel = (int) (config.lemur.newbornFoodLevelFraction * config.lemur.maxFoodLevel);
+-        }
+-    }
+-
+-    @Override
+-    protected Animal createOffspring(Location location, boolean inheritedInfection, boolean inheritedImmunity)
+-    {
+-        OffspringHealthState healthState = inheritHealthState(inheritedInfection, inheritedImmunity);
+-        return new Lemur(false, field, location, healthState.isInfected(), healthState.isImmune());
++        super(field, location, randomAge, isInfected, isImmune, SpeciesType.LEMUR, config);
+     }
+ }
+diff --git a/Lion.java b/Lion.java
+index a27724d..6b51c7b 100644
+--- a/Lion.java
++++ b/Lion.java
+@@ -38,38 +38,6 @@ public class Lion extends Predator
+      */
+     public Lion(boolean randomAge, Field field, Location location, boolean isInfected, boolean isImmune, SimulationConfig config)
+     {
+-        super(field, location, isInfected, isImmune, config);
+-        
+-        preyCatchingProbability = config.lion.preyCatchingProbability;
+-        breedingAge = config.lion.breedingAge;
+-        maxAge = config.lion.maxAge;
+-        breedingProbability = config.lion.breedingProbability;
+-        maxLitterSize = config.lion.maxLitterSize;
+-        maxFoodLevel = config.lion.maxFoodLevel;
+-        foodValue = config.lion.foodValue;
+-        movementProbability = config.lion.movementProbability;
+-        
+-        if (randomAge) 
+-        {
+-            age = rand.nextInt(config.lion.maxAge);
+-            foodLevel = rand.nextInt(config.lion.maxFoodLevel);
+-        }
+-        else
+-        {
+-            age = 0;
+-            
+-            // Chooses a random percentage between 0-18% of the max
+-            // food level to start at - prevents a self-sustaining
+-            // loop and add variability.
+-            double percentageOfMaxFoodLevel = rand.nextDouble() * config.lion.randomNewbornFoodLevelMaxFraction;
+-            foodLevel = (int) (percentageOfMaxFoodLevel * config.lion.maxFoodLevel);
+-        }
+-    }
+-
+-    @Override
+-    protected Animal createOffspring(Location location, boolean inheritedInfection, boolean inheritedImmunity)
+-    {
+-        OffspringHealthState healthState = inheritHealthState(inheritedInfection, inheritedImmunity);
+-        return new Lion(false, field, location, healthState.isInfected(), healthState.isImmune());
++        super(field, location, randomAge, isInfected, isImmune, SpeciesType.LION, config);
+     }
+ }
+diff --git a/LivingOrganism.java b/LivingOrganism.java
+index 90b59c5..9132971 100644
+--- a/LivingOrganism.java
++++ b/LivingOrganism.java
+@@ -12,6 +12,8 @@ import savannah.config.SimulationConfig;
+  */
+ public abstract class LivingOrganism
+ {
++    // The species of this organism.
++    protected final SpeciesType speciesType;
+     // Whether the organism is alive or not.
+     protected boolean alive;
+     // The field the organism is stored in.
+@@ -32,9 +34,9 @@ public abstract class LivingOrganism
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+-    protected LivingOrganism(Field field, Location location) 
++    protected LivingOrganism(Field field, Location location, SpeciesType speciesType) 
+     {
+-        this(field, location, SimulationConfig.DEFAULT);
++        this(field, location, speciesType, SimulationConfig.DEFAULT);
+     }
+ 
+     /**
+@@ -44,11 +46,12 @@ public abstract class LivingOrganism
+      * @param location The location within the field.
+      * @param config Shared simulation configuration.
+      */
+-    protected LivingOrganism(Field field, Location location, SimulationConfig config) 
++    protected LivingOrganism(Field field, Location location, SpeciesType speciesType, SimulationConfig config) 
+     {
+         alive = true;
+         this.field = field;
+         this.config = config;
++        this.speciesType = speciesType;
+         setLocation(location);
+     }
+     
+@@ -73,6 +76,16 @@ public abstract class LivingOrganism
+     {
+         return alive;
+     }
++
++    /**
++     * Return the organism's species.
++     *
++     * @return The organism's species.
++     */
++    public SpeciesType getSpeciesType()
++    {
++        return speciesType;
++    }
+     
+     /**
+      * Indicate that the organism is no longer alive.
+@@ -124,4 +137,3 @@ public abstract class LivingOrganism
+ }
+ 
+ 
+-
+diff --git a/Plant.java b/Plant.java
+index c5ec8bf..88ff010 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -1,6 +1,5 @@
+ package savannah.model;
+ 
+-import java.util.Iterator;
+ import java.util.List;
+ 
+ import savannah.config.SimulationConfig;
+@@ -40,20 +39,10 @@ public class Plant extends LivingOrganism
+      */
+     public Plant(boolean randomHealthPercentage, Field field, Location location, SimulationConfig config) 
+     {
+-        super(field, location, config);
+-        
+-        foodValue = config.plant.foodValue;
+-        
+-        healthPercentage = config.plant.newbornHealthFraction;
+-        if (randomHealthPercentage) 
+-        {
+-            healthPercentage = rand.nextDouble();
+-            
+-            if (healthPercentage < config.plant.minimumRandomHealthFraction)
+-            {
+-                healthPercentage = config.plant.minimumRandomHealthFraction;
+-            }
+-        }
++        super(field, location, SpeciesType.PLANT, config);
++
++        foodValue = speciesType.plantConfig(config).foodValue;
++        healthPercentage = speciesType.initialPlantHealth(randomHealthPercentage, rand, config);
+     }
+     
+     /**
+@@ -71,24 +60,7 @@ public class Plant extends LivingOrganism
+         {
+             if(isAlive()) 
+             {
+-                switch (Weather.getWeather())
+-                {
+-                    case Sunny:
+-                        spreadProbability = config.sunnyPlantSpreadProbability;
+-                        break;
+-                    case Rainy:
+-                        spreadProbability = config.rainyPlantSpreadProbability;
+-                        break;
+-                    case Foggy:
+-                        spreadProbability = config.foggyPlantSpreadProbability;
+-                        break;
+-                    case Cloudy:
+-                        spreadProbability = config.cloudyPlantSpreadProbability;
+-                        break;
+-                    case Clear:
+-                        spreadProbability = config.clearPlantSpreadProbability;
+-                        break;
+-                }
++                spreadProbability = speciesType.getPlantSpreadProbability(Weather.getWeather(), config);
+                 
+                 if (rand.nextDouble() < spreadProbability) 
+                 {
+@@ -104,7 +76,7 @@ public class Plant extends LivingOrganism
+      */
+     protected int beEaten() 
+     {
+-        healthPercentage -= config.plant.percentageEaten;
++        healthPercentage -= speciesType.plantConfig(config).percentageEaten;
+         if (healthPercentage <= 0)
+         {
+             setDead();
+@@ -120,7 +92,7 @@ public class Plant extends LivingOrganism
+      */
+     protected void incrementAge() 
+     {
+-        healthPercentage += config.plant.growthRate;
++        healthPercentage += speciesType.plantConfig(config).growthRate;
+         if (healthPercentage > 1.0) 
+         {
+             healthPercentage = 1.0;
+@@ -191,10 +163,6 @@ public class Plant extends LivingOrganism
+     private Plant createOffspring(List<Location> free) 
+     {
+         Location loc = free.remove(0);
+-        Plant offspring = null;
+-        
+-        offspring = new Plant(false, field, loc);
+-        
+-        return offspring;
++        return speciesType.createPlant(false, field, loc, config);
+     }
+ }
+diff --git a/Predator.java b/Predator.java
+index 436db56..1885926 100644
+--- a/Predator.java
++++ b/Predator.java
+@@ -22,9 +22,9 @@ public abstract class Predator extends Animal
+      * @param infected : intial state if the prey is infected or not
+      * @param immmune : intial state if the prey is immune or not
+      */
+-    protected Predator(Field field, Location location, boolean isInfected, boolean isImmune)
++    protected Predator(Field field, Location location, boolean randomAge, boolean isInfected, boolean isImmune, SpeciesType speciesType)
+     {
+-        this(field, location, isInfected, isImmune, SimulationConfig.DEFAULT);
++        this(field, location, randomAge, isInfected, isImmune, speciesType, SimulationConfig.DEFAULT);
+     }
+ 
+     /**
+@@ -36,9 +36,10 @@ public abstract class Predator extends Animal
+      * @param immmune : intial state if the prey is immune or not
+      * @param config Shared simulation configuration.
+      */
+-    protected Predator(Field field, Location location, boolean isInfected, boolean isImmune, SimulationConfig config)
++    protected Predator(Field field, Location location, boolean randomAge, boolean isInfected, boolean isImmune, SpeciesType speciesType, SimulationConfig config)
+     {
+-        super(field, location, isInfected, isImmune, config);
++        super(field, location, randomAge, isInfected, isImmune, speciesType, config);
++        preyCatchingProbability = speciesType.animalConfig(config).preyCatchingProbability;
+     }
+     
+     /**
+diff --git a/Prey.java b/Prey.java
+index 18e2cf3..917e151 100644
+--- a/Prey.java
++++ b/Prey.java
+@@ -20,9 +20,9 @@ public abstract class Prey extends Animal
+      * @param infected Intial state if the prey is infected or not
+      * @param immmune Intial state if the prey is immune or not
+      */
+-    protected Prey(Field field, Location location, boolean infected, boolean immune)
++    protected Prey(Field field, Location location, boolean randomAge, boolean infected, boolean immune, SpeciesType speciesType)
+     {
+-        this(field, location, infected, immune, SimulationConfig.DEFAULT);
++        this(field, location, randomAge, infected, immune, speciesType, SimulationConfig.DEFAULT);
+     }
+ 
+     /**
+@@ -34,9 +34,9 @@ public abstract class Prey extends Animal
+      * @param immmune Intial state if the prey is immune or not
+      * @param config Shared simulation configuration.
+      */
+-    protected Prey(Field field, Location location, boolean infected, boolean immune, SimulationConfig config)
++    protected Prey(Field field, Location location, boolean randomAge, boolean infected, boolean immune, SpeciesType speciesType, SimulationConfig config)
+     {
+-        super(field, location, infected, immune, config);
++        super(field, location, randomAge, infected, immune, speciesType, config);
+     }
+ 
+     /**
+diff --git a/SimulationEngine.java b/SimulationEngine.java
+index e3e5a51..75757cd 100644
+--- a/SimulationEngine.java
++++ b/SimulationEngine.java
+@@ -7,18 +7,14 @@ import java.util.Random;
+ 
+ import savannah.config.SimulationConfig;
+ import savannah.model.Animal;
+-import savannah.model.Cheetah;
+ import savannah.model.Field;
+-import savannah.model.Giraffe;
+-import savannah.model.Lemur;
+-import savannah.model.Lion;
+ import savannah.model.LivingOrganism;
+ import savannah.model.Location;
+ import savannah.model.Plant;
+ import savannah.model.Randomizer;
++import savannah.model.SpeciesType;
+ import savannah.model.Time;
+ import savannah.model.Weather;
+-import savannah.model.Zebra;
+ 
+ /**
+  * Owns the simulation state and advances the world one step at a time.
+@@ -108,7 +104,7 @@ public class SimulationEngine
+         for (int row = 0; row < field.getDepth(); row++) {
+             for (int col = 0; col < field.getWidth(); col++) {
+                 Location location = new Location(row, col);
+-                plants.add(new Plant(true, field, location, config));
++                plants.add(SpeciesType.PLANT.createPlant(true, field, location, config));
+ 
+                 Animal animal = createInitialAnimal(location, rand);
+                 if (animal != null) {
+@@ -121,19 +117,19 @@ public class SimulationEngine
+     private Animal createInitialAnimal(Location location, Random rand)
+     {
+         if (rand.nextDouble() <= config.lionCreationProbability) {
+-            return new Lion(true, field, location, false, false, config);
++            return SpeciesType.LION.createAnimal(field, location, true, false, false, config);
+         }
+         if (rand.nextDouble() <= config.cheetahCreationProbability) {
+-            return new Cheetah(true, field, location, false, false, config);
++            return SpeciesType.CHEETAH.createAnimal(field, location, true, false, false, config);
+         }
+         if (rand.nextDouble() <= config.zebraCreationProbability) {
+-            return new Zebra(true, field, location, false, false, config);
++            return SpeciesType.ZEBRA.createAnimal(field, location, true, false, false, config);
+         }
+         if (rand.nextDouble() <= config.giraffeCreationProbability) {
+-            return new Giraffe(true, field, location, false, false, config);
++            return SpeciesType.GIRAFFE.createAnimal(field, location, true, false, false, config);
+         }
+         if (rand.nextDouble() <= config.lemurCreationProbability) {
+-            return new Lemur(true, field, location, false, false, config);
++            return SpeciesType.LEMUR.createAnimal(field, location, true, false, false, config);
+         }
+ 
+         return null;
+diff --git a/Simulator.java b/Simulator.java
+index e9be66a..c0c3d4a 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -6,6 +6,7 @@ import javax.swing.JButton;
+ 
+ import savannah.config.SimulationConfig;
+ import savannah.engine.SimulationEngine;
++import savannah.model.SpeciesType;
+ import savannah.model.Time;
+ 
+ /**
+@@ -76,12 +77,12 @@ public class Simulator
+ 
+         // Create a view of the state of each location in the field.
+         view = new SimulatorView(engine.getDepth(), engine.getWidth(), buttons, CONFIG);
+-        view.setColor(savannah.model.Zebra.class, Color.BLACK, Color.WHITE);
+-        view.setColor(savannah.model.Giraffe.class, Color.YELLOW, Color.BLACK);
+-        view.setColor(savannah.model.Lemur.class, Color.BLUE, Color.WHITE);
+-        view.setColor(savannah.model.Lion.class, Color.RED, Color.WHITE);
+-        view.setColor(savannah.model.Cheetah.class, Color.ORANGE, Color.BLACK);
+-        view.setColor(savannah.model.Plant.class, Color.GREEN, Color.BLACK);
++        view.setColor(SpeciesType.ZEBRA, Color.BLACK, Color.WHITE);
++        view.setColor(SpeciesType.GIRAFFE, Color.YELLOW, Color.BLACK);
++        view.setColor(SpeciesType.LEMUR, Color.BLUE, Color.WHITE);
++        view.setColor(SpeciesType.LION, Color.RED, Color.WHITE);
++        view.setColor(SpeciesType.CHEETAH, Color.ORANGE, Color.BLACK);
++        view.setColor(SpeciesType.PLANT, Color.GREEN, Color.BLACK);
+         
+         // Setup a valid starting point.
+         reset();
+diff --git a/SimulatorView.java b/SimulatorView.java
+index ba03fac..12f3f2c 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -18,7 +18,7 @@ import javax.swing.JMenuItem;
+ import javax.swing.JOptionPane;
+ import javax.swing.JPanel;
+ 
+-import java.util.LinkedHashMap;
++import java.util.EnumMap;
+ import java.util.Map;
+ 
+ import savannah.config.SimulationConfig;
+@@ -26,6 +26,7 @@ import savannah.model.Animal;
+ import savannah.model.Field;
+ import savannah.model.FieldStats;
+ import savannah.model.Plant;
++import savannah.model.SpeciesType;
+ import savannah.model.Time;
+ import savannah.model.Weather;
+ 
+@@ -62,8 +63,8 @@ public class SimulatorView extends JFrame
+     // Stores a graph key which displays the colors of the classes.
+     private JPanel classKey;
+     
+-    // A map for storing colors for participants in the simulation
+-    private Map<Class<?>, Color> colors;
++    // A map for storing colors for participants in the simulation.
++    private Map<SpeciesType, Color> colors;
+     
+     // A statistics object computing and storing simulation information
+     private FieldStats stats;
+@@ -79,7 +80,7 @@ public class SimulatorView extends JFrame
+     public SimulatorView(int height, int width, JButton[] buttons, SimulationConfig config)
+     {
+         stats = new FieldStats();
+-        colors = new LinkedHashMap<>();
++        colors = new EnumMap<>(SpeciesType.class);
+         this.config = config;
+ 
+         setTitle("Savannah Simulation");
+@@ -193,19 +194,19 @@ public class SimulatorView extends JFrame
+     }
+     
+     /**
+-     * Define a color to be used for the given class.
++     * Define a color to be used for the given species.
+      *
+-     * @param newClass The new Class' object.
+-     * @param classColor The color to be used for the given class.
++     * @param speciesType The species.
++     * @param classColor The color to be used for the given species.
+      * @param textColor The color to be used for the text in the class key.
+      */
+-    public void setColor(Class newClass, Color classColor, Color textColor)
++    public void setColor(SpeciesType speciesType, Color classColor, Color textColor)
+     {
+-        colors.put(newClass, classColor);
++        colors.put(speciesType, classColor);
+         
+         // Creates label of the appropriate color and text to be
+         // displayed by the class key.
+-        JLabel newClassLabel = new JLabel(newClass.getName(), JLabel.CENTER);
++        JLabel newClassLabel = new JLabel(speciesType.getDisplayName(), JLabel.CENTER);
+         
+         // Adjusts color of the label's text
+         newClassLabel.setForeground(textColor);
+@@ -217,13 +218,13 @@ public class SimulatorView extends JFrame
+     }
+ 
+     /**
+-     * @param animalClass The class to get the colour of.
++     * @param speciesType The species to get the colour of.
+      * 
+-     * @return The color to be used for a given class of animal.
++     * @return The color to be used for a given species.
+      */
+-    private Color getColor(Class animalClass)
++    private Color getColor(SpeciesType speciesType)
+     {
+-        Color col = colors.get(animalClass);
++        Color col = colors.get(speciesType);
+         if(col == null) {
+             // no color defined for this class
+             return UNKNOWN_COLOR;
+@@ -264,8 +265,8 @@ public class SimulatorView extends JFrame
+                 
+                 if(animal != null) 
+                 {
+-                    stats.incrementCount(animal.getClass());
+-                    fieldView.drawMark(col, row, getColor(animal.getClass()));
++                    stats.incrementCount(animal.getSpeciesType());
++                    fieldView.drawMark(col, row, getColor(animal.getSpeciesType()));
+                     
+                     // Update the infected and immune counts
+                     if (animal.getIsInfected())
+@@ -281,7 +282,7 @@ public class SimulatorView extends JFrame
+                 // Only show the plant if an animal is not present
+                 else if(plant != null) 
+                 {
+-                    fieldView.drawMark(col, row, getColor(plant.getClass()));
++                    fieldView.drawMark(col, row, getColor(plant.getSpeciesType()));
+                 }
+                 else 
+                 {
+@@ -292,7 +293,7 @@ public class SimulatorView extends JFrame
+                 
+                 if (plant != null) 
+                 {
+-                   stats.incrementCount(plant.getClass()); 
++                   stats.incrementCount(plant.getSpeciesType()); 
+                 }
+             }
+         }
+diff --git a/SpeciesType.java b/SpeciesType.java
+new file mode 100644
+index 0000000..7ba6313
+--- /dev/null
++++ b/SpeciesType.java
+@@ -0,0 +1,173 @@
++package savannah.model;
++
++import java.util.Random;
++
++import savannah.config.SimulationConfig;
++
++/**
++ * Enumerates the supported species and their behavior/attribute mappings.
++ */
++public enum SpeciesType
++{
++    LION("Lion")
++    {
++        @Override
++        public Animal createAnimal(Field field, Location location, boolean randomAge, boolean infected, boolean immune, SimulationConfig config)
++        {
++            return new Lion(randomAge, field, location, infected, immune, config);
++        }
++    },
++    CHEETAH("Cheetah")
++    {
++        @Override
++        public Animal createAnimal(Field field, Location location, boolean randomAge, boolean infected, boolean immune, SimulationConfig config)
++        {
++            return new Cheetah(randomAge, field, location, infected, immune, config);
++        }
++    },
++    ZEBRA("Zebra")
++    {
++        @Override
++        public Animal createAnimal(Field field, Location location, boolean randomAge, boolean infected, boolean immune, SimulationConfig config)
++        {
++            return new Zebra(randomAge, field, location, infected, immune, config);
++        }
++    },
++    GIRAFFE("Giraffe")
++    {
++        @Override
++        public Animal createAnimal(Field field, Location location, boolean randomAge, boolean infected, boolean immune, SimulationConfig config)
++        {
++            return new Giraffe(randomAge, field, location, infected, immune, config);
++        }
++    },
++    LEMUR("Lemur")
++    {
++        @Override
++        public Animal createAnimal(Field field, Location location, boolean randomAge, boolean infected, boolean immune, SimulationConfig config)
++        {
++            return new Lemur(randomAge, field, location, infected, immune, config);
++        }
++    },
++    PLANT("Plant")
++    {
++        @Override
++        public Plant createPlant(boolean randomHealthPercentage, Field field, Location location, SimulationConfig config)
++        {
++            return new Plant(randomHealthPercentage, field, location, config);
++        }
++    };
++
++    private final String displayName;
++
++    SpeciesType(String displayName)
++    {
++        this.displayName = displayName;
++    }
++
++    public String getDisplayName()
++    {
++        return displayName;
++    }
++
++    public boolean isPlant()
++    {
++        return this == PLANT;
++    }
++
++    public boolean isAnimal()
++    {
++        return !isPlant();
++    }
++
++    public boolean isPredator()
++    {
++        return this == LION || this == CHEETAH;
++    }
++
++    public SimulationConfig.SpeciesConfig animalConfig(SimulationConfig config)
++    {
++        return switch (this) {
++            case LION -> config.lion;
++            case CHEETAH -> config.cheetah;
++            case ZEBRA -> config.zebra;
++            case GIRAFFE -> config.giraffe;
++            case LEMUR -> config.lemur;
++            case PLANT -> throw new IllegalStateException("Plant does not use animal config");
++        };
++    }
++
++    public SimulationConfig.PlantConfig plantConfig(SimulationConfig config)
++    {
++        if (!isPlant()) {
++            throw new IllegalStateException("Only plant species use plant config");
++        }
++        return config.plant;
++    }
++
++    public int initialAge(boolean randomAge, Random rand, SimulationConfig config)
++    {
++        if (!isAnimal()) {
++            throw new IllegalStateException("Only animal species have ages");
++        }
++
++        return randomAge ? rand.nextInt(animalConfig(config).maxAge) : 0;
++    }
++
++    public int initialFoodLevel(boolean randomAge, Random rand, SimulationConfig config)
++    {
++        if (!isAnimal()) {
++            throw new IllegalStateException("Only animal species have food levels");
++        }
++
++        SimulationConfig.SpeciesConfig speciesConfig = animalConfig(config);
++        if (randomAge) {
++            return rand.nextInt(speciesConfig.maxFoodLevel);
++        }
++        if (speciesConfig.useRandomNewbornFoodLevel) {
++            double percentageOfMaxFoodLevel = rand.nextDouble() * speciesConfig.randomNewbornFoodLevelMaxFraction;
++            return (int) (percentageOfMaxFoodLevel * speciesConfig.maxFoodLevel);
++        }
++        return (int) (speciesConfig.newbornFoodLevelFraction * speciesConfig.maxFoodLevel);
++    }
++
++    public double initialPlantHealth(boolean randomHealth, Random rand, SimulationConfig config)
++    {
++        if (!isPlant()) {
++            throw new IllegalStateException("Only plant species have health");
++        }
++
++        SimulationConfig.PlantConfig plantConfig = plantConfig(config);
++        if (!randomHealth) {
++            return plantConfig.newbornHealthFraction;
++        }
++
++        double healthPercentage = rand.nextDouble();
++        return Math.max(healthPercentage, plantConfig.minimumRandomHealthFraction);
++    }
++
++    public double getPlantSpreadProbability(Weather.WeatherType weather, SimulationConfig config)
++    {
++        if (!isPlant()) {
++            throw new IllegalStateException("Only plant species have spread probabilities");
++        }
++
++        return switch (weather) {
++            case Sunny -> config.sunnyPlantSpreadProbability;
++            case Rainy -> config.rainyPlantSpreadProbability;
++            case Foggy -> config.foggyPlantSpreadProbability;
++            case Cloudy -> config.cloudyPlantSpreadProbability;
++            case Clear -> config.clearPlantSpreadProbability;
++        };
++    }
++
++    public Animal createAnimal(Field field, Location location, boolean randomAge, boolean infected, boolean immune, SimulationConfig config)
++    {
++        throw new UnsupportedOperationException(displayName + " is not an animal factory");
++    }
++
++    public Plant createPlant(boolean randomHealthPercentage, Field field, Location location, SimulationConfig config)
++    {
++        throw new UnsupportedOperationException(displayName + " is not a plant factory");
++    }
++}
+diff --git a/Zebra.java b/Zebra.java
+index dd7890b..d74f582 100644
+--- a/Zebra.java
++++ b/Zebra.java
+@@ -38,32 +38,6 @@ public class Zebra extends Prey
+      */
+     public Zebra(boolean randomAge, Field field, Location location, boolean isInfected, boolean isImmune, SimulationConfig config)
+     {
+-        super(field, location, isInfected, isImmune, config);
+-        
+-        breedingAge = config.zebra.breedingAge;
+-        maxAge = config.zebra.maxAge;
+-        breedingProbability = config.zebra.breedingProbability;
+-        maxLitterSize = config.zebra.maxLitterSize;
+-        maxFoodLevel = config.zebra.maxFoodLevel;
+-        foodValue = config.zebra.foodValue;
+-        movementProbability = config.zebra.movementProbability;
+-        
+-        if (randomAge) 
+-        {
+-            age = rand.nextInt(config.zebra.maxAge);
+-            foodLevel = rand.nextInt(config.zebra.maxFoodLevel);
+-        }
+-        else
+-        {
+-            age = 0;
+-            foodLevel = (int) (config.zebra.newbornFoodLevelFraction * config.zebra.maxFoodLevel);
+-        }
+-    }
+-
+-    @Override
+-    protected Animal createOffspring(Location location, boolean inheritedInfection, boolean inheritedImmunity)
+-    {
+-        OffspringHealthState healthState = inheritHealthState(inheritedInfection, inheritedImmunity);
+-        return new Zebra(false, field, location, healthState.isInfected(), healthState.isImmune());
++        super(field, location, randomAge, isInfected, isImmune, SpeciesType.ZEBRA, config);
+     }
+ }

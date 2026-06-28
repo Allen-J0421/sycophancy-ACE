@@ -1,0 +1,334 @@
+diff --git a/Hunter.java b/Hunter.java
+index b2e6de9..650dd52 100644
+--- a/Hunter.java
++++ b/Hunter.java
+@@ -1,5 +1,7 @@
+ import java.util.List;
+ import java.util.Random;
++import java.util.function.Function;
++import java.util.function.Predicate;
+ 
+ /**
+  * This file is part of the Predator-Prey Simulation.
+@@ -93,4 +95,17 @@ public abstract class Hunter extends Animal {
+     protected double getEatingProbability() {
+         return attributes.getEatingProbability();
+     }
++
++    protected Location findMatchingPrey(Predicate<Prey> matches, Function<Prey, Boolean> onMatch) {
++        for (Location location : getField().adjacentLocations(getLocation())) {
++            Organism organism = getField().getOrganismAt(location);
++            if (organism instanceof Prey) {
++                Prey prey = (Prey) organism;
++                if (matches.test(prey) && Boolean.TRUE.equals(onMatch.apply(prey))) {
++                    return location;
++                }
++            }
++        }
++        return null;
++    }
+ }
+diff --git a/Populator.java b/Populator.java
+index 896afc0..1f6773c 100644
+--- a/Populator.java
++++ b/Populator.java
+@@ -1,5 +1,4 @@
+ import java.awt.*;
+-import java.util.Arrays;
+ import java.util.List;
+ import java.util.Random;
+ 
+@@ -12,40 +11,15 @@ import java.util.Random;
+  */
+ public class Populator {
+ 
+-    // define fields
+-    private static final double ANIMAL_CREATION_PROBABILITY = 0.05;
+-    private static final double PLANT_CREATION_PROBABILITY = 0.04;
+-
+-    private final List<SpawnRule> spawnRules;
++    private final List<SpeciesDefinition> speciesDefinitions;
+ 
+     /**
+      * Constructor for the populator.
+      *
+-     * @param view A given SimulatorView.
++     * @param speciesCatalog Catalog of available species.
+      */
+-    public Populator(SimulatorView view) {
+-        spawnRules = Arrays.asList(
+-                new SpawnRule(Lion.class, Color.RED, ANIMAL_CREATION_PROBABILITY,
+-                        (randomAge, field, location) -> new Lion(randomAge, field, location)),
+-                new SpawnRule(Zebra.class, Color.BLUE, ANIMAL_CREATION_PROBABILITY,
+-                        (randomAge, field, location) -> new Zebra(randomAge, field, location)),
+-                new SpawnRule(Vulture.class, Color.ORANGE, ANIMAL_CREATION_PROBABILITY,
+-                        (randomAge, field, location) -> new Vulture(randomAge, field, location)),
+-                new SpawnRule(Grass.class, Color.GREEN, PLANT_CREATION_PROBABILITY,
+-                        (randomAge, field, location) -> new Grass(randomAge, field, location)),
+-                new SpawnRule(Goat.class, Color.PINK, ANIMAL_CREATION_PROBABILITY,
+-                        (randomAge, field, location) -> new Goat(randomAge, field, location)),
+-                new SpawnRule(Elephant.class, Color.GRAY, ANIMAL_CREATION_PROBABILITY,
+-                        (randomAge, field, location) -> new Elephant(randomAge, field, location)),
+-                new SpawnRule(Cheetah.class, Color.MAGENTA, ANIMAL_CREATION_PROBABILITY,
+-                        (randomAge, field, location) -> new Cheetah(randomAge, field, location)),
+-                new SpawnRule(PoisonBerry.class, Color.BLACK, PLANT_CREATION_PROBABILITY,
+-                        (randomAge, field, location) -> new PoisonBerry(randomAge, field, location))
+-        );
+-
+-        for (SpawnRule spawnRule : spawnRules) {
+-            view.setColor(spawnRule.getOrganismType(), spawnRule.getColor());
+-        }
++    public Populator(SpeciesCatalog speciesCatalog) {
++        this.speciesDefinitions = speciesCatalog.getDefinitions();
+     }
+ 
+     /**
+@@ -64,42 +38,11 @@ public class Populator {
+ 
+     private void populateLocation(List<Organism> organisms, Field field, int row, int col, Random rand) {
+         Location location = new Location(row, col);
+-        for (SpawnRule spawnRule : spawnRules) {
+-            if (rand.nextDouble() <= spawnRule.getCreationProbability()) {
+-                organisms.add(spawnRule.spawn(field, location));
++        for (SpeciesDefinition speciesDefinition : speciesDefinitions) {
++            if (rand.nextDouble() <= speciesDefinition.getCreationProbability()) {
++                organisms.add(speciesDefinition.create(true, field, location));
+                 return;
+             }
+         }
+     }
+-
+-    private static class SpawnRule {
+-        private final Class<? extends Organism> organismType;
+-        private final Color color;
+-        private final double creationProbability;
+-        private final OrganismFactory spawnFactory;
+-
+-        private SpawnRule(Class<? extends Organism> organismType, Color color,
+-                          double creationProbability, OrganismFactory spawnFactory) {
+-            this.organismType = organismType;
+-            this.color = color;
+-            this.creationProbability = creationProbability;
+-            this.spawnFactory = spawnFactory;
+-        }
+-
+-        private Class<? extends Organism> getOrganismType() {
+-            return organismType;
+-        }
+-
+-        private Color getColor() {
+-            return color;
+-        }
+-
+-        private double getCreationProbability() {
+-            return creationProbability;
+-        }
+-
+-        private Organism spawn(Field field, Location location) {
+-            return spawnFactory.create(true, field, location);
+-        }
+-    }
+ }
+diff --git a/Predator.java b/Predator.java
+index 4a6aa30..3da5c39 100644
+--- a/Predator.java
++++ b/Predator.java
+@@ -1,5 +1,4 @@
+ import java.util.Iterator;
+-import java.util.List;
+ import java.util.Random;
+ 
+ /**
+@@ -32,26 +31,10 @@ public abstract class Predator extends Hunter {
+      */
+     @Override
+     public Location findFood() {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-
+-            Organism animal = field.getOrganismAt(where);
+-            if(animal instanceof Prey) {
+-                Prey prey = (Prey) animal;
+-                if (prey.isAlive()) {
+-                    // kills animal
+-                    prey.setDead();
+-                    // random chance to eat
+-                    boolean eaten = eat(prey);
+-
+-                    return eaten ? where : null;
+-                }
+-            }
+-        }
+-        return null;
++        return findMatchingPrey(Prey::isAlive, prey -> {
++            prey.setDead();
++            return eat(prey);
++        });
+     }
+ 
+     /**
+diff --git a/Scavenger.java b/Scavenger.java
+index bc15caf..8044f77 100644
+--- a/Scavenger.java
++++ b/Scavenger.java
+@@ -1,6 +1,3 @@
+-import java.util.Iterator;
+-import java.util.List;
+-
+ /**
+  * This file is part of the Predator-Prey Simulation.
+  *
+@@ -29,23 +26,7 @@ public abstract class Scavenger extends Hunter {
+      */
+     @Override
+     public Location findFood() {
+-        Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Organism animal = field.getOrganismAt(where);
+-            if (animal instanceof Prey) {
+-                Prey prey = (Prey) animal;
+-                // eats animal if dead only
+-                if (!prey.isAlive()) {
+-                    //System.out.println("EATEN DEAD");
+-                    eat(prey);
+-                    return where;
+-                }
+-            }
+-        }
+-        return null;
++        return findMatchingPrey(prey -> !prey.isAlive(), this::eat);
+     }
+ 
+     /**
+diff --git a/Simulator.java b/Simulator.java
+index 4697c1a..1856244 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -30,6 +30,7 @@ public class Simulator
+     private TimeOfDay currentTime;
+ 
+     private Weather currentWeather;
++    private final SpeciesCatalog speciesCatalog;
+ 
+     /**
+      * Construct a simulation field with default size.
+@@ -58,6 +59,8 @@ public class Simulator
+ 
+         // Create a view of the state of each location in the field.
+         view = new SimulatorView(depth, width);
++        speciesCatalog = new SpeciesCatalog();
++        view.registerSpecies(speciesCatalog);
+ 
+         // Setup a valid starting point
+         reset();
+@@ -144,7 +147,7 @@ public class Simulator
+ 
+         organisms.clear();
+ 
+-        Populator populator = new Populator(view);
++        Populator populator = new Populator(speciesCatalog);
+         populator.populate(organisms, field);
+         
+         // Show the starting state in the view.
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 9ece9fd..f3668b6 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -82,6 +82,12 @@ public class SimulatorView extends JFrame
+         colors.put(animalClass, color);
+     }
+ 
++    public void registerSpecies(SpeciesCatalog speciesCatalog) {
++        for (SpeciesDefinition speciesDefinition : speciesCatalog.getDefinitions()) {
++            setColor(speciesDefinition.getOrganismType(), speciesDefinition.getColor());
++        }
++    }
++
+     /**
+      * Display a short information label at the top of the window.
+      */
+diff --git a/SpeciesCatalog.java b/SpeciesCatalog.java
+new file mode 100644
+index 0000000..f409b92
+--- /dev/null
++++ b/SpeciesCatalog.java
+@@ -0,0 +1,31 @@
++import java.awt.Color;
++import java.util.Arrays;
++import java.util.List;
++
++/**
++ * Provides the species definitions used by the simulator.
++ */
++public class SpeciesCatalog {
++
++    private static final double ANIMAL_CREATION_PROBABILITY = 0.05;
++    private static final double PLANT_CREATION_PROBABILITY = 0.04;
++
++    private final List<SpeciesDefinition> definitions;
++
++    public SpeciesCatalog() {
++        definitions = Arrays.asList(
++                new SpeciesDefinition(Lion.class, Color.RED, ANIMAL_CREATION_PROBABILITY, Lion::new),
++                new SpeciesDefinition(Zebra.class, Color.BLUE, ANIMAL_CREATION_PROBABILITY, Zebra::new),
++                new SpeciesDefinition(Vulture.class, Color.ORANGE, ANIMAL_CREATION_PROBABILITY, Vulture::new),
++                new SpeciesDefinition(Grass.class, Color.GREEN, PLANT_CREATION_PROBABILITY, Grass::new),
++                new SpeciesDefinition(Goat.class, Color.PINK, ANIMAL_CREATION_PROBABILITY, Goat::new),
++                new SpeciesDefinition(Elephant.class, Color.GRAY, ANIMAL_CREATION_PROBABILITY, Elephant::new),
++                new SpeciesDefinition(Cheetah.class, Color.MAGENTA, ANIMAL_CREATION_PROBABILITY, Cheetah::new),
++                new SpeciesDefinition(PoisonBerry.class, Color.BLACK, PLANT_CREATION_PROBABILITY, PoisonBerry::new)
++        );
++    }
++
++    public List<SpeciesDefinition> getDefinitions() {
++        return definitions;
++    }
++}
+diff --git a/SpeciesDefinition.java b/SpeciesDefinition.java
+new file mode 100644
+index 0000000..87e7b79
+--- /dev/null
++++ b/SpeciesDefinition.java
+@@ -0,0 +1,36 @@
++import java.awt.Color;
++
++/**
++ * Metadata describing an organism species used by the simulator.
++ */
++public class SpeciesDefinition {
++
++    private final Class<? extends Organism> organismType;
++    private final Color color;
++    private final double creationProbability;
++    private final OrganismFactory factory;
++
++    public SpeciesDefinition(Class<? extends Organism> organismType, Color color,
++                             double creationProbability, OrganismFactory factory) {
++        this.organismType = organismType;
++        this.color = color;
++        this.creationProbability = creationProbability;
++        this.factory = factory;
++    }
++
++    public Class<? extends Organism> getOrganismType() {
++        return organismType;
++    }
++
++    public Color getColor() {
++        return color;
++    }
++
++    public double getCreationProbability() {
++        return creationProbability;
++    }
++
++    public Organism create(boolean randomAge, Field field, Location location) {
++        return factory.create(randomAge, field, location);
++    }
++}

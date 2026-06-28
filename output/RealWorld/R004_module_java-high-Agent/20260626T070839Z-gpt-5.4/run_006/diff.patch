@@ -1,0 +1,371 @@
+diff --git a/Eagle.java b/Eagle.java
+index d90df2e..4acbf97 100644
+--- a/Eagle.java
++++ b/Eagle.java
+@@ -56,7 +56,7 @@ public class Eagle extends Animal
+     @Override
+     protected Location findFood(Environment environment)
+     {
+-        if(environment.getWeather().getCurrentWeather() != WeatherType.RAINING) {
++        if(environment.getWeatherService().allowsEagleForaging()) {
+             return super.findFood(environment);
+         }
+         return null;
+diff --git a/Environment.java b/Environment.java
+index 8274762..b1433af 100644
+--- a/Environment.java
++++ b/Environment.java
+@@ -7,15 +7,15 @@
+ 
+ public class Environment {
+     private final Time time;
+-    private final Weather weather;
++    private final WeatherService weatherService;
+ 
+     /**
+      * Create a new instance of class Environment.
+      */
+-    public Environment(Time time, Weather weather)
++    public Environment(Time time, WeatherService weatherService)
+     {
+         this.time = time;
+-        this.weather = weather;
++        this.weatherService = weatherService;
+     }
+ 
+     /**
+@@ -27,23 +27,26 @@ public class Environment {
+     }
+ 
+     /**
+-     * Returns an instance of class Weather.
++     * Returns the current weather snapshot.
+      */
+     public Weather getWeather()
+     {
+-        return weather;
++        return weatherService.getCurrentWeather();
+     }
+ 
+-    public void advance(int step)
++    public WeatherService getWeatherService()
++    {
++        return weatherService;
++    }
++
++    public void advanceTime()
+     {
+         time.incrementTime();
+-        weather.checkWeatherChange(step);
+     }
+ 
+     public void reset()
+     {
+         time.reset();
+-        weather.reset();
+     }
+ 
+ }
+diff --git a/Grass.java b/Grass.java
+index fcbcc6d..1a463a9 100644
+--- a/Grass.java
++++ b/Grass.java
+@@ -10,8 +10,6 @@ public class Grass extends Plant
+ {
+     private static final int MAX_GROWTH_STAGES = 3;
+     private static final int DEFAULT_STEPS_PER_STAGE = 2;
+-    private static final double BASE_GERMINATION_RATE = 0.1;
+-    private static final double SUNNY_GERMINATION_RATE = 0.15;
+ 
+     private int foodValue;
+ 
+@@ -53,10 +51,11 @@ public class Grass extends Plant
+     public void act(List<Actor> newGrass, Environment environment)
+     {
+         Random rand = getRandomProvider().getRandom();
++        WeatherService weatherService = environment.getWeatherService();
+         if(isAlive()
+                 && environment.getTime().isDay()
+-                && rand.nextDouble() <= getGerminationRate(environment)
+-                && environment.getWeather().getCurrentWeather() != WeatherType.CLOUDY) {
++                && weatherService.allowsGrassGermination()
++                && rand.nextDouble() <= weatherService.getGrassGerminationRate()) {
+             germinate(newGrass);
+         }
+     }
+@@ -94,12 +93,4 @@ public class Grass extends Plant
+         return false;
+     }
+ 
+-    private double getGerminationRate(Environment environment)
+-    {
+-        if(environment.getWeather().getCurrentWeather() == WeatherType.SUNNY) {
+-            return SUNNY_GERMINATION_RATE;
+-        }
+-        return BASE_GERMINATION_RATE;
+-    }
+-
+ }
+diff --git a/OrganismFactory.java b/OrganismFactory.java
+index 7f8fa32..8a68c81 100644
+--- a/OrganismFactory.java
++++ b/OrganismFactory.java
+@@ -64,7 +64,7 @@ public class OrganismFactory
+     public List<Actor> createGrassPatches(Field field, Environment environment)
+     {
+         Random rand = randomProvider.getRandom();
+-        if(environment.getWeather().getCurrentWeather() != WeatherType.RAINING) {
++        if(!environment.getWeatherService().canCreateGrassPatches()) {
+             return List.of();
+         }
+ 
+diff --git a/Simulator.java b/Simulator.java
+index 667e32d..24cb96c 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -26,6 +26,7 @@ public class Simulator
+     private final SimulationConfig config;
+     private final RandomProvider randomProvider;
+     private final DiseaseService diseaseService;
++    private final WeatherService weatherService;
+     private final OrganismFactory organismFactory;
+     // Published state for observers.
+     private final List<SimulationObserver> observers;
+@@ -125,9 +126,10 @@ public class Simulator
+         this.config = config;
+         this.actors = new ArrayList<>();
+         this.diseaseService = new DiseaseService(randomProvider);
++        this.weatherService = new WeatherService(randomProvider);
+         this.organismFactory = new OrganismFactory(randomProvider, config, diseaseService);
+         this.field = new Field(randomProvider, organismFactory, diseaseService, depth, width);
+-        this.environment = new Environment(new Time(), new Weather(randomProvider));
++        this.environment = new Environment(new Time(), weatherService);
+         this.observers = new ArrayList<>();
+ 
+         reset();
+@@ -242,7 +244,8 @@ public class Simulator
+         }
+ 
+         step++;
+-        environment.advance(step);
++        environment.advanceTime();
++        weatherService.advance();
+ 
+         List<Actor> newActors = new ArrayList<>();
+         for(Iterator<Actor> it = actors.iterator(); it.hasNext(); ) {
+@@ -272,6 +275,7 @@ public class Simulator
+         remainingSteps = 0;
+         step = 0;
+         environment.reset();
++        weatherService.reset();
+         diseaseService.reset();
+ 
+         actors.clear();
+diff --git a/Weather.java b/Weather.java
+index 08f1417..367dadb 100644
+--- a/Weather.java
++++ b/Weather.java
+@@ -1,93 +1,17 @@
+-import java.util.Random;
+-import java.util.*;
+ /**
+- * This class models weather in the simulation. 
+- * It stores information about the current weather. 
+- *
+- * @version 2022.03.02
++ * Immutable snapshot of the current weather condition.
+  */
+ public class Weather
+ {
+-    private WeatherType currentWeather;
+-    private final RandomProvider randomProvider;
+-    private int randomInt;
+-    private int duration; // to keep track of when weather changes (every X hours)
+-    private boolean randomDuration = false;
+-    private Set<WeatherType> weatherList;
+-    
+-    
+-    /**
+-     * Create a new instance of weather. 
+-     */
+-    public Weather(RandomProvider randomProvider)
+-    {
+-       this.randomProvider = randomProvider;
+-       weatherList = new HashSet<>();
+-       addWeatherList();
+-       currentWeather = WeatherType.SUNNY; 
+-       duration = 0;
+-    }
++    private final WeatherType currentWeather;
+ 
+-    /**
+-     * Add the types of weather conditions to a HashSet.
+-     */
+-    public void addWeatherList()
++    public Weather(WeatherType currentWeather)
+     {
+-        weatherList = new HashSet<>(Arrays.asList(WeatherType.RAINING, WeatherType.SUNNY, WeatherType.CLOUDY));
++        this.currentWeather = currentWeather;
+     }
+-    
+-    /**
+-     * Returns the current weather of the simulation. 
+-     */
++
+     public WeatherType getCurrentWeather()
+     {
+         return currentWeather;
+     }
+-    
+-    /**
+-     * Increments the variable duration. 
+-     * If the duration is set to be random, the WeatherType lasts for 0-36 hours
+-     * Otherwise, the WeatherType lasts for 12 hours
+-     */
+-    public void checkWeatherChange(int steps)
+-    {
+-        Random rand = randomProvider.getRandom();
+-        if(randomDuration){
+-            duration = rand.nextInt(36) + 1;
+-            if(steps % duration == 0){
+-                changeWeather();
+-            }
+-        }
+-        else{
+-            if (steps % 12 == 0){
+-                changeWeather();
+-            }
+-        }
+-    }
+-
+-    /**
+-     * Allows for the duration of the weather to be switched from random (0-36 steps) to static (12 steps)
+-     * @return The new state of the randomDuration boolean
+-     */
+-    public boolean toggleRandomWeatherLength()
+-    {
+-        randomDuration = !randomDuration;
+-        return randomDuration;
+-    }
+-    
+-    /**
+-     * Changes the weather randomly. 
+-     */
+-    public void changeWeather()
+-    {
+-        Random rand = randomProvider.getRandom();
+-        randomInt = rand.nextInt(weatherList.size());
+-        currentWeather = (WeatherType) weatherList.toArray()[randomInt];
+-    }
+-
+-    public void reset()
+-    {
+-        currentWeather = WeatherType.SUNNY;
+-        duration = 0;
+-    }
+ }
+diff --git a/WeatherService.java b/WeatherService.java
+new file mode 100644
+index 0000000..b0d4522
+--- /dev/null
++++ b/WeatherService.java
+@@ -0,0 +1,99 @@
++import java.util.List;
++import java.util.Random;
++
++/**
++ * Centralizes weather state, duration, and weather-driven simulation rules.
++ */
++public class WeatherService
++{
++    private static final int FIXED_WEATHER_DURATION = 12;
++    private static final int MAX_RANDOM_DURATION = 36;
++    private static final double BASE_GRASS_GERMINATION_RATE = 0.1;
++    private static final double SUNNY_GRASS_GERMINATION_RATE = 0.15;
++    private static final List<WeatherType> WEATHER_TYPES = List.of(
++            WeatherType.RAINING,
++            WeatherType.SUNNY,
++            WeatherType.CLOUDY
++    );
++
++    private final RandomProvider randomProvider;
++
++    private Weather currentWeather;
++    private int remainingDuration;
++    private boolean randomDurationEnabled;
++
++    public WeatherService(RandomProvider randomProvider)
++    {
++        this.randomProvider = randomProvider;
++        reset();
++    }
++
++    public Weather getCurrentWeather()
++    {
++        return currentWeather;
++    }
++
++    public WeatherType getCurrentWeatherType()
++    {
++        return currentWeather.getCurrentWeather();
++    }
++
++    public void advance()
++    {
++        remainingDuration--;
++        if(remainingDuration <= 0) {
++            currentWeather = new Weather(getRandomWeatherType());
++            remainingDuration = getNextDuration();
++        }
++    }
++
++    public void reset()
++    {
++        currentWeather = new Weather(WeatherType.SUNNY);
++        remainingDuration = getNextDuration();
++    }
++
++    public boolean toggleRandomWeatherLength()
++    {
++        randomDurationEnabled = !randomDurationEnabled;
++        remainingDuration = getNextDuration();
++        return randomDurationEnabled;
++    }
++
++    public boolean canCreateGrassPatches()
++    {
++        return getCurrentWeatherType() == WeatherType.RAINING;
++    }
++
++    public boolean allowsGrassGermination()
++    {
++        return getCurrentWeatherType() != WeatherType.CLOUDY;
++    }
++
++    public double getGrassGerminationRate()
++    {
++        if(getCurrentWeatherType() == WeatherType.SUNNY) {
++            return SUNNY_GRASS_GERMINATION_RATE;
++        }
++        return BASE_GRASS_GERMINATION_RATE;
++    }
++
++    public boolean allowsEagleForaging()
++    {
++        return getCurrentWeatherType() != WeatherType.RAINING;
++    }
++
++    private int getNextDuration()
++    {
++        if(randomDurationEnabled) {
++            return randomProvider.getRandom().nextInt(MAX_RANDOM_DURATION) + 1;
++        }
++        return FIXED_WEATHER_DURATION;
++    }
++
++    private WeatherType getRandomWeatherType()
++    {
++        Random rand = randomProvider.getRandom();
++        return WEATHER_TYPES.get(rand.nextInt(WEATHER_TYPES.size()));
++    }
++}

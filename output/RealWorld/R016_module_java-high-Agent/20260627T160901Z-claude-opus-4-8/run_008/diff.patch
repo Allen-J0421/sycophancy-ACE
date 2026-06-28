@@ -1,0 +1,281 @@
+diff --git a/Animal.java b/Animal.java
+index 9fee6a8..bc98d42 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -128,24 +128,19 @@ public abstract class Animal extends Organism
+     protected Location findFood(List<String> preyList)
+     {
+         Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object food = field.getObjectAt(where);
+-            if(food!= null) {
+-                if(preyList.contains(food.getClass().getName())) {
+-                    Organism prey = (Organism) food;
+-                    if(prey.isAlive()) { 
+-                        prey.setDead();
+-                        int increment = prey.getFoodValue() + this.getFoodLevel();
+-                        this.setFoodLevel(increment);
+-                        int newWaterLevel = getWaterLevel() + 5;
+-                        this.setWaterLevel(newWaterLevel);
+-                        return where;  
+-                    }
+-                }
+-            }
++        // Find the first adjacent cell holding live prey of an edible species.
++        Location where = field.firstAdjacentLocationMatching(getLocation(),
++            occupant -> occupant != null
++                && preyList.contains(occupant.getClass().getName())
++                && ((Organism) occupant).isAlive());
++        if(where != null) {
++            Organism prey = (Organism) field.getObjectAt(where);
++            prey.setDead();
++            int increment = prey.getFoodValue() + this.getFoodLevel();
++            this.setFoodLevel(increment);
++            int newWaterLevel = getWaterLevel() + 5;
++            this.setWaterLevel(newWaterLevel);
++            return where;
+         }
+         return null;
+     }
+@@ -204,25 +199,16 @@ public abstract class Animal extends Organism
+      */
+     private List<Location> availableBirthLocations()
+     {
+-        // New animals are born into adjacent locations.
+-        // Get a list of adjacent free locations.
++        // New animals are born into adjacent free locations.
+         Field field = getField();
+         List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()) {
+-            Location where = it.next();
+-            Object animal = field.getObjectAt(where);
++        // Look for the first adjacent animal of this same species.
++        Location mateLocation = field.firstAdjacentLocationMatching(getLocation(),
++            occupant -> occupant != null && this.getClass().equals(occupant.getClass()));
++        if(mateLocation != null) {
++            Animal mate = (Animal) field.getObjectAt(mateLocation);
+             // can only breed if next to an animal of opposite sex
+-            if(animal != null && this.getClass().equals(animal.getClass())) {
+-                Animal mate = (Animal) animal;
+-                if (isFemale() != mate.isFemale()) {
+-                    return free;
+-                }
+-                else {
+-                    return null;
+-                }
+-            }
++            return (isFemale() != mate.isFemale()) ? free : null;
+         }
+         return null;
+     }
+diff --git a/Disease.java b/Disease.java
+index 7de500e..c6bf03a 100644
+--- a/Disease.java
++++ b/Disease.java
+@@ -83,22 +83,16 @@ public abstract class Disease implements Actor
+      */
+     public ArrayList<Actor> spread(Actor actor) {
+         ArrayList<Actor> newlyInfected = new ArrayList<>();
+-        List<Location> adjacent = null;
+         // Only an active carrier (a living organism / a non-empty water
+         // source) can spread the disease to its neighbours.
+         FieldOccupant carrier = (FieldOccupant) actor;
+         if (carrier.isActive()) {
+-            adjacent = field.adjacentLocations(carrier.getLocation());
+-        }
+-        if(adjacent != null) {
+-            Iterator<Location> it = adjacent.iterator();
+-            while(it.hasNext()) {
+-                Location where = it.next();
+-                Object thing = field.getObjectAt(where);
+-                if (thing != null && affectedSpecies.contains(thing.getClass().getName())) {
+-                    if (rand.nextDouble() < infectiousness) {
+-                        newlyInfected.add((Actor) thing);
+-                    }
++            // Each adjacent occupant of an affected species has a chance of
++            // catching the disease.
++            for (Location where : field.adjacentLocationsMatching(carrier.getLocation(),
++                    thing -> thing != null && affectedSpecies.contains(thing.getClass().getName()))) {
++                if (rand.nextDouble() < infectiousness) {
++                    newlyInfected.add((Actor) field.getObjectAt(where));
+                 }
+             }
+         }
+diff --git a/Field.java b/Field.java
+index 5b4cca8..f2ceaca 100644
+--- a/Field.java
++++ b/Field.java
+@@ -1,8 +1,11 @@
+ import java.util.Collections;
+-import java.util.Iterator;
+ import java.util.LinkedList;
+ import java.util.List;
++import java.util.Objects;
+ import java.util.Random;
++import java.util.function.Predicate;
++import java.util.stream.Collectors;
++import java.util.stream.Stream;
+ 
+ /**
+  * Represent a rectangular grid of field positions.
+@@ -85,6 +88,48 @@ public class Field
+         return field[row][col];
+     }
+     
++    /**
++     * A shuffled stream of the locations adjacent to the given one.
++     * Backed by {@link #adjacentLocations(Location)}, so it consumes
++     * randomness identically.
++     * @param location The location to scan around.
++     * @return A stream of the adjacent locations, in random order.
++     */
++    public Stream<Location> adjacentLocationStream(Location location)
++    {
++        return adjacentLocations(location).stream();
++    }
++
++    /**
++     * The adjacent locations whose occupant satisfies the given test, in the
++     * field's random adjacency order. The test receives each cell's occupant,
++     * which is null for an empty cell.
++     * @param location The location to scan around.
++     * @param occupantTest The test applied to each adjacent cell's occupant.
++     * @return The matching adjacent locations.
++     */
++    public List<Location> adjacentLocationsMatching(Location location, Predicate<Object> occupantTest)
++    {
++        return adjacentLocationStream(location)
++            .filter(where -> occupantTest.test(getObjectAt(where)))
++            .collect(Collectors.toList());
++    }
++
++    /**
++     * The first adjacent location whose occupant satisfies the given test, or
++     * null if no adjacent occupant matches.
++     * @param location The location to scan around.
++     * @param occupantTest The test applied to each adjacent cell's occupant.
++     * @return A matching adjacent location, or null.
++     */
++    public Location firstAdjacentLocationMatching(Location location, Predicate<Object> occupantTest)
++    {
++        return adjacentLocationStream(location)
++            .filter(where -> occupantTest.test(getObjectAt(where)))
++            .findFirst()
++            .orElse(null);
++    }
++
+     /**
+      * Get a shuffled list of the free adjacent locations.
+      * @param location Get locations adjacent to this.
+@@ -92,16 +137,9 @@ public class Field
+      */
+     public List<Location> getFreeAdjacentLocations(Location location)
+     {
+-        List<Location> free = new LinkedList<>();
+-        List<Location> adjacent = adjacentLocations(location);
+-        for(Location next : adjacent) {
+-            if(getObjectAt(next) == null) {
+-                free.add(next);
+-            }
+-        }
+-        return free;
++        return adjacentLocationsMatching(location, Objects::isNull);
+     }
+-    
++
+     /**
+      * Try to find a free location that is adjacent to the
+      * given location. If there is none, return null.
+@@ -112,14 +150,7 @@ public class Field
+      */
+     public Location freeAdjacentLocation(Location location)
+     {
+-        // The available free ones.
+-        List<Location> free = getFreeAdjacentLocations(location);
+-        if(free.size() > 0) {
+-            return free.get(0);
+-        }
+-        else {
+-            return null;
+-        }
++        return firstAdjacentLocationMatching(location, Objects::isNull);
+     }
+ 
+     /**
+diff --git a/Organism.java b/Organism.java
+index ad1d358..3f1a9ba 100644
+--- a/Organism.java
++++ b/Organism.java
+@@ -1,7 +1,4 @@
+-import java.util.Random;
+ import java.util.List;
+-import java.util.Iterator;
+-import java.util.ArrayList;
+ 
+ /**
+  * A class to represent all living creatures in the simulation
+@@ -84,34 +81,31 @@ public abstract class Organism extends FieldOccupant implements Actor
+      */
+     protected Location findWater() {
+         Field field = getField();
+-        List<Location> adjacent = field.adjacentLocations(getLocation());
+-        Iterator<Location> it = adjacent.iterator();
+-        while(it.hasNext()){
+-            Location where = it.next();
+-            Object waterSource = field.getObjectAt(where);
+-            if(waterSource instanceof Lake) {
+-                Lake lake = (Lake) waterSource;
+-                // if there is enough water left to drink
+-                if(lake.getVolume() >= lake.getWaterValue()){
+-                    // increase drinking organism's water level and reduces lake's water level
+-                    int newWaterLevel = getWaterLevel() + lake.getWaterValue();
+-                    this.setWaterLevel(newWaterLevel);
+-                    lake.reduceVolume(lake.getWaterValue());
+-                    return where;
+-                }
+-                // if only a little bit of water left to drink, drinks remnants 
+-                // then empties lake
+-                else if (lake.getVolume() >= 0) {
+-                    int newWaterLevel = getWaterLevel() + lake.getVolume();
+-                    this.setWaterLevel(newWaterLevel);
+-                    lake.setVolume(0);
+-                    lake.setDead();
+-                    return where;
+-                }
+-                else if(lake.getVolume() <=0){
+-                    lake.setDead();
+-                    return null;
+-                }
++        // Find the first adjacent water source (a lake) and drink from it.
++        Location where = field.firstAdjacentLocationMatching(getLocation(),
++            occupant -> occupant instanceof Lake);
++        if(where != null) {
++            Lake lake = (Lake) field.getObjectAt(where);
++            // if there is enough water left to drink
++            if(lake.getVolume() >= lake.getWaterValue()){
++                // increase drinking organism's water level and reduces lake's water level
++                int newWaterLevel = getWaterLevel() + lake.getWaterValue();
++                this.setWaterLevel(newWaterLevel);
++                lake.reduceVolume(lake.getWaterValue());
++                return where;
++            }
++            // if only a little bit of water left to drink, drinks remnants
++            // then empties lake
++            else if (lake.getVolume() >= 0) {
++                int newWaterLevel = getWaterLevel() + lake.getVolume();
++                this.setWaterLevel(newWaterLevel);
++                lake.setVolume(0);
++                lake.setDead();
++                return where;
++            }
++            else if(lake.getVolume() <=0){
++                lake.setDead();
++                return null;
+             }
+         }
+         return null;

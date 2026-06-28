@@ -1,0 +1,219 @@
+diff --git a/SimulationDisplay.java b/SimulationDisplay.java
+new file mode 100644
+index 0000000..1e977aa
+--- /dev/null
++++ b/SimulationDisplay.java
+@@ -0,0 +1,18 @@
++/**
++ * Display interface for the simulation view layer.
++ * Receives pre-aggregated {@link FieldStats} from {@link SimulationReporter}
++ * so that the view is responsible only for rendering, not for counting.
++ *
++ * @version 2022.03.02
++ */
++public interface SimulationDisplay
++{
++    /**
++     * Render the current state of the simulation.
++     * @param step        The step number just completed.
++     * @param environment The current simulation environment.
++     * @param field       The field to render.
++     * @param stats       Pre-aggregated population and disease counts for this step.
++     */
++    void render(int step, Environment environment, Field field, FieldStats stats);
++}
+diff --git a/SimulationReporter.java b/SimulationReporter.java
+new file mode 100644
+index 0000000..763dd1a
+--- /dev/null
++++ b/SimulationReporter.java
+@@ -0,0 +1,57 @@
++/**
++ * Bridges the simulation engine and the display layer.
++ * Implements {@link SimulationObserver} so it receives raw step events from the
++ * engine; on each event it aggregates population and disease statistics into a
++ * {@link FieldStats} snapshot, then hands the snapshot to the {@link SimulationDisplay}
++ * for rendering. Viability queries are answered from the same stats object.
++ *
++ * @version 2022.03.02
++ */
++public class SimulationReporter implements SimulationObserver
++{
++    private final SimulationDisplay display;
++    private final FieldStats stats;
++
++    /**
++     * @param display The display that will render each step after stats are computed.
++     */
++    public SimulationReporter(SimulationDisplay display)
++    {
++        this.display = display;
++        this.stats = new FieldStats();
++    }
++
++    /**
++     * Aggregate population and disease counts for the current field state,
++     * then forward the results to the display for rendering.
++     */
++    @Override
++    public void onStep(int step, Environment environment, Field field)
++    {
++        stats.reset();
++        for (int row = 0; row < field.getDepth(); row++) {
++            for (int col = 0; col < field.getWidth(); col++) {
++                Object actor = field.getObjectAt(row, col);
++                if (actor != null) {
++                    stats.incrementCount(actor.getClass());
++                    if (actor instanceof Organism && ((Organism) actor).isDiseased()) {
++                        stats.incrementDiseasedCount();
++                    }
++                }
++            }
++        }
++        stats.countFinished();
++        display.render(step, environment, field, stats);
++    }
++
++    /**
++     * Returns true if the population is still viable.
++     * Uses the counts from the most recent {@link #onStep} call, so no extra
++     * field scan is needed.
++     */
++    @Override
++    public boolean isViable(Field field)
++    {
++        return stats.isViable(field);
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index 309e42b..06e4854 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -31,7 +31,7 @@ public class Simulator implements SimulationControls
+             width = SimulationEngine.DEFAULT_WIDTH;
+         }
+         SimulatorView view = buildView(depth, width);
+-        engine = new SimulationEngine(depth, width, view);
++        engine = new SimulationEngine(depth, width, new SimulationReporter(view));
+         view.wireButtons(this);
+         engine.reset();
+     }
+@@ -54,7 +54,7 @@ public class Simulator implements SimulationControls
+                 Map.entry(Grass.class,  GrassProbability),
+                 Map.entry(Hunter.class, HunterProbability)
+         );
+-        engine = new SimulationEngine(SimulationEngine.DEFAULT_DEPTH, SimulationEngine.DEFAULT_WIDTH, probs, view);
++        engine = new SimulationEngine(SimulationEngine.DEFAULT_DEPTH, SimulationEngine.DEFAULT_WIDTH, probs, new SimulationReporter(view));
+         view.wireButtons(this);
+         engine.reset();
+     }
+diff --git a/SimulatorView.java b/SimulatorView.java
+index bcd6f5c..f52cea1 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -12,7 +12,7 @@ import java.util.*;
+  *
+  * @version 2022.03.3
+  */
+-public class SimulatorView extends JFrame implements SimulationObserver
++public class SimulatorView extends JFrame implements SimulationDisplay
+ {
+     // Colors used for empty locations.
+     private static final Color EMPTY_COLOR = Color.white;
+@@ -41,8 +41,6 @@ public class SimulatorView extends JFrame implements SimulationObserver
+ 
+     // A map for storing colors for participants in the simulation
+     private Map<Class, Color> colors;
+-    // A statistics object computing and storing simulation information
+-    private FieldStats stats;
+ 
+ 
+     /**
+@@ -52,7 +50,6 @@ public class SimulatorView extends JFrame implements SimulationObserver
+      */
+     public SimulatorView(int height, int width)
+     {
+-        stats = new FieldStats();
+         colors = new LinkedHashMap<>();
+ 
+         setTitle("Prey and predator simulation");
+@@ -242,68 +239,38 @@ public class SimulatorView extends JFrame implements SimulationObserver
+         }
+     }
+ 
+-    @Override
+-    public void onStep(int step, Environment environment, Field field)
+-    {
+-        showStatus(step, environment, field);
+-    }
+-
+     /**
+-     * Show the current status of the field.
+-     * @param step Which iteration step it is.
+-     * @param environment The current simulation environment (weather and time).
+-     * @param field The field whose status is to be displayed.
++     * Render the current state of the field using pre-aggregated statistics.
++     * Counting is handled upstream by {@link SimulationReporter}; this method
++     * is responsible only for updating labels and painting the grid.
+      */
+-    public void showStatus(int step, Environment environment, Field field)
++    @Override
++    public void render(int step, Environment environment, Field field, FieldStats stats)
+     {
+-        if(!isVisible()) {
++        if (!isVisible()) {
+             setVisible(true);
+         }
+ 
+         stepLabel.setText(STEP_PREFIX + step);
+         weatherLabel.setText(WEATHER_PREFIX + environment.getWeather().getCurrentWeather());
+         timeLabel.setText(TIME_PREFIX + environment.getTime().getCurrentTimeString());
+-        stats.reset();
+ 
+         fieldView.preparePaint();
+-
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
++        for (int row = 0; row < field.getDepth(); row++) {
++            for (int col = 0; col < field.getWidth(); col++) {
+                 Object actor = field.getObjectAt(row, col);
+-                if(actor != null) {
+-                    stats.incrementCount(actor.getClass());
+-                    if(actor instanceof Organism){
+-                        if(((Organism) actor).isDiseased()){
+-                            stats.incrementDiseasedCount();
+-                        }
+-                    }
+-                    fieldView.drawMark(col, row, getColor(actor.getClass()));
+-                }
+-                else {
+-                    fieldView.drawMark(col, row, EMPTY_COLOR);
+-                }
++                fieldView.drawMark(col, row, actor != null ? getColor(actor.getClass()) : EMPTY_COLOR);
+             }
+         }
+-        stats.countFinished();
+-        for(Class cls : SimulationInfo.ALL_ACTORS){
++
++        for (Class cls : SimulationInfo.ALL_ACTORS) {
+             classToCheckBox.get(cls).setText(stats.getCountDetails(cls));
+         }
+-
+-//        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(field));
+         diseasedPopulation.setText(stats.getDiseasedPopulation());
+         setColorsByCheckBox();
+         fieldView.repaint();
+     }
+ 
+-    /**
+-     * Determine whether the simulation should continue to run.
+-     * @return true If there is more than one species alive.
+-     */
+-    public boolean isViable(Field field)
+-    {
+-        return stats.isViable(field);
+-    }
+-
+     /**
+      * Provide a graphical view of a rectangular field. This is
+      * a nested class (a class defined inside a class) which

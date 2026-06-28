@@ -1,0 +1,167 @@
+diff --git a/Actor.java b/Actor.java
+index 1e9b270..4fd41e0 100644
+--- a/Actor.java
++++ b/Actor.java
+@@ -55,11 +55,18 @@ public abstract class Actor
+     public void act(List<Actor> newActors, WeatherCond weather)
+     {
+         incrementAge();
+-        if(isAlive() && ((!field.isUnderWater(location.getRow(), location.getCol()) && !canMoveOnLand()) || (field.isUnderWater(location.getRow(), location.getCol()) && !canMoveOnWater()))) {
++        if(isAlive() && !canAccessLocation(location)) {
+             setDead();
+         }
+     }
+ 
++    protected boolean canAccessLocation(Location loc)
++    {
++        return (canMoveOnLand() && canMoveOnWater())
++            || (field.isUnderWater(loc.getRow(), loc.getCol()) && canMoveOnWater())
++            || (!field.isUnderWater(loc.getRow(), loc.getCol()) && canMoveOnLand());
++    }
++
+     /**
+      * Check whether the actor is alive or not.
+      * @return true if the actor is still alive.
+diff --git a/Animal.java b/Animal.java
+index 9964641..aa3c117 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -138,7 +138,7 @@ public abstract class Animal extends Actor
+     {
+         Field field = getField();
+         for(Location where : field.adjacentLocations(getLocation())) {
+-            if ((canMoveOnLand() && canMoveOnWater()) || (field.isUnderWater(where.getRow(), where.getCol()) && canMoveOnWater()) || (!field.isUnderWater(where.getRow(), where.getCol()) && canMoveOnLand())) {
++            if (canAccessLocation(where)) {
+                 Object actor = field.getObjectAt(where);
+                 if (actor instanceof Actor) {
+                     Actor prey = (Actor) actor;
+diff --git a/Disease.java b/Disease.java
+index c417237..5168bf5 100644
+--- a/Disease.java
++++ b/Disease.java
+@@ -70,6 +70,16 @@ public class Disease
+      * returns the map of the actors affected by the disease
+      * @return Map of actor class to severity multiplier
+      */
++    public void addAffectedActor(Class<? extends Actor> actorClass, double severity)
++    {
++        actorsAffected.put(actorClass, severity);
++    }
++
++    public void addStartingActor(Class<? extends Actor> actorClass, double probability)
++    {
++        startingActors.put(actorClass, probability);
++    }
++
+     public Map<Class<? extends Actor>, Double> getActorsAffectedMap()
+     {
+         return Collections.unmodifiableMap(actorsAffected);
+diff --git a/Plant.java b/Plant.java
+index da7577a..46a4c96 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -10,9 +10,11 @@ import java.util.Set;
+ public abstract class Plant extends Actor
+ {
+ 
+-    protected double waterLevel;
+-    protected double sunLightLevel;
+-    private static final double maxWaterLevel = 2.5;
++    private double waterLevel;
++    private double sunLightLevel;
++    private static final double MAX_WATER_LEVEL = 2.5;
++    private static final double WATER_DECAY = 0.5;
++    private static final double SUNLIGHT_DECAY = 0.25;
+ 
+     /**
+      * Create a new plant at location in field with time as well.
+@@ -40,15 +42,11 @@ public abstract class Plant extends Actor
+     {
+         super.act(newPlants, weather);
+         if (isAlive()){
+-            waterLevel-=0.5;
+-            sunLightLevel-= 0.25;
++            waterLevel -= WATER_DECAY;
++            sunLightLevel -= SUNLIGHT_DECAY;
+             sunLightLevel += getField().getWeatherAttributeValueAt("brightness", getLocation());
+-            if (waterLevel +getField().getWeatherAttributeValueAt("dampness", getLocation()) > maxWaterLevel){
+-                waterLevel = maxWaterLevel;
+-            }
+-            else {
+-                waterLevel += getField().getWeatherAttributeValueAt("dampness", getLocation());
+-            }
++            double dampness = getField().getWeatherAttributeValueAt("dampness", getLocation());
++            waterLevel = Math.min(waterLevel + dampness, MAX_WATER_LEVEL);
+             if (waterLevel < 0 || sunLightLevel <= 0){
+                 setDead();
+             }
+diff --git a/Simulator.java b/Simulator.java
+index e96a2a2..cd34dbd 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -114,20 +114,18 @@ public class Simulator
+         List<Disease> list = new ArrayList<>();
+         Disease dengue = new Disease("dengue", true, true);
+ 
+-        dengue.getActorsAffectedMap().put(Lemur.class, 0.9);
+-        dengue.getActorsAffectedMap().put(Panther.class, 0.6);
+-        dengue.getActorsAffectedMap().put(Alligator.class, 0.6);
+-
+-        dengue.getStartingActorsMap().put(Lemur.class, 0.4);
++        dengue.addAffectedActor(Lemur.class, 0.9);
++        dengue.addAffectedActor(Panther.class, 0.6);
++        dengue.addAffectedActor(Alligator.class, 0.6);
++        dengue.addStartingActor(Lemur.class, 0.4);
+         list.add(dengue);
+ 
+         Disease river_fever = new Disease("river_fever", true, false);
+ 
+-        river_fever.getActorsAffectedMap().put(Water_Fern.class, 1.0);
+-        river_fever.getActorsAffectedMap().put(Catfish.class, 0.7);
+-        river_fever.getActorsAffectedMap().put(Salamander.class, 0.8);
+-
+-        river_fever.getStartingActorsMap().put(Water_Fern.class, 0.4);
++        river_fever.addAffectedActor(Water_Fern.class, 1.0);
++        river_fever.addAffectedActor(Catfish.class, 0.7);
++        river_fever.addAffectedActor(Salamander.class, 0.8);
++        river_fever.addStartingActor(Water_Fern.class, 0.4);
+         list.add(river_fever);
+         
+         return Collections.unmodifiableList(list);
+@@ -219,9 +217,7 @@ public class Simulator
+ 
+     private boolean terrainCompatible(Actor actor, int row, int col)
+     {
+-        return (actor.canMoveOnLand() && actor.canMoveOnWater())
+-            || (field.isUnderWater(row, col) && actor.canMoveOnWater())
+-            || (!field.isUnderWater(row, col) && actor.canMoveOnLand());
++        return actor.canAccessLocation(new Location(row, col));
+     }
+ 
+     /**
+@@ -234,7 +230,7 @@ public class Simulator
+             Thread.sleep(millisec);
+         }
+         catch (InterruptedException ie) {
+-            // wake up
++            Thread.currentThread().interrupt();
+         }
+     }
+ }
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 30bfc53..a748e97 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -22,9 +22,9 @@ public class SimulatorView extends JFrame
+     // Color used for objects that have no defined color.
+     private static final Color UNKNOWN_COLOR = Color.gray;
+ 
+-    private final String STEP_PREFIX = "Step: ";
+-    private final String POPULATION_PREFIX = "Population: ";
+-    private final String DISEASE_PREFIX = "Infected Actors: ";
++    private static final String STEP_PREFIX = "Step: ";
++    private static final String POPULATION_PREFIX = "Population: ";
++    private static final String DISEASE_PREFIX = "Infected Actors: ";
+     private JLabel stepLabel, population, infoLabel;
+     private FieldView fieldView;
+ 

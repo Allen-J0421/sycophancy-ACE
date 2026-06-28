@@ -1,0 +1,191 @@
+diff --git a/ActorManager.java b/ActorManager.java
+new file mode 100644
+index 0000000..fd5a9d1
+--- /dev/null
++++ b/ActorManager.java
+@@ -0,0 +1,49 @@
++import java.util.*;
++
++/**
++ * Owns the live actor collection and drives one simulation tick.
++ * Each tick: every actor acts (potentially spawning offspring into a staging list),
++ * dead actors are removed, then offspring are merged into the live list.
++ * Centralises actor lifecycle so the simulation engine loop stays policy-free.
++ *
++ * @version 2022.03.02
++ */
++public class ActorManager
++{
++    private final List<Actor> actors = new ArrayList<>();
++
++    /**
++     * Add a single actor to the live collection.
++     * Used by FieldPopulator during initial population and rain-driven grass growth.
++     * @param actor The actor to add.
++     */
++    public void add(Actor actor)
++    {
++        actors.add(actor);
++    }
++
++    /** Remove all actors; called during simulation reset before re-population. */
++    public void clear()
++    {
++        actors.clear();
++    }
++
++    /**
++     * Run one lifecycle tick over every live actor.
++     * Each actor's {@code act()} method is called; actors that die during the tick
++     * are removed immediately, and all newly spawned actors are appended at the end.
++     * @param environment The current simulation environment.
++     */
++    public void tick(Environment environment)
++    {
++        List<Actor> offspring = new ArrayList<>();
++        for (Iterator<Actor> it = actors.iterator(); it.hasNext(); ) {
++            Actor actor = it.next();
++            actor.act(offspring, environment);
++            if (!actor.isAlive()) {
++                it.remove();
++            }
++        }
++        actors.addAll(offspring);
++    }
++}
+diff --git a/FieldPopulator.java b/FieldPopulator.java
+index 16356c4..21c834d 100644
+--- a/FieldPopulator.java
++++ b/FieldPopulator.java
+@@ -14,19 +14,19 @@ public class FieldPopulator
+     private static final Random rand = Randomizer.getRandom();
+ 
+     private final Field field;
+-    private final List<Actor> actors;
++    private final ActorManager actorManager;
+     private final Map<Class<?>, Double> probabilities;
+     private int hunterCount = 0;
+ 
+     /**
+      * @param field         The field to populate.
+-     * @param actors        The shared actor list managed by the engine.
++     * @param actorManager  The actor manager that receives newly spawned actors.
+      * @param probabilities Per-class spawn probability.
+      */
+-    public FieldPopulator(Field field, List<Actor> actors, Map<Class<?>, Double> probabilities)
++    public FieldPopulator(Field field, ActorManager actorManager, Map<Class<?>, Double> probabilities)
+     {
+         this.field = field;
+-        this.actors = actors;
++        this.actorManager = actorManager;
+         this.probabilities = probabilities;
+     }
+ 
+@@ -61,7 +61,7 @@ public class FieldPopulator
+                     Class<?> cls = entry.getKey();
+                     if (cls == Hunter.class && hunterCount >= HUNTER_LIMIT) continue;
+                     if (rand.nextDouble() <= probabilities.get(cls)) {
+-                        actors.add(entry.getValue().apply(location, sex));
++                        actorManager.add(entry.getValue().apply(location, sex));
+                         if (cls == Hunter.class) hunterCount++;
+                         break;
+                     }
+@@ -81,7 +81,7 @@ public class FieldPopulator
+         for (Location location : field.getRandomFreePatches(grassProb)) {
+             if (rand.nextDouble() <= grassProb
+                     && environment.getWeather().getCurrentWeather() == WeatherType.RAINING) {
+-                actors.add(new Grass(field, location));
++                actorManager.add(new Grass(field, location));
+             }
+         }
+     }
+diff --git a/SimulationEngine.java b/SimulationEngine.java
+index bfa4d0a..18b458d 100644
+--- a/SimulationEngine.java
++++ b/SimulationEngine.java
+@@ -1,12 +1,12 @@
+ import java.util.*;
+ 
+ /**
+- * The core simulation engine: owns all simulation state and drives each step.
++ * The core simulation engine: owns simulation state and drives the step loop.
+  * It is deliberately decoupled from the GUI — the only way it communicates
+  * with the view layer is through the {@link SimulationObserver} passed at
+  * construction time.
+- * World-building (initial population and rain-driven grass growth) is delegated
+- * to {@link FieldPopulator}.
++ * Actor lifecycle is delegated to {@link ActorManager}; world-building is
++ * delegated to {@link FieldPopulator}.
+  *
+  * @version 2022.03.02
+  */
+@@ -27,15 +27,14 @@ public class SimulationEngine implements SimulationControls
+ 
+     private boolean playingSimulation = false;
+     private int remainingSteps;
++    private int step;
+ 
+     private final Map<Class<?>, Double> creationProbabilities;
+     private final SimulationObserver observer;
++    private final ActorManager actorManager;
+     private final FieldPopulator populator;
+-
+-    private List<Actor> actors;
+-    private Field field;
+-    private int step;
+-    private Environment environment;
++    private final Field field;
++    private final Environment environment;
+ 
+     /**
+      * Create an engine with default creation probabilities.
+@@ -60,10 +59,10 @@ public class SimulationEngine implements SimulationControls
+     {
+         this.creationProbabilities = creationProbabilities;
+         this.observer = observer;
+-        actors = new ArrayList<>();
+         field = new Field(depth, width);
+         environment = new Environment(new Time(), new Weather());
+-        populator = new FieldPopulator(field, actors, creationProbabilities);
++        actorManager = new ActorManager();
++        populator = new FieldPopulator(field, actorManager, creationProbabilities);
+     }
+ 
+     // --- SimulationControls implementation ---
+@@ -95,7 +94,7 @@ public class SimulationEngine implements SimulationControls
+     public void reset()
+     {
+         step = 0;
+-        actors.clear();
++        actorManager.clear();
+         populator.reset();
+         populator.populate();
+         environment.getTime().reset();
+@@ -138,8 +137,8 @@ public class SimulationEngine implements SimulationControls
+     }
+ 
+     /**
+-     * Run the simulation from its current state for a single step.
+-     * Iterates over the whole field, letting each actor act.
++     * Advance the simulation by one step: update environment, tick all actors,
++     * spread rain-driven grass, then notify the observer.
+      */
+     public void simulateOneStep()
+     {
+@@ -148,15 +147,7 @@ public class SimulationEngine implements SimulationControls
+         environment.getTime().incrementTime();
+         environment.getWeather().checkWeatherChange(step);
+ 
+-        List<Actor> newActors = new ArrayList<>();
+-        for (Iterator<Actor> it = actors.iterator(); it.hasNext(); ) {
+-            Actor actor = it.next();
+-            actor.act(newActors, environment);
+-            if (!actor.isAlive()) {
+-                it.remove();
+-            }
+-        }
+-        actors.addAll(newActors);
++        actorManager.tick(environment);
+         populator.plantGrassInPatches(environment);
+ 
+         observer.onStep(step, environment, field);

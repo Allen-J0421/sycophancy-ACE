@@ -1,0 +1,1797 @@
+diff --git a/Animal.java b/Animal.java
+index b1ff416..5e33779 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -1,9 +1,5 @@
+-import java.util.Arrays;
+-import java.util.Collections;
+ import java.util.Iterator;
+ import java.util.List;
+-import java.util.LinkedHashSet;
+-import java.util.Set;
+ 
+ /**
+  * A class representing shared characteristics of all animals within the simultion.
+@@ -15,12 +11,8 @@ public abstract class Animal extends Organism
+ {
+     // A singleton shared weather object between all organisms and the simulator
+     private static final Weather weather = Weather.getWeather();
+-    // The runtime class used to identify animals of the same species.
+-    private final Class<? extends Animal> speciesClass;
+-    // The kinds of organisms this animal can eat.
+-    private final Set<Class<?>> foodSources;
+-    // The kinds of organisms this animal can kill.
+-    private final Set<Class<?>> killable;
++    // Shared lifecycle and diet settings for this animal's species.
++    private final AnimalAttributes attributes;
+     // Gender of the animal
+     private boolean isMale;
+     // Current health of the animal
+@@ -35,17 +27,13 @@ public abstract class Animal extends Organism
+      * @param location The location within the field.
+      */
+     public Animal(boolean randomAge, Field field, Location location,
+-                  Class<? extends Animal> speciesClass,
+-                  Set<Class<?>> foodSources,
+-                  Set<Class<?>> killable)
++                  AnimalAttributes attributes)
+     {
+-        super(randomAge, field, location);
+-        this.speciesClass = speciesClass;
+-        this.foodSources = foodSources;
+-        this.killable = killable;
++        super(randomAge, field, location, attributes);
++        this.attributes = attributes;
+         
+         if (randomAge) {
+-            currentHealth = getRand().nextInt(getMaxHealth());
++            currentHealth = getRand().nextInt(attributes.getMaxHealth());
+         }
+         if (getRand().nextInt(2) == 0) {
+             isMale = true;
+@@ -57,27 +45,7 @@ public abstract class Animal extends Organism
+         isInfected = false;
+     }
+     
+-    // Abstract methods
+-    
+-    /**
+-     * Abstract method that returns the max health of the animal
+-     * 
+-     * @return the animal's max health
+-     */
+-    abstract protected int getMaxHealth();
+-
+     // Accessor and mutator methods
+-
+-    /**
+-     * Create an immutable set of organism classes for species configuration.
+-     *
+-     * @param classes The organism classes in the set.
+-     * @return An immutable set containing the given classes.
+-     */
+-    protected static Set<Class<?>> classSet(Class<?>... classes)
+-    {
+-        return Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList(classes)));
+-    }
+     
+     /**
+      * Returns whether the animal is male
+@@ -89,15 +57,6 @@ public abstract class Animal extends Organism
+         return isMale;
+     }
+     
+-    /**
+-     * Return the current health of the animal
+-     * 
+-     * @return int of the animal's current health
+-     */
+-    protected int getCurrentHealth() {
+-        return currentHealth;
+-    }
+-    
+     /**
+      * Return whether the animal is infected
+      * 
+@@ -114,45 +73,6 @@ public abstract class Animal extends Organism
+         isInfected = true;
+     }
+ 
+-    /**
+-     * Return the list of food sources of this animal.
+-     *
+-     * @return The set of classes this animal can eat.
+-     */
+-    protected Set<Class<?>> getFoodSources()
+-    {
+-        return foodSources;
+-    }
+-
+-    /**
+-     * Return the list of classes this animal can kill.
+-     *
+-     * @return The set of classes this animal can kill.
+-     */
+-    protected Set<Class<?>> getKillable()
+-    {
+-        return killable;
+-    }
+-    
+-    // Functional methods
+-
+-    /**
+-     * Animals share the same life-cycle: age, lose health, apply any
+-     * species-specific effects, give birth, and then try to move.
+-     *
+-     * @param newOrganisms A list to receive newborn organisms.
+-     */
+-    public void act(List<Organism> newOrganisms)
+-    {
+-        incrementAge();
+-        incrementHealth();
+-        applyStepEffects();
+-        if(isAlive()) {
+-            giveBirth(newOrganisms);
+-            moveToNextLocation();
+-        }
+-    }
+-    
+     /**
+      * Checks if the animal can breed
+      * 
+@@ -168,10 +88,10 @@ public abstract class Animal extends Organism
+             while (it.hasNext())
+             {
+                 Location where = it.next();
+-                Object thing = field.getObjectAt(where);
+-                if (speciesClass.isInstance(thing))
++                Organism organism = field.getObjectAt(where);
++                if (organism != null && organism.getSpecies() == getSpecies())
+                 {
+-                    Animal animal = (Animal) thing;
++                    Animal animal = (Animal) organism;
+                     return animal.getGender() == true && getAge() >= getBreedingAge();
+                 }
+             }
+@@ -179,32 +99,24 @@ public abstract class Animal extends Organism
+         return false;
+     }
+ 
+-    /**
+-     * Hook for subclasses that need additional work before breeding and moving.
+-     */
+-    protected void applyStepEffects()
+-    {
+-    }
+-    
+     /**
+      * A method that will make the animal object search the adjacent squares around it,
+      * then find and eat an eligible food source.
+      */
+-    protected Location findFood() {
++    protected Location findFood()
++    {
+         Field field = getField();
+         List<Location> adjacent = field.adjacentLocations(getLocation());
+         Iterator<Location> it = adjacent.iterator();
+         while(it.hasNext()) {
+             Location where = it.next();
+-            Object animal = field.getObjectAt(where);
+-            if (animal != null) {                       // makes sure to filter out empty squares
+-                Organism target = (Organism) animal;
+-                if (this.getFoodSources().contains(target.getClass()) && target.isAlive() && getRand().nextDouble() <= weather.getWeatherModifier()) {
++            Organism target = field.getObjectAt(where);
++            if (target != null) {
++                if (attributes.getFoodSources().contains(target.getSpecies())
++                    && target.isAlive()
++                    && getRand().nextDouble() <= weather.getWeatherModifier()) {
+                     target.setDead();
+-                    //currentHealth = this.getMaxHealth();
+-                    if (this.getFoodSources().contains(target.getClass())) {
+-                        currentHealth = this.getMaxHealth();
+-                    }
++                    currentHealth = attributes.getMaxHealth();
+                 }
+             }
+         }
+@@ -223,21 +135,44 @@ public abstract class Animal extends Organism
+     }
+ 
+     /**
+-     * Move towards food if possible, otherwise move into any adjacent free cell.
+-     * If no move is possible, the animal dies from overcrowding.
++     * Animals lose health every step before any movement or disease effects.
+      */
+-    private void moveToNextLocation()
++    protected void applyStepEffects()
++    {
++        incrementHealth();
++    }
++
++    /**
++     * Animals either move towards food or into a free neighbouring cell.
++     *
++     * @return The next destination for the animal.
++     */
++    protected Location findNextLocation()
+     {
+         Location newLocation = findFood();
+         if(newLocation == null) {
+             newLocation = getField().freeAdjacentLocation(getLocation());
+         }
++        return newLocation;
++    }
+ 
+-        if(newLocation != null) {
+-            setLocation(newLocation);
+-        }
+-        else {
+-            setDead();
+-        }
++    /**
++     * Animals die if they cannot move because of overcrowding.
++     *
++     * @return Always true for animals.
++     */
++    protected boolean diesWhenBlocked()
++    {
++        return true;
++    }
++
++    /**
++     * Return this species' breeding age.
++     *
++     * @return The breeding age for the animal.
++     */
++    private int getBreedingAge()
++    {
++        return attributes.getBreedingAge();
+     }
+ }
+diff --git a/AnimalAttributes.java b/AnimalAttributes.java
+new file mode 100644
+index 0000000..d2ff28d
+--- /dev/null
++++ b/AnimalAttributes.java
+@@ -0,0 +1,41 @@
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.LinkedHashSet;
++import java.util.Set;
++
++/**
++ * Shared lifecycle and diet settings for an animal species.
++ *
++ * @version 2022.03.02
++ */
++public class AnimalAttributes extends OrganismAttributes
++{
++    private final int maxHealth;
++    private final Set<Species> foodSources;
++
++    public AnimalAttributes(Species species, boolean diurnal, int breedingAge,
++                            int maxAge, double breedingProbability,
++                            int maxLitterSize, int maxHealth,
++                            OrganismFactory factory, Set<Species> foodSources)
++    {
++        super(species, diurnal, breedingAge, maxAge, breedingProbability,
++              maxLitterSize, factory);
++        this.maxHealth = maxHealth;
++        this.foodSources = foodSources;
++    }
++
++    public int getMaxHealth()
++    {
++        return maxHealth;
++    }
++
++    public Set<Species> getFoodSources()
++    {
++        return foodSources;
++    }
++
++    public static Set<Species> speciesSet(Species... species)
++    {
++        return Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList(species)));
++    }
++}
+diff --git a/Bear.java b/Bear.java
+index 0bdd96f..aac7e1b 100644
+--- a/Bear.java
++++ b/Bear.java
+@@ -1,5 +1,3 @@
+-import java.util.Set;
+-
+ /**
+  * A model of a bear. Bears will eat monkeys,
+  * but will kill monkeys and plants.
+@@ -10,27 +8,10 @@ import java.util.Set;
+  */
+ public class Bear extends InfectiousAnimal
+ {
+-    // Characteristics shared by all bears (class variables).
+-    
+-    // The age at which a bear can start to breed.
+-    private static final int BREEDING_AGE = 15;
+-    // The age to which a bear can live.
+-    private static final int MAX_AGE = 70;
+-    // The likelihood of a bear breeding.
+-    private static final double BREEDING_PROBABILITY = 0.125;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 4;
+-    // The max health of a bear
+-    private static final int MAX_HEALTH = 40;
+-    // Whether the animal is diurnal or nocturnal
+-    private static final boolean IS_DIURNAL = true;
+-    
+-    // Individual characteristics (instance fields).
+-    
+-    // The food a bear will eat.
+-    private static final Set<Class<?>> FOOD_SOURCES = classSet(Monkey.class);
+-    // The classes a bear will kill
+-    private static final Set<Class<?>> KILLABLE = classSet(Monkey.class, Plant.class);
++    private static final AnimalAttributes ATTRIBUTES =
++        new AnimalAttributes(Species.BEAR, true, 15, 70, 0.125, 4, 40,
++                             Bear::new,
++                             AnimalAttributes.speciesSet(Species.MONKEY));
+ 
+     /**
+      * Create a bear. A bear can be created as a new born (age zero
+@@ -42,78 +23,6 @@ public class Bear extends InfectiousAnimal
+      */
+     public Bear(boolean randomAge, Field field, Location location)
+     {
+-        super(randomAge, field, location, Bear.class, FOOD_SOURCES, KILLABLE);
+-    }
+-    
+-    // Accessor and mutator methods
+-    
+-    // Accessor and mutator methods
+-    /**
+-     * Return whether the bear is diurnal
+-     * 
+-     * @return boolean True if the bea is diurnal, false if nocturnal
+-     */
+-    protected boolean getIsDiurnal() {
+-        return IS_DIURNAL;
+-    }
+-    
+-    /**
+-     * Returns breeding age of a bear
+-     * 
+-     * @return int of the bear's breeding age.
+-     */
+-    protected int getBreedingAge()
+-    {
+-        return BREEDING_AGE;
+-    }
+-    
+-    /**
+-     * Returns max age of a bear
+-     * 
+-     * @return int of the bear's max age.
+-     */
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
+-    }
+-    
+-    /**
+-     * Returns breeding probability of a bear
+-     * 
+-     * @return double of the bear's breeding probability
+-     */
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Returns max litter size of a bear
+-     * 
+-     * @return int of the bear's max litter size
+-     */
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-    
+-    /**
+-     * Return the max health of the animal
+-     * 
+-     * @return the animal's max health
+-     */
+-    protected int getMaxHealth()
+-    {
+-        return MAX_HEALTH;
+-    }
+-    
+-    /**
+-     * Creates and returns a new bear object
+-     * 
+-     * @return Organism object of subclass bear
+-     */
+-    protected Organism createNewOrganism(boolean randomAge, Field field, Location location)
+-    {
+-        return new Bear(randomAge, field, location);
++        super(randomAge, field, location, ATTRIBUTES);
+     }
+ }
+diff --git a/Field.java b/Field.java
+index d3a63f0..be0866e 100644
+--- a/Field.java
++++ b/Field.java
+@@ -17,8 +17,8 @@ public class Field
+     
+     // The depth and width of the field.
+     private int depth, width;
+-    // Storage for the animals.
+-    private Object[][] field;
++    // Storage for the organisms.
++    private Organism[][] field;
+ 
+     /**
+      * Represent a field of the given dimensions.
+@@ -29,7 +29,7 @@ public class Field
+     {
+         this.depth = depth;
+         this.width = width;
+-        field = new Object[depth][width];
++        field = new Organism[depth][width];
+     }
+     
+     /**
+@@ -61,9 +61,9 @@ public class Field
+      * @param row Row coordinate of the location.
+      * @param col Column coordinate of the location.
+      */
+-    public void place(Object animal, int row, int col)
++    public void place(Organism organism, int row, int col)
+     {
+-        place(animal, new Location(row, col));
++        place(organism, new Location(row, col));
+     }
+     
+     /**
+@@ -73,9 +73,9 @@ public class Field
+      * @param animal The animal to be placed.
+      * @param location Where to place the animal.
+      */
+-    public void place(Object animal, Location location)
++    public void place(Organism organism, Location location)
+     {
+-        field[location.getRow()][location.getCol()] = animal;
++        field[location.getRow()][location.getCol()] = organism;
+     }
+     
+     /**
+@@ -83,7 +83,7 @@ public class Field
+      * @param location Where in the field.
+      * @return The animal at the given location, or null if there is none.
+      */
+-    public Object getObjectAt(Location location)
++    public Organism getObjectAt(Location location)
+     {
+         return getObjectAt(location.getRow(), location.getCol());
+     }
+@@ -94,7 +94,7 @@ public class Field
+      * @param col The desired column.
+      * @return The animal at the given location, or null if there is none.
+      */
+-    public Object getObjectAt(int row, int col)
++    public Organism getObjectAt(int row, int col)
+     {
+         return field[row][col];
+     }
+diff --git a/FieldStats.java b/FieldStats.java
+index 352da95..3a23e0c 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -1,5 +1,4 @@
+-import java.awt.Color;
+-import java.util.HashMap;
++import java.util.EnumMap;
+ 
+ /**
+  * This class collects and provides some statistical data on the state 
+@@ -13,7 +12,7 @@ public class FieldStats
+     // A shared weather object between the organisms and the simulator
+     public static final Weather weather = Weather.getWeather();
+     // Counters for each type of entity (fox, rabbit, etc.) in the simulation.
+-    private HashMap<Class, Counter> counters;
++    private EnumMap<Species, Counter> counters;
+     // Whether the counters are currently up to date.
+     private boolean countsValid;
+     // The step of the simulation
+@@ -27,7 +26,7 @@ public class FieldStats
+         // Set up a collection for counters for each type of animal that
+         // we might find
+         step = steps;
+-        counters = new HashMap<>();
++        counters = new EnumMap<>(Species.class);
+         countsValid = true;
+     }
+ 
+@@ -42,8 +41,8 @@ public class FieldStats
+         if(!countsValid) {
+             generateCounts(field);
+         }
+-        for(Class key : counters.keySet()) {
+-            Counter info = counters.get(key);
++        for(Species species : counters.keySet()) {
++            Counter info = counters.get(species);
+             buffer.append(info.getName());
+             buffer.append(": ");
+             buffer.append(info.getCount());
+@@ -70,8 +69,8 @@ public class FieldStats
+     public void reset()
+     {
+         countsValid = false;
+-        for(Class key : counters.keySet()) {
+-            Counter count = counters.get(key);
++        for(Species species : counters.keySet()) {
++            Counter count = counters.get(species);
+             count.reset();
+         }
+     }
+@@ -80,14 +79,12 @@ public class FieldStats
+      * Increment the count for one class of animal.
+      * @param animalClass The class of animal to increment.
+      */
+-    public void incrementCount(Class animalClass)
++    public void incrementCount(Species species)
+     {
+-        Counter count = counters.get(animalClass);
++        Counter count = counters.get(species);
+         if(count == null) {
+-            // We do not have a counter for this species yet.
+-            // Create one.
+-            count = new Counter(animalClass.getName());
+-            counters.put(animalClass, count);
++            count = new Counter(species.getDisplayName());
++            counters.put(species, count);
+         }
+         count.increment();
+     }
+@@ -112,8 +109,8 @@ public class FieldStats
+         if(!countsValid) {
+             generateCounts(field);
+         }
+-        for(Class key : counters.keySet()) {
+-            Counter info = counters.get(key);
++        for(Species species : counters.keySet()) {
++            Counter info = counters.get(species);
+             if(info.getCount() > 0) {
+                 nonZero++;
+             }
+@@ -133,9 +130,9 @@ public class FieldStats
+         reset();
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+-                Object animal = field.getObjectAt(row, col);
+-                if(animal != null) {
+-                    incrementCount(animal.getClass());
++                Organism organism = field.getObjectAt(row, col);
++                if(organism != null) {
++                    incrementCount(organism.getSpecies());
+                 }
+             }
+         }
+diff --git a/Hippopotamus.java b/Hippopotamus.java
+index fb4bf84..3ca82be 100644
+--- a/Hippopotamus.java
++++ b/Hippopotamus.java
+@@ -1,5 +1,3 @@
+-import java.util.Set;
+-
+ /**
+  * A model of a hippopotamus. Hippopotamus will eat monkeys and plants,
+  * but will kill monkeys, plants and bears.
+@@ -10,27 +8,10 @@ import java.util.Set;
+  */
+ public class Hippopotamus extends Animal
+ {
+-    // Characteristics shared by all foxes (class variables).
+-    
+-    // The age at which a hippopotamus can start to breed.
+-    private static final int BREEDING_AGE = 25;
+-    // The age to which a hippopotamus can live.
+-    private static final int MAX_AGE = 120;
+-    // The likelihood of a hippopotamus breeding.
+-    private static final double BREEDING_PROBABILITY = 0.12;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 3;
+-    // The max health of a hippopotamus
+-    private static final int MAX_HEALTH = 100;
+-    // Whether the animal is diurnal or nocturnal
+-    private static final boolean IS_DIURNAL = true;
+-    
+-    // Individual characteristics (instance fields).
+-    
+-    // The food a hippopotamus will eat.
+-    private static final Set<Class<?>> FOOD_SOURCES = classSet(Monkey.class, Plant.class);
+-    // The classes a hippopotamus will kill
+-    private static final Set<Class<?>> KILLABLE = classSet(Monkey.class, Plant.class, Bear.class);
++    private static final AnimalAttributes ATTRIBUTES =
++        new AnimalAttributes(Species.HIPPOPOTAMUS, true, 25, 120, 0.12, 3, 100,
++                             Hippopotamus::new,
++                             AnimalAttributes.speciesSet(Species.MONKEY, Species.PLANT));
+ 
+     /**
+      * Create a fox. A fox can be created as a new born (age zero
+@@ -42,78 +23,6 @@ public class Hippopotamus extends Animal
+      */
+     public Hippopotamus(boolean randomAge, Field field, Location location)
+     {
+-        super(randomAge, field, location, Hippopotamus.class, FOOD_SOURCES, KILLABLE);
+-    }
+-    
+-    // Accessor and mutator methods
+-    
+-    // Accessor and mutator methods
+-    /**
+-     * Return whether the hippopotamus is diurnal
+-     * 
+-     * @return boolean True if the bea is diurnal, false if nocturnal
+-     */
+-    protected boolean getIsDiurnal() {
+-        return IS_DIURNAL;
+-    }
+-    
+-    /**
+-     * Returns breeding age of a hippopotamus
+-     * 
+-     * @return int of the hippopotamus's breeding age.
+-     */
+-    protected int getBreedingAge()
+-    {
+-        return BREEDING_AGE;
+-    }
+-    
+-    /**
+-     * Returns max age of a hippopotamus
+-     * 
+-     * @return int of the hippopotamus's max age.
+-     */
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
+-    }
+-    
+-    /**
+-     * Returns breeding probability of a hippopotamus
+-     * 
+-     * @return double of the hippopotamus's breeding probability
+-     */
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Returns max litter size of a hippopotamus
+-     * 
+-     * @return int of the hippopotamus's max litter size
+-     */
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-    
+-    /**
+-     * Return the max health of the animal
+-     * 
+-     * @return the animal's max health
+-     */
+-    protected int getMaxHealth()
+-    {
+-        return MAX_HEALTH;
+-    }
+-    
+-    /**
+-     * Creates and returns a new hippopotamus object
+-     * 
+-     * @return Organism object of subclass hippopotamus
+-     */
+-    protected Organism createNewOrganism(boolean randomAge, Field field, Location location)
+-    {
+-        return new Hippopotamus(randomAge, field, location);
++        super(randomAge, field, location, ATTRIBUTES);
+     }
+ }
+diff --git a/InfectiousAnimal.java b/InfectiousAnimal.java
+index b969a6e..c165daa 100644
+--- a/InfectiousAnimal.java
++++ b/InfectiousAnimal.java
+@@ -1,7 +1,5 @@
+ import java.util.Iterator;
+ import java.util.List;
+-import java.util.Set;
+-
+ /**
+  * Shared disease behaviour for animals that can both catch and spread infection.
+  *
+@@ -10,11 +8,9 @@ import java.util.Set;
+ public abstract class InfectiousAnimal extends Animal implements Infectable
+ {
+     public InfectiousAnimal(boolean randomAge, Field field, Location location,
+-                            Class<? extends Animal> speciesClass,
+-                            Set<Class<?>> foodSources,
+-                            Set<Class<?>> killable)
++                            AnimalAttributes attributes)
+     {
+-        super(randomAge, field, location, speciesClass, foodSources, killable);
++        super(randomAge, field, location, attributes);
+     }
+ 
+     /**
+@@ -39,9 +35,8 @@ public abstract class InfectiousAnimal extends Animal implements Infectable
+         Iterator<Location> it = adjacent.iterator();
+         while(it.hasNext()) {
+             Location where = it.next();
+-            Object object = field.getObjectAt(where);
+-            if (object != null) {
+-                Organism organism = (Organism) object;
++            Organism organism = field.getObjectAt(where);
++            if (organism != null) {
+                 if (organism instanceof Infectable && organism.isAlive()
+                     && getRand().nextDouble() <= SPREAD_PROBABILITY) {
+                     Animal target = (Animal) organism;
+diff --git a/Leopard.java b/Leopard.java
+index 790133c..faff1d2 100644
+--- a/Leopard.java
++++ b/Leopard.java
+@@ -1,5 +1,3 @@
+-import java.util.Set;
+-
+ /**
+  * A model of a leopard. Leopards will eat sloths,
+  * but will kill sloths and plants.
+@@ -10,27 +8,10 @@ import java.util.Set;
+  */
+ public class Leopard extends Animal
+ {
+-    // Characteristics shared by all beares (class variables).
+-    
+-    // The age at which a leopard can start to breed.
+-    private static final int BREEDING_AGE = 15;
+-    // The age to which a leopard can live.
+-    private static final int MAX_AGE = 55;
+-    // The likelihood of a leopard breeding.
+-    private static final double BREEDING_PROBABILITY = 0.145;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 4;
+-    // The max health of a leopard
+-    private static final int MAX_HEALTH = 40;
+-    // Whether the animal is diurnal or nocturnal
+-    private static final boolean IS_DIURNAL = false;
+-    
+-    // Individual characteristics (instance fields).
+-    
+-    // The food a leopard will eat.
+-    private static final Set<Class<?>> FOOD_SOURCES = classSet(Sloth.class);
+-    // The classes a leopard will kill
+-    private static final Set<Class<?>> KILLABLE = classSet(Sloth.class, Plant.class);
++    private static final AnimalAttributes ATTRIBUTES =
++        new AnimalAttributes(Species.LEOPARD, false, 15, 55, 0.145, 4, 40,
++                             Leopard::new,
++                             AnimalAttributes.speciesSet(Species.SLOTH));
+ 
+     /**
+      * Create a bear. A bear can be created as a new born (age zero
+@@ -42,78 +23,6 @@ public class Leopard extends Animal
+      */
+     public Leopard(boolean randomAge, Field field, Location location)
+     {
+-        super(randomAge, field, location, Leopard.class, FOOD_SOURCES, KILLABLE);
+-    }
+-    
+-    // Accessor and mutator methods
+-    
+-    // Accessor and mutator methods
+-    /**
+-     * Return whether the leopard is diurnal
+-     * 
+-     * @return boolean True if the bea is diurnal, false if nocturnal
+-     */
+-    protected boolean getIsDiurnal() {
+-        return IS_DIURNAL;
+-    }
+-    
+-    /**
+-     * Returns breeding age of a leopard
+-     * 
+-     * @return int of the leopard's breeding age.
+-     */
+-    protected int getBreedingAge()
+-    {
+-        return BREEDING_AGE;
+-    }
+-    
+-    /**
+-     * Returns max age of a leopard
+-     * 
+-     * @return int of the leopard's max age.
+-     */
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
+-    }
+-    
+-    /**
+-     * Returns breeding probability of a leopard
+-     * 
+-     * @return double of the leopard's breeding probability
+-     */
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Returns max litter size of a leopard
+-     * 
+-     * @return int of the leopard's max litter size
+-     */
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-    
+-    /**
+-     * Return the max health of the animal
+-     * 
+-     * @return the animal's max health
+-     */
+-    protected int getMaxHealth()
+-    {
+-        return MAX_HEALTH;
+-    }
+-    
+-    /**
+-     * Creates and returns a new leopard object
+-     * 
+-     * @return Organism object of subclass leopard
+-     */
+-    protected Organism createNewOrganism(boolean randomAge, Field field, Location location)
+-    {
+-        return new Leopard(randomAge, field, location);
++        super(randomAge, field, location, ATTRIBUTES);
+     }
+ }
+diff --git a/Monkey.java b/Monkey.java
+index a386e9b..db3136f 100644
+--- a/Monkey.java
++++ b/Monkey.java
+@@ -1,5 +1,3 @@
+-import java.util.Set;
+-
+ /**
+  * A model of a monkey. Monkeys will eat plants.
+  * They will move and look for food and age at every step of the simulation,
+@@ -9,26 +7,10 @@ import java.util.Set;
+  */
+ public class Monkey extends Animal
+ {
+-    // Characteristics shared by all monkeys (class variables).
+-
+-    // The age at which a monkey can start to breed.
+-    private static final int BREEDING_AGE = 4;
+-    // The age to which a monkey can live.
+-    private static final int MAX_AGE = 40;
+-    // The likelihood of a monkey breeding.
+-    private static final double BREEDING_PROBABILITY = 0.17;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 5;
+-    // The max health of a monkey
+-    private static final int MAX_HEALTH = 10;
+-    // Whether the animal is diurnal or nocturnal
+-    private static final boolean IS_DIURNAL = true;
+-    
+-    // Individual characteristics (instance fields).
+-    // The food a monkey will eat.
+-    private static final Set<Class<?>> FOOD_SOURCES = classSet(Plant.class);
+-    // The classes a monkey will kill
+-    private static final Set<Class<?>> KILLABLE = classSet(Plant.class);
++    private static final AnimalAttributes ATTRIBUTES =
++        new AnimalAttributes(Species.MONKEY, true, 4, 40, 0.17, 5, 10,
++                             Monkey::new,
++                             AnimalAttributes.speciesSet(Species.PLANT));
+ 
+     /**
+      * Create a new monkey. A monkey may be created with age
+@@ -40,76 +22,6 @@ public class Monkey extends Animal
+      */
+     public Monkey(boolean randomAge, Field field, Location location)
+     {
+-        super(randomAge, field, location, Monkey.class, FOOD_SOURCES, KILLABLE);
+-    }
+-    
+-    // Accessor and mutator methods
+-    /**
+-     * Return whether the monkey is diurnal
+-     * 
+-     * @return boolean True if the monkey is diurnal, false if nocturnal
+-     */
+-    protected boolean getIsDiurnal() {
+-        return IS_DIURNAL;
+-    }
+-    
+-    /**
+-     * Return the breeding age of the monkey
+-     * 
+-     * @return the monkey's breeding age
+-     */
+-    protected int getBreedingAge()
+-    {
+-        return BREEDING_AGE;
+-    }
+-    
+-    /**
+-     * Return the max age of the monkey
+-     * 
+-     * @return the monkey's max age
+-     */
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
+-    }
+-    
+-    /**
+-     * Return the breeding probability of the monkey
+-     * 
+-     * @return the monkey's breeding probability
+-     */
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Return the max litter size of the monkey
+-     * 
+-     * @return the monkey's max litter size
+-     */
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-    
+-    /**
+-     * Return the max health of the monkey
+-     * 
+-     * @return the monkey's max health
+-     */
+-    protected int getMaxHealth()
+-    {
+-        return MAX_HEALTH;
+-    }
+-    
+-    /**
+-     * Creates a new Animal object for a newborn monkey
+-     * 
+-     * @return an Animal object for a newborn monkey
+-     */
+-    protected Animal createNewOrganism(boolean randomAge, Field field, Location location)
+-    {
+-        return new Monkey(randomAge, field, location);
++        super(randomAge, field, location, ATTRIBUTES);
+     }
+ }
+diff --git a/Organism.java b/Organism.java
+index f194092..3fd3020 100644
+--- a/Organism.java
++++ b/Organism.java
+@@ -10,6 +10,8 @@ import java.util.Random;
+  */
+ public abstract class Organism
+ {
++    // Shared lifecycle settings for this organism's species.
++    private final OrganismAttributes attributes;
+     // The organism's age
+     private int age;
+     // Whether the organism is alive or not.
+@@ -25,76 +27,40 @@ public abstract class Organism
+     /**
+      * Constructor for objects of class Organism
+      */
+-    public Organism(boolean randomAge, Field field, Location location)
++    public Organism(boolean randomAge, Field field, Location location,
++                    OrganismAttributes attributes)
+     {
++        this.attributes = attributes;
+         age = 0;
+         if (randomAge) {
+-            age = rand.nextInt(getMaxAge());
++            age = rand.nextInt(attributes.getMaxAge());
+         }
+         alive = true;
+         this.field = field;
+         setLocation(location);
+     }
+     
+-    // Abstract methods
+-    
+-    /**
+-     * Abstract method that returns whether the animal is diurnal or nocturnal
+-     * 
+-     * @return boolean True if the animal is diurnal, false if nocturnal
+-     */
+-    abstract protected boolean getIsDiurnal();
+-    
+-    /**
+-    * Make this organism act - that is: make it do
+-    * whatever it wants/needs to do.
+-    * @param newOrganisms A list to receive newly born organisms.
+-    */
+-    abstract public void act(List<Organism> newOrganisms);
+-    
+-    /**
+-     * Abstract method that returns the max age of the organism
+-     * 
+-     * @return the organism's max age
+-     */
+-    abstract protected int getMaxAge();
+-    
+-    /**
+-     * Abstract method that returns whether the organism can breed
+-     * 
+-     * @return boolean True if the organism can breed
+-     */
+-    abstract protected boolean canBreed();
+-    
+-    /**
+-     * Abstract method that returns the breeding age for the animal
+-     * 
+-     * @return the animal's breeding age
+-     */
+-    abstract protected int getBreedingAge();
+-    
+-    /**
+-     * Abstract methohd that returns the litter size of the animal
+-     * 
+-     * @return the animal's max litter size
+-     */
+-    abstract protected int getMaxLitterSize();
+-    
++    // Accessor and mutator methods
++
+     /**
+-     * Abstract method that returns the breeding probability of the animal
+-     * 
+-     * @return the animal's breeding probability
++     * Return this organism's species.
++     *
++     * @return The organism species.
+      */
+-    abstract protected double getBreedingProbability();
+-    
++    public Species getSpecies()
++    {
++        return attributes.getSpecies();
++    }
++
+     /**
+-     * Abstract method that returns an organism object of a specific subclass of organism
+-     * 
+-     * @return Organism object of a specified subclass
++     * Return whether the organism is diurnal or nocturnal.
++     *
++     * @return True if the organism is diurnal.
+      */
+-    abstract protected Organism createNewOrganism(boolean randomAge, Field field, Location location);
+-    
+-    // Accessor and mutator methods
++    public boolean isDiurnal()
++    {
++        return attributes.isDiurnal();
++    }
+     
+     /**
+      * Return the organism's location.
+@@ -133,14 +99,6 @@ public abstract class Organism
+         return age;
+     }
+     
+-    /**
+-     * Sets the organism's age
+-     */
+-    protected void setAge(int age)
+-    {
+-        this.age = age;
+-    }
+-    
+     /**
+      * Check whether the organism is alive or not.
+      * @return true if the organism is still alive.
+@@ -151,6 +109,23 @@ public abstract class Organism
+     }
+     
+     // Functional methods
++
++    /**
++     * Make this organism act for a single simulation step.
++     *
++     * @param newOrganisms A list to receive newly born organisms.
++     */
++    public final void act(List<Organism> newOrganisms)
++    {
++        incrementAge();
++        if(isAlive()) {
++            applyStepEffects();
++        }
++        if(isAlive()) {
++            giveBirth(newOrganisms);
++            relocate();
++        }
++    }
+     
+     /**
+      * Determines the amount of newborn a specific organism will produce
+@@ -160,8 +135,8 @@ public abstract class Organism
+     protected int breed()
+     {
+         int births = 0;
+-        if(canBreed() && getRand().nextDouble() <= getBreedingProbability()) {
+-            births = getRand().nextInt(getMaxLitterSize()) + 1;
++        if(canBreed() && getRand().nextDouble() <= attributes.getBreedingProbability()) {
++            births = getRand().nextInt(attributes.getMaxLitterSize()) + 1;
+         }
+         return births;
+     }
+@@ -178,7 +153,7 @@ public abstract class Organism
+         int births = breed();
+         for(int b = 0; b < births && free.size() > 0; b++) {
+             Location loc = free.remove(0);
+-            Organism young = createNewOrganism(false, field, loc);
++            Organism young = attributes.create(false, field, loc);
+             newOrganisms.add(young);
+         }
+     }
+@@ -189,7 +164,7 @@ public abstract class Organism
+     protected void incrementAge()
+     {
+         age++;
+-        if (age > getMaxAge())
++        if (age > attributes.getMaxAge())
+         {
+             setDead();
+         }
+@@ -221,4 +196,55 @@ public abstract class Organism
+         location = newLocation;
+         field.place(this, newLocation);
+     }
+-}
+\ No newline at end of file
++
++    /**
++     * Default breeding rule for organisms that reproduce without a mate.
++     *
++     * @return True when the organism is old enough to breed.
++     */
++    protected boolean canBreed()
++    {
++        return getAge() >= attributes.getBreedingAge();
++    }
++
++    /**
++     * Hook for species-specific per-step work before breeding and movement.
++     */
++    protected void applyStepEffects()
++    {
++    }
++
++    /**
++     * Hook for organisms that may move during a simulation step.
++     *
++     * @return The next location, or null to stay in place.
++     */
++    protected Location findNextLocation()
++    {
++        return null;
++    }
++
++    /**
++     * Hook for species that die when they cannot move.
++     *
++     * @return True if the organism dies when no destination is available.
++     */
++    protected boolean diesWhenBlocked()
++    {
++        return false;
++    }
++
++    /**
++     * Move the organism if its species requires relocation this step.
++     */
++    private void relocate()
++    {
++        Location newLocation = findNextLocation();
++        if(newLocation != null) {
++            setLocation(newLocation);
++        }
++        else if(diesWhenBlocked()) {
++            setDead();
++        }
++    }
++}
+diff --git a/OrganismAttributes.java b/OrganismAttributes.java
+new file mode 100644
+index 0000000..63c32d9
+--- /dev/null
++++ b/OrganismAttributes.java
+@@ -0,0 +1,63 @@
++/**
++ * Shared lifecycle settings for an organism species.
++ *
++ * @version 2022.03.02
++ */
++public class OrganismAttributes
++{
++    private final Species species;
++    private final boolean diurnal;
++    private final int breedingAge;
++    private final int maxAge;
++    private final double breedingProbability;
++    private final int maxLitterSize;
++    private final OrganismFactory factory;
++
++    public OrganismAttributes(Species species, boolean diurnal, int breedingAge,
++                              int maxAge, double breedingProbability,
++                              int maxLitterSize, OrganismFactory factory)
++    {
++        this.species = species;
++        this.diurnal = diurnal;
++        this.breedingAge = breedingAge;
++        this.maxAge = maxAge;
++        this.breedingProbability = breedingProbability;
++        this.maxLitterSize = maxLitterSize;
++        this.factory = factory;
++    }
++
++    public Species getSpecies()
++    {
++        return species;
++    }
++
++    public boolean isDiurnal()
++    {
++        return diurnal;
++    }
++
++    public int getBreedingAge()
++    {
++        return breedingAge;
++    }
++
++    public int getMaxAge()
++    {
++        return maxAge;
++    }
++
++    public double getBreedingProbability()
++    {
++        return breedingProbability;
++    }
++
++    public int getMaxLitterSize()
++    {
++        return maxLitterSize;
++    }
++
++    public Organism create(boolean randomAge, Field field, Location location)
++    {
++        return factory.create(randomAge, field, location);
++    }
++}
+diff --git a/OrganismFactory.java b/OrganismFactory.java
+new file mode 100644
+index 0000000..0eb9792
+--- /dev/null
++++ b/OrganismFactory.java
+@@ -0,0 +1,9 @@
++/**
++ * Creates organism instances for reproduction and population seeding.
++ *
++ * @version 2022.03.02
++ */
++public interface OrganismFactory
++{
++    Organism create(boolean randomAge, Field field, Location location);
++}
+diff --git a/Plant.java b/Plant.java
+index 575297e..b02d7de 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -1,7 +1,3 @@
+-import java.util.List;
+-import java.util.Random;
+-import java.util.Iterator;
+-
+ /**
+  * Write a description of class Plant here.
+  *
+@@ -10,95 +6,11 @@ import java.util.Iterator;
+ 
+ public class Plant extends Organism
+ {
+-    // The age at which a monkey can start to breed.
+-    private static final int BREEDING_AGE = 5;
+-    // The age to which a monkey can live.
+-    private static final int MAX_AGE = 15;
+-    // The likelihood of a monkey breeding.
+-    private static final double BREEDING_PROBABILITY = 0.09;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 6;
+-    // Whether the animal is diurnal or nocturnal
+-    private static final boolean IS_DIURNAL = true;
+-    // A shared random number generator to control breeding.
+-    private static final Random rand = Randomizer.getRandom();
++    private static final OrganismAttributes ATTRIBUTES =
++        new OrganismAttributes(Species.PLANT, true, 5, 15, 0.09, 6, Plant::new);
+     
+     public Plant(boolean randomAge, Field field, Location location)
+     {
+-        super(randomAge, field, location);
+-    }
+-    
+-    // Accessor and mutator methods
+-    
+-    /**
+-     * Return whether the plant is diurnal
+-     * 
+-     * @return boolean True if the plant is diurnal, false if nocturnal
+-     */
+-    protected boolean getIsDiurnal() {
+-        return IS_DIURNAL;
+-    }
+-    
+-    public void act(List<Organism> newOrganisms) {
+-        incrementAge();
+-        if(isAlive()) {
+-            giveBirth(newOrganisms);
+-        }
+-    }
+-    
+-    /**
+-     * Returns breeding age of a plant
+-     * 
+-     * @return int of the plant's breeding age.
+-     */
+-    protected int getBreedingAge() {
+-        return BREEDING_AGE;
+-    }
+-    
+-    /**
+-     * Returns max age of a plant
+-     * 
+-     * @return int of the plant's max age.
+-     */
+-    protected int getMaxAge() {
+-        return MAX_AGE;
+-    }
+-    
+-    /**
+-     * Returns whether the plant can breed, if it is above the breeding age
+-     * 
+-     * @return boolean True if the plant can breed
+-     */
+-    protected boolean canBreed() {
+-        return getAge() >= BREEDING_AGE;
+-    }
+-    
+-    /**
+-     * Returns max litter size of a plant
+-     * 
+-     * @return int of the plant's max litter size
+-     */
+-    protected int getMaxLitterSize() {
+-        return MAX_LITTER_SIZE;
+-    }
+-    
+-    /**
+-     * Returns breeding probability of a plant
+-     * 
+-     * @return double of the plant's breeding probability
+-     */
+-    protected double getBreedingProbability() {
+-        return BREEDING_PROBABILITY;
+-    }
+-    
+-    // Functional methods
+-    
+-    /**
+-     * Creates and returns a new plant object
+-     * 
+-     * @return Organism object of subclass plant
+-     */
+-    protected Organism createNewOrganism(boolean randomAge, Field field, Location location) {
+-        return new Plant(randomAge, field, location);
++        super(randomAge, field, location, ATTRIBUTES);
+     }
+ }
+diff --git a/PopulationRule.java b/PopulationRule.java
+new file mode 100644
+index 0000000..46f8ce8
+--- /dev/null
++++ b/PopulationRule.java
+@@ -0,0 +1,43 @@
++import java.awt.Color;
++
++/**
++ * Configuration describing how a species should be seeded and displayed.
++ *
++ * @version 2022.03.02
++ */
++public class PopulationRule
++{
++    private final double creationProbability;
++    private final OrganismFactory factory;
++    private final Species species;
++    private final Color color;
++
++    public PopulationRule(double creationProbability, OrganismFactory factory,
++                          Species species, Color color)
++    {
++        this.creationProbability = creationProbability;
++        this.factory = factory;
++        this.species = species;
++        this.color = color;
++    }
++
++    public double getCreationProbability()
++    {
++        return creationProbability;
++    }
++
++    public Organism create(Field field, Location location)
++    {
++        return factory.create(true, field, location);
++    }
++
++    public Species getSpecies()
++    {
++        return species;
++    }
++
++    public Color getColor()
++    {
++        return color;
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index 5bad5c2..0ce560d 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -29,6 +29,24 @@ public class Simulator
+     private static final double SLOTH_CREATION_PROBABILITY = 0.08; 
+     // The probability that a plant will be created in any given grid position.
+     private static final double PLANT_CREATION_PROBABILITY = 0.13;
++    // Rules describing the main animal population.
++    private static final PopulationRule[] PRIMARY_POPULATION_RULES = {
++        new PopulationRule(HIPPOPOTAMUS_CREATION_PROBABILITY, Hippopotamus::new,
++                           Species.HIPPOPOTAMUS, Color.DARK_GRAY),
++        new PopulationRule(LEOPARD_CREATION_PROBABILITY, Leopard::new,
++                           Species.LEOPARD, Color.MAGENTA),
++        new PopulationRule(BEAR_CREATION_PROBABILITY, Bear::new,
++                           Species.BEAR, Color.RED),
++        new PopulationRule(MONKEY_CREATION_PROBABILITY, Monkey::new,
++                           Species.MONKEY, Color.ORANGE)
++    };
++    // Rules describing slower secondary occupants when no primary animal appears.
++    private static final PopulationRule[] SECONDARY_POPULATION_RULES = {
++        new PopulationRule(SLOTH_CREATION_PROBABILITY, Sloth::new,
++                           Species.SLOTH, Color.YELLOW),
++        new PopulationRule(PLANT_CREATION_PROBABILITY, Plant::new,
++                           Species.PLANT, Color.GREEN)
++    };
+     // A shared Weather object between organisms and the simulator
+     public static final Weather weather = Weather.getWeather();
+ 
+@@ -69,12 +87,12 @@ public class Simulator
+ 
+         // Create a view of the state of each location in the field.
+         view = new SimulatorView(depth, width, step);
+-        view.setColor(Hippopotamus.class, Color.DARK_GRAY);
+-        view.setColor(Leopard.class, Color.MAGENTA);
+-        view.setColor(Bear.class, Color.RED);
+-        view.setColor(Monkey.class, Color.ORANGE);
+-        view.setColor(Sloth.class, Color.YELLOW);        
+-        view.setColor(Plant.class, Color.GREEN);
++        for(PopulationRule rule : PRIMARY_POPULATION_RULES) {
++            view.setColor(rule.getSpecies(), rule.getColor());
++        }
++        for(PopulationRule rule : SECONDARY_POPULATION_RULES) {
++            view.setColor(rule.getSpecies(), rule.getColor());
++        }
+         
+         // Setup a valid starting point.
+         reset();
+@@ -131,10 +149,10 @@ public class Simulator
+         for(Iterator<Organism> it = organisms.iterator(); it.hasNext(); ) {
+             Organism organism = it.next();
+             
+-            if (organism.getIsDiurnal() && step % 80 <= 55) {
++            if (organism.isDiurnal() && step % 80 <= 55) {
+                 organism.act(newOrganisms);
+             }
+-            else if (!organism.getIsDiurnal() && step % 80 > 55) {
++            else if (!organism.isDiurnal() && step % 80 > 55) {
+                 organism.act(newOrganisms);
+             }
+             if(! organism.isAlive()) {
+@@ -170,37 +188,7 @@ public class Simulator
+         field.clear();
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+-                if(rand.nextDouble() <= HIPPOPOTAMUS_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Hippopotamus hippopotamus = new Hippopotamus(true, field, location);
+-                    organisms.add(hippopotamus);
+-                }
+-                else if(rand.nextDouble() <= LEOPARD_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Leopard leopard = new Leopard(true, field, location);
+-                    organisms.add(leopard);
+-                }
+-                else if(rand.nextDouble() <= BEAR_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Bear bear = new Bear(true, field, location);
+-                    organisms.add(bear);
+-                }
+-                else if(rand.nextDouble() <= MONKEY_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Monkey monkey = new Monkey(true, field, location);
+-                    organisms.add(monkey);
+-                }
+-                if(rand.nextDouble() <= SLOTH_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Sloth sloth = new Sloth(true, field, location);
+-                    organisms.add(sloth);
+-                }
+-                else if (rand.nextDouble() <= PLANT_CREATION_PROBABILITY) {
+-                    Location location = new Location(row, col);
+-                    Plant plant = new Plant(true, field, location);
+-                    organisms.add(plant);
+-                }
+-                // else leave the location empty.
++                seedLocation(rand, new Location(row, col));
+             }
+         }
+     }
+@@ -227,4 +215,32 @@ public class Simulator
+             weather.changeWeather();
+         }
+     }
++
++    /**
++     * Populate one location by selecting the first species whose creation
++     * probability passes. Each cell can contain at most one organism.
++     */
++    private void seedLocation(Random rand, Location location)
++    {
++        if(seedFromRules(rand, location, PRIMARY_POPULATION_RULES)) {
++            return;
++        }
++        seedFromRules(rand, location, SECONDARY_POPULATION_RULES);
++    }
++
++    /**
++     * Try each creation rule in sequence until one organism is created.
++     *
++     * @return True if a species was placed at the location.
++     */
++    private boolean seedFromRules(Random rand, Location location, PopulationRule[] rules)
++    {
++        for(PopulationRule rule : rules) {
++            if(rand.nextDouble() <= rule.getCreationProbability()) {
++                organisms.add(rule.create(field, location));
++                return true;
++            }
++        }
++        return false;
++    }
+ }
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 3a61b48..6594aef 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -30,7 +30,7 @@ public class SimulatorView extends JFrame
+     private int step;
+     
+     // A map for storing colors for participants in the simulation
+-    private Map<Class, Color> colors;
++    private Map<Species, Color> colors;
+     // A statistics object computing and storing simulation information
+     private FieldStats stats;
+     
+@@ -111,9 +111,9 @@ public class SimulatorView extends JFrame
+      * @param animalClass The animal's Class object.
+      * @param color The color to be used for the given class.
+      */
+-    public void setColor(Class animalClass, Color color)
++    public void setColor(Species species, Color color)
+     {
+-        colors.put(animalClass, color);
++        colors.put(species, color);
+     }
+ 
+     /**
+@@ -127,9 +127,9 @@ public class SimulatorView extends JFrame
+     /**
+      * @return The color to be used for a given class of animal.
+      */
+-    private Color getColor(Class animalClass)
++    private Color getColor(Species species)
+     {
+-        Color col = colors.get(animalClass);
++        Color col = colors.get(species);
+         if(col == null) {
+             // no color defined for this class
+             return UNKNOWN_COLOR;
+@@ -157,10 +157,10 @@ public class SimulatorView extends JFrame
+ 
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+-                Object animal = field.getObjectAt(row, col);
+-                if(animal != null) {
+-                    stats.incrementCount(animal.getClass());
+-                    fieldView.drawMark(col, row, getColor(animal.getClass()));
++                Organism organism = field.getObjectAt(row, col);
++                if(organism != null) {
++                    stats.incrementCount(organism.getSpecies());
++                    fieldView.drawMark(col, row, getColor(organism.getSpecies()));
+                 }
+                 else {
+                     fieldView.drawMark(col, row, EMPTY_COLOR);
+diff --git a/Sloth.java b/Sloth.java
+index 91f5c51..ac7c15b 100644
+--- a/Sloth.java
++++ b/Sloth.java
+@@ -1,5 +1,3 @@
+-import java.util.Set;
+-
+ /**
+  * A model of a Sloth. Sloths will eat plants.
+  * They will move and look for food and age at every step of the simulation,
+@@ -9,26 +7,10 @@ import java.util.Set;
+  */
+ public class Sloth extends InfectiousAnimal
+ {
+-    // Characteristics shared by all sloths (class variables).
+-
+-    // The age at which a sloth can start to breed.
+-    private static final int BREEDING_AGE = 5;
+-    // The age to which a sloth can live.
+-    private static final int MAX_AGE = 30;
+-    // The likelihood of a sloth breeding.
+-    private static final double BREEDING_PROBABILITY = 0.17;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 4;
+-    // The max health of a sloth
+-    private static final int MAX_HEALTH = 8;
+-    // Whether the animal is diurnal or nocturnal
+-    private static final boolean IS_DIURNAL = true;
+-    
+-    // Individual characteristics (instance fields).
+-    // The food a sloth will eat.
+-    private static final Set<Class<?>> FOOD_SOURCES = classSet(Plant.class);
+-    // The classes a bear will kill
+-    private static final Set<Class<?>> KILLABLE = classSet(Plant.class);
++    private static final AnimalAttributes ATTRIBUTES =
++        new AnimalAttributes(Species.SLOTH, true, 5, 30, 0.17, 4, 8,
++                             Sloth::new,
++                             AnimalAttributes.speciesSet(Species.PLANT));
+ 
+     /**
+      * Create a new sloth. A sloth may be created with age
+@@ -40,76 +22,6 @@ public class Sloth extends InfectiousAnimal
+      */
+     public Sloth(boolean randomAge, Field field, Location location)
+     {
+-        super(randomAge, field, location, Sloth.class, FOOD_SOURCES, KILLABLE);
+-    }
+-    
+-    // Accessor and mutator methods
+-    /**
+-     * Return whether the sloth is diurnal
+-     * 
+-     * @return boolean True if the sloth is diurnal, false if nocturnal
+-     */
+-    protected boolean getIsDiurnal() {
+-        return IS_DIURNAL;
+-    }
+-    
+-    /**
+-     * Return the breeding age of the sloth
+-     * 
+-     * @return the sloth's breeding age
+-     */
+-    protected int getBreedingAge()
+-    {
+-        return BREEDING_AGE;
+-    }
+-    
+-    /**
+-     * Return the max age of the sloth
+-     * 
+-     * @return the sloth's max age
+-     */
+-    protected int getMaxAge()
+-    {
+-        return MAX_AGE;
+-    }
+-    
+-    /**
+-     * Return the breeding probability of the sloth
+-     * 
+-     * @return the sloth's breeding probability
+-     */
+-    protected double getBreedingProbability()
+-    {
+-        return BREEDING_PROBABILITY;
+-    }
+-    
+-    /**
+-     * Return the max litter size of the sloth
+-     * 
+-     * @return the sloth's max litter size
+-     */
+-    protected int getMaxLitterSize()
+-    {
+-        return MAX_LITTER_SIZE;
+-    }
+-    
+-    /**
+-     * Return the max health of the sloth
+-     * 
+-     * @return the sloth's max health
+-     */
+-    protected int getMaxHealth()
+-    {
+-        return MAX_HEALTH;
+-    }
+-    
+-    /**
+-     * Creates a new Animal object for a newborn sloth
+-     * 
+-     * @return an Animal object for a newborn sloth
+-     */
+-    protected Animal createNewOrganism(boolean randomAge, Field field, Location location)
+-    {
+-        return new Sloth(randomAge, field, location);
++        super(randomAge, field, location, ATTRIBUTES);
+     }
+ }
+diff --git a/Species.java b/Species.java
+new file mode 100644
+index 0000000..a86ceec
+--- /dev/null
++++ b/Species.java
+@@ -0,0 +1,26 @@
++/**
++ * Identifiers for the different organism types in the simulation.
++ *
++ * @version 2022.03.02
++ */
++public enum Species
++{
++    HIPPOPOTAMUS("Hippopotamus"),
++    LEOPARD("Leopard"),
++    BEAR("Bear"),
++    MONKEY("Monkey"),
++    SLOTH("Sloth"),
++    PLANT("Plant");
++
++    private final String displayName;
++
++    Species(String displayName)
++    {
++        this.displayName = displayName;
++    }
++
++    public String getDisplayName()
++    {
++        return displayName;
++    }
++}

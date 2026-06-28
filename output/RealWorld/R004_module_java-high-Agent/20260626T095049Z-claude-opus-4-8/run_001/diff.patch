@@ -1,0 +1,899 @@
+diff --git a/Animal.java b/Animal.java
+index e9408dd..f4094a4 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -4,19 +4,25 @@ import java.util.stream.Collectors;
+ /**
+  * A class representing shared characteristics of animals.
+  *
++ * Concrete species supply their fixed characteristics as an {@link AnimalTraits}
++ * profile and implement {@link #createOffspring} to produce newborns; all of the
++ * common behaviour (ageing, hunger, movement, feeding, breeding and disease) lives
++ * here.
++ *
+  * @version 2022.03.02
+  */
+ public abstract class Animal extends Organism implements Actor
+ {
++    // Fixed characteristics of this animal's species.
++    protected final AnimalTraits traits;
+ 
+     protected int age;
+-    protected boolean isNocturnal;
+     protected int foodLevel;
+     protected Gender sex;
+ 
+     protected static final Random rand = Randomizer.getRandom();
+ 
+-    // An animal is either male or female 
++    // An animal is either male or female
+     protected enum Gender {
+         MALE,
+         FEMALE
+@@ -25,39 +31,39 @@ public abstract class Animal extends Organism implements Actor
+     private double RANDOM_CONTRACTION_RATE = 0.002;
+ 
+ 
+-    // Declaring abstract methods to obtain fields used by subclasses
+-    // These methods have been declared in order to use common methods in the Animal class, reducing repeatability
+-    protected abstract double BREEDING_AGE();
+-    protected abstract int MAX_LITTER_SIZE();
+-    protected abstract double BREEDING_PROBABILITY();
+-    protected abstract int MAX_AGE();
+-    protected abstract int MAX_FOOD_LEVEL();
+-    protected abstract Set<Class> DIET();
+-
+-
+     /**
+      * Create a new animal at location in field.
+      *
++     * @param traits The fixed characteristics of this animal's species.
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      * @param randomAge The animal's random starting age.
+-     * @param sex The animal's gender. 
++     * @param sex The animal's gender.
+      */
+-    public Animal(Field field, Location location, boolean randomAge, Gender sex)
++    public Animal(AnimalTraits traits, Field field, Location location, boolean randomAge, Gender sex)
+     {
+         super(field, location);
++        this.traits = traits;
+         this.sex = sex;
+         if(randomAge) {
+-            this.age = rand.nextInt(MAX_AGE());
+-            foodLevel = rand.nextInt(MAX_FOOD_LEVEL());
++            this.age = rand.nextInt(traits.getMaxAge());
++            foodLevel = rand.nextInt(traits.getMaxFoodLevel());
+         }
+         else {
+             this.age = 0;
+-            foodLevel = MAX_FOOD_LEVEL();
++            foodLevel = traits.getMaxFoodLevel();
+         }
+         randomlyContractDisease();
+     }
+ 
++    /**
++     * The food value an animal provides when eaten.
++     */
++    protected int getFoodValue()
++    {
++        return traits.getFoodValue();
++    }
++
+     /**
+      * Make this animal act - that is: make it do
+      * whatever it wants/needs to do.
+@@ -72,7 +78,7 @@ public abstract class Animal extends Organism implements Actor
+         if(isAlive()) {
+             giveBirth(newAnimals, environment);
+             // Move towards a source of food if found.
+-            Location newLocation = findFood();
++            Location newLocation = findFood(environment);
+             if(newLocation == null) {
+                 // No food found - try to move to a free location.
+                 newLocation = getField().freeAdjacentLocation(getLocation());
+@@ -91,7 +97,7 @@ public abstract class Animal extends Organism implements Actor
+                 getField().clear(getLocation());
+                 setLocation(adjacentGrassSpots.get(rand.nextInt(adjacentGrassSpots.size())));
+             }
+-            else {
++            else if (diesFromOvercrowding()) {
+                 // Overcrowding
+                 setDead();
+             }
+@@ -105,6 +111,18 @@ public abstract class Animal extends Organism implements Actor
+         }
+     }
+ 
++    /**
++     * Look for food adjacent to the current location, taking the environment
++     * into account. By default the environment is ignored; species whose
++     * foraging depends on conditions (e.g. weather) override this.
++     * @param environment The environment that the animal resides in.
++     * @return Where food was found, or null if it wasn't.
++     */
++    protected Location findFood(Environment environment)
++    {
++        return findFood();
++    }
++
+     /**
+      * Look for food adjacent to the current location.
+      * Only the first food is eaten.
+@@ -126,24 +144,24 @@ public abstract class Animal extends Organism implements Actor
+         }
+         Iterator<Location> it = adjacent.iterator();
+         // only eats if it's not full (food level less than max)
+-        while(it.hasNext() && foodLevel <= MAX_FOOD_LEVEL()) {
++        while(it.hasNext() && foodLevel <= traits.getMaxFoodLevel()) {
+             Location where = it.next();
+             Object animal = field.getObjectAt(where);
+-            if(animal != null && DIET().contains(animal.getClass())) 
++            if(animal != null && traits.getDiet().contains(animal.getClass()))
+             {
+                 Organism food = (Organism) animal;
+-                if (food.isDiseased() &&  food.getDisease().getDiseaseType() == DiseaseType.FOODBORNE && food.getDisease().getPropagationRate() <= rand.nextDouble()) 
++                if (food.isDiseased() &&  food.getDisease().getDiseaseType() == DiseaseType.FOODBORNE && food.getDisease().getPropagationRate() <= rand.nextDouble())
+                 {
+                     // contracts disease from food if it has a disease and that disease is foodborne
+                     setDisease(food.getDisease());
+                 }
+-                if(food.isAlive()) 
++                if(food.isAlive())
+                 {
+                     food.setDead();
+-                    int newFoodLevel = foodLevel + food.FOOD_VALUE();
++                    int newFoodLevel = foodLevel + food.getFoodValue();
+ 
+                     // caps the food level at the maximum
+-                    foodLevel = Math.min(newFoodLevel, MAX_FOOD_LEVEL());
++                    foodLevel = Math.min(newFoodLevel, traits.getMaxFoodLevel());
+ 
+                     return where;
+                 }
+@@ -155,7 +173,7 @@ public abstract class Animal extends Organism implements Actor
+ 
+     /**
+      * Returns true if an animal contracts a disease at birth.
+-     * Returns false if otherwise. 
++     * Returns false if otherwise.
+      */
+     protected void randomlyContractDisease()
+     {
+@@ -164,20 +182,49 @@ public abstract class Animal extends Organism implements Actor
+         }
+     }
+ 
++    /**
++     * Whether this animal dies when it cannot find anywhere to move (i.e. it is
++     * overcrowded). Most animals do; apex species may override this to survive.
++     * @return true if overcrowding is fatal for this species.
++     */
++    protected boolean diesFromOvercrowding()
++    {
++        return true;
++    }
++
+     /**
+      * Check whether this animal is to give birth at this step.
+-     * New births will be made into free adjacent locations.
++     * New births are made into free adjacent locations.
+      * @param newAnimals A list to return newly born animals.
+-     * @param environment The environment that the animal resides in. 
++     * @param environment The environment that the animal resides in.
++     */
++    protected void giveBirth(List<Actor> newAnimals, Environment environment)
++    {
++        // New animals are born into adjacent locations.
++        // Get a list of adjacent free locations.
++        Field field = getField();
++        List<Location> free = field.getFreeAdjacentLocations(getLocation());
++        int births = breed();
++        for(int b = 0; b < births && free.size() > 0; b++) {
++            Location loc = free.remove(0);
++            newAnimals.add(createOffspring(field, loc));
++        }
++    }
++
++    /**
++     * Create a single newborn of this species at the given location.
++     * @param field The field the newborn is placed in.
++     * @param location The location for the newborn.
++     * @return The newly created animal.
+      */
+-    protected abstract void giveBirth(List<Actor> newAnimals, Environment environment);
++    protected abstract Animal createOffspring(Field field, Location location);
+ 
+     /**
+      * Returns true if the animal is awake or not.
+      */
+     public boolean isAwake(Environment environment)
+     {
+-        if(isNocturnal){
++        if(traits.isNocturnal()){
+             return !environment.getTime().isDay();
+         }
+         return environment.getTime().isDay();
+@@ -191,8 +238,8 @@ public abstract class Animal extends Organism implements Actor
+     protected int breed()
+     {
+         int births = 0;
+-        if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY()) {
+-            births = rand.nextInt(MAX_LITTER_SIZE()) + 1;
++        if(canBreed() && rand.nextDouble() <= traits.getBreedingProbability()) {
++            births = rand.nextInt(traits.getMaxLitterSize()) + 1;
+             Animal mate = (Animal) getPotentialMates().get(rand.nextInt(getPotentialMates().size()));
+             if(mate.isDiseased() && mate.getDisease().getDiseaseType() == DiseaseType.SEXUAL){
+                 this.setDisease(mate.getDisease());
+@@ -203,16 +250,16 @@ public abstract class Animal extends Organism implements Actor
+ 
+     /**
+      * Returns true if the animal is able to breed.
+-     * Returns false if otherwise. 
++     * Returns false if otherwise.
+      */
+     protected boolean canBreed()
+     {
+-        return (age >= BREEDING_AGE() && getPotentialMates().size() > 0);
++        return (age >= traits.getBreedingAge() && getPotentialMates().size() > 0);
+     }
+ 
+     /**
+      * Returns a list of potential mates. Mates have to be
+-     * of a opposite gender. 
++     * of a opposite gender.
+      * @return List<Organism> A list of potential mates.
+      */
+     protected List<Organism> getPotentialMates()
+@@ -238,7 +285,7 @@ public abstract class Animal extends Organism implements Actor
+     protected void incrementAge()
+     {
+         this.age++;
+-        if(this.age > MAX_AGE()) {
++        if(this.age > traits.getMaxAge()) {
+             setDead();
+         }
+     }
+diff --git a/AnimalTraits.java b/AnimalTraits.java
+new file mode 100644
+index 0000000..11678c2
+--- /dev/null
++++ b/AnimalTraits.java
+@@ -0,0 +1,59 @@
++import java.util.Set;
++
++/**
++ * Immutable bundle of the fixed biological characteristics that define an
++ * animal species: breeding limits, lifespan, appetite, food value, activity
++ * period and diet.
++ *
++ * Previously every {@link Animal} subclass repeated these as a block of static
++ * constants together with a matching set of trivial accessor methods
++ * (e.g. {@code MAX_AGE} plus {@code MAX_AGE()}). Gathering them here lets each
++ * subclass declare its species profile once and removes that boilerplate from
++ * the hierarchy.
++ *
++ * @version 2022.03.02
++ */
++public class AnimalTraits
++{
++    // The age at which the animal can start to breed.
++    private final double breedingAge;
++    // The maximum number of births in a single litter.
++    private final int maxLitterSize;
++    // The likelihood of the animal breeding in a given step.
++    private final double breedingProbability;
++    // The age to which the animal can live.
++    private final int maxAge;
++    // The food level the animal can reach by eating.
++    private final int maxFoodLevel;
++    // The food value this animal provides when eaten.
++    private final int foodValue;
++    // Whether the animal is active at night rather than during the day.
++    private final boolean nocturnal;
++    // The set of organism classes this animal eats.
++    private final Set<Class> diet;
++
++    /**
++     * Create an immutable description of a species' characteristics.
++     */
++    public AnimalTraits(double breedingAge, int maxLitterSize, double breedingProbability,
++                        int maxAge, int maxFoodLevel, int foodValue, boolean nocturnal, Set<Class> diet)
++    {
++        this.breedingAge = breedingAge;
++        this.maxLitterSize = maxLitterSize;
++        this.breedingProbability = breedingProbability;
++        this.maxAge = maxAge;
++        this.maxFoodLevel = maxFoodLevel;
++        this.foodValue = foodValue;
++        this.nocturnal = nocturnal;
++        this.diet = diet;
++    }
++
++    public double getBreedingAge()         { return breedingAge; }
++    public int getMaxLitterSize()          { return maxLitterSize; }
++    public double getBreedingProbability() { return breedingProbability; }
++    public int getMaxAge()                 { return maxAge; }
++    public int getMaxFoodLevel()           { return maxFoodLevel; }
++    public int getFoodValue()              { return foodValue; }
++    public boolean isNocturnal()           { return nocturnal; }
++    public Set<Class> getDiet()            { return diet; }
++}
+diff --git a/Coyote.java b/Coyote.java
+index 1957143..069124c 100644
+--- a/Coyote.java
++++ b/Coyote.java
+@@ -7,32 +7,16 @@ import java.util.*;
+  */
+ public class Coyote extends Animal
+ {
+-    // Characteristics shared by all coyotes (class variables).
+-
+-    // The age at which a coyote can start to breed.
+-    private static final int BREEDING_AGE = 15;
+-    // The age to which a coyote can live.
+-    private static final int MAX_AGE = 150;
+-    // The likelihood of a coyote breeding.
+-    private static final double BREEDING_PROBABILITY = 0.4;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 2;
+-    // The food value of a single coyote
+-    private static final int FOOD_VALUE = 5;
+-    // The coyotes's food level which is increased by eating prey.
+-    private static final int MAX_FOOD_LEVEL = 15;
+-    // A set of organisms that a coyote consumes
+-    private static final Set<Class> DIET = new HashSet<>(Arrays.asList(Deer.class, Mouse.class));
+-
+-
+-    // Implementing abstract methods to return fields to be used by the superclass
+-    protected double BREEDING_AGE() { return BREEDING_AGE; }
+-    protected int MAX_LITTER_SIZE() { return MAX_LITTER_SIZE; }
+-    protected double BREEDING_PROBABILITY() { return BREEDING_PROBABILITY; }
+-    protected int MAX_AGE() { return MAX_AGE; }
+-    protected int MAX_FOOD_LEVEL() { return MAX_FOOD_LEVEL; }
+-    protected int FOOD_VALUE() { return FOOD_VALUE; }
+-    protected Set<Class> DIET() { return DIET; }
++    // Characteristics shared by all coyotes.
++    private static final AnimalTraits TRAITS = new AnimalTraits(
++            15,     // breeding age
++            2,      // max litter size
++            0.4,    // breeding probability
++            150,    // max age
++            15,     // max food level
++            5,      // food value
++            true,   // nocturnal
++            new HashSet<>(Arrays.asList(Deer.class, Mouse.class)));
+ 
+     /**
+      * Create a coyote. A coyote can be created as a new-born (age zero
+@@ -44,31 +28,12 @@ public class Coyote extends Animal
+      */
+     public Coyote(boolean randomAge, Field field, Location location, Gender sex)
+     {
+-        super(field, location, randomAge, sex);
+-        this.isNocturnal = true;
++        super(TRAITS, field, location, randomAge, sex);
+     }
+ 
+-    /**
+-     * Check whether this coyote is to give birth at this step.
+-     * New births will be made into free adjacent locations.
+-     * @param newCoyotes A list to return newly born coyotes.
+-     * @param environment The environment that the coyote resides in. 
+-     */
+-    protected void giveBirth(List<Actor> newCoyotes, Environment environment)
++    @Override
++    protected Animal createOffspring(Field field, Location location)
+     {
+-        // New coyotes are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+-        Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        int births = breed();
+-        for(int b = 0; b < births && free.size() > 0; b++) {
+-            Location loc = free.remove(0);
+-
+-            Gender sex = Randomizer.getRandomSex();
+-
+-            Coyote young = new Coyote(false, field, loc, sex);
+-            newCoyotes.add(young);
+-        }
++        return new Coyote(false, field, location, Randomizer.getRandomSex());
+     }
+-
+ }
+diff --git a/Deer.java b/Deer.java
+index ef24ca8..d4e4e3f 100644
+--- a/Deer.java
++++ b/Deer.java
+@@ -8,33 +8,16 @@ import java.util.*;
+  */
+ public class Deer extends Animal
+ {
+-    // Characteristics shared by all deers (class variables).
+-
+-    // The age at which a deer can start to breed.
+-    protected static final int BREEDING_AGE = 5;
+-    // The age to which a deer can live.
+-    private static final int MAX_AGE = 40;
+-    // The likelihood of a deer breeding.
+-    protected static final double BREEDING_PROBABILITY = 0.5;
+-    // The maximum number of births.
+-    protected static final int MAX_LITTER_SIZE = 2;
+-    // The deer's food level which is increased by eating grass.
+-    private static final int MAX_FOOD_LEVEL = 9;
+-    // The food value of a deer. 
+-    private static final int FOOD_VALUE = 4;
+-    // A set of organisms that a deer consumes
+-    private static final Set<Class> DIET = new HashSet<>(Arrays.asList(Grass.class));
+-
+-    // Implementing abstract methods to return fields to be used by the superclass
+-    protected double BREEDING_AGE() { return BREEDING_AGE; }
+-    protected int MAX_LITTER_SIZE() { return MAX_LITTER_SIZE; }
+-    protected double BREEDING_PROBABILITY() { return BREEDING_PROBABILITY; }
+-    protected int MAX_AGE() { return MAX_AGE; }
+-    protected int MAX_FOOD_LEVEL() { return MAX_FOOD_LEVEL; }
+-    protected int FOOD_VALUE() { return FOOD_VALUE; }
+-    protected Set<Class> DIET() { return DIET; }
+-
+-
++    // Characteristics shared by all deers.
++    private static final AnimalTraits TRAITS = new AnimalTraits(
++            5,      // breeding age
++            2,      // max litter size
++            0.5,    // breeding probability
++            40,     // max age
++            9,      // max food level
++            4,      // food value
++            false,  // nocturnal
++            new HashSet<>(Arrays.asList(Grass.class)));
+ 
+     /**
+      * Create a new deer. A deer may be created with age
+@@ -46,38 +29,21 @@ public class Deer extends Animal
+      */
+     public Deer(boolean randomAge, Field field, Location location, Gender sex)
+     {
+-        super(field, location, randomAge, sex);
+-        this.isNocturnal = false;
++        super(TRAITS, field, location, randomAge, sex);
+     }
+ 
+-
+     /**
+-     * Makes the deer stay awake regardless of the time of the day
+-     * Overrides the method in the Animal class that uses the isNocturnal field to determine if it is awake
++     * Makes the deer stay awake regardless of the time of the day.
++     * Overrides the method in the Animal class that uses nocturnality to determine if it is awake.
+      */
+     @Override
+     public boolean isAwake(Environment environment) {
+         return true;
+     }
+ 
+-    /**
+-     * Check whether this deer is ready to give birth at this step.
+-     * New births will be made into free adjacent locations.
+-     * @param newDeers A list to return newly born deers.
+-     * @param environment The environment that the deer resides in. 
+-     */
+-    protected void giveBirth(List<Actor> newDeers, Environment environment)
++    @Override
++    protected Animal createOffspring(Field field, Location location)
+     {
+-        // New deers are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+-        Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        int births = super.breed();
+-        for(int b = 0; b < births && free.size() > 0; b++) {
+-            Location loc = free.remove(0);
+-            Gender sex = Randomizer.getRandomSex();
+-            Deer young = new Deer(false, field, loc, sex);
+-            newDeers.add(young);
+-        }
++        return new Deer(false, field, location, Randomizer.getRandomSex());
+     }
+ }
+diff --git a/Eagle.java b/Eagle.java
+index d80a3bd..61f78b5 100644
+--- a/Eagle.java
++++ b/Eagle.java
+@@ -1,42 +1,26 @@
+-import java.util.Random;
+-import java.util.List;
+ import java.util.*;
+ 
+ /**
+  * A simple model of a eagle.
+  * Eagles age, move,contract diseases, eat prey, and die.
+  *
++ * As an apex species an eagle does not die from overcrowding, and it cannot
++ * forage while it is raining.
++ *
+  * @version 2022.03.02
+  */
+ public class Eagle extends Animal
+ {
+-     // Characteristics shared by all eagles (class variables).
+-
+-    // The age at which a eagle can start to breed.
+-    private static final int BREEDING_AGE = 15;
+-    // The age to which a eagle can live.
+-    private static final int MAX_AGE = 150;
+-    // The likelihood of a eagle breeding.
+-    private static final double BREEDING_PROBABILITY = 0.4;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 2;
+-    // The eagles's food level which is increased by eating prey.
+-    private static final int MAX_FOOD_LEVEL = 14;
+-    // A shared random number generator to control breeding.
+-    private static final Random rand = Randomizer.getRandom();
+-    // The food value of a single eagle.
+-    private static final int FOOD_VALUE = 5;
+-    // A set of organisms that a eagle consumes
+-    private static final Set<Class> DIET = new HashSet<>(Arrays.asList(Deer.class, Coyote.class, Mouse.class));
+-
+-    // Implementing abstract methods to return fields to be used by the superclass
+-    protected double BREEDING_AGE() { return BREEDING_AGE; }
+-    protected int MAX_LITTER_SIZE() { return MAX_LITTER_SIZE; }
+-    protected double BREEDING_PROBABILITY() { return BREEDING_PROBABILITY; }
+-    protected int MAX_AGE() { return MAX_AGE; }
+-    protected int MAX_FOOD_LEVEL() { return MAX_FOOD_LEVEL; }
+-    protected int FOOD_VALUE() { return FOOD_VALUE; }
+-    protected Set<Class> DIET() { return DIET; }
++    // Characteristics shared by all eagles.
++    private static final AnimalTraits TRAITS = new AnimalTraits(
++            15,     // breeding age
++            2,      // max litter size
++            0.4,    // breeding probability
++            150,    // max age
++            14,     // max food level
++            5,      // food value
++            false,  // nocturnal
++            new HashSet<>(Arrays.asList(Deer.class, Coyote.class, Mouse.class)));
+ 
+     /**
+      * Create a eagle. A eagle can be created as a new born (age zero
+@@ -48,83 +32,35 @@ public class Eagle extends Animal
+      */
+     public Eagle(boolean randomAge, Field field, Location location, Gender sex)
+     {
+-        super(field, location,randomAge,sex);
+-        this.isNocturnal = false;
++        super(TRAITS, field, location, randomAge, sex);
+     }
+ 
+-    
+-    /**
+-     * Check whether this eagle is to give birth at this step.
+-     * New births will be made into free adjacent locations.
+-     * @param newEagles A list to return newly born Eagles.
+-     * @param environment The environment that the eagle resides in. 
+-     */
+-    protected void giveBirth(List<Actor> newEagles, Environment environment)
++    @Override
++    protected Animal createOffspring(Field field, Location location)
+     {
+-        // New Eagles are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+-        Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        int births = breed();
+-        for(int b = 0; b < births && free.size() > 0; b++) {
+-            Location loc = free.remove(0);
+-            Gender sex = Randomizer.getRandomSex();
+-            Eagle young = new Eagle(false, field, loc, sex);
+-            newEagles.add(young);
+-        }
++        return new Eagle(false, field, location, Randomizer.getRandomSex());
+     }
+ 
+     /**
+-     * Make this animal act - that is: make it do
+-     * whatever it wants/needs to do.
+-     * @param newAnimals A list to receive newly born animals.
+-     * @param environment The environment that the eagle resides in. 
++     * Eagles sit above everyone else and so are not killed by overcrowding.
+      */
+-    public void act(List<Actor> newAnimals, Environment environment)
++    @Override
++    protected boolean diesFromOvercrowding()
+     {
+-        randomlyContractDisease();
+-        incrementAge();
+-        incrementHunger();
+-        if(isAlive()) {
+-            giveBirth(newAnimals, environment);
+-            // Move towards a source of food if found.
+-            Location newLocation = findFood(environment);
+-            if(newLocation == null) {
+-                // No food found - try to move to a free location.
+-                newLocation = getField().freeAdjacentLocation(getLocation());
+-            }
+-            List<Location> adjacentGrassSpots = getField().adjacentLocationsWithSpecies(getLocation(), Grass.class);
+-
+-            if(newLocation != null) {
+-                setLocation(newLocation);
+-            }
+-            else if (adjacentGrassSpots.size() > 0) {
+-                getField().clear(getLocation());
+-                setLocation(adjacentGrassSpots.get(rand.nextInt(adjacentGrassSpots.size())));
+-            }
+-            // removing overcrowding for eagles since they're above everyone
+-
+-            if(isDiseased() && getDisease().getLethalityRate() <= rand.nextDouble()){
+-                // every step, check if the Animal is diseased
+-                // if it is Diseased, and a random double is less than the lethality rate, the Animal dies
+-                setDead();
+-            }
+-
+-        }
++        return false;
+     }
+ 
+-
+     /**
+-     * Additional functionality that doesn't allow eagles to find food while it's raining
+-     * @param environment The environment that the eagle resides in. 
+-     * @return Location Where food was found, or null if it wasn't.
++     * Eagles cannot find food while it is raining.
++     * @param environment The environment that the eagle resides in.
++     * @return Where food was found, or null if it wasn't.
+      */
++    @Override
+     protected Location findFood(Environment environment)
+     {
+-        while(environment.getWeather().getCurrentWeather() != WeatherType.RAINING) {
+-            return(super.findFood());
++        if (environment.getWeather().getCurrentWeather() != WeatherType.RAINING) {
++            return super.findFood();
+         }
+         return null;
+     }
+-
+ }
+diff --git a/Grass.java b/Grass.java
+index 3919b6d..ac1e2f8 100644
+--- a/Grass.java
++++ b/Grass.java
+@@ -14,7 +14,7 @@ public class Grass extends Plant
+      * Returns the food value of the grass.
+      * @return int The food value of the grass.
+      */
+-    protected int FOOD_VALUE()
++    protected int getFoodValue()
+     {
+         return FOOD_VALUE;
+     }
+diff --git a/Mouse.java b/Mouse.java
+index e2e0ea9..1711de7 100644
+--- a/Mouse.java
++++ b/Mouse.java
+@@ -1,44 +1,24 @@
+-import java.util.List;
+-import java.util.Random;
+ import java.util.*;
+ 
+ /**
+  * A simple model of a mouse.
+- * Mice can age, move, contract diseases, eat plants and die. 
++ * Mice can age, move, contract diseases, eat plants and die.
+  *
+  * @version 2022.03.02
+  */
+ public class Mouse extends Animal
+ {
+-    // Characteristics shared by all Mice (class variables).
++    // Characteristics shared by all mice.
++    private static final AnimalTraits TRAITS = new AnimalTraits(
++            5,      // breeding age
++            4,      // max litter size
++            0.5,    // breeding probability
++            40,     // max age
++            9,      // max food level
++            2,      // food value
++            false,  // nocturnal
++            new HashSet<>(Arrays.asList(Grass.class)));
+ 
+-    // The age at which a Mouse can start to breed.
+-    private static final int BREEDING_AGE = 5;
+-    // The age to which a Mouse can live.
+-    private static final int MAX_AGE = 40;
+-    // The likelihood of a Mouse breeding.
+-    private static final double BREEDING_PROBABILITY = 0.5;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 4;
+-    // A shared random number generator to control breeding.
+-    private static final Random rand = Randomizer.getRandom();
+-    // The mouse's food level which is increased by eating prey.
+-    private static final int MAX_FOOD_LEVEL = 9;
+-    // The food value of a single mouse.
+-    private static final int FOOD_VALUE = 2;
+-    // A set of organisms that a mouse consumes
+-    private static final Set<Class> DIET = new HashSet<>(Arrays.asList(Grass.class));
+-
+-    protected double BREEDING_AGE() { return BREEDING_AGE; }
+-    protected int MAX_LITTER_SIZE() { return MAX_LITTER_SIZE; }
+-    protected double BREEDING_PROBABILITY() { return BREEDING_PROBABILITY; }
+-    
+-    protected int MAX_AGE() { return MAX_AGE; }
+-    protected int MAX_FOOD_LEVEL() { return MAX_FOOD_LEVEL; }
+-    protected int FOOD_VALUE() { return FOOD_VALUE; }
+-    protected Set<Class> DIET() { return DIET; }
+-
+-    
+     /**
+      * Create a new Mouse. A Mouse may be created with age
+      * zero (a new born) or with a random age.
+@@ -49,30 +29,16 @@ public class Mouse extends Animal
+      */
+     public Mouse(boolean randomAge, Field field, Location location, Gender sex)
+     {
+-        super(field, location, randomAge, sex);
+-        this.isNocturnal = false;
++        super(TRAITS, field, location, randomAge, sex);
+     }
+ 
+-
+     /**
+-     * Check whether this mouse is to give birth at this step.
+-     * New births will be made into free adjacent locations.
+-     * @param newMouses A list to return newly born mice.
+-     * @param environment The environment that mouse resides in. 
++     * Newborn mice inherit the gender of their parent (unlike most species,
++     * whose offspring gender is drawn at random).
+      */
+-    protected void giveBirth(List<Actor> newMouses, Environment environment)
++    @Override
++    protected Animal createOffspring(Field field, Location location)
+     {
+-        // New Mouses are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+-        Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        int births = breed();
+-        for(int b = 0; b < births && free.size() > 0; b++) {
+-            Location loc = free.remove(0);
+-            Mouse young = new Mouse(false, field, loc, sex);
+-            newMouses.add(young);
+-        }
++        return new Mouse(false, field, location, sex);
+     }
+-
+-
+ }
+diff --git a/Organism.java b/Organism.java
+index f4974e7..c0c3e02 100644
+--- a/Organism.java
++++ b/Organism.java
+@@ -19,7 +19,7 @@ public abstract class Organism {
+     private boolean hasDisease = false;
+ 
+ 
+-    protected abstract int FOOD_VALUE();
++    protected abstract int getFoodValue();
+ 
+     /**
+      * Creates a new organism. 
+diff --git a/Plant.java b/Plant.java
+index d5520d5..7877cee 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -14,7 +14,7 @@ public abstract class Plant extends Organism implements Actor
+ 
+ 
+     // Implementing abstract methods to return fields to be used by the superclass
+-    public int STEPS_PER_STAGE(){ return STEPS_PER_STAGE; }
++    public int getStepsPerStage(){ return STEPS_PER_STAGE; }
+     protected static final Random rand = Randomizer.getRandom();
+     
+     
+diff --git a/Simulator.java b/Simulator.java
+index e3503eb..30944b4 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -246,7 +246,7 @@ public class Simulator
+             }
+ 
+             if(actor instanceof Plant){
+-                if(step % ((Plant) actor).STEPS_PER_STAGE()==0){
++                if(step % ((Plant) actor).getStepsPerStage()==0){
+                     ((Plant) actor).incrementGrowth();
+                 }
+             }
+diff --git a/Wolf.java b/Wolf.java
+index 610b4ed..4ab6621 100644
+--- a/Wolf.java
++++ b/Wolf.java
+@@ -1,5 +1,3 @@
+-import java.util.Random;
+-import java.util.List;
+ import java.util.*;
+ 
+ /**
+@@ -10,36 +8,16 @@ import java.util.*;
+  */
+ public class Wolf extends Animal
+ {
+-    private Time time;
+-    private Weather weather;
+-
+-    // Characteristics shared by all wolves (class variables).
+-
+-    // The age at which a wolf can start to breed.
+-    private static final int BREEDING_AGE = 15;
+-    // The age to which a wolf can live.
+-    private static final int MAX_AGE = 150;
+-    // The likelihood of a wolf breeding.
+-    private static final double BREEDING_PROBABILITY = 0.3;
+-    // The maximum number of births.
+-    private static final int MAX_LITTER_SIZE = 2;
+-    // The wolf's food level which is increased by eating prey.
+-    private static final int MAX_FOOD_LEVEL = 15;
+-    // A shared random number generator to control breeding.
+-    private static final Random rand = Randomizer.getRandom();
+-    // The food value of a single wolf.
+-    private static final int FOOD_VALUE = 6;
+-    // A set of organisms that a wolf consumes
+-    private static final Set<Class> DIET = new HashSet<>(Arrays.asList(Deer.class, Mouse.class, Coyote.class));
+-
+-    // Implementing abstract methods to return fields to be used by the superclass
+-    protected double BREEDING_AGE() { return BREEDING_AGE; }
+-    protected int MAX_LITTER_SIZE() { return MAX_LITTER_SIZE; }
+-    protected double BREEDING_PROBABILITY() { return BREEDING_PROBABILITY; }
+-    protected int MAX_AGE() { return MAX_AGE; }
+-    protected int MAX_FOOD_LEVEL() { return MAX_FOOD_LEVEL; }
+-    protected int FOOD_VALUE() { return FOOD_VALUE; }
+-    protected Set<Class> DIET() { return DIET; }
++    // Characteristics shared by all wolves.
++    private static final AnimalTraits TRAITS = new AnimalTraits(
++            15,     // breeding age
++            2,      // max litter size
++            0.3,    // breeding probability
++            150,    // max age
++            15,     // max food level
++            6,      // food value
++            true,   // nocturnal
++            new HashSet<>(Arrays.asList(Deer.class, Mouse.class, Coyote.class)));
+ 
+     /**
+      * Create a wolf. A wolf can be created as a new born (age zero
+@@ -51,31 +29,12 @@ public class Wolf extends Animal
+      */
+     public Wolf(boolean randomAge, Field field, Location location, Gender sex)
+     {
+-        super(field, location, randomAge, sex);
+-        this.isNocturnal = true;
++        super(TRAITS, field, location, randomAge, sex);
+     }
+ 
+-    /**
+-     * Check whether this wolf is to give birth at this step.
+-     * New births will be made into free adjacent locations.
+-     * @param newWolves A list to return newly born wolves.
+-     * @param environment The environment that the wolf resides in. 
+-     */
+-    protected void giveBirth(List<Actor> newWolves, Environment environment)
++    @Override
++    protected Animal createOffspring(Field field, Location location)
+     {
+-        // New wolves are born into adjacent locations.
+-        // Get a list of adjacent free locations.
+-        Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        int births = breed();
+-        for(int b = 0; b < births && free.size() > 0; b++) {
+-            Location loc = free.remove(0);
+-            Gender sex = Randomizer.getRandomSex();
+-            Wolf young = new Wolf(false, field, loc, sex);
+-            newWolves.add(young);
+-        }
++        return new Wolf(false, field, location, Randomizer.getRandomSex());
+     }
+-
+-
+-
+ }

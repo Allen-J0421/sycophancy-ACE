@@ -1,0 +1,351 @@
+diff --git a/Actor.java b/Actor.java
+index c625205..7eed02e 100644
+--- a/Actor.java
++++ b/Actor.java
+@@ -14,4 +14,38 @@ interface Actor
+      * @param newActors A list to receive any actors relevant to action
+      */
+     abstract public void act(List<Actor> actorsList);
++
++    /**
++     * Respond to rain. Physical entities gain water/volume; other actors
++     * (weather, disease) ignore it.
++     */
++    default void onRain() { }
++
++    /**
++     * Respond to fog. Physical entities react in their own way; other
++     * actors ignore it.
++     */
++    default void onFog() { }
++
++    /**
++     * Respond to a heatwave. Physical entities lose water/volume; other
++     * actors ignore it.
++     */
++    default void onHeatwave() { }
++
++    /**
++     * Whether this actor is allowed to act at the current time of day.
++     * Most actors always act; nocturnal animals are the exception.
++     * @param isNight Whether it is currently night time.
++     * @return true if the actor may act this step.
++     */
++    default boolean canActNow(boolean isNight) { return true; }
++
++    /**
++     * Whether this actor has finished participating in the simulation and
++     * should be removed from the actor list (a dead organism, an emptied
++     * water source). Most actors persist.
++     * @return true if the actor should be removed.
++     */
++    default boolean isExpired() { return false; }
+ }
+\ No newline at end of file
+diff --git a/Animal.java b/Animal.java
+index 0362dcd..9c8546f 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -328,7 +328,25 @@ public abstract class Animal extends Organism
+     public void setSleepStatus(){
+         sleeping = ! sleeping;
+     }
+-    
++
++    /**
++     * Fog stops an animal behaving normally: instead of gaining water it
++     * is sent to sleep.
++     */
++    public void onFog() {
++        setSleepStatus();
++    }
++
++    /**
++     * An animal can only act when the time of day matches its habits:
++     * nocturnal animals act at night, others act during the day.
++     * @param isNight Whether it is currently night time.
++     * @return true if this animal may act this step.
++     */
++    public boolean canActNow(boolean isNight) {
++        return isNight == isNocturnal();
++    }
++
+     /**
+      * @return Returns list of prey for each animal
+      */
+diff --git a/Organism.java b/Organism.java
+index 06452b4..ad1d358 100644
+--- a/Organism.java
++++ b/Organism.java
+@@ -160,6 +160,28 @@ public abstract class Organism extends FieldOccupant implements Actor
+         return age;
+     }
+     
++    /**
++     * Rain raises every organism's water level.
++     */
++    public void onRain() {
++        setWaterLevel(getWaterLevel() + 5);
++    }
++
++    /**
++     * A heatwave halves every organism's water level.
++     */
++    public void onHeatwave() {
++        setWaterLevel(getWaterLevel() / 2);
++    }
++
++    /**
++     * An organism leaves the simulation once it is no longer alive.
++     * @return true if this organism is dead.
++     */
++    public boolean isExpired() {
++        return !isAlive();
++    }
++
+     /**
+      * When an organism's infection runs its course, the organism dies.
+      */
+diff --git a/Plant.java b/Plant.java
+index 2e7dc13..1f7bf8f 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -36,6 +36,13 @@ public abstract class Plant extends Organism
+         super.act(newPlants);
+     }
+     
++    /**
++     * Fog raises a plant's water level slightly.
++     */
++    public void onFog() {
++        setWaterLevel(getWaterLevel() + 2);
++    }
++
+     /**
+      * Reduces the current water level of the plant by 1 and updates it.
+      * Checks if water level is 0. If it does, the plant dies.
+diff --git a/Simulator.java b/Simulator.java
+index 2aa93d0..2d37703 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -44,6 +44,8 @@ public class Simulator
+     private SimulatorView view;
+     // Whether it is currently day or night - determines each animal's behaviour
+     private boolean nightTime;
++    // The weather actor driving the simulation's weather events.
++    private Weather weather;
+     
+     /**
+      * Construct a simulation field with default size.
+@@ -123,52 +125,36 @@ public class Simulator
+         }
+         
+         // Provide space for newborn organisms
+-        List<Actor> newOrganisms = new ArrayList<>();   
++        List<Actor> newOrganisms = new ArrayList<>();
+ 
+-        Weather weather = null;
+-        
+         // Let all actors act
+         Iterator<Actor> it = actors.iterator();
+         while(it.hasNext()) {
+-            boolean canAct = true;
+             Actor actor = it.next();
+-            if (actor instanceof Weather) {
+-                weather = (Weather) actor;
+-            }
+             if (actor instanceof Organism) {
+-                // low chance of each animal being infected wiht a disease
++                // Organisms may catch a disease, only act when the time of
++                // day suits them, and breed into the newborn collector so
++                // their young are not visited this same step.
+                 generateDisease(actor);
+-                Organism organism = (Organism) actor;
+-                if (organism instanceof Animal) {
+-                    Animal animal = (Animal) organism;   
+-                    // animals only act during certain times of day (i.e. if day but nocturnal, won't act)
+-                    if (nightTime != animal.isNocturnal()) {
+-                        canAct = false;
+-                    }
+-                }
+-                if (canAct) {
++                if (actor.canActNow(nightTime)) {
+                     actor.act(newOrganisms);
+                 }
+-                if(!(organism.isAlive())) {
+-                    it.remove();
+-                }
+             }
+             else {
+-                actor.act(actors);  
++                // Environmental actors (weather, disease) operate on the
++                // live actor list.
++                actor.act(actors);
+             }
+-            
+-            // Removes any empty water sources from the field
+-            if (actor instanceof WaterSources) {
+-                WaterSources water = (WaterSources) actor;
+-                // if a water source is empty, remove it from simulation
+-                if (water.isEmpty()) {
+-                    it.remove();
+-                }
++
++            // Remove anything that has left the simulation: a dead organism
++            // or an emptied water source.
++            if (actor.isExpired()) {
++                it.remove();
+             }
+         }
+         // Add the newly born animals to the main lists.
+-        actors.addAll(newOrganisms);      
+-        
++        actors.addAll(newOrganisms);
++
+         // If it has rained, create new water
+         if (weather != null && weather.generateNewWater()) {
+             generateWater();
+@@ -206,8 +192,8 @@ public class Simulator
+         Disease leptospirosis = new Leptospirosis(field);
+         diseases.addAll(Arrays.asList(covid, leptospirosis));
+         
+-        Weather weather = new Weather(this);
+-        
++        weather = new Weather(this);
++
+         actors.addAll(diseases);
+         actors.add(weather);
+         for(int row = 0; row < field.getDepth(); row++) {
+diff --git a/WaterSources.java b/WaterSources.java
+index 648ee9f..cd35792 100644
+--- a/WaterSources.java
++++ b/WaterSources.java
+@@ -37,6 +37,35 @@ public abstract class WaterSources extends FieldOccupant implements Actor
+ 
+     }
+ 
++    /**
++     * Rain increases a water source's volume.
++     */
++    public void onRain() {
++        setVolume(getVolume() + 10);
++    }
++
++    /**
++     * Fog increases a water source's volume slightly.
++     */
++    public void onFog() {
++        setVolume(getVolume() + 2);
++    }
++
++    /**
++     * A heatwave halves a water source's volume.
++     */
++    public void onHeatwave() {
++        setVolume(getVolume() / 2);
++    }
++
++    /**
++     * A water source leaves the simulation once it has run dry.
++     * @return true if this water source is empty.
++     */
++    public boolean isExpired() {
++        return isEmpty();
++    }
++
+     /**
+      * When a water source's infection runs its course it is cured, since
+      * infection does not last forever in water.
+diff --git a/Weather.java b/Weather.java
+index 7638974..7eefb7a 100644
+--- a/Weather.java
++++ b/Weather.java
+@@ -1,7 +1,6 @@
+ import java.util.Random;
+ import java.util.List;
+ import java.util.Iterator;
+-import java.util.ArrayList;
+ 
+ /**
+  * Models behaviour of simple weather conditions in the simulation.
+@@ -59,28 +58,13 @@ public class Weather implements Actor
+         //it will now rain for 3 steps
+         int current = simulator.getStep();
+         int stop = current + 3;
+-        ArrayList<WaterSources> newWater = new ArrayList<>();
+         while (current <= stop) {
+             //iterate over all actors in the simulation
+             Iterator<Actor> it = actorsList.iterator();
+             while(it.hasNext()) {
+                 Actor actor = it.next();
+-                //add rain water value to each actor's water level
+-                if (actor instanceof Plant) {
+-                    Plant plant = (Plant) actor;
+-                    int newWaterLevel = plant.getWaterLevel() + 5;
+-                    plant.setWaterLevel(newWaterLevel);
+-                }
+-                else if (actor instanceof Animal) {
+-                    Animal animal = (Animal) actor;
+-                    int newWaterLevel = animal.getWaterLevel() + 5;
+-                    animal.setWaterLevel(newWaterLevel);
+-                }
+-                else if (actor instanceof WaterSources){
+-                    WaterSources source = (WaterSources) actor;
+-                    int newVolume = source.getVolume() + 10;
+-                    source.setVolume(newVolume);
+-                }
++                //each actor responds to the rain in its own way
++                actor.onRain();
+                 current++;
+             }
+         }
+@@ -103,22 +87,8 @@ public class Weather implements Actor
+             Iterator<Actor> it = actorsList.iterator();
+             while(it.hasNext()) {
+                 Actor actor = it.next();
+-                //plant's & water sources' water levels increase a bit
+-                if (actor instanceof Plant) {
+-                    Plant plant = (Plant) actor;
+-                    int newWaterLevel = plant.getWaterLevel() + 2;
+-                    plant.setWaterLevel(newWaterLevel);
+-                }
+-                else if (actor instanceof Animal) {
+-                    //animals can't do anything
+-                    Animal animal = (Animal) actor;
+-                    animal.setSleepStatus();
+-                }
+-                else if (actor instanceof WaterSources){
+-                    WaterSources source = (WaterSources) actor;
+-                    int newVolume = source.getVolume() + 2;
+-                    source.setVolume(newVolume);
+-                }
++                //each actor responds to the fog in its own way
++                actor.onFog();
+                 current++;
+             }
+         }
+@@ -139,22 +109,8 @@ public class Weather implements Actor
+             Iterator<Actor> it = actorsList.iterator();
+             while(it.hasNext()) {
+                 Actor actor = it.next();
+-                //water value halved by 2 for all actors
+-                if (actor instanceof Plant) {
+-                    Plant plant = (Plant) actor;
+-                    int newWaterLevel = plant.getWaterLevel() / 2;
+-                    plant.setWaterLevel(newWaterLevel);
+-                }
+-                else if (actor instanceof Animal) {
+-                    Animal animal = (Animal) actor;
+-                    int newWaterLevel = animal.getWaterLevel() / 2;
+-                    animal.setWaterLevel(newWaterLevel);
+-                }
+-                else if (actor instanceof WaterSources){
+-                    WaterSources source = (WaterSources) actor;
+-                    int newVolume = source.getVolume() / 2;
+-                    source.setVolume(newVolume);
+-                }
++                //each actor responds to the heatwave in its own way
++                actor.onHeatwave();
+                 current++;
+             }
+         }

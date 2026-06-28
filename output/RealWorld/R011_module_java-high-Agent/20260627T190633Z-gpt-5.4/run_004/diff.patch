@@ -1,0 +1,305 @@
+diff --git a/Actor.java b/Actor.java
+index 25ea57b..4461f4d 100644
+--- a/Actor.java
++++ b/Actor.java
+@@ -40,7 +40,6 @@ public abstract class Actor
+         alive = true;
+         this.field = field;
+         this.location = location;
+-        field.place(this, location);
+         this.time = time;
+         setDiseases = new HashSet<>();
+     }
+@@ -106,6 +105,16 @@ public abstract class Actor
+         field.place(this, newLocation);
+     }
+ 
++    /**
++     * Register this actor in its current field location.
++     */
++    protected final void placeInField()
++    {
++        if(field != null && location != null) {
++            field.place(this, location);
++        }
++    }
++
+     /**
+      * Return the actor's field.
+      * @return The actor's field.
+diff --git a/Animal.java b/Animal.java
+index 1ef96c7..df46aa7 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -255,7 +255,9 @@ public abstract class Animal extends Actor
+      */
+     protected final Animal birth(Location loc, Set<Disease> parentDiseases)
+     {
+-        return profile.factory.create(getTime(), getField(), loc, parentDiseases);
++        Animal young = profile.factory.create(getTime(), getField(), loc, parentDiseases);
++        young.placeInField();
++        return young;
+     }
+ 
+     /**
+diff --git a/Field.java b/Field.java
+index 0b278b1..1f3283c 100644
+--- a/Field.java
++++ b/Field.java
+@@ -328,13 +328,30 @@ public class Field
+             return false;
+         }
+ 
+-        if(actor.canMoveOnLand() && actor.canMoveOnWater()) {
++        return canOccupy(actor.canMoveOnLand(), actor.canMoveOnWater(), location);
++    }
++
++    /**
++     * Returns whether an actor with the given movement capabilities can occupy
++     * the specified location.
++     * @param canGoLand Whether the actor can survive on land.
++     * @param canGoWater Whether the actor can survive in water.
++     * @param location The location being checked.
++     * @return true if the actor can survive at the location.
++     */
++    public boolean canOccupy(boolean canGoLand, boolean canGoWater, Location location)
++    {
++        if(location == null) {
++            return false;
++        }
++
++        if(canGoLand && canGoWater) {
+             return true;
+         }
+ 
+         boolean underWater = isUnderWater(location.getRow(), location.getCol());
+-        return (underWater && actor.canMoveOnWater())
+-            || (!underWater && actor.canMoveOnLand());
++        return (underWater && canGoWater)
++            || (!underWater && canGoLand);
+     }
+ 
+     /**
+diff --git a/Plant.java b/Plant.java
+index 51f08d4..1404257 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -137,7 +137,9 @@ public abstract class Plant extends Actor
+      */
+     protected final Plant birth(Location loc, Set<Disease> parentDiseases)
+     {
+-        return profile.factory.create(getTime(), getField(), loc, parentDiseases);
++        Plant young = profile.factory.create(getTime(), getField(), loc, parentDiseases);
++        young.placeInField();
++        return young;
+     }
+ 
+     /**
+diff --git a/Simulator.java b/Simulator.java
+index 77c0589..f235afe 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -3,10 +3,6 @@ import java.util.List;
+ import java.util.ArrayList;
+ import java.util.Iterator;
+ import java.awt.Color;
+-import java.util.Map;
+-import java.util.HashMap;
+-import java.util.Set;
+-import java.util.HashSet;
+ 
+ /**
+  * A simple predator-prey simulator, based on a rectangular field
+@@ -16,6 +12,28 @@ import java.util.HashSet;
+  */
+ public class Simulator
+ {
++    private interface ActorCreator
++    {
++        Actor create(Location location);
++    }
++
++    private static class ActorCreationRule
++    {
++        private final double probability;
++        private final boolean canGoLand;
++        private final boolean canGoWater;
++        private final ActorCreator creator;
++
++        private ActorCreationRule(double probability, boolean canGoLand, boolean canGoWater,
++                                  ActorCreator creator)
++        {
++            this.probability = probability;
++            this.canGoLand = canGoLand;
++            this.canGoWater = canGoWater;
++            this.creator = creator;
++        }
++    }
++
+     // Constants representing configuration information for the simulation.
+     // The default width for the grid.
+     private static final int DEFAULT_WIDTH = 250;
+@@ -23,8 +41,8 @@ public class Simulator
+     private static final int DEFAULT_DEPTH = 250;
+     // List of actors in the field.
+     private List<Actor> actors;
+-    // The probabilities that actors will be created in any given grid position.
+-    private Map<Actor,Double> actorCreationProb; 
++    // The creation rules for actors in any given grid position.
++    private List<ActorCreationRule> actorCreationRules; 
+     // List of diseases in the simulation.
+     public static final List<Disease> diseases = createDiseases();
+     // The current state of the field.
+@@ -63,7 +81,7 @@ public class Simulator
+         actors = new ArrayList<>();
+         field = new Field(depth, width);
+         time = new Time(3);
+-        actorCreationProb = createActorCreationProb();
++        actorCreationRules = createActorCreationRules();
+         weatherCond = WeatherCond.Sunny; //Sunny weather is default 
+ 
+         // Create a view of the state of each location in the field.
+@@ -75,6 +93,7 @@ public class Simulator
+         view.setColor(Alligator.class, Color.LIGHT_GRAY);
+         view.setColor(Salamander.class, Color.MAGENTA);
+         view.setColor(Catfish.class, Color.BLACK);
++        view.display();
+ 
+         
+         weatherCond.setTime(time);
+@@ -90,20 +109,52 @@ public class Simulator
+      * and a value of the creation proability.
+      * @return The actor creation prbability Map.
+      */
+-    private Map<Actor,Double> createActorCreationProb()
++    private List<ActorCreationRule> createActorCreationRules()
+     {
+-        Map<Actor,Double> tempMap = new HashMap<>();
+-        Location location = new Location(0, 0);
+-        tempMap.put(new Grass(time, field, location),0.8);
+-        tempMap.put(new Water_Fern(time, field, location),0.9);
+-        tempMap.put(new Salamander(time, field, location),0.5);
+-        tempMap.put(new Catfish(time, field, location),0.7);
+-        tempMap.put(new Lemur(time, field, location),0.45);
+-        tempMap.put(new Panther(time, field, location),0.3);
+-        tempMap.put(new Alligator(time, field, location),0.25);
+-        
+-        
+-        return tempMap;
++        List<ActorCreationRule> rules = new ArrayList<>();
++        rules.add(new ActorCreationRule(0.8, true, false, new ActorCreator() {
++            public Actor create(Location location)
++            {
++                return new Grass(time, field, location);
++            }
++        }));
++        rules.add(new ActorCreationRule(0.9, false, true, new ActorCreator() {
++            public Actor create(Location location)
++            {
++                return new Water_Fern(time, field, location);
++            }
++        }));
++        rules.add(new ActorCreationRule(0.5, true, true, new ActorCreator() {
++            public Actor create(Location location)
++            {
++                return new Salamander(time, field, location);
++            }
++        }));
++        rules.add(new ActorCreationRule(0.7, false, true, new ActorCreator() {
++            public Actor create(Location location)
++            {
++                return new Catfish(time, field, location);
++            }
++        }));
++        rules.add(new ActorCreationRule(0.45, true, false, new ActorCreator() {
++            public Actor create(Location location)
++            {
++                return new Lemur(time, field, location);
++            }
++        }));
++        rules.add(new ActorCreationRule(0.3, true, false, new ActorCreator() {
++            public Actor create(Location location)
++            {
++                return new Panther(time, field, location);
++            }
++        }));
++        rules.add(new ActorCreationRule(0.25, true, true, new ActorCreator() {
++            public Actor create(Location location)
++            {
++                return new Alligator(time, field, location);
++            }
++        }));
++        return rules;
+     }
+ 
+     /**
+@@ -211,10 +262,12 @@ public class Simulator
+         field.clear();
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+-                for (Actor actor : actorCreationProb.keySet()){
++                for (ActorCreationRule rule : actorCreationRules){
+                     Location location = new Location(row, col);
+-                    if(rand.nextDouble() <= actorCreationProb.get(actor) && field.canOccupy(actor, location)) {
+-                        Actor newActor = actor.birth(new Location(row, col));
++                    if(rand.nextDouble() <= rule.probability
++                       && field.canOccupy(rule.canGoLand, rule.canGoWater, location)) {
++                        Actor newActor = rule.creator.create(location);
++                        newActor.placeInField();
+                         actors.add(newActor);
+                         break;
+                     }
+diff --git a/SimulatorView.java b/SimulatorView.java
+index c61c5b7..8bb116e 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -27,6 +27,7 @@ public class SimulatorView extends JFrame
+     private final String STEP_PREFIX = "Step: ";
+     private final String POPULATION_PREFIX = "Population: ";
+     private final String DISEASE_PREFIX = "Infected Actors: ";
++    private boolean initialized;
+     private JLabel stepLabel, population, infoLabel;
+     private FieldView fieldView;
+ 
+@@ -45,23 +46,31 @@ public class SimulatorView extends JFrame
+         super("Fox and Rabbit Simulation");
+         stats = new FieldStats();
+         colors = new LinkedHashMap<>();
++        initialized = false;
+ 
+         stepLabel = new JLabel(STEP_PREFIX, JLabel.CENTER);
+         infoLabel = new JLabel("  ", JLabel.CENTER);
+         population = new JLabel(POPULATION_PREFIX, JLabel.CENTER);
+ 
+-        setLocation(100, 50);
+-
+         fieldView = new FieldView(height, width);
++    }
+ 
+-        Container contents = getContentPane();
+-
+-        JPanel infoPane = new JPanel(new BorderLayout());
+-        infoPane.add(stepLabel, BorderLayout.WEST);
+-        infoPane.add(infoLabel, BorderLayout.CENTER);
+-        contents.add(infoPane, BorderLayout.NORTH);
+-        contents.add(fieldView, BorderLayout.CENTER);
+-        contents.add(population, BorderLayout.SOUTH);
++    /**
++     * Display the simulation window.
++     */
++    public void display()
++    {
++        if(!initialized) {
++            Container contents = getContentPane();
++            JPanel infoPane = new JPanel(new BorderLayout());
++            infoPane.add(stepLabel, BorderLayout.WEST);
++            infoPane.add(infoLabel, BorderLayout.CENTER);
++            contents.add(infoPane, BorderLayout.NORTH);
++            contents.add(fieldView, BorderLayout.CENTER);
++            contents.add(population, BorderLayout.SOUTH);
++            initialized = true;
++        }
++        setLocation(100, 50);
+         pack();
+         setVisible(true);
+     }

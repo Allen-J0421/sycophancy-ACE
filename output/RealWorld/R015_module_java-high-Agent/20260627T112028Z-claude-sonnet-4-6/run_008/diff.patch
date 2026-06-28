@@ -1,0 +1,259 @@
+diff --git a/Counter.java b/Counter.java
+index c7f40a5..e38e427 100644
+--- a/Counter.java
++++ b/Counter.java
+@@ -1,59 +1,38 @@
+-import java.awt.Color;
+-
+ /**
+- * Provide a counter for a participant in the simulation.
+- * This includes an identifying string and a count of how
+- * many participants of this type currently exist within 
+- * the simulation.
++ * An immutable snapshot of the population count for one class of simulation
++ * participant.
++ *
++ * Instances are created exclusively by {@link CounterRegistry#snapshot()} and
++ * carry a fixed count value.  All counting operations (increment, reset) are
++ * the responsibility of {@link CounterRegistry}; this class is a read-only
++ * data container.
+  *
+  * @version 2016.02.29
+  */
+ public class Counter
+ {
+-    // A name for this type of simulation participant
+-    private String name;
+-    // How many of this type exist in the simulation.
+-    private int count;
++    private final String name;
++    private final int    count;
+ 
+     /**
+-     * Provide a name for one of the simulation types.
+-     * @param name  A name, e.g. "Fox".
++     * @param name  display label for this class of participant (e.g. "Rat")
++     * @param count the population count at the moment of snapshot
+      */
+-    public Counter(String name)
++    public Counter(String name, int count)
+     {
+-        this.name = name;
+-        count = 0;
++        this.name  = name;
++        this.count = count;
+     }
+-    
+-    /**
+-     * @return The short description of this type.
+-     */
++
++    /** @return the display label for this participant class */
+     public String getName()
+     {
+         return name;
+     }
+ 
+-    /**
+-     * @return The current count for this type.
+-     */
++    /** @return the population count recorded at snapshot time */
+     public int getCount()
+     {
+         return count;
+     }
+-
+-    /**
+-     * Increment the current count by one.
+-     */
+-    public void increment()
+-    {
+-        count++;
+-    }
+-    
+-    /**
+-     * Reset the current count to zero.
+-     */
+-    public void reset()
+-    {
+-        count = 0;
+-    }
+ }
+diff --git a/CounterRegistry.java b/CounterRegistry.java
+new file mode 100644
+index 0000000..d8721d9
+--- /dev/null
++++ b/CounterRegistry.java
+@@ -0,0 +1,55 @@
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.Map;
++
++/**
++ * Manages mutable population tallies keyed by class and produces immutable
++ * {@link Counter} snapshots on demand.
++ *
++ * This is the only class in the codebase that increments or resets raw
++ * counts.  {@link Counter} instances vended by {@link #snapshot()} are
++ * read-only value objects; subsequent calls to {@link #clear()} or
++ * {@link #increment(Class)} leave previously returned snapshots unchanged.
++ *
++ * Typical usage within one simulation step:
++ * <pre>
++ *   registry.clear();
++ *   for each occupant → registry.increment(occupant.getClass());
++ *   Map&lt;Class, Counter&gt; counts = registry.snapshot();
++ * </pre>
++ */
++class CounterRegistry
++{
++    private final HashMap<Class, Integer> counts = new HashMap<>();
++
++    /** Remove all recorded tallies. */
++    void clear()
++    {
++        counts.clear();
++    }
++
++    /**
++     * Increment the tally for {@code clazz} by one.
++     * Creates an entry with count 1 if none exists yet.
++     * @param clazz the class whose tally should be incremented
++     */
++    void increment(Class clazz)
++    {
++        counts.merge(clazz, 1, Integer::sum);
++    }
++
++    /**
++     * Return an unmodifiable snapshot of all current tallies as
++     * {@link Counter} instances.
++     * @return immutable map from class to its {@link Counter}
++     */
++    Map<Class, Counter> snapshot()
++    {
++        Map<Class, Counter> result = new HashMap<>();
++        for (Map.Entry<Class, Integer> entry : counts.entrySet()) {
++            result.put(entry.getKey(),
++                       new Counter(entry.getKey().getName(), entry.getValue()));
++        }
++        return Collections.unmodifiableMap(result);
++    }
++}
+diff --git a/FieldStats.java b/FieldStats.java
+index d2b3792..6cb503b 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -1,4 +1,5 @@
+-import java.util.HashMap;
++import java.util.Collections;
++import java.util.Map;
+ 
+ /**
+  * Collects and provides statistical data on the state of a field.
+@@ -7,11 +8,16 @@ import java.util.HashMap;
+  * state. All other methods return values from the most recent update and
+  * require no Field reference.
+  *
++ * Mutation (increment / reset) is fully delegated to the internal
++ * {@link CounterRegistry}; this class only reads from the immutable snapshot
++ * produced after each scan.
++ *
+  * @version 2016.02.29
+  */
+ public class FieldStats
+ {
+-    private HashMap<Class, Counter> counters = new HashMap<>();
++    private final CounterRegistry registry = new CounterRegistry();
++    private Map<Class, Counter> snapshot   = Collections.emptyMap();
+ 
+     /**
+      * Scan the field and refresh all counts.
+@@ -20,28 +26,27 @@ public class FieldStats
+      */
+     public void update(Field field)
+     {
+-        for (Counter c : counters.values()) {
+-            c.reset();
+-        }
++        registry.clear();
+         for (Object item : field.getOccupants()) {
+-            incrementCount(item.getClass());
++            registry.increment(item.getClass());
+             if (item instanceof Infectable) {
+                 Disease disease = ((Infectable) item).getDisease();
+                 if (disease != null) {
+-                    incrementCount(disease.getClass());
++                    registry.increment(disease.getClass());
+                 }
+             }
+         }
++        snapshot = registry.snapshot();
+     }
+ 
+     /**
+-     * Return the raw counters keyed by class, reflecting the most recent
++     * Return an immutable snapshot of population counts from the most recent
+      * {@link #update(Field)} call.
+-     * @return the population counters
++     * @return map from class to its {@link Counter}
+      */
+-    public HashMap<Class, Counter> getCounters()
++    public Map<Class, Counter> getCounters()
+     {
+-        return counters;
++        return snapshot;
+     }
+ 
+     /**
+@@ -51,7 +56,7 @@ public class FieldStats
+     public String getSummary()
+     {
+         StringBuilder sb = new StringBuilder();
+-        for (Counter info : counters.values()) {
++        for (Counter info : snapshot.values()) {
+             sb.append(info.getName()).append(": ").append(info.getCount()).append(' ');
+         }
+         return sb.toString();
+@@ -59,26 +64,16 @@ public class FieldStats
+ 
+     /**
+      * Determine whether the simulation is still viable.
+-     * @return true if more than one species has a non-zero count
++     * @return true if more than one class has a non-zero count
+      */
+     public boolean isViable()
+     {
+         int nonZero = 0;
+-        for (Counter info : counters.values()) {
++        for (Counter info : snapshot.values()) {
+             if (info.getCount() > 0) {
+                 nonZero++;
+             }
+         }
+         return nonZero > 1;
+     }
+-
+-    private void incrementCount(Class clazz)
+-    {
+-        Counter c = counters.get(clazz);
+-        if (c == null) {
+-            c = new Counter(clazz.getName());
+-            counters.put(clazz, c);
+-        }
+-        c.increment();
+-    }
+ }
+diff --git a/SimulationStepContext.java b/SimulationStepContext.java
+index 17c1958..df11f07 100644
+--- a/SimulationStepContext.java
++++ b/SimulationStepContext.java
+@@ -42,7 +42,7 @@ class SimulationStepContext implements StepContext
+     public Counter getPopulationCount(Class entityClass)
+     {
+         Counter c = state.getCurrentStats(entityClass);
+-        return c != null ? c : new Counter(entityClass.getName());
++        return c != null ? c : new Counter(entityClass.getName(), 0);
+     }
+ 
+     @Override

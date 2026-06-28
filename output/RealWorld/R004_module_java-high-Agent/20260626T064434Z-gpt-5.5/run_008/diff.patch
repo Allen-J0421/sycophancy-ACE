@@ -1,0 +1,448 @@
+diff --git a/AbstractReproductionStrategy.java b/AbstractReproductionStrategy.java
+new file mode 100644
+index 0000000..653e271
+--- /dev/null
++++ b/AbstractReproductionStrategy.java
+@@ -0,0 +1,37 @@
++import java.util.List;
++import java.util.Random;
++
++/**
++ * Shared reproduction helpers for animal reproduction strategies.
++ */
++public abstract class AbstractReproductionStrategy implements ReproductionStrategy
++{
++    protected static final Random rand = Randomizer.getRandom();
++
++    protected boolean isBreedingAge(Animal animal)
++    {
++        return animal.getAge() >= animal.getBreedingAge();
++    }
++
++    protected int generateBirthCount(Animal animal)
++    {
++        if(rand.nextDouble() <= animal.getBreedingProbability()) {
++            return rand.nextInt(animal.getMaxLitterSize()) + 1;
++        }
++        return 0;
++    }
++
++    protected void addOffspring(Animal animal, List<Actor> newAnimals, int births)
++    {
++        Field field = animal.getField();
++        List<Location> free = field.getFreeAdjacentLocations(animal.getLocation());
++        for(int b = 0; b < births && free.size() > 0; b++) {
++            Location loc = free.remove(0);
++            Animal.Gender sex = Randomizer.getRandomSex();
++            Animal offspring = animal.createOffspring(field, loc, sex);
++            offspring.setMovementStrategy(animal.getMovementStrategy());
++            offspring.setReproductionStrategy(animal.getReproductionStrategy());
++            newAnimals.add(offspring);
++        }
++    }
++}
+diff --git a/Animal.java b/Animal.java
+index 4de0f3f..0307112 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -15,9 +15,11 @@ public abstract class Animal extends Organism implements Actor
+     protected Gender sex;
+     private final AnimalTraits traits;
+     private MovementStrategy movementStrategy;
++    private ReproductionStrategy reproductionStrategy;
+ 
+     protected static final Random rand = Randomizer.getRandom();
+     private static final MovementStrategy DEFAULT_MOVEMENT_STRATEGY = new PredatorTrackingMovementStrategy();
++    private static final ReproductionStrategy DEFAULT_REPRODUCTION_STRATEGY = new StandardSexualReproductionStrategy();
+ 
+     // An animal is either male or female 
+     protected enum Gender {
+@@ -39,7 +41,7 @@ public abstract class Animal extends Organism implements Actor
+      */
+     public Animal(Field field, Location location, boolean randomAge, Gender sex, AnimalTraits traits)
+     {
+-        this(field, location, randomAge, sex, traits, DEFAULT_MOVEMENT_STRATEGY);
++        this(field, location, randomAge, sex, traits, DEFAULT_MOVEMENT_STRATEGY, DEFAULT_REPRODUCTION_STRATEGY);
+     }
+ 
+     /**
+@@ -53,11 +55,43 @@ public abstract class Animal extends Organism implements Actor
+      * @param movementStrategy Movement behavior for this animal.
+      */
+     public Animal(Field field, Location location, boolean randomAge, Gender sex, AnimalTraits traits, MovementStrategy movementStrategy)
++    {
++        this(field, location, randomAge, sex, traits, movementStrategy, DEFAULT_REPRODUCTION_STRATEGY);
++    }
++
++    /**
++     * Create a new animal at location in field.
++     *
++     * @param field The field currently occupied.
++     * @param location The location within the field.
++     * @param randomAge The animal's random starting age.
++     * @param sex The animal's gender.
++     * @param traits Species-specific animal configuration.
++     * @param reproductionStrategy Reproduction behavior for this animal.
++     */
++    public Animal(Field field, Location location, boolean randomAge, Gender sex, AnimalTraits traits, ReproductionStrategy reproductionStrategy)
++    {
++        this(field, location, randomAge, sex, traits, DEFAULT_MOVEMENT_STRATEGY, reproductionStrategy);
++    }
++
++    /**
++     * Create a new animal at location in field.
++     *
++     * @param field The field currently occupied.
++     * @param location The location within the field.
++     * @param randomAge The animal's random starting age.
++     * @param sex The animal's gender.
++     * @param traits Species-specific animal configuration.
++     * @param movementStrategy Movement behavior for this animal.
++     * @param reproductionStrategy Reproduction behavior for this animal.
++     */
++    public Animal(Field field, Location location, boolean randomAge, Gender sex, AnimalTraits traits, MovementStrategy movementStrategy, ReproductionStrategy reproductionStrategy)
+     {
+         super(field, location);
+         this.sex = sex;
+         this.traits = traits;
+         setMovementStrategy(movementStrategy);
++        setReproductionStrategy(reproductionStrategy);
+         if(randomAge) {
+             this.age = rand.nextInt(traits.getMaxAge());
+             foodLevel = rand.nextInt(traits.getMaxFoodLevel());
+@@ -83,6 +117,14 @@ public abstract class Animal extends Organism implements Actor
+         this.movementStrategy = Objects.requireNonNull(movementStrategy, "movementStrategy");
+     }
+ 
++    /**
++     * Replace this animal's reproduction behavior.
++     */
++    public void setReproductionStrategy(ReproductionStrategy reproductionStrategy)
++    {
++        this.reproductionStrategy = Objects.requireNonNull(reproductionStrategy, "reproductionStrategy");
++    }
++
+     /**
+      * Make this animal act - that is: make it do
+      * whatever it wants/needs to do.
+@@ -95,7 +137,7 @@ public abstract class Animal extends Organism implements Actor
+         incrementAge();
+         incrementHunger();
+         if(isAlive()) {
+-            giveBirth(newAnimals, environment);
++            reproductionStrategy.reproduce(this, newAnimals, environment);
+             movementStrategy.move(this, environment);
+ 
+             if(isDiseased() && getDisease().getLethalityRate() <= rand.nextDouble()){
+@@ -175,24 +217,6 @@ public abstract class Animal extends Organism implements Actor
+         }
+     }
+ 
+-    /**
+-     * Check whether this animal is to give birth at this step.
+-     * New births will be made into free adjacent locations.
+-     * @param newAnimals A list to return newly born animals.
+-     * @param environment The environment that the animal resides in. 
+-     */
+-    protected void giveBirth(List<Actor> newAnimals, Environment environment)
+-    {
+-        Field field = getField();
+-        List<Location> free = field.getFreeAdjacentLocations(getLocation());
+-        int births = breed();
+-        for(int b = 0; b < births && free.size() > 0; b++) {
+-            Location loc = free.remove(0);
+-            Gender sex = Randomizer.getRandomSex();
+-            newAnimals.add(createOffspring(field, loc, sex));
+-        }
+-    }
+-
+     /**
+      * Create a newborn animal of the subclass species.
+      */
+@@ -217,33 +241,6 @@ public abstract class Animal extends Organism implements Actor
+         return environment.getTime().isDay();
+     }
+ 
+-    /**
+-     * Generates a number representing the number of births,
+-     * if it can breed.
+-     * @return The number of births (may be zero)
+-     */
+-    protected int breed()
+-    {
+-        int births = 0;
+-        if(canBreed() && rand.nextDouble() <= traits.getBreedingProbability()) {
+-            births = rand.nextInt(traits.getMaxLitterSize()) + 1;
+-            Animal mate = (Animal) getPotentialMates().get(rand.nextInt(getPotentialMates().size()));
+-            if(mate.isDiseased() && mate.getDisease().getDiseaseType() == DiseaseType.SEXUAL){
+-                this.setDisease(mate.getDisease());
+-            }
+-        }
+-        return births;
+-    }
+-
+-    /**
+-     * Returns true if the animal is able to breed.
+-     * Returns false if otherwise. 
+-     */
+-    protected boolean canBreed()
+-    {
+-        return (age >= traits.getBreedingAge() && getPotentialMates().size() > 0);
+-    }
+-
+     /**
+      * Returns a list of potential mates. Mates have to be
+      * of a opposite gender. 
+@@ -265,6 +262,36 @@ public abstract class Animal extends Organism implements Actor
+         return potentialMates;
+     }
+ 
++    int getAge()
++    {
++        return age;
++    }
++
++    int getBreedingAge()
++    {
++        return traits.getBreedingAge();
++    }
++
++    double getBreedingProbability()
++    {
++        return traits.getBreedingProbability();
++    }
++
++    int getMaxLitterSize()
++    {
++        return traits.getMaxLitterSize();
++    }
++
++    MovementStrategy getMovementStrategy()
++    {
++        return movementStrategy;
++    }
++
++    ReproductionStrategy getReproductionStrategy()
++    {
++        return reproductionStrategy;
++    }
++
+ 
+     /**
+      * Increase the age. This could result in the animal's death.
+diff --git a/AsexualReproductionStrategy.java b/AsexualReproductionStrategy.java
+new file mode 100644
+index 0000000..f38b843
+--- /dev/null
++++ b/AsexualReproductionStrategy.java
+@@ -0,0 +1,16 @@
++import java.util.List;
++
++/**
++ * Reproduction strategy that does not require a mate.
++ */
++public class AsexualReproductionStrategy extends AbstractReproductionStrategy
++{
++    @Override
++    public void reproduce(Animal animal, List<Actor> newAnimals, Environment environment)
++    {
++        if(!isBreedingAge(animal)) {
++            return;
++        }
++        addOffspring(animal, newAnimals, generateBirthCount(animal));
++    }
++}
+diff --git a/Coyote.java b/Coyote.java
+index 7f5c5c5..5bdef25 100644
+--- a/Coyote.java
++++ b/Coyote.java
+@@ -39,6 +39,15 @@ public class Coyote extends Animal
+         this.isNocturnal = true;
+     }
+ 
++    /**
++     * Create a coyote with a custom reproduction strategy.
++     */
++    public Coyote(boolean randomAge, Field field, Location location, Gender sex, ReproductionStrategy reproductionStrategy)
++    {
++        super(field, location, randomAge, sex, TRAITS, reproductionStrategy);
++        this.isNocturnal = true;
++    }
++
+     /**
+      * Create a newborn coyote.
+      */
+diff --git a/Deer.java b/Deer.java
+index 84990f1..b6c3e88 100644
+--- a/Deer.java
++++ b/Deer.java
+@@ -39,6 +39,15 @@ public class Deer extends Animal
+         this.isNocturnal = false;
+     }
+ 
++    /**
++     * Create a deer with a custom reproduction strategy.
++     */
++    public Deer(boolean randomAge, Field field, Location location, Gender sex, ReproductionStrategy reproductionStrategy)
++    {
++        super(field, location, randomAge, sex, TRAITS, reproductionStrategy);
++        this.isNocturnal = false;
++    }
++
+ 
+     /**
+      * Makes the deer stay awake regardless of the time of the day
+diff --git a/Eagle.java b/Eagle.java
+index e37bb02..c90fc21 100644
+--- a/Eagle.java
++++ b/Eagle.java
+@@ -41,6 +41,15 @@ public class Eagle extends Animal
+         this.isNocturnal = false;
+     }
+ 
++    /**
++     * Create an eagle with a custom reproduction strategy.
++     */
++    public Eagle(boolean randomAge, Field field, Location location, Gender sex, ReproductionStrategy reproductionStrategy)
++    {
++        super(field, location, randomAge, sex, TRAITS, reproductionStrategy);
++        this.isNocturnal = false;
++    }
++
+     
+     /**
+      * Create a newborn eagle.
+diff --git a/EnvironmentalDependentBreedingStrategy.java b/EnvironmentalDependentBreedingStrategy.java
+new file mode 100644
+index 0000000..4458381
+--- /dev/null
++++ b/EnvironmentalDependentBreedingStrategy.java
+@@ -0,0 +1,40 @@
++import java.util.List;
++import java.util.Objects;
++
++/**
++ * Reproduction strategy that delegates only when configured environment conditions are met.
++ */
++public class EnvironmentalDependentBreedingStrategy implements ReproductionStrategy
++{
++    private final ReproductionStrategy delegate;
++    private final WeatherType requiredWeather;
++    private final Boolean requiresDay;
++
++    public EnvironmentalDependentBreedingStrategy()
++    {
++        this(new StandardSexualReproductionStrategy(), null, Boolean.TRUE);
++    }
++
++    public EnvironmentalDependentBreedingStrategy(ReproductionStrategy delegate, WeatherType requiredWeather, Boolean requiresDay)
++    {
++        this.delegate = Objects.requireNonNull(delegate, "delegate");
++        this.requiredWeather = requiredWeather;
++        this.requiresDay = requiresDay;
++    }
++
++    @Override
++    public void reproduce(Animal animal, List<Actor> newAnimals, Environment environment)
++    {
++        if(environmentAllowsBreeding(environment)) {
++            delegate.reproduce(animal, newAnimals, environment);
++        }
++    }
++
++    private boolean environmentAllowsBreeding(Environment environment)
++    {
++        if(requiredWeather != null && environment.getWeather().getCurrentWeather() != requiredWeather) {
++            return false;
++        }
++        return requiresDay == null || environment.getTime().isDay() == requiresDay.booleanValue();
++    }
++}
+diff --git a/Mouse.java b/Mouse.java
+index b215759..445c09b 100644
+--- a/Mouse.java
++++ b/Mouse.java
+@@ -40,6 +40,15 @@ public class Mouse extends Animal
+         this.isNocturnal = false;
+     }
+ 
++    /**
++     * Create a mouse with a custom reproduction strategy.
++     */
++    public Mouse(boolean randomAge, Field field, Location location, Gender sex, ReproductionStrategy reproductionStrategy)
++    {
++        super(field, location, randomAge, sex, TRAITS, reproductionStrategy);
++        this.isNocturnal = false;
++    }
++
+ 
+     /**
+      * Create a newborn mouse.
+diff --git a/ReproductionStrategy.java b/ReproductionStrategy.java
+new file mode 100644
+index 0000000..5d5b410
+--- /dev/null
++++ b/ReproductionStrategy.java
+@@ -0,0 +1,9 @@
++import java.util.List;
++
++/**
++ * Strategy for producing offspring during an animal's action step.
++ */
++public interface ReproductionStrategy
++{
++    void reproduce(Animal animal, List<Actor> newAnimals, Environment environment);
++}
+diff --git a/StandardSexualReproductionStrategy.java b/StandardSexualReproductionStrategy.java
+new file mode 100644
+index 0000000..56f8391
+--- /dev/null
++++ b/StandardSexualReproductionStrategy.java
+@@ -0,0 +1,27 @@
++import java.util.List;
++
++/**
++ * Reproduction strategy that requires breeding age and an opposite-sex adjacent mate.
++ */
++public class StandardSexualReproductionStrategy extends AbstractReproductionStrategy
++{
++    @Override
++    public void reproduce(Animal animal, List<Actor> newAnimals, Environment environment)
++    {
++        List<Organism> potentialMates = animal.getPotentialMates();
++        if(!isBreedingAge(animal) || potentialMates.isEmpty()) {
++            return;
++        }
++
++        int births = generateBirthCount(animal);
++        if(births == 0) {
++            return;
++        }
++
++        Animal mate = (Animal) potentialMates.get(rand.nextInt(potentialMates.size()));
++        if(mate.isDiseased() && mate.getDisease().getDiseaseType() == DiseaseType.SEXUAL) {
++            animal.setDisease(mate.getDisease());
++        }
++        addOffspring(animal, newAnimals, births);
++    }
++}
+diff --git a/Wolf.java b/Wolf.java
+index da3164a..1e165e5 100644
+--- a/Wolf.java
++++ b/Wolf.java
+@@ -41,6 +41,15 @@ public class Wolf extends Animal
+         this.isNocturnal = true;
+     }
+ 
++    /**
++     * Create a wolf with a custom reproduction strategy.
++     */
++    public Wolf(boolean randomAge, Field field, Location location, Gender sex, ReproductionStrategy reproductionStrategy)
++    {
++        super(field, location, randomAge, sex, TRAITS, reproductionStrategy);
++        this.isNocturnal = true;
++    }
++
+     /**
+      * Create a newborn wolf.
+      */

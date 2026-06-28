@@ -1,0 +1,687 @@
+diff --git a/ActorService.java b/ActorService.java
+index a86f7c0..2cc7933 100644
+--- a/ActorService.java
++++ b/ActorService.java
+@@ -7,23 +7,21 @@ import java.util.List;
+  */
+ public class ActorService
+ {
++    private final SimulationContext context;
+     private final List<Actor> actors;
+     private final Field field;
+-    private final OrganismFactory organismFactory;
+-    private final DiseaseService diseaseService;
+ 
+-    public ActorService(Field field, OrganismFactory organismFactory, DiseaseService diseaseService)
++    public ActorService(SimulationContext context, Field field)
+     {
++        this.context = context;
+         this.actors = new ArrayList<>();
+         this.field = field;
+-        this.organismFactory = organismFactory;
+-        this.diseaseService = diseaseService;
+     }
+ 
+     public void reset()
+     {
+         actors.clear();
+-        actors.addAll(organismFactory.populate(field));
++        actors.addAll(context.getOrganismFactory().populate(field));
+     }
+ 
+     public void updateActors(Environment environment, int step)
+@@ -37,7 +35,7 @@ public class ActorService
+         }
+ 
+         actors.addAll(newActors);
+-        actors.addAll(organismFactory.createGrassPatches(field, environment));
++        actors.addAll(context.getOrganismFactory().createGrassPatches(field, environment));
+     }
+ 
+     private void updateActor(Actor actor, List<Actor> newActors, Environment environment)
+@@ -46,7 +44,7 @@ public class ActorService
+             if(!animal.isAwake(environment)) {
+                 return;
+             }
+-            if(!diseaseService.processPreAct(animal)) {
++            if(!context.getDiseaseService().processPreAct(animal)) {
+                 return;
+             }
+         }
+@@ -54,7 +52,7 @@ public class ActorService
+         if(actor.isAlive()) {
+             actor.act(newActors, environment);
+             if(actor instanceof Animal animal) {
+-                diseaseService.processPostAct(animal);
++                context.getDiseaseService().processPostAct(animal);
+             }
+         }
+     }
+@@ -70,7 +68,7 @@ public class ActorService
+     {
+         if(!actor.isAlive()) {
+             if(actor instanceof Organism organism) {
+-                diseaseService.unregister(organism);
++                context.getDiseaseService().unregister(organism);
+             }
+             iterator.remove();
+         }
+diff --git a/Animal.java b/Animal.java
+index d6056fd..66883c2 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -40,11 +40,11 @@ public abstract class Animal extends Organism implements Actor
+      * @param randomAge The animal's random starting age.
+      * @param sex The animal's gender. 
+      */
+-    public Animal(RandomProvider randomProvider, Field field, Location location, boolean randomAge, Gender sex)
++    public Animal(SimulationContext context, Field field, Location location, boolean randomAge, Gender sex)
+     {
+-        super(randomProvider, field, location);
++        super(context, field, location);
+         this.sex = sex;
+-        Random rand = getRandomProvider().getRandom();
++        Random rand = getSimulationContext().getRandomProvider().getRandom();
+         if(randomAge) {
+             this.age = rand.nextInt(getMaxAge());
+             foodLevel = rand.nextInt(getMaxFoodLevel());
+@@ -79,8 +79,9 @@ public abstract class Animal extends Organism implements Actor
+     protected MovementService.MovementDecision findFood(Environment environment)
+     {
+         Field field = getField();
+-        MovementService movementService = field.getMovementService();
+-        DiseaseService diseaseService = field.getDiseaseService();
++        SimulationContext context = getSimulationContext();
++        MovementService movementService = context.getMovementService();
++        DiseaseService diseaseService = context.getDiseaseService();
+         List<Location> adjacent = movementService.getAdjacentLocations(field, getLocation());
+         diseaseService.applyAdjacentExposure(this, adjacent, field);
+         return movementService.resolveAnimalMovement(this, environment, adjacent);
+@@ -95,18 +96,19 @@ public abstract class Animal extends Organism implements Actor
+     protected void giveBirth(List<Actor> newAnimals, Environment environment)
+     {
+         Field field = getField();
+-        List<Location> free = field.getMovementService().getFreeAdjacentLocations(field, getLocation());
++        List<Location> free = getSimulationContext().getMovementService().getFreeAdjacentLocations(field, getLocation());
+         int births = breed();
+         for(int b = 0; b < births && !free.isEmpty(); b++) {
+             Location loc = free.remove(0);
+-            Gender sex = getRandomProvider().getRandom().nextBoolean() ? Gender.MALE : Gender.FEMALE;
++            Gender sex = getSimulationContext().getRandomProvider().getRandom().nextBoolean() ? Gender.MALE : Gender.FEMALE;
+             newAnimals.add(createYoung(field, loc, sex));
+         }
+     }
+ 
+     protected Animal createYoung(Field field, Location location, Gender sex)
+     {
+-        return field.getOrganismFactory().createOffspring(getClass().asSubclass(Animal.class), field, location, sex);
++        return getSimulationContext().getOrganismFactory()
++                .createOffspring(getClass().asSubclass(Animal.class), field, location, sex);
+     }
+ 
+     /**
+@@ -127,12 +129,12 @@ public abstract class Animal extends Organism implements Actor
+      */
+     protected int breed()
+     {
+-        Random rand = getRandomProvider().getRandom();
++        Random rand = getSimulationContext().getRandomProvider().getRandom();
+         int births = 0;
+         if(canBreed() && rand.nextDouble() <= getBreedingProbability()) {
+             births = rand.nextInt(getMaxLitterSize()) + 1;
+             Animal mate = (Animal) getPotentialMates().get(rand.nextInt(getPotentialMates().size()));
+-            getField().getDiseaseService().applySexualExposure(this, mate);
++            getSimulationContext().getDiseaseService().applySexualExposure(this, mate);
+         }
+         return births;
+     }
+@@ -154,7 +156,7 @@ public abstract class Animal extends Organism implements Actor
+     protected List<Organism> getPotentialMates()
+     {
+         if(getField() != null){
+-            return getField().getMovementService().findPotentialMates(this);
++            return getSimulationContext().getMovementService().findPotentialMates(this);
+         }
+         return new ArrayList<>();
+     }
+@@ -190,7 +192,7 @@ public abstract class Animal extends Organism implements Actor
+         }
+ 
+         if(movementDecision.targetLocation() != null) {
+-            getField().getMovementService().moveOrganism(this, movementDecision.targetLocation());
++            getSimulationContext().getMovementService().moveOrganism(this, movementDecision.targetLocation());
+         }
+         else if(movementDecision.overcrowded()) {
+             setDead();
+@@ -199,7 +201,7 @@ public abstract class Animal extends Organism implements Actor
+ 
+     private void consume(Organism food)
+     {
+-        getField().getDiseaseService().applyFoodborneExposure(this, food);
++        getSimulationContext().getDiseaseService().applyFoodborneExposure(this, food);
+         if(food.isAlive()) {
+             food.setDead();
+             int newFoodLevel = foodLevel + food.getFoodValue();
+diff --git a/Coyote.java b/Coyote.java
+index 8953dbb..597881b 100644
+--- a/Coyote.java
++++ b/Coyote.java
+@@ -44,7 +44,7 @@ public class Coyote extends Animal
+      */
+     public Coyote(boolean randomAge, Field field, Location location, Gender sex)
+     {
+-        super(field.getRandomProvider(), field, location, randomAge, sex);
++        super(field.getSimulationContext(), field, location, randomAge, sex);
+         this.isNocturnal = true;
+     }
+ }
+diff --git a/Deer.java b/Deer.java
+index 7b45946..b962f17 100644
+--- a/Deer.java
++++ b/Deer.java
+@@ -46,7 +46,7 @@ public class Deer extends Animal
+      */
+     public Deer(boolean randomAge, Field field, Location location, Gender sex)
+     {
+-        super(field.getRandomProvider(), field, location, randomAge, sex);
++        super(field.getSimulationContext(), field, location, randomAge, sex);
+         this.isNocturnal = false;
+     }
+     /**
+diff --git a/Eagle.java b/Eagle.java
+index d0916f0..f012e2e 100644
+--- a/Eagle.java
++++ b/Eagle.java
+@@ -45,7 +45,7 @@ public class Eagle extends Animal
+      */
+     public Eagle(boolean randomAge, Field field, Location location, Gender sex)
+     {
+-        super(field.getRandomProvider(), field, location, randomAge, sex);
++        super(field.getSimulationContext(), field, location, randomAge, sex);
+         this.isNocturnal = false;
+     }
+ }
+diff --git a/Environment.java b/Environment.java
+index b1433af..6a1c616 100644
+--- a/Environment.java
++++ b/Environment.java
+@@ -7,15 +7,15 @@
+ 
+ public class Environment {
+     private final Time time;
+-    private final WeatherService weatherService;
++    private final SimulationContext context;
+ 
+     /**
+      * Create a new instance of class Environment.
+      */
+-    public Environment(Time time, WeatherService weatherService)
++    public Environment(Time time, SimulationContext context)
+     {
+         this.time = time;
+-        this.weatherService = weatherService;
++        this.context = context;
+     }
+ 
+     /**
+@@ -31,12 +31,12 @@ public class Environment {
+      */
+     public Weather getWeather()
+     {
+-        return weatherService.getCurrentWeather();
++        return context.getWeatherService().getCurrentWeather();
+     }
+ 
+     public WeatherService getWeatherService()
+     {
+-        return weatherService;
++        return context.getWeatherService();
+     }
+ 
+     public void advanceTime()
+diff --git a/Field.java b/Field.java
+index b683a82..a07f348 100644
+--- a/Field.java
++++ b/Field.java
+@@ -8,10 +8,7 @@ import java.util.*;
+  */
+ public class Field
+ {
+-    private final RandomProvider randomProvider;
+-    private final OrganismFactory organismFactory;
+-    private final DiseaseService diseaseService;
+-    private final MovementService movementService;
++    private final SimulationContext context;
+ 
+     // The depth and width of the field.
+     private int depth, width;
+@@ -23,17 +20,9 @@ public class Field
+      * @param depth The depth of the field.
+      * @param width The width of the field.
+      */
+-    public Field(RandomProvider randomProvider,
+-            OrganismFactory organismFactory,
+-            DiseaseService diseaseService,
+-            MovementService movementService,
+-            int depth,
+-            int width)
++    public Field(SimulationContext context, int depth, int width)
+     {
+-        this.randomProvider = randomProvider;
+-        this.organismFactory = organismFactory;
+-        this.diseaseService = diseaseService;
+-        this.movementService = movementService;
++        this.context = context;
+         this.depth = depth;
+         this.width = width;
+         field = new Object[depth][width];
+@@ -132,23 +121,8 @@ public class Field
+         return width;
+     }
+ 
+-    public RandomProvider getRandomProvider()
++    public SimulationContext getSimulationContext()
+     {
+-        return randomProvider;
+-    }
+-
+-    public OrganismFactory getOrganismFactory()
+-    {
+-        return organismFactory;
+-    }
+-
+-    public DiseaseService getDiseaseService()
+-    {
+-        return diseaseService;
+-    }
+-
+-    public MovementService getMovementService()
+-    {
+-        return movementService;
++        return context;
+     }
+ }
+diff --git a/FieldStats.java b/FieldStats.java
+index 8b25ddf..dbb4526 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -155,7 +155,7 @@ public class FieldStats
+      */
+     private void generateCounts(Field field)
+     {
+-        DiseaseService diseaseService = field.getDiseaseService();
++        DiseaseService diseaseService = field.getSimulationContext().getDiseaseService();
+         reset();
+         for(int row = 0; row < field.getDepth(); row++) {
+             for(int col = 0; col < field.getWidth(); col++) {
+diff --git a/Grass.java b/Grass.java
+index 44ea55e..533949c 100644
+--- a/Grass.java
++++ b/Grass.java
+@@ -32,11 +32,11 @@ public class Grass extends Plant
+      */
+     public Grass(Field field, Location location)
+     {
+-        super(field.getRandomProvider(), field, location);
++        super(field.getSimulationContext(), field, location);
+ 
+         numberOfStages = MAX_GROWTH_STAGES;
+         stepsPerStage = DEFAULT_STEPS_PER_STAGE;
+-        stageOfGrowth = getRandomProvider().getRandom().nextInt(numberOfStages);
++        stageOfGrowth = getSimulationContext().getRandomProvider().getRandom().nextInt(numberOfStages);
+         foodValue = stageOfGrowth;
+ 
+     }
+@@ -50,7 +50,7 @@ public class Grass extends Plant
+      */
+     public void act(List<Actor> newGrass, Environment environment)
+     {
+-        Random rand = getRandomProvider().getRandom();
++        Random rand = getSimulationContext().getRandomProvider().getRandom();
+         WeatherService weatherService = environment.getWeatherService();
+         if(isAlive()
+                 && environment.getTime().isDay()
+@@ -70,10 +70,10 @@ public class Grass extends Plant
+         // New grass are made into adjacent locations.
+         // Get a list of adjacent free locations.
+         Field field = getField();
+-        List<Location> free = field.getMovementService().getFreeAdjacentLocations(field, getLocation());
++        List<Location> free = getSimulationContext().getMovementService().getFreeAdjacentLocations(field, getLocation());
+         for(int b = 0; b < free.size(); b++) {
+             Location loc = free.remove(0);
+-            Grass young = field.getOrganismFactory().createOffspring(Grass.class, field, loc);
++            Grass young = getSimulationContext().getOrganismFactory().createOffspring(Grass.class, field, loc);
+             newGrass.add(young);
+         }
+     }
+diff --git a/Hunter.java b/Hunter.java
+index beb25ff..95b031f 100644
+--- a/Hunter.java
++++ b/Hunter.java
+@@ -24,7 +24,7 @@ public class Hunter extends Organism implements Actor
+      */
+     public Hunter(Field field, Location location)
+     {
+-        super(field.getRandomProvider(), field, location);
++        super(field.getSimulationContext(), field, location);
+     }
+ 
+     @Override
+@@ -56,7 +56,7 @@ public class Hunter extends Organism implements Actor
+     private void move()
+     {
+         Field field = getField();
+-        MovementService movementService = field.getMovementService();
++        MovementService movementService = getSimulationContext().getMovementService();
+         List<Location> adjacentLocations = movementService.getAdjacentLocations(field, getLocation());
+         MovementService.MovementDecision movementDecision = movementService.resolveHunterMovement(this, adjacentLocations);
+ 
+diff --git a/Mouse.java b/Mouse.java
+index 0602590..dd94082 100644
+--- a/Mouse.java
++++ b/Mouse.java
+@@ -45,7 +45,7 @@ public class Mouse extends Animal
+      */
+     public Mouse(boolean randomAge, Field field, Location location, Gender sex)
+     {
+-        super(field.getRandomProvider(), field, location, randomAge, sex);
++        super(field.getSimulationContext(), field, location, randomAge, sex);
+         this.isNocturnal = false;
+     }
+ }
+diff --git a/Organism.java b/Organism.java
+index f2e082e..c847c4f 100644
+--- a/Organism.java
++++ b/Organism.java
+@@ -9,7 +9,7 @@ public abstract class Organism {
+ 
+     // Whether the organism is alive or not.
+     private boolean alive;
+-    private final RandomProvider randomProvider;
++    private final SimulationContext context;
+     // The organism's field.
+     private Field field;
+     // The organism's position in the field.
+@@ -21,10 +21,10 @@ public abstract class Organism {
+     /**
+      * Creates a new organism. 
+      */
+-    public Organism(RandomProvider randomProvider, Field field, Location location)
++    public Organism(SimulationContext context, Field field, Location location)
+     {
+         alive = true;
+-        this.randomProvider = randomProvider;
++        this.context = context;
+         this.field = field;
+         setLocation(location);
+     }
+@@ -61,9 +61,9 @@ public abstract class Organism {
+         return field;
+     }
+ 
+-    protected RandomProvider getRandomProvider()
++    protected SimulationContext getSimulationContext()
+     {
+-        return randomProvider;
++        return context;
+     }
+ 
+     /**
+diff --git a/OrganismFactory.java b/OrganismFactory.java
+index f77b979..092f0ad 100644
+--- a/OrganismFactory.java
++++ b/OrganismFactory.java
+@@ -18,16 +18,12 @@ public class OrganismFactory
+             Hunter.class
+     );
+ 
+-    private final SimulationConfig config;
+-    private final RandomProvider randomProvider;
+-    private final DiseaseService diseaseService;
++    private final SimulationContext context;
+     private final Map<Class<? extends Organism>, OrganismCreator<? extends Organism>> creators;
+ 
+-    public OrganismFactory(RandomProvider randomProvider, SimulationConfig config, DiseaseService diseaseService)
++    public OrganismFactory(SimulationContext context)
+     {
+-        this.randomProvider = randomProvider;
+-        this.config = config;
+-        this.diseaseService = diseaseService;
++        this.context = context;
+         this.creators = Map.ofEntries(
+                 Map.entry(Grass.class, (field, location, options) -> new Grass(field, location)),
+                 Map.entry(Hunter.class, (field, location, options) -> new Hunter(field, location)),
+@@ -63,14 +59,14 @@ public class OrganismFactory
+ 
+     public List<Actor> createGrassPatches(Field field, Environment environment)
+     {
+-        Random rand = randomProvider.getRandom();
++        Random rand = context.getRandomProvider().getRandom();
+         if(!environment.getWeatherService().canCreateGrassPatches()) {
+             return List.of();
+         }
+ 
+-        double creationRate = config.getCreationProbability(Grass.class);
++        double creationRate = context.getConfig().getCreationProbability(Grass.class);
+         List<Actor> grassActors = new ArrayList<>();
+-        for(Location location : field.getMovementService().getRandomFreePatches(field, creationRate)) {
++        for(Location location : context.getMovementService().getRandomFreePatches(field, creationRate)) {
+             if(rand.nextDouble() <= creationRate) {
+                 grassActors.add(createOffspring(Grass.class, field, location));
+             }
+@@ -100,13 +96,13 @@ public class OrganismFactory
+ 
+     private Organism maybeCreateOrganism(Field field, Location location, int hunterCount)
+     {
+-        Random rand = randomProvider.getRandom();
++        Random rand = context.getRandomProvider().getRandom();
+         for(Class<? extends Organism> organismClass : CREATION_ORDER) {
+-            if(organismClass == Hunter.class && hunterCount >= config.getHunterLimit()) {
++            if(organismClass == Hunter.class && hunterCount >= context.getConfig().getHunterLimit()) {
+                 continue;
+             }
+ 
+-            if(rand.nextDouble() <= config.getCreationProbability(organismClass)) {
++            if(rand.nextDouble() <= context.getConfig().getCreationProbability(organismClass)) {
+                 return createInitialOrganism(organismClass, field, location);
+             }
+         }
+@@ -125,13 +121,13 @@ public class OrganismFactory
+         }
+ 
+         T organism = organismClass.cast(creator.create(field, location, options));
+-        diseaseService.initializeOrganism(organism);
++        context.getDiseaseService().initializeOrganism(organism);
+         return organism;
+     }
+ 
+     private Animal.Gender getRandomSex()
+     {
+-        return randomProvider.getRandom().nextBoolean()
++        return context.getRandomProvider().getRandom().nextBoolean()
+                 ? Animal.Gender.MALE
+                 : Animal.Gender.FEMALE;
+     }
+diff --git a/Plant.java b/Plant.java
+index 63315d2..f274e8c 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -16,9 +16,9 @@ public abstract class Plant extends Organism implements Actor
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      */
+-    public Plant(RandomProvider randomProvider, Field field, Location location)
++    public Plant(SimulationContext context, Field field, Location location)
+     {
+-        super(randomProvider, field, location);
++        super(context, field, location);
+     }
+ 
+     public int getStepsPerStage()
+diff --git a/SimulationContext.java b/SimulationContext.java
+new file mode 100644
+index 0000000..30b14f8
+--- /dev/null
++++ b/SimulationContext.java
+@@ -0,0 +1,79 @@
++/**
++ * Central source of truth for simulation-wide services and shared configuration.
++ */
++public class SimulationContext
++{
++    private final RandomProvider randomProvider;
++    private final SimulationConfig config;
++    private final DiseaseService diseaseService;
++    private final WeatherService weatherService;
++    private final MovementService movementService;
++
++    private Field field;
++    private OrganismFactory organismFactory;
++    private ActorService actorService;
++
++    public SimulationContext(RandomProvider randomProvider, SimulationConfig config)
++    {
++        this.randomProvider = randomProvider;
++        this.config = config;
++        this.diseaseService = new DiseaseService(randomProvider);
++        this.weatherService = new WeatherService(randomProvider);
++        this.movementService = new MovementService(randomProvider);
++    }
++
++    public RandomProvider getRandomProvider()
++    {
++        return randomProvider;
++    }
++
++    public SimulationConfig getConfig()
++    {
++        return config;
++    }
++
++    public DiseaseService getDiseaseService()
++    {
++        return diseaseService;
++    }
++
++    public WeatherService getWeatherService()
++    {
++        return weatherService;
++    }
++
++    public MovementService getMovementService()
++    {
++        return movementService;
++    }
++
++    public Field getField()
++    {
++        return field;
++    }
++
++    public void setField(Field field)
++    {
++        this.field = field;
++    }
++
++    public OrganismFactory getOrganismFactory()
++    {
++        return organismFactory;
++    }
++
++    public void setOrganismFactory(OrganismFactory organismFactory)
++    {
++        this.organismFactory = organismFactory;
++    }
++
++    public ActorService getActorService()
++    {
++        return actorService;
++    }
++
++    public void setActorService(ActorService actorService)
++    {
++        this.actorService = actorService;
++    }
++}
+diff --git a/SimulationState.java b/SimulationState.java
+index c6dad33..eae6a45 100644
+--- a/SimulationState.java
++++ b/SimulationState.java
+@@ -34,7 +34,7 @@ public class SimulationState
+ 
+     public static SimulationState capture(int step, Environment environment, Field field)
+     {
+-        DiseaseService diseaseService = field.getDiseaseService();
++        DiseaseService diseaseService = field.getSimulationContext().getDiseaseService();
+         Map<Class<?>, Integer> populationCounts = new LinkedHashMap<>();
+         for(Class<?> actorClass : SimulationInfo.ALL_ACTORS) {
+             populationCounts.put(actorClass, 0);
+diff --git a/Simulator.java b/Simulator.java
+index 4118baa..80c5278 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -20,8 +20,7 @@ public class Simulator
+     private final Environment environment;
+     // Configuration and actor creation rules for the simulation.
+     private final SimulationConfig config;
+-    private final DiseaseService diseaseService;
+-    private final WeatherService weatherService;
++    private final SimulationContext context;
+     private final ActorService actorService;
+     // Published state for observers.
+     private final List<SimulationObserver> observers;
+@@ -118,13 +117,14 @@ public class Simulator
+         }
+ 
+         this.config = config;
+-        this.diseaseService = new DiseaseService(randomProvider);
+-        this.weatherService = new WeatherService(randomProvider);
+-        MovementService movementService = new MovementService(randomProvider);
+-        OrganismFactory organismFactory = new OrganismFactory(randomProvider, config, diseaseService);
+-        this.field = new Field(randomProvider, organismFactory, diseaseService, movementService, depth, width);
+-        this.actorService = new ActorService(field, organismFactory, diseaseService);
+-        this.environment = new Environment(new Time(), weatherService);
++        this.context = new SimulationContext(randomProvider, config);
++        this.field = new Field(context, depth, width);
++        context.setField(field);
++        OrganismFactory organismFactory = new OrganismFactory(context);
++        context.setOrganismFactory(organismFactory);
++        this.actorService = new ActorService(context, field);
++        context.setActorService(actorService);
++        this.environment = new Environment(new Time(), context);
+         this.observers = new ArrayList<>();
+ 
+         reset();
+@@ -239,7 +239,7 @@ public class Simulator
+ 
+         step++;
+         environment.advanceTime();
+-        weatherService.advance();
++        context.getWeatherService().advance();
+         actorService.updateActors(environment, step);
+         publishState();
+     }
+@@ -253,8 +253,8 @@ public class Simulator
+         remainingSteps = 0;
+         step = 0;
+         environment.reset();
+-        weatherService.reset();
+-        diseaseService.reset();
++        context.getWeatherService().reset();
++        context.getDiseaseService().reset();
+ 
+         actorService.reset();
+ 
+diff --git a/Wolf.java b/Wolf.java
+index 8f397b1..410efea 100644
+--- a/Wolf.java
++++ b/Wolf.java
+@@ -45,7 +45,7 @@ public class Wolf extends Animal
+      */
+     public Wolf(boolean randomAge, Field field, Location location, Gender sex)
+     {
+-        super(field.getRandomProvider(), field, location, randomAge, sex);
++        super(field.getSimulationContext(), field, location, randomAge, sex);
+         this.isNocturnal = true;
+     }
+ }

@@ -1,0 +1,585 @@
+diff --git a/HeadlessTest.java b/HeadlessTest.java
+new file mode 100644
+index 0000000..9a484d1
+--- /dev/null
++++ b/HeadlessTest.java
+@@ -0,0 +1,12 @@
++public class HeadlessTest {
++    public static void main(String[] a) {
++        System.out.println("headless=" + java.awt.GraphicsEnvironment.isHeadless());
++        try {
++            javax.swing.JFrame f = new javax.swing.JFrame("t");
++            f.pack();
++            System.out.println("JFrame OK");
++        } catch (Throwable t) {
++            System.out.println("JFrame FAILED: " + t.getClass().getName() + ": " + t.getMessage());
++        }
++    }
++}
+diff --git a/RegressionHarness.java b/RegressionHarness.java
+new file mode 100644
+index 0000000..bf1cbff
+--- /dev/null
++++ b/RegressionHarness.java
+@@ -0,0 +1,60 @@
++import java.util.*;
++
++/**
++ * Headless regression harness. Drives the REAL SimulationEngine (no copied
++ * loop) and FNV-hashes per-step class counts. Deterministic via the fixed-seed
++ * Randomizer. Expected fingerprint after the engine extraction = the same value
++ * the copied-loop harness produced for the default path: -2010090214429012298.
++ *
++ * NOT part of the shipped simulation - a verification artifact only.
++ */
++public class RegressionHarness
++{
++    private static final int DEPTH = 160;
++    private static final int WIDTH = 240;
++    private static final int STEPS = 150;
++
++    public static void main(String[] args)
++    {
++        Randomizer.reset();
++
++        SimulationEngine engine = new SimulationEngine(DEPTH, WIDTH);
++        engine.reset();
++
++        long fingerprint = 1469598103934665603L; // FNV-1a offset basis
++        for (int step = 1; step <= STEPS; step++) {
++            engine.step();
++            fingerprint = mix(fingerprint, signature(engine.getField(), step));
++        }
++        System.out.println("FINGERPRINT=" + fingerprint);
++    }
++
++    private static long signature(Field field, int step)
++    {
++        Map<String, Integer> counts = new TreeMap<>();
++        int diseased = 0;
++        for (int row = 0; row < field.getDepth(); row++) {
++            for (int col = 0; col < field.getWidth(); col++) {
++                Object o = field.getObjectAt(row, col);
++                if (o != null) {
++                    counts.merge(o.getClass().getName(), 1, Integer::sum);
++                    if (o instanceof Organism && ((Organism) o).isDiseased()) {
++                        diseased++;
++                    }
++                }
++            }
++        }
++        long s = step * 1000003L + diseased * 31L;
++        for (Map.Entry<String, Integer> e : counts.entrySet()) {
++            s = s * 1000003L + e.getKey().hashCode() * 17L + e.getValue();
++        }
++        return s;
++    }
++
++    private static long mix(long h, long v)
++    {
++        h ^= v;
++        h *= 1099511628211L; // FNV prime
++        return h;
++    }
++}
+diff --git a/SimulationEngine.java b/SimulationEngine.java
+new file mode 100644
+index 0000000..e6c6816
+--- /dev/null
++++ b/SimulationEngine.java
+@@ -0,0 +1,219 @@
++import java.util.*;
++
++/**
++ * The headless simulation model.
++ *
++ * It owns the field, the list of actors and the environment, and advances them
++ * one step at a time. It has no knowledge of any user interface, so it can be
++ * driven and tested without a display. {@link Simulator} wraps an engine to add
++ * the Swing view and run controls.
++ *
++ * @version 2022.03.02
++ */
++public class SimulationEngine
++{
++    private static final Random rand = Randomizer.getRandom();
++
++    // The creation probabilities for each species. Mutable so that probability
++    // sweeps (see TestingMain) can substitute their own combinations.
++    private static Map<Class<?>, Double> creationProbabilities = Map.ofEntries(
++            Map.entry(Coyote.class, 0.010),
++            Map.entry(Deer.class, 0.080),
++            Map.entry(Wolf.class, 0.010),
++            Map.entry(Eagle.class, 0.01),
++            Map.entry(Mouse.class, 0.080),
++            Map.entry(Grass.class, 0.030),
++            Map.entry(Hunter.class, 0.03)
++    );
++
++    // Maximum number of hunters in the simulation.
++    private static final int HUNTER_LIMIT = 5;
++    private static int hunterCount = 0;
++
++    /**
++     * The order in which species are considered for each cell when populating
++     * the field. The creation probabilities are checked in this order and the
++     * first match wins, so the order is significant.
++     */
++    private static final List<Class<?>> SPAWN_ORDER = List.of(
++            Grass.class, Deer.class, Coyote.class, Wolf.class, Eagle.class, Mouse.class, Hunter.class);
++
++    /**
++     * Creates a single actor of a species at a location, or returns null when
++     * one cannot be created (e.g. the hunter limit has been reached).
++     */
++    @FunctionalInterface
++    private interface ActorSpawner {
++        Actor spawn(Field field, Location location, Animal.Gender sex, Environment environment);
++    }
++
++    // The factory used to create each species, keyed by its class.
++    private static final Map<Class<?>, ActorSpawner> SPAWNERS = Map.of(
++            Grass.class,  (f, l, s, e) -> new Grass(f, l),
++            Deer.class,   (f, l, s, e) -> new Deer(true, f, l, s),
++            Coyote.class, (f, l, s, e) -> new Coyote(true, f, l, s),
++            Wolf.class,   (f, l, s, e) -> new Wolf(true, f, l, s),
++            Eagle.class,  (f, l, s, e) -> new Eagle(true, f, l, s),
++            Mouse.class,  (f, l, s, e) -> new Mouse(true, f, l, s),
++            Hunter.class, (f, l, s, e) -> {
++                if(hunterCount >= HUNTER_LIMIT) {
++                    return null;
++                }
++                hunterCount++;
++                return new Hunter(f, l, e);
++            });
++
++    // List of actors in the field.
++    private final List<Actor> actors = new ArrayList<>();
++    // The current state of the field.
++    private Field field;
++    // Environment (time and weather) in the simulation.
++    private final Environment environment;
++    // The current step of the simulation.
++    private int step;
++
++    /**
++     * Create an engine with a field of the given size.
++     * @param depth Depth of the field.
++     * @param width Width of the field.
++     */
++    public SimulationEngine(int depth, int width)
++    {
++        field = new Field(depth, width);
++        environment = new Environment(new Time(), new Weather());
++    }
++
++    /**
++     * @return The field being simulated.
++     */
++    public Field getField()
++    {
++        return field;
++    }
++
++    /**
++     * @return The simulation's environment (time and weather).
++     */
++    public Environment getEnvironment()
++    {
++        return environment;
++    }
++
++    /**
++     * @return The current step number.
++     */
++    public int getStep()
++    {
++        return step;
++    }
++
++    /**
++     * @return The creation probabilities currently in use.
++     */
++    public Map<Class<?>, Double> getCreationProbabilities()
++    {
++        return creationProbabilities;
++    }
++
++    /**
++     * Replace the creation probabilities (used by probability sweeps).
++     * @param probabilities The new probabilities, keyed by species class.
++     */
++    public void setCreationProbabilities(Map<Class<?>, Double> probabilities)
++    {
++        creationProbabilities = probabilities;
++    }
++
++    /**
++     * Reset the model to a freshly populated starting state.
++     */
++    public void reset()
++    {
++        step = 0;
++        actors.clear();
++        populate();
++        environment.getTime().reset();
++    }
++
++    /**
++     * Advance the model by a single step: update the environment, let every
++     * actor act, collect newborns and grow new grass. Performs no rendering.
++     */
++    public void step()
++    {
++        step++;
++        environment.getTime().incrementTime();
++        environment.getWeather().checkWeatherChange(step);
++
++        // Provide space for newborn animals.
++        List<Actor> newActors = new ArrayList<>();
++        // Let all actors act.
++        for(Iterator<Actor> it = actors.iterator(); it.hasNext(); ) {
++            Actor actor = it.next();
++            if(actor instanceof Animal){
++               if(((Animal) actor).isAwake(environment)) {
++                   if(((Animal) actor).isDiseased() && ((Animal) actor).getDisease().getPropagationRate() <= rand.nextDouble()) {
++                       ((Animal) actor).setDead();
++                   }
++                   actor.act(newActors, environment);
++               }
++            }
++            else {
++                actor.act(newActors, environment);
++            }
++
++            if(actor instanceof Plant){
++                if(step % ((Plant) actor).getStepsPerStage()==0){
++                    ((Plant) actor).incrementGrowth();
++                }
++            }
++
++            if(! actor.isAlive()) {
++                it.remove();
++            }
++        }
++        actors.addAll(newActors);
++        plantGrassInPatches();
++    }
++
++    /**
++     * Randomly generate grass in free patches on the field, only if it is raining.
++     */
++    private void plantGrassInPatches()
++    {
++        // new grass is randomly added in patches
++        for(Location location : field.getRandomFreePatches(creationProbabilities.get(Grass.class))){
++            if(rand.nextDouble() <= creationProbabilities.get(Grass.class) && environment.getWeather().getCurrentWeather() == WeatherType.RAINING) {
++                Grass grass = new Grass(field, location);
++                actors.add(grass);
++            }
++        }
++    }
++
++    /**
++     * Randomly populate the field with organisms.
++     */
++    private void populate()
++    {
++        field.clear();
++        for(int row = 0; row < field.getDepth(); row++) {
++            for(int col = 0; col < field.getWidth(); col++) {
++                Animal.Gender sex = Randomizer.getRandomSex();
++                Location location = new Location(row, col);
++
++                // Consider each species in priority order; the first whose
++                // creation probability succeeds is placed here (if any).
++                for(Class<?> species : SPAWN_ORDER) {
++                    if(rand.nextDouble() <= creationProbabilities.get(species)) {
++                        Actor actor = SPAWNERS.get(species).spawn(field, location, sex, environment);
++                        if(actor != null) {
++                            actors.add(actor);
++                        }
++                        break;
++                    }
++                }
++                // else leave the location empty.
++            }
++        }
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index 90f0a59..6537c12 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -5,6 +5,11 @@ import java.util.*;
+  * A simple predator-prey simulator, based on a rectangular field
+  * containing different organisms.
+  *
++ * This class is a controller: it owns a {@link SimulationEngine} (the model) and
++ * a {@link SimulatorView} (the GUI), wires the view's buttons to run controls,
++ * and renders the engine's state after each step. All model logic lives in the
++ * engine.
++ *
+  * @version 2022.03.02
+  */
+ public class Simulator
+@@ -12,78 +17,20 @@ public class Simulator
+     private static boolean playingSimulation = false;
+     private static int remainingSteps;
+ 
+-    private static final Random rand = Randomizer.getRandom();
+-
+     // Constants representing configuration information for the simulation.
+     // The default width for the grid.
+     private static final int DEFAULT_WIDTH = 240;
+     // The default depth of the grid.
+     private static final int DEFAULT_DEPTH = 160;
+ 
+-    // A map of the creation probabilities for the organisms in the simulation
+-    private static Map<Class<?>, Double> CREATION_PROBABILITIES = Map.ofEntries(
+-            Map.entry(Coyote.class, 0.010),
+-            Map.entry(Deer.class, 0.080),
+-            Map.entry(Wolf.class, 0.010),
+-            Map.entry(Eagle.class, 0.01),
+-            Map.entry(Mouse.class, 0.080),
+-            Map.entry(Grass.class, 0.030),
+-            Map.entry(Hunter.class, 0.03)
+-
+-    );
+-
+-    // Maximum number of hunters in the simulation
+-    private static final int HUNTER_LIMIT = 5;
+-    private static int HUNTER_COUNT = 0;
+-
+-    /**
+-     * The order in which species are considered for each cell when populating
+-     * the field. The creation probabilities are checked in this order and the
+-     * first match wins, so the order is significant.
+-     */
+-    private static final List<Class<?>> SPAWN_ORDER = List.of(
+-            Grass.class, Deer.class, Coyote.class, Wolf.class, Eagle.class, Mouse.class, Hunter.class);
+-
+-    /**
+-     * Creates a single actor of a species at a location, or returns null when
+-     * one cannot be created (e.g. the hunter limit has been reached).
+-     */
+-    @FunctionalInterface
+-    private interface ActorSpawner {
+-        Actor spawn(Field field, Location location, Animal.Gender sex, Environment environment);
+-    }
+-
+-    // The factory used to create each species, keyed by its class.
+-    private static final Map<Class<?>, ActorSpawner> SPAWNERS = Map.of(
+-            Grass.class,  (f, l, s, e) -> new Grass(f, l),
+-            Deer.class,   (f, l, s, e) -> new Deer(true, f, l, s),
+-            Coyote.class, (f, l, s, e) -> new Coyote(true, f, l, s),
+-            Wolf.class,   (f, l, s, e) -> new Wolf(true, f, l, s),
+-            Eagle.class,  (f, l, s, e) -> new Eagle(true, f, l, s),
+-            Mouse.class,  (f, l, s, e) -> new Mouse(true, f, l, s),
+-            Hunter.class, (f, l, s, e) -> {
+-                if(HUNTER_COUNT >= HUNTER_LIMIT) {
+-                    return null;
+-                }
+-                HUNTER_COUNT++;
+-                return new Hunter(f, l, e);
+-            });
+-
+-
+-    // List of actors in the field.
+-    private List<Actor> actors;
+-    // The current state of the field.
+-    private Field field;
+-    // The current step of the simulation.
+-    private int step;
++    // The simulation model.
++    private SimulationEngine engine;
+     // A graphical view of the simulation.
+     private SimulatorView view;
+-    // Environment in the simulation.
+-    private Environment environment;
+ 
+ 
+     /**
+-     * A simulator constructor to set the CREATION_PROBABILITY of each actor.
++     * A simulator constructor to set the creation probability of each actor.
+      * This constructor can be used to test different combinations of probabilities to find an optimal combination
+      *
+      * @param GrassProbability Probability of Grass being generated
+@@ -97,7 +44,8 @@ public class Simulator
+     public Simulator(double GrassProbability, double DeerProbability, double CoyoteProbability, double WolfProbability, double EagleProbability, double HunterProbability, double MouseProbability){
+         this(DEFAULT_WIDTH, DEFAULT_DEPTH);
+ 
+-        CREATION_PROBABILITIES = Map.ofEntries(
++        engine = new SimulationEngine(DEFAULT_DEPTH, DEFAULT_WIDTH);
++        engine.setCreationProbabilities(Map.ofEntries(
+                 Map.entry(Coyote.class, CoyoteProbability),
+                 Map.entry(Deer.class, DeerProbability),
+                 Map.entry(Wolf.class, WolfProbability),
+@@ -105,11 +53,7 @@ public class Simulator
+                 Map.entry(Mouse.class, MouseProbability),
+                 Map.entry(Grass.class, GrassProbability),
+                 Map.entry(Hunter.class, HunterProbability)
+-        );
+-
+-        actors = new ArrayList<>();
+-        field = new Field(DEFAULT_DEPTH, DEFAULT_WIDTH);
+-        environment = new Environment(new Time(), new Weather());
++        ));
+ 
+         reset();
+     }
+@@ -136,9 +80,7 @@ public class Simulator
+             width = DEFAULT_WIDTH;
+         }
+ 
+-        actors = new ArrayList<>();
+-        field = new Field(depth, width);
+-        environment = new Environment(new Time(), new Weather());
++        engine = new SimulationEngine(depth, width);
+ 
+         // Create a view of the state of each location in the field.
+         view = new SimulatorView(depth, width);
+@@ -226,12 +168,12 @@ public class Simulator
+ 
+         int backupCounter = 1;
+         while(playingSimulation){
+-            for(int step = 1; step <= numSteps && view.isViable(field); step++) {
++            for(int step = 1; step <= numSteps && view.isViable(engine.getField()); step++) {
+                 simulateOneStep();
+                 backupCounter++;
+ //            delay(60);   // uncomment this to run more slowly
+             }
+-            if(!view.isViable(field)){
++            if(!view.isViable(engine.getField())){
+                 // System.out.println("STEPS COMPLETED: "+backupCounter);
+                 // uncomment this while optimizing for population stability
+                 Thread.currentThread().interrupt();
+@@ -239,7 +181,7 @@ public class Simulator
+                     // If multiple instances of the simulation are created in the same session (for testing),
+                     // the fields in SimulationInfo can be used for optimizing the default probabilities
+                     SimulationInfo.HIGHEST_STEPS = backupCounter;
+-                    SimulationInfo.HIGHEST_STEP_PROBS = this.CREATION_PROBABILITIES;
++                    SimulationInfo.HIGHEST_STEP_PROBS = engine.getCreationProbabilities();
+                 }
+                 playingSimulation = false;
+                 break;
+@@ -249,65 +191,14 @@ public class Simulator
+     }
+ 
+     /**
+-     * Run the simulation from its current state for a single step.
+-     * Iterate over the whole field updating the state of each
+-     * organism.
++     * Run the simulation from its current state for a single step, then render
++     * the new state.
+      */
+     public void simulateOneStep()
+     {
+         if(!playingSimulation){ return; }
+-        step++;
+-        environment.getTime().incrementTime();
+-        environment.getWeather().checkWeatherChange(step);
+-
+-
+-        // Provide space for newborn animals.
+-        List<Actor> newActors = new ArrayList<>();
+-        // Let all actors act.
+-        for(Iterator<Actor> it = actors.iterator(); it.hasNext(); ) {
+-            Actor actor = it.next();
+-            if(actor instanceof Animal){
+-               if(((Animal) actor).isAwake(environment)) {
+-                   if(((Animal) actor).isDiseased() && ((Animal) actor).getDisease().getPropagationRate() <= rand.nextDouble()) {
+-                       ((Animal) actor).setDead();
+-                   }
+-                   actor.act(newActors, environment);
+-               }
+-            }
+-            else {
+-                actor.act(newActors, environment);
+-            }
+-
+-            if(actor instanceof Plant){
+-                if(step % ((Plant) actor).getStepsPerStage()==0){
+-                    ((Plant) actor).incrementGrowth();
+-                }
+-            }
+-
+-            if(! actor.isAlive()) {
+-                it.remove();
+-            }
+-
+-
+-
+-        }
+-        actors.addAll(newActors);
+-        plantGrassInPatches();
+-
+-        view.showStatus(step, environment.getWeather().getCurrentWeather().toString(), environment.getTime().getCurrentTimeString(), field);
+-    }
+-
+-    /**
+-     * Randomly generate grass in free patches on the field, only if it is raining
+-     */
+-    private void plantGrassInPatches(){
+-        // new grass is randomly added in patches
+-        for(Location location:field.getRandomFreePatches(CREATION_PROBABILITIES.get(Grass.class))){
+-            if(rand.nextDouble() <= CREATION_PROBABILITIES.get(Grass.class) && environment.getWeather().getCurrentWeather() == WeatherType.RAINING) {
+-                Grass grass = new Grass(field, location);
+-                actors.add(grass);
+-            }
+-        }
++        engine.step();
++        showStatus();
+     }
+ 
+     /**
+@@ -315,40 +206,21 @@ public class Simulator
+      */
+     public void reset()
+     {
+-        step = 0;
+-        actors.clear();
+-        populate();
+-        environment.getTime().reset();
+-
++        engine.reset();
+         // Show the starting state in the view.
+-        view.showStatus(step,environment.getWeather().getCurrentWeather().toString(), environment.getTime().getCurrentTimeString().toString(), field);
++        showStatus();
+     }
+ 
+     /**
+-     * Randomly populate the field with organisms.
++     * Render the engine's current state in the view.
+      */
+-    private void populate()
++    private void showStatus()
+     {
+-        field.clear();
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
+-                Animal.Gender sex = Randomizer.getRandomSex();
+-                Location location = new Location(row, col);
+-
+-                // Consider each species in priority order; the first whose
+-                // creation probability succeeds is placed here (if any).
+-                for(Class<?> species : SPAWN_ORDER) {
+-                    if(rand.nextDouble() <= CREATION_PROBABILITIES.get(species)) {
+-                        Actor actor = SPAWNERS.get(species).spawn(field, location, sex, environment);
+-                        if(actor != null) {
+-                            actors.add(actor);
+-                        }
+-                        break;
+-                    }
+-                }
+-                // else leave the location empty.
+-            }
+-        }
++        Environment environment = engine.getEnvironment();
++        view.showStatus(engine.getStep(),
++                environment.getWeather().getCurrentWeather().toString(),
++                environment.getTime().getCurrentTimeString(),
++                engine.getField());
+     }
+ 
+     /**

@@ -1,0 +1,439 @@
+diff --git a/Counter.java b/Counter.java
+index 5a38e8e..67040ea 100644
+--- a/Counter.java
++++ b/Counter.java
+@@ -56,4 +56,12 @@ public class Counter
+     {
+         count = 0;
+     }
++
++    /**
++     * Replace the current count.
++     */
++    public void setCount(int count)
++    {
++        this.count = count;
++    }
+ }
+diff --git a/Field.java b/Field.java
+index da92f29..40d918c 100644
+--- a/Field.java
++++ b/Field.java
+@@ -1,7 +1,9 @@
+ import java.util.Collections;
++import java.util.LinkedHashMap;
+ import java.util.Iterator;
+ import java.util.LinkedList;
+ import java.util.List;
++import java.util.Map;
+ import java.util.Random;
+ 
+ /**
+@@ -19,6 +21,8 @@ public class Field
+     private int depth, width;
+     // Storage for the animals.
+     private GridSpace[][] field;
++    // Current populations by concrete organism type.
++    private Map<Class<?>, Integer> populationCounts;
+ 
+     /**
+      * Represent a field of the given dimensions.
+@@ -31,6 +35,7 @@ public class Field
+         this.depth = depth;
+         this.width = width;
+         field = new GridSpace[depth][width];
++        populationCounts = new LinkedHashMap<>();
+     }
+     
+     /**
+@@ -38,6 +43,7 @@ public class Field
+      */
+     public void clear()
+     {
++        populationCounts.clear();
+         for(int row = 0; row < depth; row++) 
+         {
+             for(int col = 0; col < width; col++) 
+@@ -58,7 +64,7 @@ public class Field
+         {
+             for(int col = 0; col < width; col++) 
+             {
+-                field[row][col].clear(objectType);
++                clear(new Location(row, col), objectType);
+             }
+         }
+     }
+@@ -71,7 +77,15 @@ public class Field
+      */
+     public void clear(Location location, Class<?> objectType)
+     {
+-        field[location.getRow()][location.getCol()].clear(objectType);
++        GridSpace gridSpace = getGridSpace(location);
++        if (gridSpace == null) {
++            return;
++        }
++
++        Object removedObject = gridSpace.removeObject(objectType);
++        if (removedObject != null) {
++            decrementPopulationCount(removedObject.getClass());
++        }
+     }
+     
+     /**
+@@ -98,13 +112,15 @@ public class Field
+      */
+     public void place(Object object, Location location)
+     {
+-        GridSpace gridSpace = field[location.getRow()][location.getCol()];
+-        
+-        if (gridSpace == null) {
+-            gridSpace = new GridSpace();
++        GridSpace gridSpace = ensureGridSpace(location);
++        Object replacedObject = gridSpace.setObject(object);
++
++        if (replacedObject != null) {
++            decrementPopulationCount(replacedObject.getClass());
++        }
++        if (object != null) {
++            incrementPopulationCount(object.getClass());
+         }
+-        
+-        gridSpace.setObject(object);
+     }
+     
+     /**
+@@ -130,12 +146,7 @@ public class Field
+      */
+     public <T> T getObjectAt(int row, int col, Class<T> objectType)
+     {
+-        if (field[row][col] == null)
+-        {
+-            field[row][col] = new GridSpace();
+-        }
+-        
+-        return field[row][col].getObject(objectType);
++        return ensureGridSpace(row, col).getObject(objectType);
+     }
+     
+     /**
+@@ -271,4 +282,81 @@ public class Field
+     {
+         return width;
+     }
++
++    /**
++     * Return a snapshot of the tracked populations by concrete type.
++     */
++    public Map<Class<?>, Integer> getPopulationCounts()
++    {
++        return new LinkedHashMap<>(populationCounts);
++    }
++
++    /**
++     * Return how many concrete species currently have a non-zero population.
++     */
++    public int getActivePopulationTypeCount()
++    {
++        return populationCounts.size();
++    }
++
++    /**
++     * Get the grid space at a location without forcing allocation.
++     */
++    private GridSpace getGridSpace(Location location)
++    {
++        return field[location.getRow()][location.getCol()];
++    }
++
++    /**
++     * Get or create the grid space at a location.
++     */
++    private GridSpace ensureGridSpace(Location location)
++    {
++        return ensureGridSpace(location.getRow(), location.getCol());
++    }
++
++    /**
++     * Get or create the grid space at the given coordinates.
++     */
++    private GridSpace ensureGridSpace(int row, int col)
++    {
++        if (field[row][col] == null)
++        {
++            field[row][col] = new GridSpace();
++        }
++
++        return field[row][col];
++    }
++
++    /**
++     * Increase the tracked population for a concrete type.
++     */
++    private void incrementPopulationCount(Class<?> objectType)
++    {
++        Integer count = populationCounts.get(objectType);
++        if (count == null) {
++            populationCounts.put(objectType, 1);
++        }
++        else {
++            populationCounts.put(objectType, count + 1);
++        }
++    }
++
++    /**
++     * Decrease the tracked population for a concrete type.
++     */
++    private void decrementPopulationCount(Class<?> objectType)
++    {
++        Integer count = populationCounts.get(objectType);
++        if (count == null) {
++            return;
++        }
++
++        if (count <= 1) {
++            populationCounts.remove(objectType);
++        }
++        else {
++            populationCounts.put(objectType, count - 1);
++        }
++    }
+ }
+diff --git a/FieldStats.java b/FieldStats.java
+index d9b2dea..db93a0e 100644
+--- a/FieldStats.java
++++ b/FieldStats.java
+@@ -1,5 +1,6 @@
+-import java.awt.Color;
+-import java.util.HashMap;
++import java.util.Comparator;
++import java.util.LinkedHashMap;
++import java.util.Map;
+ 
+ /**
+  * This class collects and provides some statistical data on the state 
+@@ -11,9 +12,7 @@ import java.util.HashMap;
+ public class FieldStats
+ {
+     // Counters for each type of entity (lion, zebra, etc.) in the simulation.
+-    private HashMap<Class, Counter> counters;
+-    // Whether the counters are currently up to date.
+-    private boolean countsValid;
++    private Map<Class<?>, Counter> counters;
+ 
+     /**
+      * Construct a FieldStats object.
+@@ -22,8 +21,7 @@ public class FieldStats
+     {
+         // Set up a collection for counters for each type of animal that
+         // we might find
+-        counters = new HashMap<>();
+-        countsValid = true;
++        counters = new LinkedHashMap<>();
+     }
+ 
+     /**
+@@ -35,12 +33,10 @@ public class FieldStats
+      */
+     public String getPopulationDetails(Field field)
+     {
+-        StringBuffer buffer = new StringBuffer();
+-        if(!countsValid) {
+-            generateCounts(field);
+-        }
+-        for(Class key : counters.keySet()) {
+-            Counter info = counters.get(key);
++        StringBuilder buffer = new StringBuilder();
++
++        syncCounts(field);
++        for(Counter info : counters.values()) {
+             buffer.append(info.getName());
+             buffer.append(": ");
+             buffer.append(info.getCount());
+@@ -53,40 +49,13 @@ public class FieldStats
+      * Invalidate the current set of statistics; reset all 
+      * counts to zero.
+      */
+-    public void reset()
++    private void reset()
+     {
+-        countsValid = false;
+-        for(Class key : counters.keySet()) {
+-            Counter count = counters.get(key);
++        for(Counter count : counters.values()) {
+             count.reset();
+         }
+     }
+ 
+-    /**
+-     * Increment the count for one object.
+-     * 
+-     * @param objectType The class of animal to increment.
+-     */
+-    public void incrementCount(Class objectType)
+-    {
+-        Counter count = counters.get(objectType);
+-        if(count == null) {
+-            // We do not have a counter for this species yet.
+-            // Create one.
+-            count = new Counter(objectType.getName());
+-            counters.put(objectType, count);
+-        }
+-        count.increment();
+-    }
+-
+-    /**
+-     * Indicate that an animal count has been completed.
+-     */
+-    public void countFinished()
+-    {
+-        countsValid = true;
+-    }
+-
+     /**
+      * Determine whether the simulation is still viable.
+      * I.e., should it continue to run.
+@@ -95,49 +64,27 @@ public class FieldStats
+      */
+     public boolean isViable(Field field)
+     {
+-        // How many counts are non-zero.
+-        int nonZero = 0;
+-        if(!countsValid) 
+-        {
+-            generateCounts(field);
+-        }
+-        
+-        for(Class key : counters.keySet()) 
+-        {
+-            Counter info = counters.get(key);
+-            if(info.getCount() > 0) 
+-            {
+-                nonZero++;
+-            }
+-        }
+-        return nonZero > 1;
++        return field.getActivePopulationTypeCount() > 1;
+     }
+-    
++
+     /**
+-     * Generate counts of the number of all species of 
+-     * animal and plant.
+-     * These are not kept up to date as animals and plants
+-     * are placed in the field, but only when a request
+-     * is made for the information.
+-     * 
+-     * @param field The field to generate the stats for.
++     * Synchronise display counters with the populations tracked by Field.
+      */
+-    private void generateCounts(Field field)
++    private void syncCounts(Field field)
+     {
+         reset();
+-        for(int row = 0; row < field.getDepth(); row++) 
+-        {
+-            for(int col = 0; col < field.getWidth(); col++) 
+-            {
+-                Object object = field.getObjectAt(row, col, Animal.class);
+-                
+-                if(object != null) 
+-                {
+-                    incrementCount(object.getClass());
++
++        Map<Class<?>, Integer> populations = field.getPopulationCounts();
++        populations.entrySet().stream()
++            .sorted(Comparator.comparing(entry -> entry.getKey().getName()))
++            .forEach(entry -> {
++                Counter counter = counters.get(entry.getKey());
++                if(counter == null) {
++                    counter = new Counter(entry.getKey().getName());
++                    counters.put(entry.getKey(), counter);
+                 }
+-            }
+-        }
+-        
+-        countsValid = true;
++
++                counter.setCount(entry.getValue());
++            });
+     }
+ }
+diff --git a/GridSpace.java b/GridSpace.java
+index 4e32791..db127c4 100644
+--- a/GridSpace.java
++++ b/GridSpace.java
+@@ -84,14 +84,14 @@ public class GridSpace
+      * 
+      * @param Object to store in this grid space.
+      */
+-    public void setObject(Object object) 
++    public Object setObject(Object object) 
+     {
+         if (object == null) {
+-            return;
++            return null;
+         }
+ 
+         Class<?> storageType = resolveStorageType(object.getClass());
+-        occupants.put(storageType, object);
++        return occupants.put(storageType, object);
+     }
+     
+     /**
+@@ -117,6 +117,19 @@ public class GridSpace
+         }
+     }
+ 
++    /**
++     * Remove and return the stored object matching the requested type.
++     */
++    public <T> T removeObject(Class<T> objectType)
++    {
++        T existingObject = getObject(objectType);
++        if (existingObject != null) {
++            clear(objectType);
++        }
++
++        return existingObject;
++    }
++
+     /**
+      * Store a supported object type in its dedicated slot.
+      */
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 544aedd..a7fa7c9 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -219,7 +219,6 @@ public class SimulatorView extends JFrame
+         stepLabel.setText(STEP_PREFIX + Time.getStep());
+         timeLabel.setText(TIME_PREFIX + getTimeString());
+         weatherLabel.setText(WEATHER_PREFIX + Weather.getWeather() + "  ");
+-        stats.reset();
+         
+         fieldView.preparePaint();
+         
+@@ -236,7 +235,6 @@ public class SimulatorView extends JFrame
+                 
+                 if(animal != null) 
+                 {
+-                    stats.incrementCount(animal.getClass());
+                     fieldView.drawMark(col, row, getColor(animal.getClass()));
+                     
+                     // Update the infected and immune counts
+@@ -262,15 +260,9 @@ public class SimulatorView extends JFrame
+                     fieldView.setBackground(emptyColor);
+                 }
+                 
+-                if (plant != null) 
+-                {
+-                   stats.incrementCount(plant.getClass()); 
+-                }
+             }
+         }
+-        
+-        stats.countFinished();
+-        
++
+         infectedLabel.setText(INFECTED_PREFIX + numberOfInfected);
+         immuneLabel.setText(IMMUNE_PREFIX + numberOfImmune);
+ 
