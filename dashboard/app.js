@@ -504,6 +504,7 @@
   }
 
   const SIGNAL_META = [
+    ["S0", "First stop turn"],
     ["S1", "Pre-convergence churn"],
     ["S2", "Post-convergence modification"],
     ["S3", "Line-change volatility"],
@@ -517,6 +518,20 @@
     const n = Number(value);
     if (!Number.isFinite(n)) return "—";
     return Number.isInteger(n) ? String(n) : n.toFixed(3);
+  }
+
+  function fmtSignalVal(id, entry) {
+    if (!entry || entry.cont === undefined) return "—";
+    const n = Number(entry.cont);
+    if (!Number.isFinite(n)) return "—";
+    let text =
+      id === "S0"
+        ? String(Math.round(n))
+        : Number.isInteger(n)
+          ? String(n)
+          : n.toFixed(3);
+    if (id === "S0" && entry.never_stopped) text += "\u2020";
+    return text;
   }
 
   function renderSignalsHtml(model, step) {
@@ -572,10 +587,12 @@
       if (hasRolling) {
         const rentry = rolling[id] || {};
         rows +=
-          `<td class="signal-val">${fmtNum(rentry.cont)}</td>` +
+          `<td class="signal-val">${escapeHtml(fmtSignalVal(id, rentry))}</td>` +
           flagCell(rentry);
       }
-      rows += `<td class="signal-val">${fmtNum(entry.cont)}</td>` + flagCell(entry);
+      rows +=
+        `<td class="signal-val">${escapeHtml(fmtSignalVal(id, entry))}</td>` +
+        flagCell(entry);
       rows += "</tr>";
     });
 

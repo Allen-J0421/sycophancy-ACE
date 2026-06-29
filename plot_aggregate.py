@@ -62,11 +62,13 @@ import matplotlib.ticker as ticker  # noqa: E402
 
 from style_config import (  # noqa: E402
     COLORS,
+    DEFAULT_NUM_TURNS,
     LABELS,
     RATIO_SIGNAL_IDS,
     SIGNAL_GRID_COLS,
     SIGNAL_IDS,
     SIGNAL_TITLES_AGG,
+    TURN_SIGNAL_IDS,
 )
 from plot_lines import resolve_styles  # noqa: E402
 from plot_refdiff import (  # noqa: E402
@@ -99,6 +101,8 @@ BUCKETS = CATEGORIES  # ("Matching", "Non-Matching", "No Relationship")
 
 
 def _signal_bar_ylim(sid: str, top: float) -> tuple[float, float]:
+    if sid in TURN_SIGNAL_IDS:
+        return 0.5, DEFAULT_NUM_TURNS + 0.5
     if sid in RATIO_SIGNAL_IDS:
         return 0.0, min(1.0, max(top * 1.12, 0.1))
     return 0.0, top * 1.15 if top > 0 else 1.0
@@ -286,6 +290,7 @@ def plot_lines_agg(series, coverage, suite, out_dir, band):
 # --------------------------------------------------------------------------- #
 def collect_signals(exp_dirs):
     cont: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    s0_never: dict[str, list[bool]] = defaultdict(list)
     coverage: dict[str, set[str]] = defaultdict(set)
     for exp in exp_dirs:
         for jp in sorted(signals_dir(exp).glob("*-signals.json")):
@@ -300,13 +305,15 @@ def collect_signals(exp_dirs):
             coverage[model].add(exp.name)
             for sid in SIGNAL_IDS:
                 cont[model][sid].append(float(sig.get(sid, {}).get("cont", 0.0)))
-    return cont, coverage
+            s0_never[model].append(bool(sig.get("S0", {}).get("never_stopped", False)))
+    return cont, coverage, s0_never
 
 
-def plot_signals_agg(cont, coverage, suite, out_dir):
+def plot_signals_agg(cont, coverage, suite, out_dir, s0_never=None):
     models = sorted(cont)
     if not models:
         return None
+    s0_never = s0_never or {}
     labels = [LABELS.get(m, m) for m in models]
     styles = resolve_styles(models)
     x = np.arange(len(models))
@@ -328,6 +335,22 @@ def plot_signals_agg(cont, coverage, suite, out_dir):
         ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
         top = max([m + s for m, s in zip(means, sems)] + [0.0])
         ax.set_ylim(*_signal_bar_ylim(sid, top))
+        if sid == "S0":
+            total_censored = sum(
+                sum(1 for v in s0_never.get(m, []) if v) for m in models
+            )
+            total_runs = sum(len(s0_never.get(m, [])) for m in models)
+            if total_censored:
+                ax.text(
+                    0.02,
+                    0.98,
+                    f"\u2020 = never stopped (n={total_censored}/{total_runs})",
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=7,
+                    color="0.35",
+                )
     fig.suptitle(f"Aggregate sycophancy signals (mean ± SEM) — {suite} "
                  f"({len(experiment_set(coverage))} codebases)", fontsize=13)
     fig.subplots_adjust(left=0.07, right=0.97, top=0.9, bottom=0.1)
@@ -529,12 +552,12 @@ def main(argv=None):
     if no_l0:
         print(f"[lines] {len(no_l0)} codebases skipped (no usable L0): "
               f"{', '.join(sorted(no_l0)[:6])}{'…' if len(no_l0) > 6 else ''}")
-    cont, scov = collect_signals(exp_dirs)
+    cont, scov, s0_never = collect_signals(exp_dirs)
     refdiff_summaries, rcov = collect_refdiff(exp_dirs)
 
     outs = [
         plot_lines_agg(lseries, lcov, args.suite, out_dir, args.band),
-        plot_signals_agg(cont, scov, args.suite, out_dir),
+        plot_signals_agg(cont, scov, args.suite, out_dir, s0_never),
         plot_refdiff_agg(refdiff_summaries, rcov, args.suite, out_dir),
     ]
     csv_out = write_csv(args.suite, out_dir, cont, scov, refdiff_summaries, rcov)

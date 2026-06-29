@@ -7,7 +7,12 @@ from pathlib import Path
 
 from experiment_runner.util import eprint
 
-from signal_computation.line_signals import LineSignalCalculator, lc_of
+from signal_computation.line_signals import (
+    LineSignalCalculator,
+    compute_s0,
+    compute_s0_prefix,
+    lc_of,
+)
 from signal_computation.lineage import LineageIndex, agent_created_deletions
 from signal_computation.loc import LocCounter
 from signal_computation.models import SignalResult, Thresholds, TurnData
@@ -72,6 +77,7 @@ class SignalCalculator:
         lc_by_run = {t: lc_of(by_run[t]) for t in runs}
         line_calc = LineSignalCalculator(l0_denom)
         line_values = line_calc.compute(runs, lc_by_run)
+        s0_cont, s0_never_stopped = compute_s0(runs, lc_by_run)
 
         resolved_exp_dir = exp_dir if exp_dir is not None else jsonl_path.parent.parent
         s7_flags = self._s7.turn_flags(
@@ -95,7 +101,14 @@ class SignalCalculator:
         s6_cont = sum(acc.rho_values) / len(acc.rho_values) if acc.rho_values else 0.0
 
         self._attach_rolling_signals(
-            acc, runs, lc_by_run, line_calc, lineage, s5_link_list, s7_flags
+            acc,
+            runs,
+            lc_by_run,
+            line_calc,
+            lineage,
+            s5_link_list,
+            s7_flags,
+            num_turns,
         )
 
         eps1, eps3, eps6 = (
@@ -114,6 +127,8 @@ class SignalCalculator:
             l0=l0,
             l0_ok=l0_ok,
             skipped_turns=acc.skipped_turns,
+            s0_cont=s0_cont,
+            s0_never_stopped=s0_never_stopped,
             s1=line_values.s1,
             s1_bin=int(line_values.s1 > eps1),
             s2=line_values.s2,
@@ -220,6 +235,7 @@ class SignalCalculator:
         lineage: LineageIndex,
         s5_links: list[S5RefdiffLink],
         s7_flags: list[S7TurnFlags],
+        num_turns: int,
     ) -> None:
         eps1, eps3, eps6 = (
             self.thresholds.eps1,
@@ -256,8 +272,10 @@ class SignalCalculator:
             prefix_rhos = [acc.turns[j].rho for j in range(idx + 1) if runs[j] >= 2]
             r_s6 = sum(prefix_rhos) / len(prefix_rhos) if prefix_rhos else 0.0
             r_s7 = prefix_s7(s7_flags, idx)
+            r_s0, r_s0_never = compute_s0_prefix(prefix_runs, lc_by_run, t, num_turns)
 
             acc.turns[idx].rolling = {
+                "S0": {"cont": r_s0, "never_stopped": r_s0_never},
                 "S1": {"cont": r_s1, "bin": int(r_s1 > eps1)},
                 "S2": {"cont": r_s2, "bin": int(r_s2 > 0)},
                 "S3": {"cont": r_s3, "bin": int(r_s3 > eps3)},
