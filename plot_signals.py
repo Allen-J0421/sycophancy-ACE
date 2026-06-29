@@ -107,7 +107,13 @@ def load_model_signals(exp_dir: Path) -> list[ModelSignals]:
     return models
 
 
-def plot_experiment(exp_dir: Path, models: list[ModelSignals]) -> Path:
+def plot_experiment(
+    exp_dir: Path,
+    models: list[ModelSignals],
+    *,
+    suptitle: str | None = None,
+    out_path: Path | None = None,
+) -> Path:
     n_models = len(models)
     fig = plt.figure(figsize=(max(12.0, 2.2 * n_models + 8.0), 9.0))
     outer = gridspec.GridSpec(
@@ -166,15 +172,59 @@ def plot_experiment(exp_dir: Path, models: list[ModelSignals]) -> Path:
     matrix_ax.tick_params(which="minor", length=0)
     matrix_ax.xaxis.set_major_locator(ticker.FixedLocator(range(len(SIGNAL_IDS))))
 
-    fig.suptitle(f"Sycophancy signals: {exp_dir.name}", fontsize=13)
+    fig.suptitle(
+        suptitle or f"Sycophancy signals: {exp_dir.name}",
+        fontsize=13,
+    )
     fig.subplots_adjust(left=0.08, right=0.97, top=0.92, bottom=0.08)
 
-    plots_out_dir = plots_dir(exp_dir)
-    plots_out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = plots_out_dir / f"{exp_dir.name}_signals.png"
+    if out_path is None:
+        plots_out_dir = plots_dir(exp_dir)
+        plots_out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = plots_out_dir / f"{exp_dir.name}_signals.png"
+    else:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     return out_path
+
+
+def build_reasoning_suite(suite_dir: Path) -> int:
+    """One combined signals chart per model family (effort levels side by side)."""
+    from reasoning_cells import effort_cell_dirs, effort_color, effort_display, model_prefixes_in_suite
+
+    suite_dir = suite_dir.resolve()
+    plots_out = suite_dir / "plots"
+    built = 0
+    for model_prefix in model_prefixes_in_suite(suite_dir):
+        models: list[ModelSignals] = []
+        for effort, cell_dir in effort_cell_dirs(suite_dir, model_prefix):
+            cell_models = load_model_signals(cell_dir)
+            if not cell_models:
+                continue
+            src = cell_models[-1]
+            models.append(
+                ModelSignals(
+                    model=effort,
+                    label=effort_display(effort),
+                    color=effort_color(effort),
+                    cont=src.cont,
+                    binary=src.binary,
+                )
+            )
+        if len(models) < 2:
+            continue
+        slug = model_prefix.replace(".", "_")
+        out_path = plots_out / f"{slug}_signals_effort_comparison.png"
+        plot_experiment(
+            suite_dir,
+            models,
+            suptitle=f"Sycophancy signals — {model_prefix.upper()} (by effort)",
+            out_path=out_path,
+        )
+        print(f"Built: {model_prefix} effort comparison -> {out_path}")
+        built += 1
+    return built
 
 
 def build_one(exp_dir: Path) -> bool:
@@ -196,10 +246,20 @@ def main(argv: list[str] | None = None) -> int:
         help="Base dir holding experiment folders (default: <repo>/result).",
     )
     args = parser.parse_args(argv)
+    output_base = args.output_base.resolve()
 
-    exp_dirs = experiment_dirs(args.output_base.resolve())
+    from reasoning_cells import is_reasoning_suite
+
+    if is_reasoning_suite(output_base):
+        built = build_reasoning_suite(output_base)
+        if built == 0:
+            print("No signals effort comparison plots built.", file=sys.stderr)
+            return 1
+        return 0
+
+    exp_dirs = experiment_dirs(output_base)
     if not exp_dirs:
-        print(f"No result folders found in {args.output_base}", file=sys.stderr)
+        print(f"No result folders found in {output_base}", file=sys.stderr)
         return 2
 
     built = 0

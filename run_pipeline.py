@@ -43,7 +43,19 @@ _PYTHON = sys.executable
 
 # Canonical phase order. The orchestrator always runs phases in this order,
 # regardless of how they are written in the planner or passed via --phase.
-CANONICAL_PHASES = ["run_exp", "plot_lines", "refdiff", "plot_refdiff", "signals", "plot_signals", "dashboard"]
+CANONICAL_PHASES = [
+    "run_exp",
+    "plot_lines",
+    "refdiff",
+    "plot_refdiff",
+    "signals",
+    "plot_signals",
+    "dashboard",
+    "plot_reasoning_groups",
+]
+
+# Phases that scan an entire suite output_base (one step per suite, not per cell).
+SUITE_WIDE_PHASES = frozenset({"plot_refdiff", "plot_signals", "plot_reasoning_groups"})
 
 # Upstream dependency for the soft dep-check: a phase should only run once the
 # named upstream phase is `done` for the same experiment. run_exp has no upstream.
@@ -58,7 +70,11 @@ PHASE_UPSTREAM = {
 }
 
 # Map planner group key -> output subdirectory name.
-CATEGORY_DIRS = {"algorithms": "Algorithms", "realworld": "RealWorld"}
+CATEGORY_DIRS = {
+    "algorithms": "Algorithms",
+    "realworld": "RealWorld",
+    "reasoning_test": "reasoning_test",
+}
 
 
 def eprint(*args: object) -> None:
@@ -123,8 +139,8 @@ def experiment_folder_name(target: Path, label: str | None, prompter: bool) -> s
 
 @dataclass
 class Task:
-    category: str            # "algorithms" | "realworld"
-    output_base: Path        # output/Algorithms | output/RealWorld
+    category: str            # "algorithms" | "realworld" | "reasoning_test"
+    output_base: Path        # output/Algorithms | output/RealWorld | output/reasoning_test/<suite>
     target: Path
     commit: str
     models: list[str]
@@ -132,11 +148,13 @@ class Task:
     phases: list[str]
     prompter: bool
     label: str | None
+    prompter_profile: str | None = None
     effort_codex: str | None = None
     effort_claude: str | None = None
     no_snapshot: bool = False
     refdiff_lang: str | None = None
     exp_folder: str = field(default="")
+    suite: str | None = None  # reasoning_test suite name (e.g. 001_binary_search)
 
     def __post_init__(self) -> None:
         if not self.exp_folder:
@@ -147,6 +165,43 @@ def _merge_defaults(defaults: dict, task: dict) -> dict:
     merged = dict(defaults)
     merged.update(task)
     return merged
+
+
+def _agent_for_model(model: str) -> str:
+    """Mirror of run_experiment's CLI inference (claude-* → Claude, else Codex)."""
+    return "claude" if model.strip().lower().startswith("claude") else "codex"
+
+
+def _task_state_prefix(task: Task) -> str:
+    if task.category == "reasoning_test" and task.suite:
+        return f"reasoning_test/{task.suite}/{task.exp_folder}"
+    return f"{CATEGORY_DIRS[task.category]}/{task.exp_folder}"
+
+
+def _task_from_merged(category: str, output_base: Path, merged: dict) -> Task:
+    phases = merged.get("phases", CANONICAL_PHASES)
+    unknown = [p for p in phases if p not in CANONICAL_PHASES]
+    if unknown:
+        raise ValueError(f"unknown phase(s) {unknown} in task {merged.get('target', merged)}")
+    exp_folder = merged.get("exp_folder") or ""
+    return Task(
+        category=category,
+        output_base=output_base.resolve(),
+        target=Path(merged["target"]),
+        commit=str(merged["commit"]),
+        models=list(merged.get("models", [])),
+        iterations=int(merged.get("iterations", 10)),
+        phases=[p for p in CANONICAL_PHASES if p in phases],
+        prompter=bool(merged.get("prompter", False)),
+        label=merged.get("label"),
+        prompter_profile=merged.get("prompter_profile"),
+        effort_codex=merged.get("effort_codex"),
+        effort_claude=merged.get("effort_claude"),
+        no_snapshot=bool(merged.get("no_snapshot", False)),
+        refdiff_lang=merged.get("refdiff_lang"),
+        exp_folder=str(exp_folder) if exp_folder else "",
+        suite=merged.get("suite"),
+    )
 
 
 def load_plan(plan_path: Path, output_root: Path) -> list[Task]:
@@ -160,25 +215,48 @@ def load_plan(plan_path: Path, output_root: Path) -> list[Task]:
             merged = _merge_defaults(defaults, raw)
             if "target" not in merged or "commit" not in merged:
                 raise ValueError(f"task in '{category}' missing target/commit: {raw}")
-            phases = merged.get("phases", CANONICAL_PHASES)
-            unknown = [p for p in phases if p not in CANONICAL_PHASES]
-            if unknown:
-                raise ValueError(f"unknown phase(s) {unknown} in task {merged['target']}")
             tasks.append(
-                Task(
-                    category=category,
-                    output_base=(output_root / CATEGORY_DIRS[category]).resolve(),
-                    target=Path(merged["target"]),
-                    commit=str(merged["commit"]),
-                    models=list(merged.get("models", [])),
-                    iterations=int(merged.get("iterations", 10)),
-                    phases=[p for p in CANONICAL_PHASES if p in phases],  # canonical order
-                    prompter=bool(merged.get("prompter", False)),
-                    label=merged.get("label"),
-                    effort_codex=merged.get("effort_codex"),
-                    effort_claude=merged.get("effort_claude"),
-                    no_snapshot=bool(merged.get("no_snapshot", False)),
-                    refdiff_lang=merged.get("refdiff_lang"),
+                _task_from_merged(
+                    category,
+                    output_root / CATEGORY_DIRS[category],
+                    merged,
+                )
+            )
+    for raw_suite in data.get("reasoning_test", []):
+        if "suite" not in raw_suite or "target" not in raw_suite or "commit" not in raw_suite:
+            raise ValueError(f"reasoning_test entry missing suite/target/commit: {raw_suite}")
+        suite = str(raw_suite["suite"])
+        cells = raw_suite.get("cells", [])
+        if not cells:
+            raise ValueError(f"reasoning_test suite {suite!r} has no cells")
+        seen_folders: set[str] = set()
+        for cell in cells:
+            for key in ("model", "effort", "exp_folder"):
+                if key not in cell:
+                    raise ValueError(f"reasoning_test cell in {suite!r} missing {key}: {cell}")
+            exp_folder = str(cell["exp_folder"])
+            if exp_folder in seen_folders:
+                raise ValueError(f"duplicate exp_folder {exp_folder!r} in suite {suite!r}")
+            seen_folders.add(exp_folder)
+            model = str(cell["model"])
+            effort = str(cell["effort"])
+            merged = _merge_defaults(defaults, raw_suite)
+            merged.update(cell)
+            merged["suite"] = suite
+            merged["models"] = [model]
+            if _agent_for_model(model) == "claude":
+                merged["effort_claude"] = effort
+                merged["effort_codex"] = None
+            else:
+                merged["effort_codex"] = effort
+                merged["effort_claude"] = None
+            merged["label"] = None
+            merged["exp_folder"] = exp_folder
+            tasks.append(
+                _task_from_merged(
+                    "reasoning_test",
+                    output_root / "reasoning_test" / suite,
+                    merged,
                 )
             )
     return tasks
@@ -227,7 +305,9 @@ class Step:
 
 
 def step_key(task: Task, phase: str, model: str | None) -> str:
-    base = f"{CATEGORY_DIRS[task.category]}/{task.exp_folder}::{phase}"
+    if phase == "plot_reasoning_groups" and task.suite:
+        return f"reasoning_test/{task.suite}::{phase}"
+    base = f"{_task_state_prefix(task)}::{phase}"
     return f"{base}::{model}" if model else base
 
 
@@ -244,10 +324,18 @@ def build_steps(task: Task, phases_filter: set[str] | None) -> list[Step]:
     return steps
 
 
-def _agent_for_model(model: str) -> str:
-    """Mirror of run_experiment's CLI inference (claude-* → Claude, else Codex)."""
-    return "claude" if model.strip().lower().startswith("claude") else "codex"
-
+def dedupe_suite_wide_steps(steps: list[Step]) -> list[Step]:
+    """Keep one suite-wide phase step per (output_base, phase) for reasoning_test."""
+    seen: set[tuple[str, str]] = set()
+    out: list[Step] = []
+    for step in steps:
+        if step.phase in SUITE_WIDE_PHASES and step.task.suite:
+            key = (str(step.task.output_base), step.phase)
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(step)
+    return out
 
 def build_command(step: Step) -> list[str]:
     t = step.task
@@ -264,8 +352,12 @@ def build_command(step: Step) -> list[str]:
             cmd += ["--effort", effort]
         if t.label:
             cmd += ["--label", t.label]
+        if t.exp_folder and t.category == "reasoning_test":
+            cmd += ["--exp-folder", t.exp_folder]
         if t.prompter:
             cmd += ["--prompter"]
+            if t.prompter_profile:
+                cmd += ["--prompter-profile", str(t.prompter_profile)]
         if t.no_snapshot:
             cmd += ["--no-snapshot"]
         return cmd
@@ -297,6 +389,11 @@ def build_command(step: Step) -> list[str]:
             "--exp", t.exp_folder,
             "--result-dir", base,
         ]
+    if step.phase == "plot_reasoning_groups":
+        return [
+            _PYTHON, str(_SCRIPT_DIR / "plot_reasoning_groups.py"),
+            "--suite-dir", base,
+        ]
     raise ValueError(f"unknown phase: {step.phase}")
 
 
@@ -314,7 +411,7 @@ def upstream_satisfied(step: Step, state: State) -> bool:
     if upstream is None:
         return True
     if upstream == "run_exp":
-        prefix = f"{CATEGORY_DIRS[step.task.category]}/{step.task.exp_folder}::run_exp::"
+        prefix = f"{_task_state_prefix(step.task)}::run_exp::"
         return any(k.startswith(prefix) and v.get("status") == "done" for k, v in state.data.items())
     return state.is_done(step_key(step.task, upstream, None))
 
@@ -660,7 +757,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Run only these phases across the whole plan (comma list). "
              "Omit to run the full canonical chain per experiment.",
     )
-    parser.add_argument("--only-category", choices=["algorithms", "realworld"], default=None)
+    parser.add_argument("--only-category", choices=["algorithms", "realworld", "reasoning_test"], default=None)
     parser.add_argument("--task", default=None, help="Run only tasks whose target path or exp folder matches this substring.")
     parser.add_argument("--force", action="store_true", help="Re-run steps even if already done.")
     parser.add_argument("--retry-failed", action="store_true", help="Re-run only steps marked failed.")
@@ -740,9 +837,10 @@ def main(argv: list[str] | None = None) -> int:
     for phase in CANONICAL_PHASES:
         if phases_filter is not None and phase not in phases_filter:
             continue
+        phase_steps: list[Step] = []
         for task in tasks:
-            for step in build_steps(task, {phase}):
-                ordered_steps.append(step)
+            phase_steps.extend(build_steps(task, {phase}))
+        ordered_steps.extend(dedupe_suite_wide_steps(phase_steps))
 
     eprint(f"[plan] {len(tasks)} task(s), {len(ordered_steps)} step(s); output root: {output_root}")
     if phases_filter:

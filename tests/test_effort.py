@@ -42,6 +42,17 @@ def test_codex_command_omits_effort_when_none(tmp_path: Path) -> None:
     assert not any("model_reasoning_effort" in part for part in cmd)
 
 
+def test_codex_command_keeps_full_auto(tmp_path: Path) -> None:
+    cmd = build_codex_command(tmp_path, "do it", "gpt-5.5", is_first=True, effort="high")
+    assert "--full-auto" in cmd
+
+
+def test_codex_command_none_effort_uses_full_auto(tmp_path: Path) -> None:
+    cmd = build_codex_command(tmp_path, "do it", "gpt-5.5", is_first=True, effort="none")
+    assert "--full-auto" in cmd
+    assert "model_reasoning_effort=none" in cmd
+
+
 # --- parse_args validation -------------------------------------------------
 
 def _base_argv(model: str, effort: str) -> list[str]:
@@ -55,19 +66,30 @@ def test_parse_args_accepts_valid_claude_effort() -> None:
 
 
 def test_parse_args_accepts_valid_codex_effort() -> None:
-    args = parse_args(_base_argv("gpt-5.5", "minimal"))
-    assert args.effort == "minimal"
+    args = parse_args(_base_argv("gpt-5.5", "none"))
+    assert args.effort == "none"
     assert args.agent == "codex"
 
 
-def test_parse_args_rejects_xhigh_for_codex() -> None:
-    with pytest.raises(SystemExit):
-        parse_args(_base_argv("gpt-5.5", "xhigh"))
+def test_parse_args_accepts_exp_folder() -> None:
+    args = parse_args([".", "HEAD", "1", "--model", "gpt-5.5", "--exp-folder", "gpt-5.5-none-Agent"])
+    assert args.exp_folder == "gpt-5.5-none-Agent"
 
 
-def test_parse_args_rejects_minimal_for_claude() -> None:
+def test_parse_args_accepts_xhigh_for_codex() -> None:
+    args = parse_args(_base_argv("gpt-5.5", "xhigh"))
+    assert args.effort == "xhigh"
+    assert args.agent == "codex"
+
+
+def test_parse_args_rejects_max_for_codex() -> None:
     with pytest.raises(SystemExit):
-        parse_args(_base_argv("claude-opus-4-6", "minimal"))
+        parse_args(_base_argv("gpt-5.5", "max"))
+
+
+def test_parse_args_rejects_none_for_claude() -> None:
+    with pytest.raises(SystemExit):
+        parse_args(_base_argv("claude-opus-4-6", "none"))
 
 
 # --- plan parsing + build_command ------------------------------------------

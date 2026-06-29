@@ -8,9 +8,9 @@ import time
 from pathlib import Path
 
 from experiment_runner.constants import (
-    CODEX_AUTO_FLAGS,
     CODEX_REASONING_CONFIG_KEY,
     DEFAULT_TIMEOUT,
+    codex_exec_flags,
 )
 from experiment_runner.models import AgentRunResult
 from experiment_runner.util import run_text_command
@@ -25,14 +25,15 @@ def build_codex_command(
     session_id: str | None = None,
     effort: str | None = None,
 ) -> list[str]:
+    flags = codex_exec_flags(effort)
     if is_first:
-        cmd = ["codex", "exec", "--json", *CODEX_AUTO_FLAGS, "--cd", str(codex_cd)]
+        cmd = ["codex", "exec", "--json", *flags, "--cd", str(codex_cd)]
     else:
         if not session_id:
             raise RuntimeError("Missing Codex session id for resume.")
         # `codex exec resume` does not accept `--cd` in some Codex CLI versions.
         # We enforce the working directory via `subprocess.run(..., cwd=...)` instead.
-        cmd = ["codex", "exec", "resume", session_id, "--json", *CODEX_AUTO_FLAGS]
+        cmd = ["codex", "exec", "resume", session_id, "--json", *flags]
 
     if effort:
         cmd = [*cmd, "-c", f"{CODEX_REASONING_CONFIG_KEY}={effort}"]

@@ -11,6 +11,7 @@ from experiment_runner.codex_agent import CodexAgent
 from experiment_runner.coding_agent import CodingAgent
 from experiment_runner.constants import (
     DEFAULT_TIMEOUT,
+    PROMPTER_PROFILES,
     PROMPTER_SUFFIX,
     effort_levels_for_agent,
 )
@@ -120,7 +121,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--prompter",
         action="store_true",
-        help="Use a Gemini user agent to generate vague refactoring prompts each turn.",
+        help="Use a Gemini user agent to generate refactoring prompts each turn.",
+    )
+    p.add_argument(
+        "--prompter-profile",
+        type=str,
+        default=None,
+        choices=sorted(PROMPTER_PROFILES),
+        help=(
+            "Gemini user-agent persona: novice (vague refactor requests) or "
+            "expert (concrete refactor requests). Default: PROMPTER_PROFILE in "
+            "config/prompt.env."
+        ),
     )
     p.add_argument(
         "--no-snapshot",
@@ -138,7 +150,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Thinking / reasoning effort for the coding agent. Must be valid for the "
             "selected --model's CLI: Claude accepts low|medium|high|xhigh|max; "
-            "Codex accepts minimal|low|medium|high. Default: CLI default."
+            "Codex accepts none|low|medium|high|xhigh. Default: CLI default."
         ),
     )
     p.add_argument(
@@ -149,6 +161,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Base directory holding one folder per experiment "
             "(default: <repo>/result). Used by the pipeline orchestrator to "
             "route outputs into output/Algorithms or output/RealWorld."
+        ),
+    )
+    p.add_argument(
+        "--exp-folder",
+        type=str,
+        default=None,
+        help=(
+            "Exact experiment folder name under --output-base "
+            "(e.g. gpt-5.5-none-Agent). Overrides auto naming from repo + --label."
         ),
     )
     return p
@@ -164,6 +185,9 @@ def parse_args(argv: list[str] | None = None) -> CliArgs:
         p.error("--model must be non-empty")
     if namespace.label is not None and not non_empty_string(namespace.label):
         p.error("--label must be non-empty")
+    exp_folder = non_empty_string(namespace.exp_folder)
+    if namespace.exp_folder is not None and exp_folder is None:
+        p.error("--exp-folder must be non-empty")
     agent = infer_agent_from_model(model)
     effort = non_empty_string(namespace.effort)
     if effort is not None:
@@ -182,8 +206,10 @@ def parse_args(argv: list[str] | None = None) -> CliArgs:
         agent=agent,
         prompter=bool(namespace.prompter),
         output_base=namespace.output_base,
+        exp_folder=exp_folder,
         effort=effort,
         no_snapshot=bool(namespace.no_snapshot),
+        prompter_profile=namespace.prompter_profile,
     )
 
 
@@ -209,17 +235,24 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
         label_slug=label_slug,
         prompter=args.prompter,
     )
-    result_dir = target.repo_name
-    if label_slug:
-        result_dir = f"{target.repo_name}-{label_slug}"
-    if args.prompter:
-        result_dir = f"{result_dir}{PROMPTER_SUFFIX}"
+    if args.exp_folder:
+        result_dir = args.exp_folder
+    else:
+        result_dir = target.repo_name
+        if label_slug:
+            result_dir = f"{target.repo_name}-{label_slug}"
+        if args.prompter:
+            result_dir = f"{result_dir}{PROMPTER_SUFFIX}"
     base_dir = args.output_base if args.output_base is not None else (script_dir() / "result")
     exp_path = (base_dir / result_dir).resolve()
     results_csv = log_csv_path(exp_path, stamp, model.slug)
     artifacts_dir_path = artifacts_dir(exp_path, stamp, model.slug)
     prompt = load_prompt()
-    prompter_config = load_prompter_config(fallback_prompt=prompt) if args.prompter else None
+    prompter_config = (
+        load_prompter_config(fallback_prompt=prompt, profile=args.prompter_profile)
+        if args.prompter
+        else None
+    )
     clarification_patterns = load_clarification_patterns()
     limit_detect = load_limit_detect_config()
     return ExperimentConfig(
@@ -251,7 +284,10 @@ def eprint_setup(config: ExperimentConfig) -> None:
     if config.effort:
         eprint(f"[setup] Effort:             {config.effort}")
     if config.prompter and config.prompter_config:
-        eprint(f"[setup] Prompter mode:      Gemini ({config.prompter_config.model})")
+        eprint(
+            f"[setup] Prompter mode:      Gemini ({config.prompter_config.model}, "
+            f"profile={config.prompter_config.profile})"
+        )
         if config.no_snapshot:
             eprint("[setup] Codebase snapshot:  disabled (--no-snapshot)")
 

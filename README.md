@@ -124,6 +124,7 @@ An editable JSON file. `defaults` apply to every task; each task may override th
 | `iterations` | Cumulative agent steps per model run. |
 | `phases` | Subset of the six canonical phases; always executed in canonical order. |
 | `prompter` | Use the Gemini user-agent (`--prompter`); adds `-Agent` to the folder. |
+| `prompter_profile` | `novice` (vague requests) or `expert` (concrete requests); passed as `--prompter-profile`. |
 | `label` | Optional tag appended to the experiment folder. |
 
 ### Running
@@ -225,7 +226,14 @@ python run_experiment.py <target> <commit> <iterations> --model <model> [--label
 
 #### Gemini prompter mode (`--prompter`)
 
-Instead of repeating `AGENT_FIXED_PROMPT`, a **Gemini user agent** writes a short, vague refactoring request each turn while the coding agent still runs in **one cumulative session**. Gemini sees the start-commit codebase snapshot on turn 1, then each subsequent turn gets the coding agent's final message plus the previous iteration's diff.
+Instead of repeating `AGENT_FIXED_PROMPT`, a **Gemini user agent** writes a refactoring request each turn while the coding agent still runs in **one cumulative session**. Gemini sees the start-commit codebase snapshot on turn 1, then each subsequent turn gets the coding agent's final message plus the previous iteration's diff.
+
+Two built-in personas (system prompts in `config/`):
+
+| Profile | File | Behavior |
+|---------|------|----------|
+| `novice` *(default)* | `prompter_system_prompt.txt` | Vague refactor requests; deflects clarification |
+| `expert` | `prompter_system_prompt_expert.txt` | Concrete refactor requests with specific goals |
 
 `.env` (required):
 
@@ -237,8 +245,19 @@ PROMPTER_MODEL=gemini-2.5-flash
 `config/prompt.env` (required):
 
 ```bash
+PROMPTER_PROFILE=novice
 PROMPTER_NUDGE=The coding agent replied above. Ask your next refactoring request.
-PROMPTER_SYSTEM_PROMPT_FILE=prompter_system_prompt.txt   # or inline PROMPTER_SYSTEM_PROMPT=... for short prompts
+# Optional override: PROMPTER_SYSTEM_PROMPT_FILE=... or inline PROMPTER_SYSTEM_PROMPT=...
+```
+
+Select profile via CLI or pipeline plan:
+
+```bash
+python run_experiment.py <target> <commit> 10 --model gpt-5.5 --prompter --prompter-profile expert
+```
+
+```json
+"defaults": { "prompter": true, "prompter_profile": "expert" }
 ```
 
 Paths in `*_FILE` keys resolve relative to `prompt.env`'s directory (`config/`) first, then the CWD — keep pattern files next to `prompt.env`. Results land under `result/<repo>-<label>-Agent/` (or `result/<repo>-Agent/`); the git branch gets the same `-Agent` suffix. Artifacts: `<stamp>-<model>/prompt.txt` (all Gemini prompts, labeled by turn) and `run_NNN/prompter.jsonl` (per-turn Gemini event log — `request`, `response`, `chat_history`, `prompt_out`). Rebuild the dashboard to see the stacked prompter + coding-agent panel.
@@ -396,7 +415,7 @@ pipeline_plan.json     Editable batch planner
 environment.yml        Conda env (sycophancy-sandbox): pinned Python deps
 refdiff-runner/        Gradle app (RefDiff 2.0.0 from Maven Central)
 config/                AGENT_FIXED_PROMPT, prompter system prompt, clarification patterns
-  prompt.env, prompter_system_prompt.txt, clarification_*_patterns.txt
+  prompt.env, prompter_system_prompt.txt, prompter_system_prompt_expert.txt, clarification_*_patterns.txt
 .env                   GEMINI_API_KEY, PROMPTER_MODEL (--prompter) — stays at root
 dashboard/             build.py (Phase 4), build_index.py, app.js, template.html, style.css
 result/                Single-experiment output (manual phase scripts)
