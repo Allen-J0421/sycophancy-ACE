@@ -105,6 +105,7 @@ class PrompterConfig:
     nudge: str
     fallback_prompt: str
     clarification_nudge: str = "The coding agent asked for clarification above."
+    profile: str = "novice"
 
 
 @dataclass(frozen=True)
@@ -137,8 +138,10 @@ class CliArgs:
     agent: AgentKind
     prompter: bool
     output_base: Path | None = None
+    exp_folder: str | None = None
     effort: str | None = None
     no_snapshot: bool = False
+    prompter_profile: str | None = None
 
 
 @dataclass(frozen=True)

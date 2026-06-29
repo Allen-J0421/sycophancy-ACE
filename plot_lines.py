@@ -105,30 +105,19 @@ def experiment_dirs(result_dir: Path) -> list[Path]:
     return dirs
 
 
-def build_one(exp_dir: Path) -> bool:
-    """Render the lines_total chart for one experiment. Returns True if written."""
-    csv_files = iter_log_csvs(exp_dir)
-    if not csv_files:
-        return False
-
-    # Collect one (model, frame) per CSV first, then assign mutually-distinct
-    # color/marker styles across the whole chart.
-    series: list[tuple[str, "pd.DataFrame"]] = []
-    for csv_path in csv_files:
-        df = pd.read_csv(csv_path)
-        if df.empty or "run" not in df or "lines_total" not in df:
-            continue
-        model = str(df["model"].iloc[0]) if "model" in df else csv_path.stem
-        series.append((model, df))
-
+def render_lines_chart(
+    series: list[tuple[str, "pd.DataFrame"]],
+    *,
+    title: str,
+    out_path: Path,
+    legend_title: str = "Model",
+) -> bool:
+    """Render a lines_total vs run chart. Returns True if written."""
     if not series:
         return False
 
     styles = resolve_styles([m for m, _ in series])
 
-    # Width scales with iteration count so horizontal point-spacing stays
-    # constant regardless of run count (10 runs ≈ 11in; 20 runs ≈ 22in),
-    # rather than packing every run into a fixed, near-square frame.
     n_runs = max((int(df["run"].max()) for _, df in series if len(df)), default=10)
     width = max(6.0, 1.1 * n_runs)
     fig, ax = plt.subplots(figsize=(width, 3.5))
@@ -146,15 +135,14 @@ def build_one(exp_dir: Path) -> bool:
 
     ax.set_xlabel("Refactoring Iteration (run)")
     ax.set_ylabel("Lines Total Changed")
-    ax.set_title(f"Lines Changed per Refactoring Run — {exp_dir.name.upper()}")
+    ax.set_title(title)
     ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
     ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
 
-    # Compact legend in the upper-right corner.
     leg = ax.legend(
         loc="upper right",
         fontsize=7,
-        title="Model",
+        title=legend_title,
         title_fontsize=8,
         framealpha=0.9,
         markerscale=0.8,
@@ -164,10 +152,6 @@ def build_one(exp_dir: Path) -> bool:
     )
     fig.tight_layout()
 
-    # Raise the top y-limit until the legend box clears every line beneath it,
-    # so the upper-right legend never covers data (robust across datasets).
-    # Check interpolated line height across the legend's x-span (not just
-    # vertices) to catch segments that pass under the box between runs.
     lines_xy = [
         (df["run"].to_numpy(dtype=float), df["lines_total"].to_numpy(dtype=float))
         for _, df in series
@@ -177,8 +161,8 @@ def build_one(exp_dir: Path) -> bool:
     def max_line_height(x0: float, x1: float) -> float:
         peak = 0.0
         for xs, ys in lines_xy:
-            cand = list(ys[(xs >= x0) & (xs <= x1)])  # vertices inside the span
-            for xe in (x0, x1):                        # interpolated edges
+            cand = list(ys[(xs >= x0) & (xs <= x1)])
+            for xe in (x0, x1):
                 if xs.min() <= xe <= xs.max():
                     cand.append(float(np.interp(xe, xs, ys)))
             if cand:
@@ -192,19 +176,43 @@ def build_one(exp_dir: Path) -> bool:
             x0, x1 = sorted((lb.x0, lb.x1))
             y_bottom = min(lb.y0, lb.y1)
             peak = max_line_height(x0, x1)
-            if peak * 1.05 < y_bottom:  # require a small gap, not just contact
+            if peak * 1.05 < y_bottom:
                 break
             top = ax.get_ylim()[1]
             scale = (peak * 1.06) / max(y_bottom, 1e-9)
             ax.set_ylim(top=top * max(scale, 1.02))
 
-    plots_out_dir = plots_dir(exp_dir)
-    plots_out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = plots_out_dir / f"{exp_dir.name}_lines.png"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     print(f"Wrote: {out_path}")
     return True
+
+
+def build_one(exp_dir: Path) -> bool:
+    """Render the lines_total chart for one experiment. Returns True if written."""
+    csv_files = iter_log_csvs(exp_dir)
+    if not csv_files:
+        return False
+
+    series: list[tuple[str, "pd.DataFrame"]] = []
+    for csv_path in csv_files:
+        df = pd.read_csv(csv_path)
+        if df.empty or "run" not in df or "lines_total" not in df:
+            continue
+        model = str(df["model"].iloc[0]) if "model" in df else csv_path.stem
+        series.append((model, df))
+
+    if not series:
+        return False
+
+    plots_out_dir = plots_dir(exp_dir)
+    out_path = plots_out_dir / f"{exp_dir.name}_lines.png"
+    return render_lines_chart(
+        series,
+        title=f"Lines Changed per Refactoring Run — {exp_dir.name.upper()}",
+        out_path=out_path,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

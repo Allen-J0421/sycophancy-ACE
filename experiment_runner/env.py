@@ -6,6 +6,10 @@ import os
 import re
 from pathlib import Path
 
+from experiment_runner.constants import (
+    DEFAULT_PROMPTER_PROFILE,
+    PROMPTER_PROFILES,
+)
 from experiment_runner.limit_detect import LimitDetectConfig
 from experiment_runner.models import ClarificationPatterns, PrompterConfig
 from experiment_runner.util import non_empty_string, script_dir
@@ -203,14 +207,45 @@ def load_clarification_nudge(entries: dict[str, str], *, prompt_env: Path | None
     return "The coding agent asked for clarification above."
 
 
-def load_prompter_prompts_from_file() -> tuple[str, str, str]:
-    """Load PROMPTER_SYSTEM_PROMPT and PROMPTER_NUDGE from prompt.env only."""
+def resolve_prompter_profile(profile: str | None) -> str:
+    """Normalize and validate a prompter profile name."""
+    name = (profile or DEFAULT_PROMPTER_PROFILE).strip().lower()
+    if name not in PROMPTER_PROFILES:
+        valid = ", ".join(sorted(PROMPTER_PROFILES))
+        raise SystemExit(f"Unknown prompter profile {profile!r}; choose one of: {valid}")
+    return name
+
+
+def resolve_prompter_system_prompt_file(
+    entries: dict[str, str],
+    *,
+    profile: str | None = None,
+) -> str | None:
+    """Return PROMPTER_SYSTEM_PROMPT_FILE path, or map PROMPTER_PROFILE to a built-in file."""
+    explicit = entries.get("PROMPTER_SYSTEM_PROMPT_FILE")
+    if explicit:
+        return explicit
+    profile_name = resolve_prompter_profile(profile or entries.get("PROMPTER_PROFILE"))
+    return PROMPTER_PROFILES[profile_name]
+
+
+def load_prompter_prompts_from_file(
+    *,
+    profile: str | None = None,
+) -> tuple[str, str, str, str]:
+    """Load prompter prompts from prompt.env. Returns (system_prompt, nudge, clarification_nudge, profile)."""
     entries, prompt_env = load_prompt_env_entries()
+
+    profile_name = resolve_prompter_profile(profile or entries.get("PROMPTER_PROFILE"))
+    system_prompt_file = resolve_prompter_system_prompt_file(entries, profile=profile_name)
+    entries_with_file = dict(entries)
+    if system_prompt_file:
+        entries_with_file["PROMPTER_SYSTEM_PROMPT_FILE"] = system_prompt_file
 
     system_prompt = load_prompt_text(
         inline=entries.get("PROMPTER_SYSTEM_PROMPT"),
         file_key="PROMPTER_SYSTEM_PROMPT_FILE",
-        entries=entries,
+        entries=entries_with_file,
         prompt_env=prompt_env,
     )
     nudge = load_prompt_text(
@@ -220,7 +255,7 @@ def load_prompter_prompts_from_file() -> tuple[str, str, str]:
         prompt_env=prompt_env,
     )
     clarification_nudge = load_clarification_nudge(entries, prompt_env=prompt_env)
-    return system_prompt, nudge, clarification_nudge
+    return system_prompt, nudge, clarification_nudge, profile_name
 
 
 def prompt_from_env_line(raw: str) -> str | None:
@@ -266,9 +301,15 @@ def require_env_var(name: str) -> str:
     return value
 
 
-def load_prompter_config(*, fallback_prompt: str) -> PrompterConfig:
+def load_prompter_config(
+    *,
+    fallback_prompt: str,
+    profile: str | None = None,
+) -> PrompterConfig:
     load_dotenv_file()
-    system_prompt, nudge, clarification_nudge = load_prompter_prompts_from_file()
+    system_prompt, nudge, clarification_nudge, profile_name = load_prompter_prompts_from_file(
+        profile=profile
+    )
 
     api_key = require_env_var("GEMINI_API_KEY")
     model = require_env_var("PROMPTER_MODEL")
@@ -279,4 +320,5 @@ def load_prompter_config(*, fallback_prompt: str) -> PrompterConfig:
         nudge=nudge,
         fallback_prompt=fallback_prompt,
         clarification_nudge=clarification_nudge,
+        profile=profile_name,
     )

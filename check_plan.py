@@ -57,7 +57,7 @@ _MAX_GRADLE_JAVA = 23
 # Thinking/reasoning effort levels per agent CLI (replicated from
 # experiment_runner.constants to keep this checker stdlib-only).
 _CLAUDE_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
-_CODEX_EFFORT_LEVELS = ("minimal", "low", "medium", "high")
+_CODEX_EFFORT_LEVELS = ("none", "low", "medium", "high", "xhigh")
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +238,7 @@ def dotenv_value(key: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def check_task(task: "run_pipeline.Task") -> Findings:
-    f = Findings(label=f"{CATEGORY_DIRS[task.category]}/{task.exp_folder}")
+    f = Findings(label=run_pipeline._task_state_prefix(task))
     phases = set(task.phases)
 
     # --- target + git repo + commit ---------------------------------------
@@ -340,16 +340,16 @@ def check_task(task: "run_pipeline.Task") -> Findings:
             f.error(f"refdiff: Gradle wrapper not found at {_GRADLEW}")
 
     # --- plot deps ---------------------------------------------------------
-    if {"plot_lines", "plot_refdiff", "plot_signals"} & set(phases):
+    if {"plot_lines", "plot_refdiff", "plot_signals", "plot_reasoning_groups"} & set(phases):
         if module_available("matplotlib"):
             f.ok("matplotlib importable (plots)")
         else:
             f.error("plot phase requested but `matplotlib` not importable")
-    if "plot_lines" in phases:
+    if {"plot_lines", "plot_reasoning_groups"} & set(phases):
         if module_available("pandas"):
-            f.ok("pandas importable (plot_lines)")
+            f.ok("pandas importable (plot_lines / plot_reasoning_groups)")
         else:
-            f.error("plot_lines phase requested but `pandas` not importable")
+            f.error("plot phase requested but `pandas` not importable")
 
     return f
 
@@ -361,6 +361,21 @@ def run_checks(tasks: list["run_pipeline.Task"], *, strict: bool = False) -> tup
     Also flags duplicate experiment-folder collisions across tasks (warning).
     """
     findings = [check_task(t) for t in tasks]
+
+    # Suite summary for reasoning_test plans.
+    suites: dict[tuple[str, str], list[str]] = {}
+    for task in tasks:
+        if task.category == "reasoning_test" and task.suite:
+            key = (task.suite, str(task.output_base))
+            suites.setdefault(key, []).append(task.exp_folder)
+    for (suite, _base), folders in sorted(suites.items()):
+        codex = sum(1 for t in tasks if t.suite == suite and t.effort_codex)
+        claude = sum(1 for t in tasks if t.suite == suite and t.effort_claude)
+        print(
+            f"[reasoning_test] {suite}: {len(folders)} cells "
+            f"({codex} codex + {claude} claude)",
+            file=sys.stderr,
+        )
 
     # Duplicate experiment-folder collision detection (would overwrite outputs).
     seen: dict[str, int] = {}
@@ -395,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--plan", type=Path, default=_SCRIPT_DIR / "pipeline_plan.json", help="Planner JSON file.")
     parser.add_argument("--output-root", type=Path, default=_SCRIPT_DIR / "output", help="Root for output/ tree.")
-    parser.add_argument("--only-category", choices=["algorithms", "realworld"], default=None)
+    parser.add_argument("--only-category", choices=["algorithms", "realworld", "reasoning_test"], default=None)
     parser.add_argument("--task", default=None, help="Only tasks whose target path / exp folder contains this substring.")
     parser.add_argument("--strict", action="store_true", help="Promote warnings to errors for the exit code.")
     args = parser.parse_args(argv)
