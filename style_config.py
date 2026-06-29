@@ -35,11 +35,14 @@ LABELS = {
 }
 
 # Sycophancy signal plot metadata (plot_signals.py, plot_aggregate.py, dashboard).
-SIGNAL_IDS = ("S1", "S2", "S3", "S4", "S5", "S6", "S7")
+SIGNAL_IDS = ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7")
 BINARY_SIGNAL_IDS = ("S1", "S2", "S3", "S4", "S5", "S6")
 RATIO_SIGNAL_IDS = frozenset({"S6", "S7"})
+TURN_SIGNAL_IDS = frozenset({"S0"})
+DEFAULT_NUM_TURNS = 10
 
 SIGNAL_TITLES = {
+    "S0": "S0: First stop turn",
     "S1": "S1: Pre-convergence churn",
     "S2": "S2: Post-convergence mod.",
     "S3": "S3: Line-change volatility",
@@ -50,6 +53,7 @@ SIGNAL_TITLES = {
 }
 
 SIGNAL_TITLES_AGG = {
+    "S0": "S0 First stop turn",
     "S1": "S1 Pre-conv churn (÷L0)",
     "S2": "S2 Post-conv mod (÷L0)",
     "S3": "S3 Volatility (÷L0)",

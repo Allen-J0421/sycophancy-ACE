@@ -11,6 +11,7 @@ from experiment_runner.util import eprint, script_dir
 from signal_computation.config import ENV_EPS1, ENV_EPS3, ENV_EPS6, load_thresholds
 from signal_computation.discovery import experiment_dirs
 from signal_computation.pipeline import process_experiment
+from signal_computation.s0_patch import patch_s0_for_experiment
 from signal_computation.s7_patch import patch_s7_for_experiment
 
 from refusal_analysis.keyword_regex import DEFAULT_CONFIG_PATH
@@ -49,7 +50,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Patch S7 into existing signals JSON/CSV only (skip S1-S6 recomputation).",
     )
+    parser.add_argument(
+        "--s0-only",
+        action="store_true",
+        help="Patch S0 into existing signals JSON/CSV only (skip S1-S7 recomputation).",
+    )
     args = parser.parse_args(argv)
+
+    if args.s7_only and args.s0_only:
+        eprint("error: --s7-only and --s0-only are mutually exclusive")
+        return 2
 
     result_dir = args.result_dir.resolve()
     if not result_dir.is_dir():
@@ -66,6 +76,16 @@ def main(argv: list[str] | None = None) -> int:
         exp_dirs = experiment_dirs(result_dir)
 
     refusal_config = args.refusal_config.resolve()
+
+    if args.s0_only:
+        total = 0
+        for exp_dir in exp_dirs:
+            total += patch_s0_for_experiment(exp_dir)
+        if total == 0:
+            eprint("No S0 patches applied (no refdiff/*-refdiff.jsonl or missing signals JSON).")
+            return 1
+        eprint(f"[summary] patched S0 for {total} model run-sequences.")
+        return 0
 
     if args.s7_only:
         total = 0

@@ -51,21 +51,32 @@ plt.rcParams.update(
 from style_config import (  # noqa: E402
     BINARY_SIGNAL_IDS,
     COLORS,
+    DEFAULT_NUM_TURNS,
     LABELS,
     RATIO_SIGNAL_IDS,
     SIGNAL_GRID_COLS,
     SIGNAL_IDS,
     SIGNAL_TITLES,
+    TURN_SIGNAL_IDS,
 )
 
 
 def _signal_bar_ylim(sid: str, top: float) -> tuple[float, float]:
+    if sid in TURN_SIGNAL_IDS:
+        return 0.5, DEFAULT_NUM_TURNS + 0.5
     if sid in RATIO_SIGNAL_IDS:
         return 0.0, min(1.0, max(top * 1.12, 0.1))
     return 0.0, top * 1.18 if top > 0 else 1.0
 
 
-def _format_signal_value(sid: str, val: float) -> str:
+def _format_signal_value(
+    sid: str, val: float, *, never_stopped: bool = False
+) -> str:
+    if sid in TURN_SIGNAL_IDS:
+        text = f"{int(round(val))}"
+        if never_stopped:
+            text += "\u2020"
+        return text
     if sid in RATIO_SIGNAL_IDS:
         return f"{val:.3f}"
     return f"{val:.2f}"
@@ -78,6 +89,7 @@ class ModelSignals:
     color: str
     cont: dict[str, float]
     binary: dict[str, int]
+    never_stopped: dict[str, bool]
 
 
 def experiment_dirs(result_dir: Path) -> list[Path]:
@@ -107,6 +119,10 @@ def load_model_signals(exp_dir: Path) -> list[ModelSignals]:
         binary = {
             sid: int(signals.get(sid, {}).get("bin", 0)) for sid in BINARY_SIGNAL_IDS
         }
+        never_stopped = {
+            sid: bool(signals.get(sid, {}).get("never_stopped", False))
+            for sid in TURN_SIGNAL_IDS
+        }
         models.append(
             ModelSignals(
                 model=model,
@@ -114,6 +130,7 @@ def load_model_signals(exp_dir: Path) -> list[ModelSignals]:
                 color=COLORS.get(model, "#4878a8"),
                 cont=cont,
                 binary=binary,
+                never_stopped=never_stopped,
             )
         )
     return models
@@ -153,14 +170,26 @@ def plot_experiment(
         ax.margins(x=0.15)
         top = max(values + [0.0])
         ax.set_ylim(*_signal_bar_ylim(sid, top))
-        for xi, val in zip(x, values):
+        for xi, val, m in zip(x, values, models):
+            censored = sid in TURN_SIGNAL_IDS and m.never_stopped.get(sid, False)
             ax.text(
                 xi,
                 val + (top * 0.02 if top > 0 else 0.02),
-                _format_signal_value(sid, val),
+                _format_signal_value(sid, val, never_stopped=censored),
                 ha="center",
                 va="bottom",
                 fontsize=8,
+            )
+        if sid in TURN_SIGNAL_IDS and any(m.never_stopped.get(sid, False) for m in models):
+            ax.text(
+                0.02,
+                0.98,
+                "\u2020 = never stopped",
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=7,
+                color="0.35",
             )
 
     matrix_ax = fig.add_subplot(outer[1])

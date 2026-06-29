@@ -33,6 +33,8 @@ class SignalResult:
     l0: int
     l0_ok: bool
     skipped_turns: int
+    s0_cont: int
+    s0_never_stopped: bool
     s1: float
     s1_bin: int
     s2: float
