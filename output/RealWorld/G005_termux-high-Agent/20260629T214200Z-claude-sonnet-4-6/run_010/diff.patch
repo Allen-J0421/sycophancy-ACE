@@ -1,0 +1,545 @@
+diff --git a/terminal-emulator/src/main/java/com/termux/terminal/ByteQueue.java b/terminal-emulator/src/main/java/com/termux/terminal/ByteQueue.java
+index adfdfa864..3800e8b2d 100644
+--- a/terminal-emulator/src/main/java/com/termux/terminal/ByteQueue.java
++++ b/terminal-emulator/src/main/java/com/termux/terminal/ByteQueue.java
+@@ -19,14 +19,11 @@ final class ByteQueue {
+ 
+     public synchronized int read(byte[] buffer, boolean block) {
+         while (mStoredBytes == 0 && mOpen) {
+-            if (block) {
+-                try {
+-                    wait();
+-                } catch (InterruptedException e) {
+-                    // Ignore.
+-                }
+-            } else {
+-                return 0;
++            if (!block) return 0;
++            try {
++                wait();
++            } catch (InterruptedException e) {
++                // Ignore.
+             }
+         }
+         if (!mOpen) return -1;
+@@ -57,11 +54,10 @@ final class ByteQueue {
+      * Returns whether the output was totally written, false if it was closed before.
+      */
+     public boolean write(byte[] buffer, int offset, int lengthToWrite) {
+-        if (lengthToWrite + offset > buffer.length) {
++        if (lengthToWrite + offset > buffer.length)
+             throw new IllegalArgumentException("length + offset > buffer.length");
+-        } else if (lengthToWrite <= 0) {
++        if (lengthToWrite <= 0)
+             throw new IllegalArgumentException("length <= 0");
+-        }
+ 
+         final int bufferLength = mBuffer.length;
+ 
+@@ -89,7 +85,7 @@ final class ByteQueue {
+                         // Buffer: [.............]
+                         // ___________T____H
+                         // onRun= _____----_
+-                        tail = tail - bufferLength;
++                        tail -= bufferLength;
+                         oneRun = mHead - tail;
+                     } else {
+                         oneRun = bufferLength - tail;
+diff --git a/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java b/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java
+index 04290ebab..846225e38 100644
+--- a/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java
++++ b/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java
+@@ -272,7 +272,8 @@ public final class TerminalBuffer {
+             if (oldLine == null || (state.cursorPlaced || !cursorAtThisRow) && oldLine.isBlank()) {
+                 skippedBlankLines++;
+                 continue;
+-            } else if (skippedBlankLines > 0) {
++            }
++            if (skippedBlankLines > 0) {
+                 // After skipping some blank lines we encounter a non-blank line. Insert the skipped blank lines.
+                 for (int i = 0; i < skippedBlankLines; i++)
+                     advanceReflowRow(state, false, currentStyle);
+diff --git a/terminal-emulator/src/main/java/com/termux/terminal/TerminalColorScheme.java b/terminal-emulator/src/main/java/com/termux/terminal/TerminalColorScheme.java
+index 452666acc..250a46c94 100644
+--- a/terminal-emulator/src/main/java/com/termux/terminal/TerminalColorScheme.java
++++ b/terminal-emulator/src/main/java/com/termux/terminal/TerminalColorScheme.java
+@@ -108,14 +108,9 @@ public final class TerminalColorScheme {
+      * above (too bright), we use black cursor.
+      */
+     public void setCursorColorForBackground() {
+-        int backgroundColor = mDefaultColors[TextStyle.COLOR_INDEX_BACKGROUND];
+-        int brightness = TerminalColors.getPerceivedBrightnessOfColor(backgroundColor);
+-        if (brightness > 0) {
+-            if (brightness < 130)
+-                mDefaultColors[TextStyle.COLOR_INDEX_CURSOR] = 0xffffffff;
+-            else
+-                mDefaultColors[TextStyle.COLOR_INDEX_CURSOR] = 0xff000000;
+-        }
++        int brightness = TerminalColors.getPerceivedBrightnessOfColor(mDefaultColors[TextStyle.COLOR_INDEX_BACKGROUND]);
++        if (brightness > 0)
++            mDefaultColors[TextStyle.COLOR_INDEX_CURSOR] = (brightness < 130) ? 0xffffffff : 0xff000000;
+     }
+ 
+ }
+diff --git a/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java b/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java
+index 87e350f80..9553c7795 100644
+--- a/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java
++++ b/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java
+@@ -383,11 +383,8 @@ public final class TerminalEmulator {
+         this.mCellWidthPixels = cellWidthPixels;
+         this.mCellHeightPixels = cellHeightPixels;
+ 
+-        if (mRows == rows && mColumns == columns) {
+-            return;
+-        } else if (columns < 2 || rows < 2) {
+-            throw new IllegalArgumentException("rows=" + rows + ", columns=" + columns);
+-        }
++        if (mRows == rows && mColumns == columns) return;
++        if (columns < 2 || rows < 2) throw new IllegalArgumentException("rows=" + rows + ", columns=" + columns);
+ 
+         if (mRows != rows) {
+             mRows = rows;
+@@ -499,9 +496,7 @@ public final class TerminalEmulator {
+             if ((byteToProcess & 0b11000000) == 0b10000000) {
+                 // 10xxxxxx, a continuation byte.
+                 mUtf8InputBuffer[mUtf8Index++] = byteToProcess;
+-                if (--mUtf8ToFollow == 0) {
+-                    decodeCompletedUtf8Sequence();
+-                }
++                if (--mUtf8ToFollow == 0) decodeCompletedUtf8Sequence();
+             } else {
+                 // Not a UTF-8 continuation byte so replace the entire sequence up to now with the replacement char:
+                 mUtf8Index = mUtf8ToFollow = 0;
+@@ -515,23 +510,24 @@ public final class TerminalEmulator {
+                 // subsequence."
+                 processByte(byteToProcess);
+             }
++            return;
++        }
++        if ((byteToProcess & 0b10000000) == 0) { // The leading bit is not set so it is a 7-bit ASCII character.
++            processCodePoint(byteToProcess);
++            return;
++        }
++        if ((byteToProcess & 0b11100000) == 0b11000000) { // 110xxxxx, a two-byte sequence.
++            mUtf8ToFollow = 1;
++        } else if ((byteToProcess & 0b11110000) == 0b11100000) { // 1110xxxx, a three-byte sequence.
++            mUtf8ToFollow = 2;
++        } else if ((byteToProcess & 0b11111000) == 0b11110000) { // 11110xxx, a four-byte sequence.
++            mUtf8ToFollow = 3;
+         } else {
+-            if ((byteToProcess & 0b10000000) == 0) { // The leading bit is not set so it is a 7-bit ASCII character.
+-                processCodePoint(byteToProcess);
+-                return;
+-            } else if ((byteToProcess & 0b11100000) == 0b11000000) { // 110xxxxx, a two-byte sequence.
+-                mUtf8ToFollow = 1;
+-            } else if ((byteToProcess & 0b11110000) == 0b11100000) { // 1110xxxx, a three-byte sequence.
+-                mUtf8ToFollow = 2;
+-            } else if ((byteToProcess & 0b11111000) == 0b11110000) { // 11110xxx, a four-byte sequence.
+-                mUtf8ToFollow = 3;
+-            } else {
+-                // Not a valid UTF-8 sequence start, signal invalid data:
+-                processCodePoint(UNICODE_REPLACEMENT_CHAR);
+-                return;
+-            }
+-            mUtf8InputBuffer[mUtf8Index++] = byteToProcess;
++            // Not a valid UTF-8 sequence start, signal invalid data:
++            processCodePoint(UNICODE_REPLACEMENT_CHAR);
++            return;
+         }
++        mUtf8InputBuffer[mUtf8Index++] = byteToProcess;
+     }
+ 
+     /** Called when mUtf8ToFollow reaches 0: decode mUtf8InputBuffer[0..mUtf8Index) and dispatch. */
+@@ -548,20 +544,16 @@ public final class TerminalEmulator {
+ 
+         mUtf8Index = mUtf8ToFollow = 0;
+ 
+-        if (codePoint >= 0x80 && codePoint <= 0x9F) {
+-            // Sequence decoded to a C1 control character which we ignore. They are
+-            // not used nowadays and increases the risk of messing up the terminal state
+-            // on binary input. XTerm does not allow them in utf-8:
+-            // "It is not possible to use a C1 control obtained from decoding the
+-            // UTF-8 text" - http://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+-        } else {
+-            switch (Character.getType(codePoint)) {
+-                case Character.UNASSIGNED:
+-                case Character.SURROGATE:
+-                    codePoint = UNICODE_REPLACEMENT_CHAR;
+-            }
+-            processCodePoint(codePoint);
++        // C1 control characters (0x80–0x9F) are ignored: not used nowadays, risk of messing up terminal
++        // state on binary input. XTerm does not allow them in UTF-8 ("It is not possible to use a C1
++        // control obtained from decoding the UTF-8 text" - http://invisible-island.net/xterm/ctlseqs/).
++        if (codePoint >= 0x80 && codePoint <= 0x9F) return;
++        switch (Character.getType(codePoint)) {
++            case Character.UNASSIGNED:
++            case Character.SURROGATE:
++                codePoint = UNICODE_REPLACEMENT_CHAR;
+         }
++        processCodePoint(codePoint);
+     }
+ 
+     public void processCodePoint(int b) {
+@@ -569,7 +561,8 @@ public final class TerminalEmulator {
+         if (mEscapeState == ESC_APC) {
+             doApc(b);
+             return;
+-        } else if (mEscapeState == ESC_APC_ESCAPE) {
++        }
++        if (mEscapeState == ESC_APC_ESCAPE) {
+             doApcEscape(b);
+             return;
+         }
+@@ -629,13 +622,8 @@ public final class TerminalEmulator {
+ 
+     /** Handle the ESC (0x1B) byte: start a new escape sequence, or pass to the current OSC/DCS handler. */
+     private void doEscByte() {
+-        if (mEscapeState == ESC_P) {
+-            // Ignore escape when reading device control sequence — it may be part of the string terminator.
+-        } else if (mEscapeState != ESC_OSC) {
+-            startEscapeSequence();
+-        } else {
+-            doOsc(27);
+-        }
++        if (mEscapeState == ESC_P) return; // Ignore — may be part of the string terminator.
++        if (mEscapeState == ESC_OSC) doOsc(27); else startEscapeSequence();
+     }
+ 
+     /** Dispatch a printable or control byte to the current escape-sequence handler, then reset state if sequence is complete. */
+@@ -841,30 +829,24 @@ public final class TerminalEmulator {
+                         setOrClear = false;
+                         break;
+                 }
+-                if (reverse && !setOrClear) {
+-                    // Reverse attributes in rectangular area ignores non-(1,4,5,7) bits.
+-                } else {
+-                    mScreen.setOrClearEffect(bits, setOrClear, reverse, isDecsetInternalBitSet(DECSET_BIT_RECTANGULAR_CHANGEATTRIBUTE),
+-                        effectiveLeftMargin, effectiveRightMargin, top, left, bottom, right);
+-                }
++                if (reverse && !setOrClear) continue; // Reverse ignores non-(1,4,5,7) bits.
++                mScreen.setOrClearEffect(bits, setOrClear, reverse, isDecsetInternalBitSet(DECSET_BIT_RECTANGULAR_CHANGEATTRIBUTE),
++                    effectiveLeftMargin, effectiveRightMargin, top, left, bottom, right);
+             }
+         }
+     }
+ 
+     /** DECSCA — select character attribute protection (ESC_CSI_DOUBLE_QUOTE). */
+     private void doCsiDoubleQuote(int b) {
+-        if (b == 'q') {
+-            // http://www.vt100.net/docs/vt510-rm/DECSCA
+-            int arg = getArg0(0);
+-            if (arg == 0 || arg == 2) {
+-                // DECSED and DECSEL can erase characters.
+-                mEffect &= ~TextStyle.CHARACTER_ATTRIBUTE_PROTECTED;
+-            } else if (arg == 1) {
+-                // DECSED and DECSEL cannot erase characters.
+-                mEffect |= TextStyle.CHARACTER_ATTRIBUTE_PROTECTED;
+-            } else {
+-                unknownSequence(b);
+-            }
++        if (b != 'q') { unknownSequence(b); return; }
++        // http://www.vt100.net/docs/vt510-rm/DECSCA
++        int arg = getArg0(0);
++        if (arg == 0 || arg == 2) {
++            // DECSED and DECSEL can erase characters.
++            mEffect &= ~TextStyle.CHARACTER_ATTRIBUTE_PROTECTED;
++        } else if (arg == 1) {
++            // DECSED and DECSEL cannot erase characters.
++            mEffect |= TextStyle.CHARACTER_ATTRIBUTE_PROTECTED;
+         } else {
+             unknownSequence(b);
+         }
+@@ -890,26 +872,23 @@ public final class TerminalEmulator {
+ 
+     /** DECRQM — request DEC private mode setting (ESC_CSI_QUESTIONMARK_ARG_DOLLAR). */
+     private void doCsiQuestionMarkArgDollar(int b) {
+-        if (b == 'p') {
+-            // Request DEC private mode (DECRQM).
+-            int mode = getArg0(0);
+-            int value;
+-            if (mode == 47 || mode == 1047 || mode == 1049) {
+-                // This state is carried by mScreen pointer.
+-                value = (mScreen == mAltBuffer) ? 1 : 2;
++        if (b != 'p') { unknownSequence(b); return; }
++        // Request DEC private mode (DECRQM).
++        int mode = getArg0(0);
++        int value;
++        if (mode == 47 || mode == 1047 || mode == 1049) {
++            // This state is carried by mScreen pointer.
++            value = (mScreen == mAltBuffer) ? 1 : 2;
++        } else {
++            int internalBit = mapDecSetBitToInternalBit(mode);
++            if (internalBit != -1) {
++                value = isDecsetInternalBitSet(internalBit) ? 1 : 2; // 1=set, 2=reset.
+             } else {
+-                int internalBit = mapDecSetBitToInternalBit(mode);
+-                if (internalBit != -1) {
+-                    value = isDecsetInternalBitSet(internalBit) ? 1 : 2; // 1=set, 2=reset.
+-                } else {
+-                    Logger.logError(mClient, LOG_TAG, "Got DECRQM for unrecognized private DEC mode=" + mode);
+-                    value = 0; // 0=not recognized, 3=permanently set, 4=permanently reset
+-                }
++                Logger.logError(mClient, LOG_TAG, "Got DECRQM for unrecognized private DEC mode=" + mode);
++                value = 0; // 0=not recognized, 3=permanently set, 4=permanently reset
+             }
+-            mSession.write(String.format(Locale.US, "\033[?%d;%d$y", mode, value));
+-        } else {
+-            unknownSequence(b);
+         }
++        mSession.write(String.format(Locale.US, "\033[?%d;%d$y", mode, value));
+     }
+ 
+     /** DECSCUSR — set cursor style; also margin-bell volume (ESC_CSI_ARGS_SPACE). */
+@@ -945,7 +924,7 @@ public final class TerminalEmulator {
+     /** DECSACE — select attribute change extent (ESC_CSI_ARGS_ASTERIX). */
+     private void doCsiArgsAsterix(int b) {
+         int attributeChangeExtent = getArg0(0);
+-        if (b == 'x' && (attributeChangeExtent >= 0 && attributeChangeExtent <= 2)) {
++        if (b == 'x' && attributeChangeExtent <= 2) {
+             // Select attribute change extent (DECSACE - http://www.vt100.net/docs/vt510-rm/DECSACE).
+             setDecsetinternalBit(DECSET_BIT_RECTANGULAR_CHANGEATTRIBUTE, attributeChangeExtent == 2);
+         } else {
+@@ -957,7 +936,6 @@ public final class TerminalEmulator {
+     private void doDeviceControl(int b) {
+         switch (b) {
+             case (byte) '\\': // End of ESC \ string Terminator
+-            {
+                 String dcs = mOSCOrDeviceControlArgs.toString();
+                 if (dcs.startsWith("$q")) {
+                     doDeviceControlRequestStatusString(dcs);
+@@ -968,17 +946,16 @@ public final class TerminalEmulator {
+                         Logger.logError(mClient, LOG_TAG, "Unrecognized device control string: " + dcs);
+                 }
+                 finishSequence();
+-            }
+-            break;
++                break;
+             default:
+                 if (mOSCOrDeviceControlArgs.length() > MAX_OSC_STRING_LENGTH) {
+                     // Too long.
+                     mOSCOrDeviceControlArgs.setLength(0);
+                     finishSequence();
+-                } else {
+-                    mOSCOrDeviceControlArgs.appendCodePoint(b);
+-                    continueSequence(mEscapeState);
++                    break;
+                 }
++                mOSCOrDeviceControlArgs.appendCodePoint(b);
++                continueSequence(mEscapeState);
+         }
+     }
+ 
+@@ -1036,49 +1013,46 @@ public final class TerminalEmulator {
+     }
+ 
+     private void respondToTermcapTerminfoRequest(String part) {
+-        if (part.length() % 2 == 0) {
+-            StringBuilder transBuffer = new StringBuilder();
+-            char c;
+-            for (int i = 0; i < part.length(); i += 2) {
+-                try {
+-                    c = (char) Integer.parseInt(part.substring(i, i + 2), 16);
+-                } catch (NumberFormatException e) {
+-                    Logger.logStackTraceWithMessage(mClient, LOG_TAG, "Invalid device termcap/terminfo encoded name \"" + part + "\"", e);
+-                    continue;
+-                }
+-                transBuffer.append(c);
++        if (part.length() % 2 != 0) {
++            Logger.logError(mClient, LOG_TAG, "Invalid device termcap/terminfo name of odd length: " + part);
++            return;
++        }
++        StringBuilder transBuffer = new StringBuilder();
++        for (int i = 0; i < part.length(); i += 2) {
++            try {
++                transBuffer.append((char) Integer.parseInt(part.substring(i, i + 2), 16));
++            } catch (NumberFormatException e) {
++                Logger.logStackTraceWithMessage(mClient, LOG_TAG, "Invalid device termcap/terminfo encoded name \"" + part + "\"", e);
+             }
+-            String trans = transBuffer.toString();
+-            String responseValue;
++        }
++        String trans = transBuffer.toString();
++        String responseValue;
++        switch (trans) {
++            case "Co":
++            case "colors":
++                responseValue = "256"; // Number of colors.
++                break;
++            case "TN":
++            case "name":
++                responseValue = "xterm";
++                break;
++            default:
++                responseValue = KeyHandler.getCodeFromTermcap(trans, isDecsetInternalBitSet(DECSET_BIT_APPLICATION_CURSOR_KEYS),
++                    isDecsetInternalBitSet(DECSET_BIT_APPLICATION_KEYPAD));
++                break;
++        }
++        if (responseValue == null) {
+             switch (trans) {
+-                case "Co":
+-                case "colors":
+-                    responseValue = "256"; // Number of colors.
+-                    break;
+-                case "TN":
+-                case "name":
+-                    responseValue = "xterm";
++                case "%1": // Help key - ignore
++                case "&8": // Undo key - ignore.
+                     break;
+                 default:
+-                    responseValue = KeyHandler.getCodeFromTermcap(trans, isDecsetInternalBitSet(DECSET_BIT_APPLICATION_CURSOR_KEYS),
+-                        isDecsetInternalBitSet(DECSET_BIT_APPLICATION_KEYPAD));
+-                    break;
+-            }
+-            if (responseValue == null) {
+-                switch (trans) {
+-                    case "%1": // Help key - ignore
+-                    case "&8": // Undo key - ignore.
+-                        break;
+-                    default:
+-                        Logger.logWarn(mClient, LOG_TAG, "Unhandled termcap/terminfo name: '" + trans + "'");
+-                }
+-                // Respond with invalid request:
+-                mSession.write("\033P0+r" + part + "\033\\");
+-            } else {
+-                mSession.write("\033P1+r" + part + "=" + hexEncode(responseValue) + "\033\\");
++                    Logger.logWarn(mClient, LOG_TAG, "Unhandled termcap/terminfo name: '" + trans + "'");
+             }
++            // Respond with invalid request:
++            mSession.write("\033P0+r" + part + "\033\\");
+         } else {
+-            Logger.logError(mClient, LOG_TAG, "Invalid device termcap/terminfo name of odd length: " + part);
++            mSession.write("\033P1+r" + part + "=" + hexEncode(responseValue) + "\033\\");
+         }
+     }
+ 
+@@ -1195,12 +1169,12 @@ public final class TerminalEmulator {
+             int internalBit = mapDecSetBitToInternalBit(externalBit);
+             if (internalBit == -1) {
+                 Logger.logWarn(mClient, LOG_TAG, "Ignoring request to save/recall decset bit=" + externalBit);
++                continue;
++            }
++            if (b == 's') {
++                mSavedDecSetFlags |= internalBit;
+             } else {
+-                if (b == 's') {
+-                    mSavedDecSetFlags |= internalBit;
+-                } else {
+-                    doDecSetOrReset((mSavedDecSetFlags & internalBit) != 0, externalBit);
+-                }
++                doDecSetOrReset((mSavedDecSetFlags & internalBit) != 0, externalBit);
+             }
+         }
+     }
+@@ -1334,7 +1308,7 @@ public final class TerminalEmulator {
+         // Reset: Use Normal Screen Buffer and restore cursor as in DECRC.
+         TerminalBuffer newScreen = setting ? mAltBuffer : mMainBuffer;
+         if (newScreen != mScreen) {
+-            boolean resized = !(newScreen.mColumns == mColumns && newScreen.mScreenRows == mRows);
++            boolean resized = newScreen.mColumns != mColumns || newScreen.mScreenRows != mRows;
+             if (setting) saveCursor();
+             mScreen = newScreen;
+             if (!setting) {
+@@ -1494,9 +1468,8 @@ public final class TerminalEmulator {
+     }
+ 
+     private void doLinefeed() {
+-        boolean belowScrollingRegion = mCursorRow >= mBottomMargin;
+         int newCursorRow = mCursorRow + 1;
+-        if (belowScrollingRegion) {
++        if (mCursorRow >= mBottomMargin) {
+             // Move down (but not scroll) as long as we are above the last row.
+             if (mCursorRow != mRows - 1) {
+                 setCursorRow(newCursorRow);
+@@ -1925,13 +1898,13 @@ public final class TerminalEmulator {
+     private void doCsiCursorBackwardTabulation() {
+         int numberOfTabs = getArg0(1);
+         int newCol = mLeftMargin;
+-        for (int i = mCursorCol - 1; i >= 0; i--)
+-            if (mTabStop[i]) {
+-                if (--numberOfTabs == 0) {
+-                    newCol = Math.max(i, mLeftMargin);
+-                    break;
+-                }
++        for (int i = mCursorCol - 1; i >= 0; i--) {
++            if (!mTabStop[i]) continue;
++            if (--numberOfTabs == 0) {
++                newCol = Math.max(i, mLeftMargin);
++                break;
+             }
++        }
+         mCursorCol = newCol;
+     }
+ 
+@@ -1955,8 +1928,7 @@ public final class TerminalEmulator {
+         switch (getArg0(0)) {
+             case 5: // Device status report (DSR):
+                 // Answer is ESC [ 0 n (Terminal OK).
+-                byte[] dsr = {(byte) 27, (byte) '[', (byte) '0', (byte) 'n'};
+-                mSession.write(dsr, 0, dsr.length);
++                mSession.write("\033[0n");
+                 break;
+             case 6: // Cursor position report (CPR):
+                 // Answer is ESC [ y ; x R, where x,y is
+@@ -2025,13 +1997,6 @@ public final class TerminalEmulator {
+             }
+ 
+             int code = getArg(i, 0, false);
+-            if (code < 0) {
+-                if (mArgIndex > 0) {
+-                    continue;
+-                } else {
+-                    code = 0;
+-                }
+-            }
+             if (code == 0) { // reset
+                 mForeColor = TextStyle.COLOR_INDEX_FOREGROUND;
+                 mBackColor = TextStyle.COLOR_INDEX_BACKGROUND;
+@@ -2475,12 +2440,9 @@ public final class TerminalEmulator {
+     }
+ 
+     private void collectOSCArgs(int b) {
+-        if (mOSCOrDeviceControlArgs.length() < MAX_OSC_STRING_LENGTH) {
+-            mOSCOrDeviceControlArgs.appendCodePoint(b);
+-            continueSequence(mEscapeState);
+-        } else {
+-            unknownSequence(b);
+-        }
++        if (mOSCOrDeviceControlArgs.length() >= MAX_OSC_STRING_LENGTH) { unknownSequence(b); return; }
++        mOSCOrDeviceControlArgs.appendCodePoint(b);
++        continueSequence(mEscapeState);
+     }
+ 
+     private void unimplementedSequence(int b) {
+diff --git a/terminal-emulator/src/main/java/com/termux/terminal/TerminalRow.java b/terminal-emulator/src/main/java/com/termux/terminal/TerminalRow.java
+index 35470b1ee..c54bc0763 100644
+--- a/terminal-emulator/src/main/java/com/termux/terminal/TerminalRow.java
++++ b/terminal-emulator/src/main/java/com/termux/terminal/TerminalRow.java
+@@ -215,12 +215,10 @@ public final class TerminalRow {
+ 
+     /** Returns how many java chars the given column occupies in mText, starting at {@code startIndex}. */
+     private int countCharsUsedByColumn(int column, int displayWidth, int startIndex) {
+-        if (column + displayWidth < mColumns) {
++        if (column + displayWidth < mColumns)
+             return findStartOfColumn(column + displayWidth) - startIndex;
+-        } else {
+-            // Last character.
+-            return mSpaceUsed - startIndex;
+-        }
++        // Last character.
++        return mSpaceUsed - startIndex;
+     }
+ 
+     /**
+@@ -234,9 +232,9 @@ public final class TerminalRow {
+             mText[newNextColumnIndex] = ' ';
+             ++mSpaceUsed;
+         } else if (oldWidth == 1 && newWidth == 2) {
+-            if (columnToSet == mColumns - 1) {
++            if (columnToSet == mColumns - 1)
+                 throw new IllegalArgumentException("Cannot put wide character in last column");
+-            } else if (columnToSet == mColumns - 2) {
++            if (columnToSet == mColumns - 2) {
+                 // Truncate the line to the second part of this wide char:
+                 mSpaceUsed = (short) newNextColumnIndex;
+             } else {

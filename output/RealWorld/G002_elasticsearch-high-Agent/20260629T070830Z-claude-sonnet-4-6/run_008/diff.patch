@@ -1,0 +1,157 @@
+diff --git a/server/src/main/java/org/elasticsearch/monitor/jvm/JvmGcMonitorService.java b/server/src/main/java/org/elasticsearch/monitor/jvm/JvmGcMonitorService.java
+index 7d3ee9785..1f3ad468f 100644
+--- a/server/src/main/java/org/elasticsearch/monitor/jvm/JvmGcMonitorService.java
++++ b/server/src/main/java/org/elasticsearch/monitor/jvm/JvmGcMonitorService.java
+@@ -50,7 +50,7 @@ public class JvmGcMonitorService extends AbstractLifecycleComponent {
+         Property.NodeScope
+     );
+ 
+-    private static String GC_COLLECTOR_PREFIX = "monitor.jvm.gc.collector.";
++    private static final String GC_COLLECTOR_PREFIX = "monitor.jvm.gc.collector.";
+     public static final Setting<Settings> GC_SETTING = Setting.groupSetting(GC_COLLECTOR_PREFIX, Property.NodeScope);
+ 
+     public static final Setting<Integer> GC_OVERHEAD_WARN_SETTING = Setting.intSetting(
+@@ -136,34 +136,33 @@ public class JvmGcMonitorService extends AbstractLifecycleComponent {
+         gcThresholds.putIfAbsent("default", new GcThreshold("default", 10000, 5000, 2000));
+         this.gcThresholds = unmodifiableMap(gcThresholds);
+ 
+-        if (GC_OVERHEAD_WARN_SETTING.get(settings) <= GC_OVERHEAD_INFO_SETTING.get(settings)) {
++        final int warnOverhead = GC_OVERHEAD_WARN_SETTING.get(settings);
++        final int infoOverhead = GC_OVERHEAD_INFO_SETTING.get(settings);
++        final int debugOverhead = GC_OVERHEAD_DEBUG_SETTING.get(settings);
++        if (warnOverhead <= infoOverhead) {
+             final String message = String.format(
+                 Locale.ROOT,
+                 "[%s] must be greater than [%s] [%d] but was [%d]",
+                 GC_OVERHEAD_WARN_SETTING.getKey(),
+                 GC_OVERHEAD_INFO_SETTING.getKey(),
+-                GC_OVERHEAD_INFO_SETTING.get(settings),
+-                GC_OVERHEAD_WARN_SETTING.get(settings)
++                infoOverhead,
++                warnOverhead
+             );
+             throw new IllegalArgumentException(message);
+         }
+-        if (GC_OVERHEAD_INFO_SETTING.get(settings) <= GC_OVERHEAD_DEBUG_SETTING.get(settings)) {
++        if (infoOverhead <= debugOverhead) {
+             final String message = String.format(
+                 Locale.ROOT,
+                 "[%s] must be greater than [%s] [%d] but was [%d]",
+                 GC_OVERHEAD_INFO_SETTING.getKey(),
+                 GC_OVERHEAD_DEBUG_SETTING.getKey(),
+-                GC_OVERHEAD_DEBUG_SETTING.get(settings),
+-                GC_OVERHEAD_INFO_SETTING.get(settings)
++                debugOverhead,
++                infoOverhead
+             );
+             throw new IllegalArgumentException(message);
+         }
+ 
+-        this.gcOverheadThreshold = new GcOverheadThreshold(
+-            GC_OVERHEAD_WARN_SETTING.get(settings),
+-            GC_OVERHEAD_INFO_SETTING.get(settings),
+-            GC_OVERHEAD_DEBUG_SETTING.get(settings)
+-        );
++        this.gcOverheadThreshold = new GcOverheadThreshold(warnOverhead, infoOverhead, debugOverhead);
+ 
+         logger.debug(
+             "enabled [{}], interval [{}], gc_threshold [{}], overhead [{}, {}, {}]",
+@@ -447,9 +446,11 @@ public class JvmGcMonitorService extends AbstractLifecycleComponent {
+         }
+ 
+         final void monitorSlowGc(JvmStats currentJvmStats, long elapsed) {
+-            for (int i = 0; i < currentJvmStats.getGc().getCollectors().length; i++) {
+-                GarbageCollector gc = currentJvmStats.getGc().getCollectors()[i];
+-                GarbageCollector prevGc = lastJvmStats.getGc().getCollectors()[i];
++            GarbageCollector[] collectors = currentJvmStats.getGc().getCollectors();
++            GarbageCollector[] prevCollectors = lastJvmStats.getGc().getCollectors();
++            for (int i = 0; i < collectors.length; i++) {
++                GarbageCollector gc = collectors[i];
++                GarbageCollector prevGc = prevCollectors[i];
+ 
+                 // no collection has happened
+                 long collections = gc.getCollectionCount() - prevGc.getCollectionCount();
+@@ -496,9 +497,11 @@ public class JvmGcMonitorService extends AbstractLifecycleComponent {
+ 
+         final void monitorGcOverhead(final JvmStats currentJvmStats, final long elapsed) {
+             long current = 0;
+-            for (int i = 0; i < currentJvmStats.getGc().getCollectors().length; i++) {
+-                GarbageCollector gc = currentJvmStats.getGc().getCollectors()[i];
+-                GarbageCollector prevGc = lastJvmStats.getGc().getCollectors()[i];
++            GarbageCollector[] collectors = currentJvmStats.getGc().getCollectors();
++            GarbageCollector[] prevCollectors = lastJvmStats.getGc().getCollectors();
++            for (int i = 0; i < collectors.length; i++) {
++                GarbageCollector gc = collectors[i];
++                GarbageCollector prevGc = prevCollectors[i];
+                 current += gc.getCollectionTime().millis() - prevGc.getCollectionTime().millis();
+             }
+             checkGcOverhead(current, elapsed, seq);
+diff --git a/server/src/main/java/org/elasticsearch/monitor/jvm/JvmStats.java b/server/src/main/java/org/elasticsearch/monitor/jvm/JvmStats.java
+index e6b109207..7f742323e 100644
+--- a/server/src/main/java/org/elasticsearch/monitor/jvm/JvmStats.java
++++ b/server/src/main/java/org/elasticsearch/monitor/jvm/JvmStats.java
+@@ -23,7 +23,6 @@ import org.elasticsearch.xcontent.XContentBuilder;
+ import java.io.IOException;
+ import java.lang.management.BufferPoolMXBean;
+ import java.lang.management.ClassLoadingMXBean;
+-import java.lang.management.GarbageCollectorMXBean;
+ import java.lang.management.ManagementFactory;
+ import java.lang.management.MemoryMXBean;
+ import java.lang.management.MemoryPoolMXBean;
+@@ -53,13 +52,13 @@ public class JvmStats implements Writeable, ToXContentFragment {
+     }
+ 
+     public static JvmStats jvmStats() {
+-        MemoryUsage memUsage = memoryMXBean.getHeapMemoryUsage();
+-        long heapUsed = memUsage.getUsed() < 0 ? 0 : memUsage.getUsed();
+-        long heapCommitted = memUsage.getCommitted() < 0 ? 0 : memUsage.getCommitted();
+-        long heapMax = memUsage.getMax() < 0 ? 0 : memUsage.getMax();
+-        memUsage = memoryMXBean.getNonHeapMemoryUsage();
+-        long nonHeapUsed = memUsage.getUsed() < 0 ? 0 : memUsage.getUsed();
+-        long nonHeapCommitted = memUsage.getCommitted() < 0 ? 0 : memUsage.getCommitted();
++        MemoryUsage heapUsage = memoryMXBean.getHeapMemoryUsage();
++        long heapUsed = Math.max(0, heapUsage.getUsed());
++        long heapCommitted = Math.max(0, heapUsage.getCommitted());
++        long heapMax = Math.max(0, heapUsage.getMax());
++        MemoryUsage nonHeapUsage = memoryMXBean.getNonHeapMemoryUsage();
++        long nonHeapUsed = Math.max(0, nonHeapUsage.getUsed());
++        long nonHeapCommitted = Math.max(0, nonHeapUsage.getCommitted());
+         List<MemoryPoolMXBean> memoryPoolMXBeans = ManagementFactory.getMemoryPoolMXBeans();
+         List<MemoryPool> pools = new ArrayList<>();
+         for (MemoryPoolMXBean memoryPoolMXBean : memoryPoolMXBeans) {
+@@ -70,10 +69,10 @@ public class JvmStats implements Writeable, ToXContentFragment {
+                 pools.add(
+                     new MemoryPool(
+                         name,
+-                        usage.getUsed() < 0 ? 0 : usage.getUsed(),
+-                        usage.getMax() < 0 ? 0 : usage.getMax(),
+-                        peakUsage.getUsed() < 0 ? 0 : peakUsage.getUsed(),
+-                        peakUsage.getMax() < 0 ? 0 : peakUsage.getMax()
++                        Math.max(0, usage.getUsed()),
++                        Math.max(0, usage.getMax()),
++                        Math.max(0, peakUsage.getUsed()),
++                        Math.max(0, peakUsage.getMax())
+                     )
+                 );
+             } catch (final Exception ignored) {
+@@ -92,16 +91,10 @@ public class JvmStats implements Writeable, ToXContentFragment {
+         Mem mem = new Mem(heapCommitted, heapUsed, heapMax, nonHeapCommitted, nonHeapUsed, Collections.unmodifiableList(pools));
+         Threads threads = new Threads(threadMXBean.getThreadCount(), threadMXBean.getPeakThreadCount());
+ 
+-        List<GarbageCollectorMXBean> gcMxBeans = ManagementFactory.getGarbageCollectorMXBeans();
+-        GarbageCollector[] collectors = new GarbageCollector[gcMxBeans.size()];
+-        for (int i = 0; i < collectors.length; i++) {
+-            GarbageCollectorMXBean gcMxBean = gcMxBeans.get(i);
+-            collectors[i] = new GarbageCollector(
+-                GcNames.getByGcName(gcMxBean.getName(), gcMxBean.getName()),
+-                gcMxBean.getCollectionCount(),
+-                gcMxBean.getCollectionTime()
+-            );
+-        }
++        GarbageCollector[] collectors = ManagementFactory.getGarbageCollectorMXBeans()
++            .stream()
++            .map(gc -> new GarbageCollector(GcNames.getByGcName(gc.getName(), gc.getName()), gc.getCollectionCount(), gc.getCollectionTime()))
++            .toArray(GarbageCollector[]::new);
+         GarbageCollectors garbageCollectors = new GarbageCollectors(collectors);
+         List<BufferPool> bufferPoolsList = Collections.emptyList();
+         try {

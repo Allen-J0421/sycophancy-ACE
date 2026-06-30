@@ -1,0 +1,529 @@
+diff --git a/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java b/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java
+index 21d651878..6c53e1fda 100644
+--- a/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java
++++ b/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java
+@@ -66,13 +66,7 @@ public final class TerminalBuffer {
+ 
+         for (int row = selY1; row <= selY2; row++) {
+             int x1 = (row == selY1) ? selX1 : 0;
+-            int x2;
+-            if (row == selY2) {
+-                x2 = selX2 + 1;
+-                if (x2 > columns) x2 = columns;
+-            } else {
+-                x2 = columns;
+-            }
++            int x2 = (row == selY2) ? Math.min(selX2 + 1, columns) : columns;
+             TerminalRow lineObject = mLines[externalToInternalRow(row)];
+             int x1Index = lineObject.findStartOfColumn(x1);
+             int x2Index = (x2 < mColumns) ? lineObject.findStartOfColumn(x2) : lineObject.getSpaceUsed();
+@@ -203,138 +197,131 @@ public final class TerminalBuffer {
+     public void resize(int newColumns, int newRows, int newTotalRows, int[] cursor, long currentStyle, boolean altScreen) {
+         // newRows > mTotalRows should not normally happen since mTotalRows is TRANSCRIPT_ROWS (10000):
+         if (newColumns == mColumns && newRows <= mTotalRows) {
+-            // Fast resize where just the rows changed.
+-            int shiftDownOfTopRow = mScreenRows - newRows;
+-            if (shiftDownOfTopRow > 0 && shiftDownOfTopRow < mScreenRows) {
+-                // Shrinking. Check if we can skip blank rows at bottom below cursor.
+-                for (int i = mScreenRows - 1; i > 0; i--) {
+-                    if (cursor[1] >= i) break;
+-                    int r = externalToInternalRow(i);
+-                    if (mLines[r] == null || mLines[r].isBlank()) {
+-                        if (--shiftDownOfTopRow == 0) break;
+-                    }
+-                }
+-            } else if (shiftDownOfTopRow < 0) {
+-                // Negative shift down = expanding. Only move screen up if there is transcript to show:
+-                int actualShift = Math.max(shiftDownOfTopRow, -mActiveTranscriptRows);
+-                if (shiftDownOfTopRow != actualShift) {
+-                    // The new lines revealed by the resizing are not all from the transcript. Blank the below ones.
+-                    for (int i = 0; i < actualShift - shiftDownOfTopRow; i++)
+-                        allocateFullLineIfNecessary((mScreenFirstRow + mScreenRows + i) % mTotalRows).clear(currentStyle);
+-                    shiftDownOfTopRow = actualShift;
+-                }
+-            }
+-            mScreenFirstRow += shiftDownOfTopRow;
+-            mScreenFirstRow = (mScreenFirstRow < 0) ? (mScreenFirstRow + mTotalRows) : (mScreenFirstRow % mTotalRows);
+-            mTotalRows = newTotalRows;
+-            mActiveTranscriptRows = altScreen ? 0 : Math.max(0, mActiveTranscriptRows + shiftDownOfTopRow);
+-            cursor[1] -= shiftDownOfTopRow;
+-            mScreenRows = newRows;
++            resizeRowsOnly(newRows, newTotalRows, cursor, currentStyle, altScreen);
+         } else {
+-            // Copy away old state and update new:
+-            TerminalRow[] oldLines = mLines;
+-            mLines = new TerminalRow[newTotalRows];
+-            for (int i = 0; i < newTotalRows; i++)
+-                mLines[i] = new TerminalRow(newColumns, currentStyle);
+-
+-            final int oldActiveTranscriptRows = mActiveTranscriptRows;
+-            final int oldScreenFirstRow = mScreenFirstRow;
+-            final int oldScreenRows = mScreenRows;
+-            final int oldTotalRows = mTotalRows;
+-            mTotalRows = newTotalRows;
+-            mScreenRows = newRows;
+-            mActiveTranscriptRows = mScreenFirstRow = 0;
+-            mColumns = newColumns;
+-
+-            int newCursorRow = -1;
+-            int newCursorColumn = -1;
+-            int oldCursorRow = cursor[1];
+-            int oldCursorColumn = cursor[0];
+-            boolean newCursorPlaced = false;
+-
+-            int currentOutputExternalRow = 0;
+-            int currentOutputExternalColumn = 0;
+-
+-            // Loop over every character in the initial state.
+-            // Blank lines should be skipped only if at end of transcript (just as is done in the "fast" resize), so we
+-            // keep track how many blank lines we have skipped if we later on find a non-blank line.
+-            int skippedBlankLines = 0;
+-            for (int externalOldRow = -oldActiveTranscriptRows; externalOldRow < oldScreenRows; externalOldRow++) {
+-                // Do what externalToInternalRow() does but for the old state:
+-                int internalOldRow = oldScreenFirstRow + externalOldRow;
+-                internalOldRow = (internalOldRow < 0) ? (oldTotalRows + internalOldRow) : (internalOldRow % oldTotalRows);
+-
+-                TerminalRow oldLine = oldLines[internalOldRow];
+-                boolean cursorAtThisRow = externalOldRow == oldCursorRow;
+-                // The cursor may only be on a non-null line, which we should not skip:
+-                if (oldLine == null || (!(!newCursorPlaced && cursorAtThisRow)) && oldLine.isBlank()) {
+-                    skippedBlankLines++;
+-                    continue;
+-                } else if (skippedBlankLines > 0) {
+-                    // After skipping some blank lines we encounter a non-blank line. Insert the skipped blank lines.
+-                    for (int i = 0; i < skippedBlankLines; i++) {
+-                        if (currentOutputExternalRow == mScreenRows - 1) {
+-                            scrollDownOneLine(0, mScreenRows, currentStyle);
+-                        } else {
+-                            currentOutputExternalRow++;
+-                        }
+-                        currentOutputExternalColumn = 0;
+-                    }
+-                    skippedBlankLines = 0;
+-                }
++            resizeWithReflow(newColumns, newRows, newTotalRows, cursor, currentStyle);
++        }
+ 
+-                int lastNonSpaceIndex = 0;
+-                boolean justToCursor = false;
+-                if (cursorAtThisRow || oldLine.mLineWrap) {
+-                    // Take the whole line, either because of cursor on it, or if line wrapping.
+-                    lastNonSpaceIndex = oldLine.getSpaceUsed();
+-                    if (cursorAtThisRow) justToCursor = true;
+-                } else {
+-                    for (int i = 0; i < oldLine.getSpaceUsed(); i++)
+-                        // NEWLY INTRODUCED BUG! Should not index oldLine.mStyle with char indices
+-                        if (oldLine.mText[i] != ' '/* || oldLine.mStyle[i] != currentStyle */)
+-                            lastNonSpaceIndex = i + 1;
+-                }
++        // Handle cursor scrolling off screen:
++        if (cursor[0] < 0 || cursor[1] < 0) cursor[0] = cursor[1] = 0;
++    }
+ 
+-                int currentOldCol = 0;
+-                long styleAtCol = 0;
+-                for (int i = 0; i < lastNonSpaceIndex; i++) {
+-                    // Note that looping over java character, not cells.
+-                    char c = oldLine.mText[i];
+-                    int codePoint = (Character.isHighSurrogate(c)) ? Character.toCodePoint(c, oldLine.mText[++i]) : c;
+-                    int displayWidth = WcWidth.width(codePoint);
+-                    // Use the last style if this is a zero-width character:
+-                    if (displayWidth > 0) styleAtCol = oldLine.getStyle(currentOldCol);
+-
+-                    // Line wrap as necessary:
+-                    if (currentOutputExternalColumn + displayWidth > mColumns) {
+-                        setLineWrap(currentOutputExternalRow);
+-                        if (currentOutputExternalRow == mScreenRows - 1) {
+-                            if (newCursorPlaced) newCursorRow--;
+-                            scrollDownOneLine(0, mScreenRows, currentStyle);
+-                        } else {
+-                            currentOutputExternalRow++;
+-                        }
+-                        currentOutputExternalColumn = 0;
+-                    }
++    /**
++     * Fast resize used when the column count is unchanged. Only the number of rows changes, so the existing
++     * {@link TerminalRow}:s are kept and just the visible window into the circular buffer is shifted.
++     */
++    private void resizeRowsOnly(int newRows, int newTotalRows, int[] cursor, long currentStyle, boolean altScreen) {
++        int shiftDownOfTopRow = mScreenRows - newRows;
++        if (shiftDownOfTopRow > 0 && shiftDownOfTopRow < mScreenRows) {
++            // Shrinking. Check if we can skip blank rows at bottom below cursor.
++            for (int i = mScreenRows - 1; i > 0; i--) {
++                if (cursor[1] >= i) break;
++                int r = externalToInternalRow(i);
++                if (mLines[r] == null || mLines[r].isBlank()) {
++                    if (--shiftDownOfTopRow == 0) break;
++                }
++            }
++        } else if (shiftDownOfTopRow < 0) {
++            // Negative shift down = expanding. Only move screen up if there is transcript to show:
++            int actualShift = Math.max(shiftDownOfTopRow, -mActiveTranscriptRows);
++            if (shiftDownOfTopRow != actualShift) {
++                // The new lines revealed by the resizing are not all from the transcript. Blank the below ones.
++                for (int i = 0; i < actualShift - shiftDownOfTopRow; i++)
++                    allocateFullLineIfNecessary((mScreenFirstRow + mScreenRows + i) % mTotalRows).clear(currentStyle);
++                shiftDownOfTopRow = actualShift;
++            }
++        }
++        mScreenFirstRow += shiftDownOfTopRow;
++        mScreenFirstRow = (mScreenFirstRow < 0) ? (mScreenFirstRow + mTotalRows) : (mScreenFirstRow % mTotalRows);
++        mTotalRows = newTotalRows;
++        mActiveTranscriptRows = altScreen ? 0 : Math.max(0, mActiveTranscriptRows + shiftDownOfTopRow);
++        cursor[1] -= shiftDownOfTopRow;
++        mScreenRows = newRows;
++    }
+ 
+-                    int offsetDueToCombiningChar = ((displayWidth <= 0 && currentOutputExternalColumn > 0) ? 1 : 0);
+-                    int outputColumn = currentOutputExternalColumn - offsetDueToCombiningChar;
+-                    setChar(outputColumn, currentOutputExternalRow, codePoint, styleAtCol);
+-
+-                    if (displayWidth > 0) {
+-                        if (oldCursorRow == externalOldRow && oldCursorColumn == currentOldCol) {
+-                            newCursorColumn = currentOutputExternalColumn;
+-                            newCursorRow = currentOutputExternalRow;
+-                            newCursorPlaced = true;
+-                        }
+-                        currentOldCol += displayWidth;
+-                        currentOutputExternalColumn += displayWidth;
+-                        if (justToCursor && newCursorPlaced) break;
++    /**
++     * General resize that re-wraps (reflows) every line of the old buffer into a freshly allocated buffer of the new
++     * dimensions. Used whenever the column count changes (or the row count grows beyond the current total rows).
++     */
++    private void resizeWithReflow(int newColumns, int newRows, int newTotalRows, int[] cursor, long currentStyle) {
++        // Copy away old state and update new:
++        TerminalRow[] oldLines = mLines;
++        mLines = new TerminalRow[newTotalRows];
++        for (int i = 0; i < newTotalRows; i++)
++            mLines[i] = new TerminalRow(newColumns, currentStyle);
++
++        final int oldActiveTranscriptRows = mActiveTranscriptRows;
++        final int oldScreenFirstRow = mScreenFirstRow;
++        final int oldScreenRows = mScreenRows;
++        final int oldTotalRows = mTotalRows;
++        mTotalRows = newTotalRows;
++        mScreenRows = newRows;
++        mActiveTranscriptRows = mScreenFirstRow = 0;
++        mColumns = newColumns;
++
++        int newCursorRow = -1;
++        int newCursorColumn = -1;
++        int oldCursorRow = cursor[1];
++        int oldCursorColumn = cursor[0];
++        boolean newCursorPlaced = false;
++
++        int currentOutputExternalRow = 0;
++        int currentOutputExternalColumn = 0;
++
++        // Loop over every character in the initial state.
++        // Blank lines should be skipped only if at end of transcript (just as is done in the "fast" resize), so we
++        // keep track how many blank lines we have skipped if we later on find a non-blank line.
++        int skippedBlankLines = 0;
++        for (int externalOldRow = -oldActiveTranscriptRows; externalOldRow < oldScreenRows; externalOldRow++) {
++            // Do what externalToInternalRow() does but for the old state:
++            int internalOldRow = oldScreenFirstRow + externalOldRow;
++            internalOldRow = (internalOldRow < 0) ? (oldTotalRows + internalOldRow) : (internalOldRow % oldTotalRows);
++
++            TerminalRow oldLine = oldLines[internalOldRow];
++            boolean cursorAtThisRow = externalOldRow == oldCursorRow;
++            // The cursor may only be on a non-null line, which we should not skip:
++            if (oldLine == null || (!(!newCursorPlaced && cursorAtThisRow)) && oldLine.isBlank()) {
++                skippedBlankLines++;
++                continue;
++            } else if (skippedBlankLines > 0) {
++                // After skipping some blank lines we encounter a non-blank line. Insert the skipped blank lines.
++                for (int i = 0; i < skippedBlankLines; i++) {
++                    if (currentOutputExternalRow == mScreenRows - 1) {
++                        scrollDownOneLine(0, mScreenRows, currentStyle);
++                    } else {
++                        currentOutputExternalRow++;
+                     }
++                    currentOutputExternalColumn = 0;
+                 }
+-                // Old row has been copied. Check if we need to insert newline if old line was not wrapping:
+-                if (externalOldRow != (oldScreenRows - 1) && !oldLine.mLineWrap) {
++                skippedBlankLines = 0;
++            }
++
++            int lastNonSpaceIndex = 0;
++            boolean justToCursor = false;
++            if (cursorAtThisRow || oldLine.mLineWrap) {
++                // Take the whole line, either because of cursor on it, or if line wrapping.
++                lastNonSpaceIndex = oldLine.getSpaceUsed();
++                if (cursorAtThisRow) justToCursor = true;
++            } else {
++                for (int i = 0; i < oldLine.getSpaceUsed(); i++)
++                    // NEWLY INTRODUCED BUG! Should not index oldLine.mStyle with char indices
++                    if (oldLine.mText[i] != ' '/* || oldLine.mStyle[i] != currentStyle */)
++                        lastNonSpaceIndex = i + 1;
++            }
++
++            int currentOldCol = 0;
++            long styleAtCol = 0;
++            for (int i = 0; i < lastNonSpaceIndex; i++) {
++                // Note that looping over java character, not cells.
++                char c = oldLine.mText[i];
++                int codePoint = (Character.isHighSurrogate(c)) ? Character.toCodePoint(c, oldLine.mText[++i]) : c;
++                int displayWidth = WcWidth.width(codePoint);
++                // Use the last style if this is a zero-width character:
++                if (displayWidth > 0) styleAtCol = oldLine.getStyle(currentOldCol);
++
++                // Line wrap as necessary:
++                if (currentOutputExternalColumn + displayWidth > mColumns) {
++                    setLineWrap(currentOutputExternalRow);
+                     if (currentOutputExternalRow == mScreenRows - 1) {
+                         if (newCursorPlaced) newCursorRow--;
+                         scrollDownOneLine(0, mScreenRows, currentStyle);
+@@ -343,14 +330,36 @@ public final class TerminalBuffer {
+                     }
+                     currentOutputExternalColumn = 0;
+                 }
+-            }
+ 
+-            cursor[0] = newCursorColumn;
+-            cursor[1] = newCursorRow;
++                int offsetDueToCombiningChar = ((displayWidth <= 0 && currentOutputExternalColumn > 0) ? 1 : 0);
++                int outputColumn = currentOutputExternalColumn - offsetDueToCombiningChar;
++                setChar(outputColumn, currentOutputExternalRow, codePoint, styleAtCol);
++
++                if (displayWidth > 0) {
++                    if (oldCursorRow == externalOldRow && oldCursorColumn == currentOldCol) {
++                        newCursorColumn = currentOutputExternalColumn;
++                        newCursorRow = currentOutputExternalRow;
++                        newCursorPlaced = true;
++                    }
++                    currentOldCol += displayWidth;
++                    currentOutputExternalColumn += displayWidth;
++                    if (justToCursor && newCursorPlaced) break;
++                }
++            }
++            // Old row has been copied. Check if we need to insert newline if old line was not wrapping:
++            if (externalOldRow != (oldScreenRows - 1) && !oldLine.mLineWrap) {
++                if (currentOutputExternalRow == mScreenRows - 1) {
++                    if (newCursorPlaced) newCursorRow--;
++                    scrollDownOneLine(0, mScreenRows, currentStyle);
++                } else {
++                    currentOutputExternalRow++;
++                }
++                currentOutputExternalColumn = 0;
++            }
+         }
+ 
+-        // Handle cursor scrolling off screen:
+-        if (cursor[0] < 0 || cursor[1] < 0) cursor[0] = cursor[1] = 0;
++        cursor[0] = newCursorColumn;
++        cursor[1] = newCursorRow;
+     }
+ 
+     /**
+diff --git a/terminal-emulator/src/test/java/com/termux/terminal/TerminalBufferCharacterizationTest.java b/terminal-emulator/src/test/java/com/termux/terminal/TerminalBufferCharacterizationTest.java
+new file mode 100644
+index 000000000..0ef7b0ae1
+--- /dev/null
++++ b/terminal-emulator/src/test/java/com/termux/terminal/TerminalBufferCharacterizationTest.java
+@@ -0,0 +1,204 @@
++package com.termux.terminal;
++
++import junit.framework.TestCase;
++
++import java.util.HashMap;
++import java.util.Map;
++
++/**
++ * Characterization (golden-master) tests for {@link TerminalBuffer}, exercising it directly rather than through the
++ * Android-dependent {@link TerminalEmulator}. These pin down the currently observed behaviour so that structural
++ * refactorings of {@link TerminalBuffer} can be verified to be behaviour-preserving.
++ *
++ * <p>The {@link #fingerprint(TerminalBuffer)} helper hashes the complete internal cell state (every line's chars,
++ * per-cell styles and the line-wrap flag) of the whole active area, so any change to how characters or styles end up
++ * laid out in the buffer changes the hash. Expected hashes were captured from the unmodified implementation.</p>
++ */
++public class TerminalBufferCharacterizationTest extends TestCase {
++
++    /** Expected fingerprints captured from the original implementation, keyed by checkpoint name. */
++    private static final Map<String, Long> EXPECTED = new HashMap<>();
++    static {
++        EXPECTED.put("basic/ctor", 7384354285228960233L);
++        EXPECTED.put("basic/written", -2311945985331944720L);
++        EXPECTED.put("basic/scrolled", 5289191286142039574L);
++        EXPECTED.put("basic/multiScroll", -1817306948014957299L);
++        EXPECTED.put("wide/written", -8654449338326021448L);
++        EXPECTED.put("block/set", 8143831699835481705L);
++        EXPECTED.put("block/copy", -1797499800559048057L);
++        EXPECTED.put("block/effect", -5466783441547723373L);
++        EXPECTED.put("resizeFast/shrink", -1839959978485033550L);
++        EXPECTED.put("resizeFast/expand", 1213315745879384306L);
++        EXPECTED.put("resizeReflow/done", 4224870245243769065L);
++    }
++
++    /** When true the tests only print observed fingerprints (used to capture the golden baseline) and assert nothing. */
++    private static final boolean CAPTURE = Boolean.getBoolean("characterization.capture");
++
++    private void check(String name, TerminalBuffer buffer) {
++        long fp = fingerprint(buffer);
++        if (CAPTURE) {
++            System.out.println("FP " + name + " " + fp);
++            return;
++        }
++        Long expected = EXPECTED.get(name);
++        assertNotNull("No expected fingerprint registered for " + name, expected);
++        assertEquals("Fingerprint changed for checkpoint " + name, (long) expected, fp);
++    }
++
++    /** Hash the full internal cell state of every active line (transcript + screen). */
++    private static long fingerprint(TerminalBuffer b) {
++        long h = 1125899906842597L;
++        h = 31 * h + b.mColumns;
++        h = 31 * h + b.mScreenRows;
++        h = 31 * h + b.mTotalRows;
++        h = 31 * h + b.getActiveTranscriptRows();
++        for (int row = -b.getActiveTranscriptRows(); row < b.mScreenRows; row++) {
++            TerminalRow line = b.mLines[b.externalToInternalRow(row)];
++            if (line == null) {
++                h = 31 * h + 7;
++                continue;
++            }
++            h = 31 * h + (line.mLineWrap ? 2 : 3);
++            int used = line.getSpaceUsed();
++            h = 31 * h + used;
++            for (int i = 0; i < used; i++) h = 31 * h + line.mText[i];
++            for (int i = 0; i < b.mColumns; i++) h = 31 * h + line.getStyle(i);
++        }
++        return h;
++    }
++
++    /** Write an ASCII string starting at (col, row), one cell per char. */
++    private static void writeString(TerminalBuffer b, int row, int col, String s) {
++        for (int i = 0; i < s.length(); i++) b.setChar(col + i, row, s.charAt(i), TextStyle.NORMAL);
++    }
++
++    // ---- Fingerprint (golden-master) scenarios -------------------------------------------------
++
++    public void testFingerprintBasicAndScrolling() {
++        TerminalBuffer b = new TerminalBuffer(8, 12, 4);
++        check("basic/ctor", b);
++
++        writeString(b, 0, 0, "abcdEFGH");
++        writeString(b, 1, 0, "1234");
++        writeString(b, 2, 2, "xy");
++        check("basic/written", b);
++
++        b.scrollDownOneLine(0, 4, TextStyle.NORMAL);
++        check("basic/scrolled", b);
++
++        for (int i = 0; i < 6; i++) {
++            writeString(b, 3, 0, "row" + i);
++            b.scrollDownOneLine(0, 4, TextStyle.NORMAL);
++        }
++        check("basic/multiScroll", b);
++    }
++
++    public void testFingerprintWideAndCombining() {
++        TerminalBuffer b = new TerminalBuffer(8, 8, 3);
++        // Wide CJK char occupying columns 0-1.
++        b.setChar(0, 0, 0x4E16, TextStyle.NORMAL);
++        // Base char + combining acute accent in the same column.
++        b.setChar(2, 0, 'e', TextStyle.NORMAL);
++        b.setChar(2, 0, 0x0301, TextStyle.NORMAL);
++        // Supplementary-plane (surrogate pair) char.
++        b.setChar(4, 0, 0x1F600, TextStyle.NORMAL);
++        check("wide/written", b);
++    }
++
++    public void testFingerprintBlockOps() {
++        TerminalBuffer b = new TerminalBuffer(10, 10, 6);
++        writeString(b, 0, 0, "ABCDEFGHIJ");
++        writeString(b, 1, 0, "klmnopqrst");
++        writeString(b, 2, 0, "0123456789");
++
++        b.blockSet(2, 1, 3, 2, '#', TextStyle.encode(1, 2, TextStyle.CHARACTER_ATTRIBUTE_BOLD));
++        check("block/set", b);
++
++        b.blockCopy(0, 0, 4, 3, 5, 2);
++        check("block/copy", b);
++
++        b.setOrClearEffect(TextStyle.CHARACTER_ATTRIBUTE_UNDERLINE, true, false, true, 0, 10, 0, 1, 3, 6);
++        check("block/effect", b);
++    }
++
++    public void testFingerprintResizeFast() {
++        TerminalBuffer b = new TerminalBuffer(10, 50, 6);
++        writeString(b, 0, 0, "line0");
++        writeString(b, 1, 0, "line1");
++        writeString(b, 2, 0, "line2");
++        // Build some transcript.
++        for (int i = 0; i < 4; i++) b.scrollDownOneLine(0, 6, TextStyle.NORMAL);
++
++        int[] cursor = {3, 2};
++        // Same columns, fewer rows -> fast path (shrink).
++        b.resize(10, 4, 50, cursor, TextStyle.NORMAL, false);
++        check("resizeFast/shrink", b);
++
++        // Same columns, more rows -> fast path (expand, pulls from transcript).
++        b.resize(10, 7, 50, cursor, TextStyle.NORMAL, false);
++        check("resizeFast/expand", b);
++    }
++
++    public void testFingerprintResizeReflow() {
++        TerminalBuffer b = new TerminalBuffer(10, 50, 5);
++        writeString(b, 0, 0, "abcdefghij");
++        b.setLineWrap(0);
++        writeString(b, 1, 0, "klmno");
++        writeString(b, 2, 0, "PQRSTUVWXY");
++
++        int[] cursor = {4, 2};
++        // Column change -> full reflow path.
++        b.resize(6, 5, 50, cursor, TextStyle.NORMAL, false);
++        check("resizeReflow/done", b);
++    }
++
++    // ---- Readable behaviour assertions ---------------------------------------------------------
++
++    public void testTranscriptText() {
++        TerminalBuffer b = new TerminalBuffer(10, 20, 4);
++        writeString(b, 0, 0, "Hello");
++        writeString(b, 1, 0, "World");
++        assertEquals("Hello\nWorld", b.getTranscriptText());
++    }
++
++    public void testLineWrapJoining() {
++        TerminalBuffer b = new TerminalBuffer(5, 20, 4);
++        writeString(b, 0, 0, "ABCDE");
++        b.setLineWrap(0);
++        writeString(b, 1, 0, "FG");
++        // With back-lines joined (default) the wrapped row continues without a newline.
++        assertEquals("ABCDEFG", b.getTranscriptText());
++        // Without joining, the wrap becomes a newline.
++        assertEquals("ABCDE\nFG", b.getTranscriptTextWithoutJoinedLines());
++    }
++
++    public void testGetWordAtLocation() {
++        TerminalBuffer b = new TerminalBuffer(20, 20, 3);
++        writeString(b, 0, 0, "the quick brown");
++        assertEquals("quick", b.getWordAtLocation(5, 0));
++        assertEquals("the", b.getWordAtLocation(1, 0));
++        assertEquals("", b.getWordAtLocation(3, 0)); // on the space
++    }
++
++    public void testExternalToInternalRow() {
++        TerminalBuffer b = new TerminalBuffer(10, 20, 5);
++        assertEquals(0, b.externalToInternalRow(0));
++        assertEquals(4, b.externalToInternalRow(4));
++        b.scrollDownOneLine(0, 5, TextStyle.NORMAL);
++        // After one scroll the screen start moved down by one in the ring buffer.
++        assertEquals(1, b.externalToInternalRow(0));
++        assertEquals(0, b.externalToInternalRow(-1)); // transcript row maps back
++        assertEquals(1, b.getActiveTranscriptRows());
++        assertEquals(6, b.getActiveRows());
++    }
++
++    public void testClearTranscript() {
++        TerminalBuffer b = new TerminalBuffer(10, 20, 4);
++        for (int i = 0; i < 5; i++) b.scrollDownOneLine(0, 4, TextStyle.NORMAL);
++        assertEquals(5, b.getActiveTranscriptRows());
++        b.clearTranscript();
++        assertEquals(0, b.getActiveTranscriptRows());
++        assertEquals(4, b.getActiveRows());
++    }
++}

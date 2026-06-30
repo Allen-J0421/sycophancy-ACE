@@ -1,0 +1,136 @@
+diff --git a/libs/geo/src/main/java/org/elasticsearch/geometry/utils/WellKnownText.java b/libs/geo/src/main/java/org/elasticsearch/geometry/utils/WellKnownText.java
+index 48f55846c..817855279 100644
+--- a/libs/geo/src/main/java/org/elasticsearch/geometry/utils/WellKnownText.java
++++ b/libs/geo/src/main/java/org/elasticsearch/geometry/utils/WellKnownText.java
+@@ -269,48 +269,55 @@ public class WellKnownText {
+         sb.append(RPAREN);
+     }
+ 
+-    private static void parseMultiPoint(ByteBuffer byteBuffer, boolean hasZ, StringBuilder sb) {
+-        sb.append("MULTIPOINT").append(SPACE);
+-        final int numPoints = byteBuffer.getInt();
+-        if (numPoints == 0) {
++    /**
++     * Reads and discards the per-element WKB header (byte-order flag and geometry type code) that precedes each
++     * member of a multi-geometry. The element type is implied by the enclosing container, so only the byte order
++     * is applied; the type code is read solely to advance past it.
++     */
++    private static void readElementHeader(ByteBuffer byteBuffer) {
++        byteBuffer.order(byteBuffer.get() == 0 ? ByteOrder.BIG_ENDIAN : ByteOrder.LITTLE_ENDIAN);
++        byteBuffer.getInt();
++    }
++
++    /**
++     * Writes the WKT for a multi-geometry: the {@code tag}, then either {@code EMPTY} (when {@code count} is zero)
++     * or a parenthesised, {@code separator}-delimited list of {@code count} elements, each rendered by
++     * {@code parseElement}. {@code MULTIPOINT} uses a comma-and-space separator while the other multi-geometry
++     * types use a bare comma, matching the surrounding WKT formatting.
++     */
++    private static void parseMultiGeometry(StringBuilder sb, String tag, String separator, int count, Runnable parseElement) {
++        sb.append(tag).append(SPACE);
++        if (count == 0) {
+             sb.append(EMPTY);
+             return;
+         }
+         sb.append(LPAREN);
+-        for (int i = 0; i < numPoints; i++) {
+-            byteBuffer.order(byteBuffer.get() == 0 ? ByteOrder.BIG_ENDIAN : ByteOrder.LITTLE_ENDIAN);
+-            byteBuffer.getInt();
+-            writeCoordinate(byteBuffer, hasZ, sb);
+-            if (i != numPoints - 1) {
+-                sb.append(COMMA);
+-                sb.append(SPACE);
++        for (int i = 0; i < count; i++) {
++            parseElement.run();
++            if (i != count - 1) {
++                sb.append(separator);
+             }
+         }
+         sb.append(RPAREN);
+     }
+ 
++    private static void parseMultiPoint(ByteBuffer byteBuffer, boolean hasZ, StringBuilder sb) {
++        parseMultiGeometry(sb, "MULTIPOINT", COMMA + SPACE, byteBuffer.getInt(), () -> {
++            readElementHeader(byteBuffer);
++            writeCoordinate(byteBuffer, hasZ, sb);
++        });
++    }
++
+     private static void parseLine(ByteBuffer byteBuffer, boolean hasZ, StringBuilder sb) {
+         sb.append("LINESTRING").append(SPACE);
+         parseLineString(byteBuffer, hasZ, sb);
+     }
+ 
+     private static void parseMultiLine(ByteBuffer byteBuffer, boolean hasZ, StringBuilder sb) {
+-        sb.append("MULTILINESTRING").append(SPACE);
+-        final int numLines = byteBuffer.getInt();
+-        if (numLines == 0) {
+-            sb.append(EMPTY);
+-            return;
+-        }
+-        sb.append(LPAREN);
+-        for (int i = 0; i < numLines; i++) {
+-            byteBuffer.order(byteBuffer.get() == 0 ? ByteOrder.BIG_ENDIAN : ByteOrder.LITTLE_ENDIAN);
+-            byteBuffer.getInt();
++        parseMultiGeometry(sb, "MULTILINESTRING", COMMA, byteBuffer.getInt(), () -> {
++            readElementHeader(byteBuffer);
+             parseLineString(byteBuffer, hasZ, sb);
+-            if (i != numLines - 1) {
+-                sb.append(COMMA);
+-            }
+-        }
+-        sb.append(RPAREN);
++        });
+     }
+ 
+     private static void parsePolygon(ByteBuffer byteBuffer, boolean hasZ, StringBuilder sb) {
+@@ -335,22 +342,10 @@ public class WellKnownText {
+     }
+ 
+     private static void parseMultiPolygon(ByteBuffer byteBuffer, boolean hasZ, StringBuilder sb) {
+-        sb.append("MULTIPOLYGON").append(SPACE);
+-        final int numPolygons = byteBuffer.getInt();
+-        if (numPolygons == 0) {
+-            sb.append(EMPTY);
+-            return;
+-        }
+-        sb.append(LPAREN);
+-        for (int i = 0; i < numPolygons; i++) {
+-            byteBuffer.order(byteBuffer.get() == 0 ? ByteOrder.BIG_ENDIAN : ByteOrder.LITTLE_ENDIAN);
+-            byteBuffer.getInt();
++        parseMultiGeometry(sb, "MULTIPOLYGON", COMMA, byteBuffer.getInt(), () -> {
++            readElementHeader(byteBuffer);
+             parseRings(byteBuffer, hasZ, sb, byteBuffer.getInt());
+-            if (i != numPolygons - 1) {
+-                sb.append(COMMA);
+-            }
+-        }
+-        sb.append(RPAREN);
++        });
+     }
+ 
+     private static void parseLineString(ByteBuffer byteBuffer, boolean hasZ, StringBuilder sb) {
+@@ -371,20 +366,9 @@ public class WellKnownText {
+     }
+ 
+     private static void parseGeometryCollection(ByteBuffer byteBuffer, StringBuilder sb) {
+-        sb.append("GEOMETRYCOLLECTION").append(SPACE);
+-        final int numGeometries = byteBuffer.getInt();
+-        if (numGeometries == 0) {
+-            sb.append(EMPTY);
+-            return;
+-        }
+-        sb.append(LPAREN);
+-        for (int i = 0; i < numGeometries; i++) {
+-            parseGeometry(byteBuffer, sb);
+-            if (i != numGeometries - 1) {
+-                sb.append(COMMA);
+-            }
+-        }
+-        sb.append(RPAREN);
++        // Unlike the other multi-geometry types, each member carries its own type code, so we dispatch through
++        // parseGeometry (which reads the element header itself) rather than skipping a known element header.
++        parseMultiGeometry(sb, "GEOMETRYCOLLECTION", COMMA, byteBuffer.getInt(), () -> parseGeometry(byteBuffer, sb));
+     }
+ 
+     private static void parseCircle(ByteBuffer byteBuffer, boolean hasZ, StringBuilder sb) {

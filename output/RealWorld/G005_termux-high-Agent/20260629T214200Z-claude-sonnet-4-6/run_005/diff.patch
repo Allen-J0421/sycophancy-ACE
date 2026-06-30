@@ -1,0 +1,322 @@
+diff --git a/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java b/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java
+index 68ed38eac..8b0e58c18 100644
+--- a/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java
++++ b/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java
+@@ -274,7 +274,7 @@ public final class TerminalBuffer {
+             TerminalRow oldLine = oldLines[internalOldRow];
+             boolean cursorAtThisRow = externalOldRow == oldCursorRow;
+             // The cursor may only be on a non-null line, which we should not skip:
+-            if (oldLine == null || (!(!state.cursorPlaced && cursorAtThisRow)) && oldLine.isBlank()) {
++            if (oldLine == null || (state.cursorPlaced || !cursorAtThisRow) && oldLine.isBlank()) {
+                 skippedBlankLines++;
+                 continue;
+             } else if (skippedBlankLines > 0) {
+@@ -284,20 +284,19 @@ public final class TerminalBuffer {
+                 skippedBlankLines = 0;
+             }
+ 
+-            int lastNonSpaceIndex = 0;
+-            boolean justToCursor = false;
++            int lastNonSpaceIndex;
+             if (cursorAtThisRow || oldLine.mLineWrap) {
+                 // Take the whole line, either because of cursor on it, or if line wrapping.
+                 lastNonSpaceIndex = oldLine.getSpaceUsed();
+-                if (cursorAtThisRow) justToCursor = true;
+             } else {
++                lastNonSpaceIndex = 0;
+                 for (int i = 0; i < oldLine.getSpaceUsed(); i++)
+                     // NEWLY INTRODUCED BUG! Should not index oldLine.mStyle with char indices
+                     if (oldLine.mText[i] != ' '/* || oldLine.mStyle[i] != currentStyle */)
+                         lastNonSpaceIndex = i + 1;
+             }
+ 
+-            reflowOldRow(oldLine, lastNonSpaceIndex, justToCursor, externalOldRow, oldCursorRow, oldCursorColumn, state, currentStyle);
++            reflowOldRow(oldLine, lastNonSpaceIndex, cursorAtThisRow, externalOldRow, oldCursorRow, oldCursorColumn, state, currentStyle);
+ 
+             // Old row has been copied. Check if we need to insert newline if old line was not wrapping:
+             if (externalOldRow != (oldScreenRows - 1) && !oldLine.mLineWrap)
+diff --git a/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java b/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java
+index 2c3b72b1c..4568c45a5 100644
+--- a/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java
++++ b/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java
+@@ -627,15 +627,7 @@ public final class TerminalEmulator {
+                 }
+                 break;
+             case 27: // ESC
+-                // Starts an escape sequence unless we're parsing a string
+-                if (mEscapeState == ESC_P) {
+-                    // XXX: Ignore escape when reading device control sequence, since it may be part of string terminator.
+-                    return;
+-                } else if (mEscapeState != ESC_OSC) {
+-                    startEscapeSequence();
+-                } else {
+-                    doOsc(b);
+-                }
++                doEscByte();
+                 break;
+             default:
+                 doEscapeStateDispatch(b);
+@@ -643,6 +635,17 @@ public final class TerminalEmulator {
+         }
+     }
+ 
++    /** Handle the ESC (0x1B) byte: start a new escape sequence, or pass to the current OSC/DCS handler. */
++    private void doEscByte() {
++        if (mEscapeState == ESC_P) {
++            // Ignore escape when reading device control sequence — it may be part of the string terminator.
++        } else if (mEscapeState != ESC_OSC) {
++            startEscapeSequence();
++        } else {
++            doOsc(27);
++        }
++    }
++
+     /** Dispatch a printable or control byte to the current escape-sequence handler, then reset state if sequence is complete. */
+     private void doEscapeStateDispatch(int b) {
+         mContinueSequence = false;
+@@ -807,7 +810,7 @@ public final class TerminalEmulator {
+         int bottom = Math.min(getArg(2, mRows, true) + 1, effectiveBottomMargin - 1) + effectiveTopMargin;
+         int right = Math.min(getArg(3, mColumns, true) + 1, effectiveRightMargin - 1) + effectiveLeftMargin;
+         if (mArgIndex >= 4) {
+-            if (mArgIndex >= mArgs.length) mArgIndex = mArgs.length - 1;
++            clampArgIndex();
+             for (int i = 4; i <= mArgIndex; i++) {
+                 int bits = 0;
+                 boolean setOrClear = true; // True if setting, false if clearing.
+@@ -1049,7 +1052,7 @@ public final class TerminalEmulator {
+             char c;
+             for (int i = 0; i < part.length(); i += 2) {
+                 try {
+-                    c = (char) Long.decode("0x" + part.charAt(i) + "" + part.charAt(i + 1)).longValue();
++                    c = (char) Integer.parseInt(part.substring(i, i + 2), 16);
+                 } catch (NumberFormatException e) {
+                     Logger.logStackTraceWithMessage(mClient, LOG_TAG, "Invalid device termcap/terminfo encoded name \"" + part + "\"", e);
+                     continue;
+@@ -1168,7 +1171,7 @@ public final class TerminalEmulator {
+                 break;
+             case 'h':
+             case 'l':
+-                if (mArgIndex >= mArgs.length) mArgIndex = mArgs.length - 1;
++                clampArgIndex();
+                 for (int i = 0; i <= mArgIndex; i++)
+                     doDecSetOrReset(b == 'h', mArgs[i]);
+                 break;
+@@ -1197,7 +1200,7 @@ public final class TerminalEmulator {
+ 
+     /** DECDMSR — save ('s') or restore ('r') a list of DEC private mode bits. */
+     private void doCsiDecModesSaveOrRestore(int b) {
+-        if (mArgIndex >= mArgs.length) mArgIndex = mArgs.length - 1;
++        clampArgIndex();
+         for (int i = 0; i <= mArgIndex; i++) {
+             int externalBit = mArgs[i];
+             int internalBit = mapDecSetBitToInternalBit(externalBit);
+@@ -1333,7 +1336,7 @@ public final class TerminalEmulator {
+         setDecsetinternalBit(DECSET_BIT_LEFTRIGHT_MARGIN_MODE, false);
+         // "Erases all data in page memory":
+         blockClear(0, 0, mColumns, mRows);
+-        setCursorRowCol(0, 0);
++        setCursorRowColAbsolute(0, 0);
+     }
+ 
+     /** Switch to/from alternate screen buffer (DECSET 47/1047/1049). */
+@@ -1449,7 +1452,7 @@ public final class TerminalEmulator {
+             int previousRow = mCursorRow - 1;
+             if (previousRow >= 0 && mScreen.getLineWrap(previousRow)) {
+                 mScreen.clearLineWrap(previousRow);
+-                setCursorRowCol(previousRow, mRightMargin - 1);
++                setCursorRowColAbsolute(previousRow, mRightMargin - 1);
+             }
+         } else {
+             setCursorCol(mCursorCol - 1);
+@@ -1569,7 +1572,7 @@ public final class TerminalEmulator {
+                 doLinefeed();
+                 break;
+             case 'F': // Cursor to lower-left corner of screen
+-                setCursorRowCol(0, mBottomMargin - 1);
++                setCursorRowColAbsolute(0, mBottomMargin - 1);
+                 break;
+             case 'H': // Tab set
+                 mTabStop[mCursorCol] = true;
+@@ -1623,7 +1626,7 @@ public final class TerminalEmulator {
+     /** DECRS restore cursor - http://www.vt100.net/docs/vt510-rm/DECRC. See {@link #saveCursor()}. */
+     private void restoreCursor() {
+         SavedScreenState state = (mScreen == mMainBuffer) ? mSavedStateMain : mSavedStateAlt;
+-        setCursorRowCol(state.mSavedCursorRow, state.mSavedCursorCol);
++        setCursorRowColAbsolute(state.mSavedCursorRow, state.mSavedCursorCol);
+         mEffect = state.mSavedEffect;
+         mForeColor = state.mSavedForeColor;
+         mBackColor = state.mSavedBackColor;
+@@ -1699,12 +1702,9 @@ public final class TerminalEmulator {
+             case 'P': // "${CSI}{N}P" - delete ${N} characters (DCH).
+                 doCsiDeleteChars();
+                 break;
+-            case 'S': { // "${CSI}${N}S" - scroll up ${N} lines (default = 1) (SU).
+-                final int linesToScroll = getArg0(1);
+-                for (int i = 0; i < linesToScroll; i++)
+-                    scrollDownOneLine();
++            case 'S': // "${CSI}${N}S" - scroll up ${N} lines (default = 1) (SU).
++                doCsiScrollUp();
+                 break;
+-            }
+             case 'T':
+                 doCsiScrollDownOrHighlightTracking(b);
+                 break;
+@@ -1729,9 +1729,7 @@ public final class TerminalEmulator {
+                 setCursorColRespectingOriginMode(getArg0(1) - 1);
+                 break;
+             case 'b': // Repeat the preceding graphic character Ps times (REP).
+-                if (mLastEmittedCodePoint == -1) break;
+-                final int numRepeat = getArg0(1);
+-                for (int i = 0; i < numRepeat; i++) emitCodePoint(mLastEmittedCodePoint);
++                doCsiRepeat();
+                 break;
+             case 'c': // Primary Device Attributes (http://www.vt100.net/docs/vt510-rm/DA1) if argument is missing or zero.
+                 // The important part that may still be used by some (tmux stores this value but does not currently use it)
+@@ -1783,6 +1781,20 @@ public final class TerminalEmulator {
+     }
+ 
+     /** ED — erase in display (J). Note: default: case uses return to skip mAboutToAutoWrap=false. */
++    /** SU — scroll up N lines (J). */
++    private void doCsiScrollUp() {
++        int linesToScroll = getArg0(1);
++        for (int i = 0; i < linesToScroll; i++)
++            scrollDownOneLine();
++    }
++
++    /** REP — repeat the preceding graphic character N times. */
++    private void doCsiRepeat() {
++        if (mLastEmittedCodePoint == -1) return;
++        int numRepeat = getArg0(1);
++        for (int i = 0; i < numRepeat; i++) emitCodePoint(mLastEmittedCodePoint);
++    }
++
+     /** ICH — insert N space characters at cursor, shifting existing chars right. */
+     private void doCsiInsertChars() {
+         mAboutToAutoWrap = false;
+@@ -2012,7 +2024,7 @@ public final class TerminalEmulator {
+ 
+     /** Select Graphic Rendition (SGR) - see http://en.wikipedia.org/wiki/ANSI_escape_code#graphics. */
+     private void selectGraphicRendition() {
+-        if (mArgIndex >= mArgs.length) mArgIndex = mArgs.length - 1;
++        clampArgIndex();
+         for (int i = 0; i <= mArgIndex; i++) {
+             // Skip leading sub parameters:
+             if ((mArgsSubParamsBitSet & (1 << i)) != 0) {
+@@ -2386,7 +2398,7 @@ public final class TerminalEmulator {
+ 
+     /**
+      * NOTE: The parameters of this function respect the {@link #DECSET_BIT_ORIGIN_MODE}. Use
+-     * {@link #setCursorRowCol(int, int)} for absolute pos.
++     * {@link #setCursorRowColAbsolute(int, int)} for absolute pos.
+      */
+     private void setCursorPosition(int x, int y) {
+         boolean originMode = isDecsetInternalBitSet(DECSET_BIT_ORIGIN_MODE);
+@@ -2396,7 +2408,7 @@ public final class TerminalEmulator {
+         int effectiveRightMargin = originMode ? mRightMargin : mColumns;
+         int newRow = Math.max(effectiveTopMargin, Math.min(effectiveTopMargin + y, effectiveBottomMargin - 1));
+         int newCol = Math.max(effectiveLeftMargin, Math.min(effectiveLeftMargin + x, effectiveRightMargin - 1));
+-        setCursorRowCol(newRow, newCol);
++        setCursorRowColAbsolute(newRow, newCol);
+     }
+ 
+     private void scrollDownOneLine() {
+@@ -2470,6 +2482,11 @@ public final class TerminalEmulator {
+         return getArg(1, defaultValue, true);
+     }
+ 
++    /** Guard before iterating over mArgs[0..mArgIndex]: ensures mArgIndex stays within array bounds. */
++    private void clampArgIndex() {
++        if (mArgIndex >= mArgs.length) mArgIndex = mArgs.length - 1;
++    }
++
+     private int getArg(int index, int defaultValue, boolean treatZeroAsDefault) {
+         int result = mArgs[index];
+         if (result < 0 || (result == 0 && treatZeroAsDefault)) {
+@@ -2509,7 +2526,7 @@ public final class TerminalEmulator {
+             buf.append(", escapeState=");
+             buf.append(mEscapeState);
+             boolean firstArg = true;
+-            if (mArgIndex >= mArgs.length) mArgIndex = mArgs.length - 1;
++            clampArgIndex();
+             for (int i = 0; i <= mArgIndex; i++) {
+                 int value = mArgs[i];
+                 if (value >= 0) {
+@@ -2646,8 +2663,8 @@ public final class TerminalEmulator {
+         setCursorPosition(col, mCursorRow);
+     }
+ 
+-    /** TODO: Better name, distinguished from {@link #setCursorPosition(int, int)} by not regarding origin mode. */
+-    private void setCursorRowCol(int row, int col) {
++    /** Sets the cursor to an absolute (row, col) position, ignoring {@link #DECSET_BIT_ORIGIN_MODE}. */
++    private void setCursorRowColAbsolute(int row, int col) {
+         mCursorRow = Math.max(0, Math.min(row, mRows - 1));
+         mCursorCol = Math.max(0, Math.min(col, mColumns - 1));
+         mAboutToAutoWrap = false;
+diff --git a/terminal-emulator/src/main/java/com/termux/terminal/TerminalRow.java b/terminal-emulator/src/main/java/com/termux/terminal/TerminalRow.java
+index 1b6d447f6..35470b1ee 100644
+--- a/terminal-emulator/src/main/java/com/termux/terminal/TerminalRow.java
++++ b/terminal-emulator/src/main/java/com/termux/terminal/TerminalRow.java
+@@ -175,15 +175,7 @@ public final class TerminalRow {
+         final int oldStartOfColumnIndex = findStartOfColumn(columnToSet);
+         final int oldCodePointDisplayWidth = WcWidth.width(text, oldStartOfColumnIndex);
+ 
+-        // Get the number of elements in the mText array this column uses now
+-        int oldCharactersUsedForColumn;
+-        if (columnToSet + oldCodePointDisplayWidth < mColumns) {
+-            int oldEndOfColumnIndex = findStartOfColumn(columnToSet + oldCodePointDisplayWidth);
+-            oldCharactersUsedForColumn = oldEndOfColumnIndex - oldStartOfColumnIndex;
+-        } else {
+-            // Last character.
+-            oldCharactersUsedForColumn = mSpaceUsed - oldStartOfColumnIndex;
+-        }
++        int oldCharactersUsedForColumn = countCharsUsedByColumn(columnToSet, oldCodePointDisplayWidth, oldStartOfColumnIndex);
+ 
+         // If MAX_COMBINING_CHARACTERS_PER_COLUMN already exist in column, then ignore adding additional combining characters.
+         if (newIsCombining) {
+@@ -218,13 +210,30 @@ public final class TerminalRow {
+         //noinspection ResultOfMethodCallIgnored - since we already now how many java chars is used.
+         Character.toChars(codePoint, text, oldStartOfColumnIndex + (newIsCombining ? oldCharactersUsedForColumn : 0));
+ 
+-        if (oldCodePointDisplayWidth == 2 && newCodePointDisplayWidth == 1) {
+-            // Replace second half of wide char with a space. Which mean that we actually add a ' ' java character.
+-            text = shiftTail(text, newNextColumnIndex, 1);
+-            text[newNextColumnIndex] = ' ';
++        adjustAfterWidthChange(oldCodePointDisplayWidth, newCodePointDisplayWidth, columnToSet, newNextColumnIndex);
++    }
++
++    /** Returns how many java chars the given column occupies in mText, starting at {@code startIndex}. */
++    private int countCharsUsedByColumn(int column, int displayWidth, int startIndex) {
++        if (column + displayWidth < mColumns) {
++            return findStartOfColumn(column + displayWidth) - startIndex;
++        } else {
++            // Last character.
++            return mSpaceUsed - startIndex;
++        }
++    }
+ 
++    /**
++     * Handle mText and mSpaceUsed adjustments when the display width of a column changes.
++     * Called after the new codepoint has been stored but before returning from setChar.
++     */
++    private void adjustAfterWidthChange(int oldWidth, int newWidth, int columnToSet, int newNextColumnIndex) {
++        if (oldWidth == 2 && newWidth == 1) {
++            // Replace second half of wide char with a space. Which mean that we actually add a ' ' java character.
++            shiftTail(mText, newNextColumnIndex, 1);
++            mText[newNextColumnIndex] = ' ';
+             ++mSpaceUsed;
+-        } else if (oldCodePointDisplayWidth == 1 && newCodePointDisplayWidth == 2) {
++        } else if (oldWidth == 1 && newWidth == 2) {
+             if (columnToSet == mColumns - 1) {
+                 throw new IllegalArgumentException("Cannot put wide character in last column");
+             } else if (columnToSet == mColumns - 2) {
+@@ -235,9 +244,8 @@ public final class TerminalRow {
+                 // check at the beginning of this method we know that we are not overwriting a wide char.
+                 int newNextNextColumnIndex = newNextColumnIndex + (Character.isHighSurrogate(mText[newNextColumnIndex]) ? 2 : 1);
+                 int nextLen = newNextNextColumnIndex - newNextColumnIndex;
+-
+                 // Shift the array leftwards.
+-                System.arraycopy(text, newNextNextColumnIndex, text, newNextColumnIndex, mSpaceUsed - newNextNextColumnIndex);
++                System.arraycopy(mText, newNextNextColumnIndex, mText, newNextColumnIndex, mSpaceUsed - newNextNextColumnIndex);
+                 mSpaceUsed -= nextLen;
+             }
+         }

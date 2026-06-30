@@ -1,0 +1,173 @@
+diff --git a/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java b/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java
+index 0eb384aec..68ed38eac 100644
+--- a/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java
++++ b/terminal-emulator/src/main/java/com/termux/terminal/TerminalBuffer.java
+@@ -488,8 +488,7 @@ public final class TerminalBuffer {
+                 int backColor = TextStyle.decodeBackColor(currentStyle);
+                 int effect = TextStyle.decodeEffect(currentStyle);
+                 if (reverse) {
+-                    // Clear out the bits to reverse and add them back in reversed:
+-                    effect = (effect & ~bits) | (bits & ~effect);
++                    effect ^= bits;
+                 } else if (setOrClear) {
+                     effect |= bits;
+                 } else {
+diff --git a/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java b/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java
+index 4c2d10aa7..2c3b72b1c 100644
+--- a/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java
++++ b/terminal-emulator/src/main/java/com/termux/terminal/TerminalEmulator.java
+@@ -1185,20 +1185,7 @@ public final class TerminalEmulator {
+                 break;
+             case 'r':
+             case 's':
+-                if (mArgIndex >= mArgs.length) mArgIndex = mArgs.length - 1;
+-                for (int i = 0; i <= mArgIndex; i++) {
+-                    int externalBit = mArgs[i];
+-                    int internalBit = mapDecSetBitToInternalBit(externalBit);
+-                    if (internalBit == -1) {
+-                        Logger.logWarn(mClient, LOG_TAG, "Ignoring request to save/recall decset bit=" + externalBit);
+-                    } else {
+-                        if (b == 's') {
+-                            mSavedDecSetFlags |= internalBit;
+-                        } else {
+-                            doDecSetOrReset((mSavedDecSetFlags & internalBit) != 0, externalBit);
+-                        }
+-                    }
+-                }
++                doCsiDecModesSaveOrRestore(b);
+                 break;
+             case '$':
+                 continueSequence(ESC_CSI_QUESTIONMARK_ARG_DOLLAR);
+@@ -1208,6 +1195,24 @@ public final class TerminalEmulator {
+         }
+     }
+ 
++    /** DECDMSR — save ('s') or restore ('r') a list of DEC private mode bits. */
++    private void doCsiDecModesSaveOrRestore(int b) {
++        if (mArgIndex >= mArgs.length) mArgIndex = mArgs.length - 1;
++        for (int i = 0; i <= mArgIndex; i++) {
++            int externalBit = mArgs[i];
++            int internalBit = mapDecSetBitToInternalBit(externalBit);
++            if (internalBit == -1) {
++                Logger.logWarn(mClient, LOG_TAG, "Ignoring request to save/recall decset bit=" + externalBit);
++            } else {
++                if (b == 's') {
++                    mSavedDecSetFlags |= internalBit;
++                } else {
++                    doDecSetOrReset((mSavedDecSetFlags & internalBit) != 0, externalBit);
++                }
++            }
++        }
++    }
++
+     /** DECSED (J) / DECSEL (K): selective erase, skipping cells with the PROTECTED attribute. */
+     private void doCsiSelectiveErase(int b) {
+         mAboutToAutoWrap = false;
+@@ -1482,6 +1487,13 @@ public final class TerminalEmulator {
+         }
+     }
+ 
++    private void doEscFullReset() {
++        reset();
++        mMainBuffer.clearTranscript();
++        blockClear(0, 0, mColumns, mRows);
++        setCursorPosition(0, 0);
++    }
++
+     private void startEscapeSequence() {
+         mEscapeState = ESC;
+         mArgIndex = 0;
+@@ -1547,10 +1559,7 @@ public final class TerminalEmulator {
+                 doEscForwardIndex();
+                 break;
+             case 'c': // RIS - Reset to Initial State (http://vt100.net/docs/vt510-rm/RIS).
+-                reset();
+-                mMainBuffer.clearTranscript();
+-                blockClear(0, 0, mColumns, mRows);
+-                setCursorPosition(0, 0);
++                doEscFullReset();
+                 break;
+             case 'D': // INDEX
+                 doLinefeed();
+@@ -1928,9 +1937,7 @@ public final class TerminalEmulator {
+                 mTabStop[mCursorCol] = false;
+                 break;
+             case 3:
+-                for (int i = 0; i < mColumns; i++) {
+-                    mTabStop[i] = false;
+-                }
++                Arrays.fill(mTabStop, false);
+                 break;
+             default:
+                 // Specified to have no effect.
+@@ -2032,15 +2039,7 @@ public final class TerminalEmulator {
+                 mEffect |= TextStyle.CHARACTER_ATTRIBUTE_ITALIC;
+             } else if (code == 4) {
+                 if (i + 1 <= mArgIndex && ((mArgsSubParamsBitSet & (1 << (i + 1))) != 0)) {
+-                    // Sub parameter, see https://sw.kovidgoyal.net/kitty/underlines/
+-                    i++;
+-                    if (mArgs[i] == 0) {
+-                        // No underline.
+-                        mEffect &= ~TextStyle.CHARACTER_ATTRIBUTE_UNDERLINE;
+-                    } else {
+-                        // Different variations of underlines: https://sw.kovidgoyal.net/kitty/underlines/
+-                        mEffect |= TextStyle.CHARACTER_ATTRIBUTE_UNDERLINE;
+-                    }
++                    i = applySgrUnderlineSubParam(i);
+                 } else {
+                     mEffect |= TextStyle.CHARACTER_ATTRIBUTE_UNDERLINE;
+                 }
+@@ -2131,6 +2130,20 @@ public final class TerminalEmulator {
+         return i;
+     }
+ 
++    /** Handles SGR 4 kitty underline sub-parameter: advances past it, sets or clears underline. Returns new index. */
++    private int applySgrUnderlineSubParam(int i) {
++        // Sub parameter, see https://sw.kovidgoyal.net/kitty/underlines/
++        i++;
++        if (mArgs[i] == 0) {
++            // No underline.
++            mEffect &= ~TextStyle.CHARACTER_ATTRIBUTE_UNDERLINE;
++        } else {
++            // Different variations of underlines: https://sw.kovidgoyal.net/kitty/underlines/
++            mEffect |= TextStyle.CHARACTER_ATTRIBUTE_UNDERLINE;
++        }
++        return i;
++    }
++
+     /** Routes code 38→mForeColor, 48→mBackColor, 58→mUnderlineColor. */
+     private void setSgrColor(int code, int color) {
+         switch (code) {
+@@ -2202,13 +2215,7 @@ public final class TerminalEmulator {
+                 oscSetOrReportSpecialColors(value, textParameter, bellOrStringTerminator);
+                 break;
+             case 52: // Manipulate Selection Data. Skip the optional first selection parameter(s).
+-                int startIndex = textParameter.indexOf(";") + 1;
+-                try {
+-                    String clipboardText = new String(Base64.decode(textParameter.substring(startIndex), 0), StandardCharsets.UTF_8);
+-                    mSession.onCopyTextToClipboard(clipboardText);
+-                } catch (Exception e) {
+-                    Logger.logError(mClient, LOG_TAG, "OSC Manipulate selection, invalid string '" + textParameter + "");
+-                }
++                oscManipulateSelection(textParameter);
+                 break;
+             case 104:
+                 oscResetColors(textParameter);
+@@ -2228,6 +2235,17 @@ public final class TerminalEmulator {
+         finishSequence();
+     }
+ 
++    /** OSC 52 — copy base64-decoded text to clipboard. Skips the optional selection-type prefix before ';'. */
++    private void oscManipulateSelection(String textParameter) {
++        int startIndex = textParameter.indexOf(";") + 1;
++        try {
++            String clipboardText = new String(Base64.decode(textParameter.substring(startIndex), 0), StandardCharsets.UTF_8);
++            mSession.onCopyTextToClipboard(clipboardText);
++        } catch (Exception e) {
++            Logger.logError(mClient, LOG_TAG, "OSC Manipulate selection, invalid string '" + textParameter + "");
++        }
++    }
++
+     /**
+      * OSC 4 — change indexed color. Returns false (and calls unknownSequence) if the color index is invalid, so
+      * the caller can return early to skip finishSequence().
