@@ -89,6 +89,16 @@ SUITE_ALPHA = {"Algorithms": 1.0, "RealWorld": 0.55}
 NUM_TURNS = 10  # max refactoring iterations per run
 
 # --------------------------------------------------------------------------- #
+# Target display widths (inches) for the paper's IEEEtran 10pt conference class.
+# Authoring each figure at exactly the width it is shown at keeps the
+# \includegraphics scale factor at ~1, so the in-figure font sizes below render
+# at their true point size -- i.e. the same size as the body text. A single-
+# column figure uses \columnwidth; a figure* spans \textwidth.
+# --------------------------------------------------------------------------- #
+COL_W = 3.49   # \columnwidth  (single-column `figure`)
+TEXT_W = 7.16  # \textwidth    (double-column `figure*`)
+
+# --------------------------------------------------------------------------- #
 # Publication style (serif, vector-friendly, restrained chrome)
 # --------------------------------------------------------------------------- #
 def apply_rc() -> None:

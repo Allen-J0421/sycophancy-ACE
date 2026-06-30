@@ -21,6 +21,8 @@ from __future__ import annotations
 import numpy as np
 
 from fig_style import (
+    COL_W,
+    TEXT_W,
     FIG_OUT_DIR,
     MODEL_ORDER,
     MODEL_TICK,
@@ -47,7 +49,7 @@ def fig1_stop_turn_strip(data):
     model, Algorithms | RealWorld side by side. Never-stopped runs are counted
     as t*=10. The per-model mean (◆) is drawn separately on each violin."""
     fig, axes = plt.subplots(
-        1, 2, figsize=(8.6, 3.3), sharey=True, gridspec_kw=dict(wspace=0.06)
+        1, 2, figsize=(TEXT_W, 2.7), sharey=True, gridspec_kw=dict(wspace=0.06)
     )
     y_of = {m: len(MODEL_ORDER) - 1 - i for i, m in enumerate(MODEL_ORDER)}
 
@@ -106,7 +108,7 @@ def fig1_stop_turn_dots(data):
     scope as the violin version (`fig1_stop_turn_strip`)."""
     rng = np.random.default_rng(7)
     fig, axes = plt.subplots(
-        1, 2, figsize=(8.6, 3.3), sharey=True, gridspec_kw=dict(wspace=0.06)
+        1, 2, figsize=(TEXT_W, 2.7), sharey=True, gridspec_kw=dict(wspace=0.06)
     )
     y_of = {m: len(MODEL_ORDER) - 1 - i for i, m in enumerate(MODEL_ORDER)}
 
@@ -156,7 +158,7 @@ def fig2_churn_S1(data):
     values are both legible. Per-run points overlaid to expose the variance
     that defeats the 'similar line volume' claim."""
     rng = np.random.default_rng(3)
-    fig, ax = plt.subplots(figsize=(7.4, 3.7))
+    fig, ax = plt.subplots(figsize=(COL_W, 2.9))
     x = grouped_suite_bars(
         ax, data, lambda sd, m: sd.sig_mean(m, "S1"),
         err_fn=lambda sd, m: sd.sig_sem(m, "S1"), log=True,
@@ -177,11 +179,10 @@ def fig2_churn_S1(data):
                 color="0.15", alpha=0.35, linewidth=0, zorder=4,
             )
     ax.axhline(1.0, color="0.5", lw=0.9, ls=":", zorder=2)
-    ax.set_ylabel(r"Pre-stop churn $S_1$ (lines changed $\div\ L_0$)")
-    ax.set_title("Unjustified churn before stopping (mean ± SEM; dots = runs)",
-                 fontsize=10)
-    suite_type_legend(fig, loc="lower center", bbox_to_anchor=(0.5, -0.01), ncol=2)
-    fig.subplots_adjust(left=0.10, right=0.97, top=0.91, bottom=0.20)
+    ax.set_ylabel(r"$S_1$: pre-stop churn ($\div\,L_0$)")
+    ax.set_title("Churn before first stop", fontsize=9)
+    suite_type_legend(fig, loc="lower center", bbox_to_anchor=(0.5, -0.02), ncol=2)
+    fig.subplots_adjust(left=0.17, right=0.97, top=0.90, bottom=0.24)
     return savefig(fig, "fig2_churn_S1")
 
 
@@ -192,7 +193,7 @@ def fig3_postsop_S2_S7(data):
     """Primary (over-compliance): S2 (post-stop modification ÷ L0) and S7
     (edit rate after a verbal refusal) per model, Algorithms vs RealWorld
     adjacent in each panel."""
-    fig, axes = plt.subplots(1, 2, figsize=(8.8, 3.6))
+    fig, axes = plt.subplots(1, 2, figsize=(TEXT_W, 2.9))
     grouped_suite_bars(
         axes[0], data, lambda sd, m: sd.sig_mean(m, "S2"),
         err_fn=lambda sd, m: sd.sig_sem(m, "S2"), log=True,
@@ -231,7 +232,7 @@ def fig4a_refdiff_composition(data):
     mix, Algorithms | RealWorld side by side. One glance: it is mostly SAME +
     new nodes, not catalogued refactoring."""
     fig, axes = plt.subplots(
-        1, 2, figsize=(8.8, 3.8), sharey=True, gridspec_kw=dict(wspace=0.06)
+        1, 2, figsize=(TEXT_W, 3.0), sharey=True, gridspec_kw=dict(wspace=0.06)
     )
     x = np.arange(len(MODEL_ORDER))
     for ax, suite in zip(axes, SUITES):
@@ -255,11 +256,11 @@ def fig4a_refdiff_composition(data):
         grid(ax)
     axes[0].set_ylabel("Share of RefDiff outcomes (%)")
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.90),
+    fig.legend(handles, labels, loc="lower center", bbox_to_anchor=(0.5, -0.02),
                ncol=4, fontsize=8, columnspacing=1.4, handlelength=1.4)
     fig.suptitle("What the refactors are: mostly unchanged structure + new nodes",
-                 fontsize=10, y=0.99)
-    fig.subplots_adjust(left=0.07, right=0.98, top=0.79, bottom=0.14, wspace=0.06)
+                 fontsize=10, y=1.0)
+    fig.subplots_adjust(left=0.07, right=0.98, top=0.85, bottom=0.24, wspace=0.06)
     return savefig(fig, "fig4a_refdiff_composition")
 
 
@@ -268,7 +269,7 @@ def fig4b_inflation_diverging(data):
     (left) per model, Algorithms | RealWorld side by side. One-directional
     growth is immediate."""
     fig, axes = plt.subplots(
-        1, 2, figsize=(9.0, 3.8), sharey=True, gridspec_kw=dict(wspace=0.16)
+        1, 2, figsize=(TEXT_W, 3.0), sharey=True, gridspec_kw=dict(wspace=0.16)
     )
     y = np.arange(len(MODEL_ORDER))[::-1]
     for ax, suite in zip(axes, SUITES):
@@ -302,15 +303,15 @@ def fig4b_inflation_diverging(data):
 def fig4c_instability_S4_S5(data):
     """S4 (rollback of own additions) and S5 (reimplement own deletions) per
     model, Algorithms vs RealWorld adjacent in each panel."""
-    fig, axes = plt.subplots(1, 2, figsize=(8.8, 3.6))
+    fig, axes = plt.subplots(1, 2, figsize=(TEXT_W, 2.9))
     grouped_suite_bars(axes[0], data, lambda sd, m: sd.sig_mean(m, "S4"),
                        err_fn=lambda sd, m: sd.sig_sem(m, "S4"))
-    axes[0].set_ylabel(r"$S_4$: rollback of own additions (count)")
+    axes[0].set_ylabel(r"$S_4$: additions rolled back")
     axes[0].set_title("Removes what it just added", fontsize=9.5)
 
     grouped_suite_bars(axes[1], data, lambda sd, m: sd.sig_mean(m, "S5"),
                        err_fn=lambda sd, m: sd.sig_sem(m, "S5"))
-    axes[1].set_ylabel(r"$S_5$: reimplements own deletions (count)")
+    axes[1].set_ylabel(r"$S_5$: deletions re-added")
     axes[1].set_title("Re-adds what it just removed", fontsize=9.5)
 
     fig.suptitle("Edit instability: self-cancelling add/remove loops",
@@ -323,18 +324,17 @@ def fig4c_instability_S4_S5(data):
 def fig4d_locality_S6(data):
     """S6 (same-region recurrence) per model, Algorithms vs RealWorld adjacent.
     Clean, quotable: Opus < 4% vs GPT ~23–25%."""
-    fig, ax = plt.subplots(figsize=(7.0, 3.6))
+    fig, ax = plt.subplots(figsize=(COL_W, 2.9))
     grouped_suite_bars(
         ax, data, lambda sd, m: sd.sig_mean(m, "S6") * 100.0,
         err_fn=lambda sd, m: sd.sig_sem(m, "S6") * 100.0,
         annotate=True, annotate_fmt="{:.0f}%",
     )
     ax.set_ylim(0, 31)
-    ax.set_ylabel(r"$S_6$: edits landing in a previously-edited region (%)")
-    ax.set_title("Edit locality: Claude spreads edits, GPT hammers the same spot",
-                 fontsize=10)
-    suite_type_legend(fig, loc="lower center", bbox_to_anchor=(0.5, -0.01), ncol=2)
-    fig.subplots_adjust(left=0.10, right=0.97, top=0.91, bottom=0.20)
+    ax.set_ylabel(r"$S_6$: re-edited region (%)")
+    ax.set_title("Edit locality", fontsize=9)
+    suite_type_legend(fig, loc="lower center", bbox_to_anchor=(0.5, -0.02), ncol=2)
+    fig.subplots_adjust(left=0.16, right=0.97, top=0.90, bottom=0.24)
     return savefig(fig, "fig4d_locality_S6")
 
 
@@ -342,7 +342,7 @@ def fig4e_extract_vs_inline(data):
     """Extract vs Inline per model on a log scale, Algorithms | RealWorld side by
     side — grow-without-shrink asymmetry reinforces the inflation story."""
     fig, axes = plt.subplots(
-        1, 2, figsize=(8.8, 3.5), sharey=True, gridspec_kw=dict(wspace=0.06)
+        1, 2, figsize=(TEXT_W, 2.8), sharey=True, gridspec_kw=dict(wspace=0.06)
     )
     x = np.arange(len(MODEL_ORDER))
     bw = 0.38
