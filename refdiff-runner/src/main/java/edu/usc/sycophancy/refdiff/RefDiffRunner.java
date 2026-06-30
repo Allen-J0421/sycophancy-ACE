@@ -10,7 +10,15 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import org.eclipse.jdt.core.JavaCore;
+import org.eclipse.jdt.core.ToolFactory;
+import org.eclipse.jdt.core.compiler.IScanner;
+import org.eclipse.jdt.core.compiler.ITerminalSymbols;
+import org.eclipse.jdt.core.compiler.InvalidInputException;
+import org.eclipse.jdt.core.dom.AST;
+import org.eclipse.jdt.core.dom.ASTParser;
 import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.lib.ObjectLoader;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
@@ -180,9 +188,9 @@ public final class RefDiffRunner {
                 // the snapshot and produces phantom delete/re-add signals. Feeding
                 // the complete tree lets unchanged nodes match as SAME so every
                 // turn carries a faithful full-repo node set.
-                List<SourceFile> afterFiles = listSourceFiles(repository, revCommit, fileFilter);
+                List<SourceFile> afterFiles = listSourceFiles(repository, revCommit, fileFilter, plugin);
                 List<SourceFile> beforeFiles = parentCommit != null
-                    ? listSourceFiles(repository, parentCommit, fileFilter)
+                    ? listSourceFiles(repository, parentCommit, fileFilter, plugin)
                     : new ArrayList<>();
 
                 ObjectId beforeId = parentCommit != null ? parentCommit.getId() : revCommit.getId();
@@ -221,8 +229,8 @@ public final class RefDiffRunner {
                 String beforeSha = beforeRev.getId().getName();
                 String afterSha = afterRev.getId().getName();
 
-                List<SourceFile> beforeFiles = listSourceFiles(repository, beforeRev, fileFilter);
-                List<SourceFile> afterFiles = listSourceFiles(repository, afterRev, fileFilter);
+                List<SourceFile> beforeFiles = listSourceFiles(repository, beforeRev, fileFilter, plugin);
+                List<SourceFile> afterFiles = listSourceFiles(repository, afterRev, fileFilter, plugin);
                 GitSourceTree before = new GitSourceTree(repository, beforeRev.getId(), beforeFiles);
                 GitSourceTree after = new GitSourceTree(repository, afterRev.getId(), afterFiles);
 
@@ -239,19 +247,86 @@ public final class RefDiffRunner {
     private static List<SourceFile> listSourceFiles(
             Repository repository,
             RevCommit commit,
-            FilePathFilter filter) throws Exception {
+            FilePathFilter filter,
+            LanguagePlugin plugin) throws Exception {
+        boolean validateJava = plugin instanceof JavaPlugin;
         List<SourceFile> files = new ArrayList<>();
         try (TreeWalk tw = new TreeWalk(repository)) {
             tw.addTree(commit.getTree());
             tw.setRecursive(true);
             while (tw.next()) {
                 String path = tw.getPathString();
-                if (filter.isAllowed(path)) {
-                    files.add(new SourceFile(Paths.get(path)));
+                if (!filter.isAllowed(path)) {
+                    continue;
                 }
+                // A .java extension does not guarantee RefDiff's pinned Java-1.8 JDT can
+                // ingest the bytes. Modern upstream repos use syntax newer than Java 8
+                // (text blocks, switch expressions, records, ...) that JDT 1.8 cannot
+                // tokenize or convert. RefDiff parses the whole tree as one batch, so a
+                // single such file aborts the entire commit. Pre-check each file the same
+                // way RefDiff would and drop the ones it cannot parse, logging the reason.
+                if (validateJava) {
+                    String content = new String(
+                        repository.open(tw.getObjectId(0)).getBytes(), StandardCharsets.UTF_8);
+                    String reason = javaParseFailure(content);
+                    if (reason != null) {
+                        System.err.println("[skip] unparseable Java (" + reason + "): "
+                            + path + " @ " + commit.getId().getName());
+                        continue;
+                    }
+                }
+                files.add(new SourceFile(Paths.get(path)));
             }
         }
         return files;
+    }
+
+    // Compiler options pinned to "1.8" to match RefDiff-java 2.0.0, which hardcodes
+    // JavaCore.setComplianceOptions("1.8", ...) in SDModelBuilder. Built once and reused.
+    private static final Map<String, String> JAVA_18_OPTIONS = build18Options();
+
+    private static Map<String, String> build18Options() {
+        Map<String, String> options = JavaCore.getOptions();
+        JavaCore.setComplianceOptions("1.8", options);
+        return options;
+    }
+
+    /**
+     * Pre-check a Java source the same two ways RefDiff's Java parser would and return a
+     * short reason string if it cannot be parsed, or null if it is fine. RefDiff parses
+     * the full tree as one batch (ASTParser.newParser(JLS8), compliance 1.8), so any file
+     * that fatally fails parsing aborts the entire commit. The two fatal modes observed on
+     * modern upstream repos, both reproduced here:
+     *   - scanner rejects the tokens (InvalidInputException), e.g. Java 15+ text blocks,
+     *     which a 1.8 scanner reads as an unterminated string (Invalid_Char_In_String);
+     *   - the JLS8 AST converter throws (e.g. Java 14+ switch expressions), which surfaces
+     *     as IllegalArgumentException during compilation-unit conversion.
+     * A clean Java 8 file passes both even though createAST reports unresolved-binding
+     * problems (no classpath is configured) -- those are not fatal and are ignored here.
+     */
+    private static String javaParseFailure(String content) {
+        char[] src = content.toCharArray();
+        IScanner scanner = ToolFactory.createScanner(false, false, false, "1.8");
+        scanner.setSource(src);
+        try {
+            while (scanner.getNextToken() != ITerminalSymbols.TokenNameEOF) {
+                // advance until EOF; any malformed token throws below
+            }
+        } catch (InvalidInputException e) {
+            return "JDT scanner rejected";
+        }
+        try {
+            ASTParser parser = ASTParser.newParser(AST.JLS8);
+            parser.setKind(ASTParser.K_COMPILATION_UNIT);
+            parser.setCompilerOptions(JAVA_18_OPTIONS);
+            parser.setResolveBindings(false);
+            parser.setStatementsRecovery(false);
+            parser.setSource(src);
+            parser.createAST(null);
+        } catch (Throwable t) {
+            return "JDT AST conversion failed: " + t.getClass().getSimpleName();
+        }
+        return null;
     }
 
     private static void writeOutput(Map<String, Object> record, CliOptions opts) throws Exception {

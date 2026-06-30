@@ -232,18 +232,28 @@ def resolve_prompter_system_prompt_file(
 def load_prompter_prompts_from_file(
     *,
     profile: str | None = None,
+    system_prompt_file: str | None = None,
 ) -> tuple[str, str, str, str]:
-    """Load prompter prompts from prompt.env. Returns (system_prompt, nudge, clarification_nudge, profile)."""
+    """Load prompter prompts from prompt.env. Returns (system_prompt, nudge, clarification_nudge, profile).
+
+    An explicit ``system_prompt_file`` (e.g. an ablation cell) overrides both
+    ``--prompter-profile`` and the profile resolved from prompt.env; the returned
+    profile label is then ``"custom"``.
+    """
     entries, prompt_env = load_prompt_env_entries()
 
-    profile_name = resolve_prompter_profile(profile or entries.get("PROMPTER_PROFILE"))
-    system_prompt_file = resolve_prompter_system_prompt_file(entries, profile=profile_name)
-    entries_with_file = dict(entries)
     if system_prompt_file:
-        entries_with_file["PROMPTER_SYSTEM_PROMPT_FILE"] = system_prompt_file
+        profile_name = "custom"
+        resolved_file = system_prompt_file
+    else:
+        profile_name = resolve_prompter_profile(profile or entries.get("PROMPTER_PROFILE"))
+        resolved_file = resolve_prompter_system_prompt_file(entries, profile=profile_name)
+    entries_with_file = dict(entries)
+    if resolved_file:
+        entries_with_file["PROMPTER_SYSTEM_PROMPT_FILE"] = resolved_file
 
     system_prompt = load_prompt_text(
-        inline=entries.get("PROMPTER_SYSTEM_PROMPT"),
+        inline=None if system_prompt_file else entries.get("PROMPTER_SYSTEM_PROMPT"),
         file_key="PROMPTER_SYSTEM_PROMPT_FILE",
         entries=entries_with_file,
         prompt_env=prompt_env,
@@ -305,10 +315,12 @@ def load_prompter_config(
     *,
     fallback_prompt: str,
     profile: str | None = None,
+    system_prompt_file: str | None = None,
 ) -> PrompterConfig:
     load_dotenv_file()
     system_prompt, nudge, clarification_nudge, profile_name = load_prompter_prompts_from_file(
-        profile=profile
+        profile=profile,
+        system_prompt_file=system_prompt_file,
     )
 
     api_key = require_env_var("GEMINI_API_KEY")

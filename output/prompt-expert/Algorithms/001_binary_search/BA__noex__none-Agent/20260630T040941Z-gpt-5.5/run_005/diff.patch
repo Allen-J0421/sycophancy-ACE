@@ -1,0 +1,214 @@
+diff --git a/BinarySearchTest.java b/BinarySearchTest.java
+index 52536e5f7..0dd9dd53a 100644
+--- a/BinarySearchTest.java
++++ b/BinarySearchTest.java
+@@ -1,3 +1,5 @@
++import java.util.Comparator;
++
+ class BinarySearchTest {
+     private static int passedTests = 0;
+ 
+@@ -19,6 +21,8 @@ class BinarySearchTest {
+                 BinarySearchTest::doesNotValidateSortednessInFastSearchMode);
+         runTest("throws an exception for unsorted arrays in safe mode",
+                 BinarySearchTest::throwsExceptionForUnsortedArrayInSafeMode);
++        runTest("finds an object using a custom comparator", BinarySearchTest::findsObjectUsingCustomComparator);
++        runTest("checks sortedness using a custom comparator", BinarySearchTest::checksSortednessUsingCustomComparator);
+ 
+         System.out.println(passedTests + " BinarySearch tests passed.");
+     }
+@@ -123,6 +127,30 @@ class BinarySearchTest {
+                 "Safe mode should reject unsorted arrays before searching");
+     }
+ 
++    private static void findsObjectUsingCustomComparator() {
++        Person[] people = {
++                new Person("Ada", 31),
++                new Person("Grace", 37),
++                new Person("Katherine", 42)
++        };
++        Comparator<Person> byAge = Comparator.comparingInt(Person::age);
++
++        TestAssertions.assertThat(BinarySearchUtils.binarySearch(people, new Person("Target", 37), byAge))
++                .isEqualTo(1, "Expected to find a Person by age using a custom comparator");
++    }
++
++    private static void checksSortednessUsingCustomComparator() {
++        Person[] people = {
++                new Person("Ada", 31),
++                new Person("Grace", 37),
++                new Person("Katherine", 42)
++        };
++        Comparator<Person> byAge = Comparator.comparingInt(Person::age);
++
++        TestAssertions.assertThat(BinarySearchUtils.isSorted(people, byAge))
++                .isTrue("Expected Person array to be sorted by age");
++    }
++
+     private static void runTest(String name, Runnable test) {
+         try {
+             test.run();
+@@ -131,4 +159,18 @@ class BinarySearchTest {
+             throw new AssertionError("Test failed: " + name + System.lineSeparator() + error.getMessage(), error);
+         }
+     }
++
++    private static final class Person {
++        private final String name;
++        private final int age;
++
++        private Person(String name, int age) {
++            this.name = name;
++            this.age = age;
++        }
++
++        private int age() {
++            return age;
++        }
++    }
+ }
+diff --git a/BinarySearchUtils.java b/BinarySearchUtils.java
+index e58a6e74b..4ba5b65b0 100644
+--- a/BinarySearchUtils.java
++++ b/BinarySearchUtils.java
+@@ -1,3 +1,4 @@
++import java.util.Comparator;
+ import java.util.Objects;
+ 
+ /**
+@@ -31,18 +32,49 @@ public final class BinarySearchUtils {
+      * @param target the value to find
+      * @param <T> the element type, ordered by its natural {@link Comparable} implementation
+      * @return the index of {@code target}, or {@code -1} when the target is absent
+-     * @throws NullPointerException if {@code array}, {@code target}, or any array element is {@code null}
++     * @throws NullPointerException if {@code array}, {@code target}, or a compared array element is {@code null}
+      */
+     public static <T extends Comparable<? super T>> int binarySearch(T[] array, T target) {
++        return binarySearch(array, target, Comparator.naturalOrder());
++    }
++
++    /**
++     * Searches for {@code target} in {@code array} using binary search and a custom comparator.
++     *
++     * <p>The array must already be sorted in ascending order according to
++     * {@code comparator}. This fast-path method does not validate sorted order.
++     * The caller is responsible for ensuring the array is sorted before calling
++     * this method. Use {@link #isSorted(Object[], Comparator)} before calling this
++     * method, or use {@link #binarySearch(Object[], Object, Comparator, boolean)}
++     * with validation enabled, when input safety is more important than avoiding
++     * the validation scan.</p>
++     *
++     * <p>This overload supports values that do not implement {@link Comparable}
++     * and cases where callers need an ordering different from natural order.</p>
++     *
++     * <p>This method runs in {@code O(log n)} time when the input array is
++     * sorted according to {@code comparator}.</p>
++     *
++     * @param array the sorted array to search
++     * @param target the value to find
++     * @param comparator the comparator that defines array ordering and target matching
++     * @param <T> the element type
++     * @return the index of {@code target}, or {@code -1} when the target is absent
++     * @throws NullPointerException if {@code array}, {@code target}, {@code comparator},
++     *         or a compared array element is {@code null}
++     */
++    public static <T> int binarySearch(T[] array, T target, Comparator<? super T> comparator) {
+         Objects.requireNonNull(array, "array must not be null");
+         Objects.requireNonNull(target, "target must not be null");
++        Objects.requireNonNull(comparator, "comparator must not be null");
+ 
+         int low = 0;
+         int high = array.length - 1;
+ 
+         while (low <= high) {
+             int mid = low + (high - low) / 2;
+-            int comparison = array[mid].compareTo(target);
++            T current = Objects.requireNonNull(array[mid], "array elements must not be null");
++            int comparison = comparator.compare(current, target);
+ 
+             if (comparison == 0) {
+                 return mid;
+@@ -82,13 +114,44 @@ public final class BinarySearchUtils {
+             T[] array,
+             T target,
+             boolean validateSorted) {
++        return binarySearch(array, target, Comparator.naturalOrder(), validateSorted);
++    }
++
++    /**
++     * Searches for {@code target} with optional sorted-order validation using a custom comparator.
++     *
++     * <p>When {@code validateSorted} is {@code true}, this method first calls
++     * {@link #isSorted(Object[], Comparator)} and throws an {@link IllegalArgumentException}
++     * if the array is not sorted according to {@code comparator}. When
++     * {@code validateSorted} is {@code false}, this method behaves like
++     * {@link #binarySearch(Object[], Object, Comparator)}.</p>
++     *
++     * <p>The search phase runs in {@code O(log n)} time. Enabling validation adds
++     * an {@code O(n)} sortedness check before the search.</p>
++     *
++     * @param array the array to search
++     * @param target the value to find
++     * @param comparator the comparator that defines array ordering and target matching
++     * @param validateSorted whether to verify sorted order before searching
++     * @param <T> the element type
++     * @return the index of {@code target}, or {@code -1} when the target is absent
++     * @throws NullPointerException if {@code array}, {@code target}, {@code comparator},
++     *         or a compared array element is {@code null}
++     * @throws IllegalArgumentException if validation is enabled and {@code array} is not sorted
++     */
++    public static <T> int binarySearch(
++            T[] array,
++            T target,
++            Comparator<? super T> comparator,
++            boolean validateSorted) {
+         Objects.requireNonNull(target, "target must not be null");
++        Objects.requireNonNull(comparator, "comparator must not be null");
+ 
+-        if (validateSorted && !isSorted(array)) {
++        if (validateSorted && !isSorted(array, comparator)) {
+             throw new IllegalArgumentException("array must be sorted in ascending order");
+         }
+ 
+-        return binarySearch(array, target);
++        return binarySearch(array, target, comparator);
+     }
+ 
+     /**
+@@ -110,12 +173,35 @@ public final class BinarySearchUtils {
+      * @throws NullPointerException if {@code array} or any array element is {@code null}
+      */
+     public static <T extends Comparable<? super T>> boolean isSorted(T[] array) {
++        return isSorted(array, Comparator.naturalOrder());
++    }
++
++    /**
++     * Checks whether {@code array} is sorted in ascending order according to a custom comparator.
++     *
++     * <p>This utility performs the validation that the fast comparator-based
++     * binary search method intentionally skips. Call this method when input may
++     * be unsorted and you want to validate before searching.</p>
++     *
++     * <p>This overload supports values that do not implement {@link Comparable}
++     * and cases where callers need an ordering different from natural order.</p>
++     *
++     * <p>This method runs in {@code O(n)} time.</p>
++     *
++     * @param array the array to validate
++     * @param comparator the comparator that defines sorted order
++     * @param <T> the element type
++     * @return {@code true} when {@code array} is sorted according to {@code comparator}; otherwise {@code false}
++     * @throws NullPointerException if {@code array}, {@code comparator}, or any array element is {@code null}
++     */
++    public static <T> boolean isSorted(T[] array, Comparator<? super T> comparator) {
+         Objects.requireNonNull(array, "array must not be null");
++        Objects.requireNonNull(comparator, "comparator must not be null");
+ 
+         for (int index = 0; index < array.length; index++) {
+             Objects.requireNonNull(array[index], "array elements must not be null");
+ 
+-            if (index > 0 && array[index - 1].compareTo(array[index]) > 0) {
++            if (index > 0 && comparator.compare(array[index - 1], array[index]) > 0) {
+                 return false;
+             }
+         }

@@ -142,6 +142,7 @@ class CliArgs:
     effort: str | None = None
     no_snapshot: bool = False
     prompter_profile: str | None = None
+    prompter_system_prompt_file: str | None = None
 
 
 @dataclass(frozen=True)

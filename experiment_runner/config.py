@@ -135,6 +135,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--prompter-system-prompt-file",
+        type=str,
+        default=None,
+        help=(
+            "Path to a file whose contents become the Gemini user-agent's system "
+            "prompt, overriding --prompter-profile and PROMPTER_PROFILE. Used to feed "
+            "arbitrary prompt variants (e.g. ablation cells) to the prompter."
+        ),
+    )
+    p.add_argument(
         "--no-snapshot",
         action="store_true",
         help=(
@@ -210,6 +220,7 @@ def parse_args(argv: list[str] | None = None) -> CliArgs:
         effort=effort,
         no_snapshot=bool(namespace.no_snapshot),
         prompter_profile=namespace.prompter_profile,
+        prompter_system_prompt_file=non_empty_string(namespace.prompter_system_prompt_file),
     )
 
 
@@ -249,7 +260,11 @@ def build_experiment_config(args: CliArgs) -> ExperimentConfig:
     artifacts_dir_path = artifacts_dir(exp_path, stamp, model.slug)
     prompt = load_prompt()
     prompter_config = (
-        load_prompter_config(fallback_prompt=prompt, profile=args.prompter_profile)
+        load_prompter_config(
+            fallback_prompt=prompt,
+            profile=args.prompter_profile,
+            system_prompt_file=args.prompter_system_prompt_file,
+        )
         if args.prompter
         else None
     )

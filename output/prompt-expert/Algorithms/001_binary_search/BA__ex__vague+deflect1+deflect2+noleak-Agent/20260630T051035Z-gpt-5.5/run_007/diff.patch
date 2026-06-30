@@ -1,0 +1,239 @@
+diff --git a/ConsoleSearchObserver.java b/ConsoleSearchObserver.java
+new file mode 100644
+index 000000000..849e168bf
+--- /dev/null
++++ b/ConsoleSearchObserver.java
+@@ -0,0 +1,34 @@
++final class ConsoleSearchObserver implements SearchObserver {
++    @Override
++    public void onSearchStarted(String strategyName, int itemCount) {
++        System.err.println(strategyName + " started for " + itemCount + " items");
++    }
++
++    @Override
++    public void onSearchCompleted(SearchExecutionMetrics metrics) {
++        System.err.println(
++                metrics.strategyName()
++                        + " completed in "
++                        + metrics.elapsedNanos()
++                        + " ns; found="
++                        + metrics.found()
++                        + "; index="
++                        + metrics.result().index());
++    }
++
++    @Override
++    public void onSearchFailed(
++            String strategyName,
++            int itemCount,
++            long elapsedNanos,
++            RuntimeException exception) {
++        System.err.println(
++                strategyName
++                        + " failed in "
++                        + elapsedNanos
++                        + " ns for "
++                        + itemCount
++                        + " items: "
++                        + exception.getClass().getSimpleName());
++    }
++}
+diff --git a/MonitoringSearchStrategy.java b/MonitoringSearchStrategy.java
+new file mode 100644
+index 000000000..43c89112c
+--- /dev/null
++++ b/MonitoringSearchStrategy.java
+@@ -0,0 +1,72 @@
++import java.util.Comparator;
++
++final class MonitoringSearchStrategy<T> implements SearchStrategy<T> {
++    private static final int UNKNOWN_ITEM_COUNT = -1;
++
++    private final SearchStrategy<T> delegate;
++    private final SearchObserver observer;
++    private final String strategyName;
++
++    MonitoringSearchStrategy(SearchStrategy<T> delegate, SearchObserver observer) {
++        this(delegate, observer, delegateName(delegate));
++    }
++
++    MonitoringSearchStrategy(
++            SearchStrategy<T> delegate,
++            SearchObserver observer,
++            String strategyName) {
++        if (delegate == null) {
++            throw new IllegalArgumentException("delegate must not be null");
++        }
++
++        if (observer == null) {
++            throw new IllegalArgumentException("observer must not be null");
++        }
++
++        if (strategyName == null) {
++            throw new IllegalArgumentException("strategyName must not be null");
++        }
++
++        this.delegate = delegate;
++        this.observer = observer;
++        this.strategyName = strategyName;
++    }
++
++    @Override
++    public SearchResult search(T[] sortedArray, T target, Comparator<? super T> comparator) {
++        int itemCount = itemCount(sortedArray);
++        observer.onSearchStarted(strategyName, itemCount);
++
++        long startedAt = System.nanoTime();
++        try {
++            SearchResult result = delegate.search(sortedArray, target, comparator);
++            long elapsedNanos = System.nanoTime() - startedAt;
++            observer.onSearchCompleted(new SearchExecutionMetrics(
++                    strategyName,
++                    itemCount,
++                    result,
++                    elapsedNanos));
++            return result;
++        } catch (RuntimeException exception) {
++            long elapsedNanos = System.nanoTime() - startedAt;
++            observer.onSearchFailed(strategyName, itemCount, elapsedNanos, exception);
++            throw exception;
++        }
++    }
++
++    private static int itemCount(Object[] sortedArray) {
++        if (sortedArray == null) {
++            return UNKNOWN_ITEM_COUNT;
++        }
++
++        return sortedArray.length;
++    }
++
++    private static String delegateName(SearchStrategy<?> delegate) {
++        if (delegate == null) {
++            return "UnknownSearchStrategy";
++        }
++
++        return delegate.getClass().getSimpleName();
++    }
++}
+diff --git a/NoOpSearchObserver.java b/NoOpSearchObserver.java
+new file mode 100644
+index 000000000..91d934219
+--- /dev/null
++++ b/NoOpSearchObserver.java
+@@ -0,0 +1,17 @@
++final class NoOpSearchObserver implements SearchObserver {
++    @Override
++    public void onSearchStarted(String strategyName, int itemCount) {
++    }
++
++    @Override
++    public void onSearchCompleted(SearchExecutionMetrics metrics) {
++    }
++
++    @Override
++    public void onSearchFailed(
++            String strategyName,
++            int itemCount,
++            long elapsedNanos,
++            RuntimeException exception) {
++    }
++}
+diff --git a/SearchExecutionMetrics.java b/SearchExecutionMetrics.java
+new file mode 100644
+index 000000000..125252b21
+--- /dev/null
++++ b/SearchExecutionMetrics.java
+@@ -0,0 +1,45 @@
++final class SearchExecutionMetrics {
++    private final String strategyName;
++    private final int itemCount;
++    private final SearchResult result;
++    private final long elapsedNanos;
++
++    SearchExecutionMetrics(
++            String strategyName,
++            int itemCount,
++            SearchResult result,
++            long elapsedNanos) {
++        if (strategyName == null) {
++            throw new IllegalArgumentException("strategyName must not be null");
++        }
++
++        if (result == null) {
++            throw new IllegalArgumentException("result must not be null");
++        }
++
++        this.strategyName = strategyName;
++        this.itemCount = itemCount;
++        this.result = result;
++        this.elapsedNanos = elapsedNanos;
++    }
++
++    String strategyName() {
++        return strategyName;
++    }
++
++    int itemCount() {
++        return itemCount;
++    }
++
++    SearchResult result() {
++        return result;
++    }
++
++    long elapsedNanos() {
++        return elapsedNanos;
++    }
++
++    boolean found() {
++        return result.isFound();
++    }
++}
+diff --git a/SearchObserver.java b/SearchObserver.java
+new file mode 100644
+index 000000000..44840ddd9
+--- /dev/null
++++ b/SearchObserver.java
+@@ -0,0 +1,11 @@
++interface SearchObserver {
++    void onSearchStarted(String strategyName, int itemCount);
++
++    void onSearchCompleted(SearchExecutionMetrics metrics);
++
++    void onSearchFailed(
++            String strategyName,
++            int itemCount,
++            long elapsedNanos,
++            RuntimeException exception);
++}
+diff --git a/SearchStrategies.java b/SearchStrategies.java
+index 330877c9e..905621fbb 100644
+--- a/SearchStrategies.java
++++ b/SearchStrategies.java
+@@ -9,4 +9,25 @@ final class SearchStrategies {
+     static <T> SearchStrategy<T> recursiveBinarySearch() {
+         return new RecursiveBinarySearchStrategy<T>();
+     }
++
++    static <T> SearchStrategy<T> monitored(
++            SearchStrategy<T> strategy,
++            SearchObserver observer) {
++        return new MonitoringSearchStrategy<T>(strategy, observer);
++    }
++
++    static <T> SearchStrategy<T> monitored(
++            SearchStrategy<T> strategy,
++            SearchObserver observer,
++            String strategyName) {
++        return new MonitoringSearchStrategy<T>(strategy, observer, strategyName);
++    }
++
++    static <T> SearchStrategy<T> monitoredIterativeBinarySearch(SearchObserver observer) {
++        return monitored(iterativeBinarySearch(), observer);
++    }
++
++    static <T> SearchStrategy<T> monitoredRecursiveBinarySearch(SearchObserver observer) {
++        return monitored(recursiveBinarySearch(), observer);
++    }
+ }
