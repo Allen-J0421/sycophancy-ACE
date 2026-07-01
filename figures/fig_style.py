@@ -128,8 +128,19 @@ def apply_rc() -> None:
     )
 
 
+# Paper-figure model colors. Overrides style_config.COLORS for the figures in
+# this directory only; the rest of the pipeline keeps its own palette.
+FIG_COLORS = {
+    "claude-opus-4-8":   "#111111",  # near-black
+    "gpt-5.5":           "#C00000",  # dark red
+    "claude-sonnet-4-6": "#4472C4",  # blue
+    "gpt-5.4":           "#70AD47",  # green
+    "gpt-5.4-mini":      "#FFC000",  # amber
+}
+
+
 def model_color(model: str) -> str:
-    return COLORS.get(model, "#555555")
+    return FIG_COLORS.get(model, COLORS.get(model, "#555555"))
 
 
 def _hex_to_rgb(h: str):
@@ -149,10 +160,16 @@ def grid(ax, axis: str = "y") -> None:
 
 
 def savefig(fig, name: str) -> list[Path]:
-    """Write both a PNG (raster preview) and a PDF (vector, for LaTeX)."""
+    """Write both a PNG (raster preview) and a PDF (vector, for LaTeX).
+
+    Each format goes into its own subfolder (``output/png/`` and ``output/pdf/``)
+    so regenerated figures never overwrite anything already in ``output/``.
+    """
     outs = []
     for ext in ("png", "pdf"):
-        out = FIG_OUT_DIR / f"{name}.{ext}"
+        sub = FIG_OUT_DIR / ext
+        sub.mkdir(parents=True, exist_ok=True)
+        out = sub / f"{name}.{ext}"
         fig.savefig(out)
         outs.append(out)
     plt.close(fig)
