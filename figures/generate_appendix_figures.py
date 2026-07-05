@@ -124,13 +124,13 @@ def figA_reasoning_effort(reasoning):
         return m, s
 
     panels = [
-        ("tstar", r"First stop turn $t^{*}$", "Stops just as late"),
-        ("S1", r"$S_1$: pre-stop churn ($\div\,L_0$)", "Churns just as much"),
-        ("S4", r"$S_4$: additions rolled back", "Rollback rises with effort"),
+        ("tstar", r"First stop turn $t^{*}$"),
+        ("S1", r"$S_1$: pre-stop churn ($\div\,L_0$)"),
+        ("S4", r"$S_4$: additions rolled back"),
     ]
     tick_lbl = {"none": "none", "low": "low", "medium": "med",
                 "high": "high", "xhigh": "xhigh"}
-    for ax, (metric, ylab, title) in zip(axes, panels):
+    for ax, (metric, ylab) in zip(axes, panels):
         m, s = series(metric)
         ax.errorbar(
             x, m, yerr=s, color=col, marker="o", ms=4.5, lw=1.4,
@@ -141,7 +141,6 @@ def figA_reasoning_effort(reasoning):
         ax.set_xlim(-0.4, len(EFFORTS) - 0.6)
         ax.set_xlabel("Reasoning effort")
         ax.set_ylabel(ylab)
-        ax.set_title(title, fontsize=9.5)
         grid(ax)
     # t* panel: show the 10-turn ceiling (= never stopped within the horizon)
     axes[0].axhline(NUM_TURNS, color="0.6", lw=0.9, ls=":", zorder=1)
@@ -157,10 +156,6 @@ def figA_reasoning_effort(reasoning):
     )
     axes[2].legend([r"$S_4$ rollback", r"$S_5$ reimplementation"], fontsize=7.5,
                    loc="upper left")
-    fig.suptitle(
-        "Reasoning-effort ablation: GPT-5.5 on binary search, 10 replicas per level",
-        fontsize=10, y=1.04,
-    )
     fig.tight_layout()
     return savefig(fig, "appA_reasoning_effort")
 
@@ -261,9 +256,9 @@ def figA_prompt_ablation(cells):
     fig, axes = plt.subplots(
         1, 2, figsize=(TEXT_W, 2.6), sharey=True, gridspec_kw=dict(wspace=0.08)
     )
-    for ax, sid, xlab, title in (
-        (axes[0], "S1", r"$S_1$: pre-stop churn ($\div\,L_0$)", "Churn before first stop"),
-        (axes[1], "S4", r"$S_4$: additions rolled back", "Removes what it just added"),
+    for ax, sid, xlab in (
+        (axes[0], "S1", r"$S_1$: pre-stop churn ($\div\,L_0$)"),
+        (axes[1], "S4", r"$S_4$: additions rolled back"),
     ):
         vals = [cells[c][sid] for c in ids]
         ax.barh(y, vals, 0.62, color=[bar_color(c) for c in ids],
@@ -274,16 +269,11 @@ def figA_prompt_ablation(cells):
                         fontsize=7, color="0.2")
         ax.set_xlim(0, max(vals) * 1.14)
         ax.set_xlabel(xlab)
-        ax.set_title(title, fontsize=9.5)
         grid(ax, axis="x")
     # novice reference line on the churn panel
     axes[0].axvline(cells["novice"]["S1"], color="0.35", lw=0.9, ls=":", zorder=2)
     axes[0].set_yticks(y)
     axes[0].set_yticklabels([labels[c] for c in ids], fontsize=8)
-    fig.suptitle(
-        "Prompt-variation ablation: GPT-5.5 (high) on binary search, one 10-turn run per cell",
-        fontsize=10, y=1.03,
-    )
     fig.tight_layout()
     return savefig(fig, "appA_prompt_ablation")
 
@@ -327,13 +317,16 @@ def tableA_prompt(cells) -> Path:
 # =========================================================================== #
 # Ablation 3 — Codebase scale (five large GitHub Java repositories)
 # =========================================================================== #
+# G002 (Elasticsearch) is excluded: RefDiff was not run for it, so it has no
+# structural signals and the paper reports the four covered repositories.
 G_REPOS = [
     ("G001_dbeaver", "DBeaver"),
-    ("G002_elasticsearch", "Elasticsearch"),
     ("G003_guava", "Guava"),
     ("G004_spring_boot", "Spring Boot"),
     ("G005_termux", "Termux"),
 ]
+# The paper reports the G-series with the GPT family only.
+G_MODELS = ["gpt-5.5", "gpt-5.4-mini", "gpt-5.4"]
 
 
 def load_scale() -> dict[str, dict]:
@@ -347,7 +340,7 @@ def load_scale() -> dict[str, dict]:
         for log in sorted((exp_dir / "logs").glob("*-log.csv")):
             stem = log.name[: -len("-log.csv")]
             stamp, _, model = stem.partition("-")
-            if model in MODEL_ORDER:
+            if model in G_MODELS:
                 logs_by_model[model] = log  # sorted() keeps the newest last
         for model, log in logs_by_model.items():
             with log.open() as f:
@@ -388,7 +381,7 @@ def figA_codebase_scale(scale):
     turns = np.arange(1, NUM_TURNS + 1)
     for ax, (gid, label) in zip(axes, G_REPOS):
         per_model = scale[gid]
-        for m in MODEL_ORDER:
+        for m in G_MODELS:
             if m not in per_model:
                 continue
             vals = np.asarray(per_model[m]["lines"][:NUM_TURNS], dtype=float)
@@ -405,21 +398,14 @@ def figA_codebase_scale(scale):
         plt.Line2D([], [], color=model_color(m), lw=1.4, marker="o", ms=3,
                    label=lbl)
         for m, lbl in (
-            ("claude-opus-4-8", "Claude Opus 4.8"),
-            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
             ("gpt-5.5", "GPT-5.5"),
             ("gpt-5.4-mini", "GPT-5.4-mini"),
             ("gpt-5.4", "GPT-5.4"),
         )
     ]
     fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, -0.04),
-               ncol=5, fontsize=7.5, columnspacing=1.2, handlelength=1.6)
-    fig.suptitle(
-        "Codebase-scale ablation: per-turn lines changed on five large GitHub"
-        " repositories (gaps = no-edit turns)",
-        fontsize=10, y=1.05,
-    )
-    fig.subplots_adjust(left=0.07, right=0.99, top=0.82, bottom=0.30)
+               ncol=3, fontsize=7.5, columnspacing=1.2, handlelength=1.6)
+    fig.subplots_adjust(left=0.07, right=0.99, top=0.88, bottom=0.30)
     return savefig(fig, "appA_codebase_scale")
 
 
@@ -429,14 +415,10 @@ def tableA_scale(scale) -> Path:
     lines = [
         r"\begin{table*}[t]",
         r"\centering",
-        r"\caption{Codebase-scale ablation: one 10-turn run per model on each"
-        r" repository. $\Sigma|\Delta l|$ is the total lines changed over the"
-        r" ten turns; $t^{*}>10$ means no no-edit turn occurred. Structural"
-        r" signals ($S_1$, $S_3$--$S_6$) are reported only where the"
-        r" structural pipeline completed and agrees with the raw line logs;"
-        r" they are unavailable for Elasticsearch and for two Sonnet runs"
-        r" whose experiment branches were partially cleaned after provider"
-        r" limits.}",
+        r"\caption{Codebase-scale ablation: one 10-turn run per GPT-family"
+        r" model on each repository. $\Sigma|\Delta l|$ is the total lines"
+        r" changed over the ten turns; $t^{*}>10$ means no no-edit turn"
+        r" occurred.}",
         r"\label{tab:app-scale}",
         r"\small",
         r"\begin{tabular}{llrrrrrr}",
@@ -454,7 +436,7 @@ def tableA_scale(scale) -> Path:
     for gid, label in G_REPOS:
         per_model = scale[gid]
         first = True
-        for m in MODEL_ORDER:
+        for m in G_MODELS:
             if m not in per_model:
                 continue
             d = per_model[m]
