@@ -1,0 +1,215 @@
+diff --git a/DryWeather.java b/DryWeather.java
+new file mode 100644
+index 000000000..ffb9da308
+--- /dev/null
++++ b/DryWeather.java
+@@ -0,0 +1,13 @@
++/**
++ * Dry (no-rain) weather: producers breed at a reduced probability.
++ */
++public class DryWeather implements Weather
++{
++    private static final double BREEDING_MODIFIER = 0.2;
++
++    @Override
++    public double breedingProbabilityModifier() { return BREEDING_MODIFIER; }
++
++    @Override
++    public String getDescription() { return "NOT RAINING"; }
++}
+diff --git a/Producer.java b/Producer.java
+index 4a0e03090..43ca5810a 100644
+--- a/Producer.java
++++ b/Producer.java
+@@ -7,8 +7,6 @@ import java.util.List;
+  */
+ public abstract class Producer extends Actor
+ {
+-    // The % of the normal breeding probability when there is no rain:
+-    private double noRainBreedingProbabilityPercentage = 0.2;
+     /**
+      * Create a new producer at a location in the field.
+      * 
+@@ -85,10 +83,8 @@ public abstract class Producer extends Actor
+     {
+         int births = 0;
+         
+-        // Decrease breeding probability if there is no rain:
+-        double actualBreedingProbability = getBreedingProbability();
+-        
+-        if (!WeatherSystem.getIsRaining()) actualBreedingProbability *= noRainBreedingProbabilityPercentage;
++        double actualBreedingProbability = getBreedingProbability()
++            * Simulator.getWeather().getCurrent().breedingProbabilityModifier();
+         
+         // Calculate number of births:
+         if (rand.nextDouble() <= actualBreedingProbability)
+diff --git a/RainyWeather.java b/RainyWeather.java
+new file mode 100644
+index 000000000..87dc6da8a
+--- /dev/null
++++ b/RainyWeather.java
+@@ -0,0 +1,11 @@
++/**
++ * Rainy weather: producers breed at their full base probability.
++ */
++public class RainyWeather implements Weather
++{
++    @Override
++    public double breedingProbabilityModifier() { return 1.0; }
++
++    @Override
++    public String getDescription() { return "RAINING"; }
++}
+diff --git a/Simulator.java b/Simulator.java
+index 350327694..d84500226 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -19,6 +19,8 @@ public class Simulator
+     // The number of steps in a day:
+     public static final int NUMBER_OF_STEPS_PER_DAY = 25;
+     
++    // Manages weather state and daily transitions:
++    private static WeatherSystem weather;
+     // Maps actor classes to their display colors:
+     private final ColorRegistry colorRegistry;
+     // Populates the field with actors at simulation start/reset:
+@@ -61,13 +63,11 @@ public class Simulator
+             width = DEFAULT_WIDTH;
+         }
+         
++        weather = new WeatherSystem();
+         colorRegistry = new ColorRegistry();
+         populator = new FieldPopulator();
+         actors = new ArrayList<>();
+         field = new Field(depth, width);
+-        
+-        // Set the initial weather:
+-        WeatherSystem.changeToNextDay();
+ 
+         // Create a view of the state of each location in the field:
+         view = new SimulatorView(this,depth, width);
+@@ -97,6 +97,11 @@ public class Simulator
+      * @return The population stats for the current simulation step.
+      */
+     public static PopulationStats getPopulationStats() { return view.getStats(); }
++
++    /**
++     * @return The weather system managing the current weather state.
++     */
++    public static WeatherSystem getWeather() { return weather; }
+     
+     /**
+      * Run the simulation from its current state for a reasonably long period,
+@@ -131,11 +136,9 @@ public class Simulator
+     {
+         step++;
+         
+-        // Update the weather:
+         if (TimeSystem.hasDayChanged())
+         {
+-            WeatherSystem.changeToNextDay();
+-            
++            weather.advance();
+         }
+ 
+         updateActors();
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 802cdc60b..0ead75755 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -118,12 +118,7 @@ public class SimulatorView extends JFrame
+      */
+     private void updateWeatherPropertiesLabel()
+     {
+-        String text;
+-        
+-        if (WeatherSystem.getIsRaining()) text = "RAINING";
+-        else                              text = "NOT RAINING";
+-        
+-        weatherPropertiesLabel.setText(text);
++        weatherPropertiesLabel.setText(Simulator.getWeather().getCurrent().getDescription());
+     }
+     public void updateDayLabel()
+     {   
+diff --git a/Weather.java b/Weather.java
+new file mode 100644
+index 000000000..63cf3163a
+--- /dev/null
++++ b/Weather.java
+@@ -0,0 +1,15 @@
++/**
++ * Represents a weather state that can influence actor behaviour.
++ * Implementations encode the concrete effects (e.g. how rain affects breeding).
++ */
++public interface Weather
++{
++    /**
++     * Multiplier applied to a producer's base breeding probability.
++     * 1.0 = no change; values below 1.0 suppress breeding.
++     */
++    double breedingProbabilityModifier();
++
++    /** Human-readable label used by the simulation view. */
++    String getDescription();
++}
+diff --git a/WeatherSystem.java b/WeatherSystem.java
+index c4bb43690..bed5e2dad 100644
+--- a/WeatherSystem.java
++++ b/WeatherSystem.java
+@@ -1,36 +1,32 @@
+ import java.util.Random;
+ 
+ /**
+- * A system that keeps track of the current weather, including
+- * e.g. whether it is raining or not. This has an impact on
+- * the actors within the simulation, e.g. plants spread slower
+- * without water from the rain.
+- *
+- * @version 18.02.22 (DD:MM:YY)
++ * Manages the current weather state and transitions it each day.
++ * Owned by the Simulator; accessed by actors via Simulator.getWeather().
+  */
+ public class WeatherSystem
+ {
+-    // Whether or not it is currently raining:
+-    private static boolean isRaining;
+-    // A random number generator to select new weather properties:
+-    private static final Random rand = Randomizer.getRandom();
+-    
++    private final Random rand = Randomizer.getRandom();
++    private Weather current;
++
+     /**
+-     * Change to a new day and randomly select new weather
+-     * properties.
++     * Create a WeatherSystem with an initial weather state already set.
+      */
+-    public static void changeToNextDay()
++    public WeatherSystem()
+     {
+-        if (rand.nextInt(2) == 1) isRaining = true;
+-        else                      isRaining = false;
++        advance();
+     }
+-    
++
+     /**
+-     * @return Whether or not it is raining.
++     * Randomly select a new weather state for the next day.
+      */
+-    public static boolean getIsRaining() { return isRaining; }
+-}
+-
++    public void advance()
++    {
++        current = (rand.nextInt(2) == 1) ? new RainyWeather() : new DryWeather();
++    }
+ 
+-// The weather should change each day.
+-// When the weather changes, 
+\ No newline at end of file
++    /**
++     * @return The current weather state.
++     */
++    public Weather getCurrent() { return current; }
++}

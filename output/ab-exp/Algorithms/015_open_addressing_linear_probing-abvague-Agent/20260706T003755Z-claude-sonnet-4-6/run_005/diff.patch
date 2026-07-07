@@ -1,0 +1,207 @@
+diff --git a/DoubleHashingStrategy.java b/DoubleHashingStrategy.java
+new file mode 100644
+index 000000000..af73cf98b
+--- /dev/null
++++ b/DoubleHashingStrategy.java
+@@ -0,0 +1,6 @@
++class DoubleHashingStrategy implements ProbingStrategy {
++    @Override
++    public int probe(int hash1, int hash2, int attempt, int capacity) {
++        return (hash1 + attempt * hash2) % capacity;
++    }
++}
+diff --git a/HashMap.java b/HashMap.java
+index 414086f74..cedb785df 100644
+--- a/HashMap.java
++++ b/HashMap.java
+@@ -4,33 +4,45 @@ class HashMap<K, V> implements HashMapOperations<K, V> {
+     private int size;
+     private final HashNode<K, V> DELETED = new HashNode<>(null, null);
+     private static final double LOAD_FACTOR_THRESHOLD = 0.75;
++    private final ProbingStrategy strategy;
+ 
+-    @SuppressWarnings("unchecked")
+     public HashMap() {
++        this(new LinearProbingStrategy());
++    }
++
++    @SuppressWarnings("unchecked")
++    public HashMap(ProbingStrategy strategy) {
++        this.strategy = strategy;
+         capacity = 20;
+         size = 0;
+         table = (HashNode<K, V>[]) new HashNode[capacity];
+     }
+ 
+-    private int hash(K key) {
++    private int hash1(K key) {
+         return (key.hashCode() & 0x7FFFFFFF) % capacity;
+     }
+ 
++    // Secondary hash for double hashing; guaranteed >= 1 so the step is never zero.
++    private int hash2(K key) {
++        return 1 + (key.hashCode() & 0x7FFFFFFF) % (capacity - 1);
++    }
++
+     @Override
+     public void insertNode(K key, V value) {
+-        HashNode<K, V> temp = new HashNode<>(key, value);
+-        int hashIndex = hash(key);
++        int h1 = hash1(key);
++        int h2 = hash2(key);
++        int attempt = 0;
++        int hashIndex = strategy.probe(h1, h2, attempt, capacity);
+ 
+         while (table[hashIndex] != null &&
+                !key.equals(table[hashIndex].getKey()) &&
+                table[hashIndex] != DELETED) {
+-            hashIndex++;
+-            hashIndex %= capacity;
++            hashIndex = strategy.probe(h1, h2, ++attempt, capacity);
+         }
+ 
+         if (table[hashIndex] == null || table[hashIndex] == DELETED)
+             size++;
+-        table[hashIndex] = temp;
++        table[hashIndex] = new HashNode<>(key, value);
+ 
+         if (size > capacity * LOAD_FACTOR_THRESHOLD)
+             resize();
+@@ -38,7 +50,10 @@ class HashMap<K, V> implements HashMapOperations<K, V> {
+ 
+     @Override
+     public V deleteNode(K key) {
+-        int hashIndex = hash(key);
++        int h1 = hash1(key);
++        int h2 = hash2(key);
++        int attempt = 0;
++        int hashIndex = strategy.probe(h1, h2, attempt, capacity);
+ 
+         while (table[hashIndex] != null) {
+             if (key.equals(table[hashIndex].getKey())) {
+@@ -47,8 +62,7 @@ class HashMap<K, V> implements HashMapOperations<K, V> {
+                 size--;
+                 return value;
+             }
+-            hashIndex++;
+-            hashIndex %= capacity;
++            hashIndex = strategy.probe(h1, h2, ++attempt, capacity);
+         }
+ 
+         return null;
+@@ -56,17 +70,15 @@ class HashMap<K, V> implements HashMapOperations<K, V> {
+ 
+     @Override
+     public V get(K key) {
+-        int hashIndex = hash(key);
+-        int counter = 0;
+-
+-        while (table[hashIndex] != null) {
+-            if (counter++ > capacity)
+-                return null;
++        int h1 = hash1(key);
++        int h2 = hash2(key);
++        int attempt = 0;
++        int hashIndex = strategy.probe(h1, h2, attempt, capacity);
+ 
++        while (table[hashIndex] != null && attempt <= capacity) {
+             if (key.equals(table[hashIndex].getKey()))
+                 return table[hashIndex].getValue();
+-            hashIndex++;
+-            hashIndex %= capacity;
++            hashIndex = strategy.probe(h1, h2, ++attempt, capacity);
+         }
+ 
+         return null;
+diff --git a/LinearProbingStrategy.java b/LinearProbingStrategy.java
+new file mode 100644
+index 000000000..1a744db32
+--- /dev/null
++++ b/LinearProbingStrategy.java
+@@ -0,0 +1,6 @@
++class LinearProbingStrategy implements ProbingStrategy {
++    @Override
++    public int probe(int hash1, int hash2, int attempt, int capacity) {
++        return (hash1 + attempt) % capacity;
++    }
++}
+diff --git a/ProbingStrategy.java b/ProbingStrategy.java
+new file mode 100644
+index 000000000..fe152e609
+--- /dev/null
++++ b/ProbingStrategy.java
+@@ -0,0 +1,11 @@
++interface ProbingStrategy {
++    /**
++     * Returns the table index to probe on the given attempt.
++     *
++     * @param hash1   primary hash of the key (index of first probe)
++     * @param hash2   secondary hash of the key (step size for double hashing)
++     * @param attempt probe number, starting at 0
++     * @param capacity current table capacity
++     */
++    int probe(int hash1, int hash2, int attempt, int capacity);
++}
+diff --git a/QuadraticProbingStrategy.java b/QuadraticProbingStrategy.java
+new file mode 100644
+index 000000000..1c58ea826
+--- /dev/null
++++ b/QuadraticProbingStrategy.java
+@@ -0,0 +1,6 @@
++class QuadraticProbingStrategy implements ProbingStrategy {
++    @Override
++    public int probe(int hash1, int hash2, int attempt, int capacity) {
++        return (hash1 + attempt * attempt) % capacity;
++    }
++}
+diff --git a/open_addressing_linear_probing.java b/open_addressing_linear_probing.java
+index 5375ef86e..e26b2fd10 100644
+--- a/open_addressing_linear_probing.java
++++ b/open_addressing_linear_probing.java
+@@ -1,30 +1,27 @@
+ class Demo {
+     public static void main(String[] args) {
+-        HashMapOperations<String, Integer> h = new HashMap<>();
++        runDemo("Linear Probing",    new HashMap<>(new LinearProbingStrategy()));
++        runDemo("Quadratic Probing", new HashMap<>(new QuadraticProbingStrategy()));
++        runDemo("Double Hashing",    new HashMap<>(new DoubleHashingStrategy()));
++    }
++
++    static void runDemo(String label, HashMapOperations<String, Integer> h) {
++        System.out.println("=== " + label + " ===");
+ 
+-        // Insert enough entries to trigger at least one resize
+-        // (capacity starts at 20; resize fires when size > 20 * 0.75 = 15)
+-        String[] keys = {
+-            "alpha", "beta", "gamma", "delta", "epsilon",
+-            "zeta", "eta", "theta", "iota", "kappa",
+-            "lambda", "mu", "nu", "xi", "omicron",
+-            "pi", "rho", "sigma", "tau", "upsilon"
+-        };
+-        for (int i = 0; i < keys.length; i++)
+-            h.insertNode(keys[i], i + 1);
++        // Insert 20 entries, triggering a resize at size 16 (load factor > 0.75)
++        for (int i = 1; i <= 20; i++)
++            h.insertNode("key" + i, i * 10);
+ 
+         System.out.println("Size after 20 inserts: " + h.getSize());
+ 
+         // Update an existing key
+-        h.insertNode("alpha", 100);
+-        System.out.println("Size after updating 'alpha': " + h.getSize());
+-        System.out.println("Get 'alpha': " + h.get("alpha"));
++        h.insertNode("key5", 999);
++        System.out.println("Get key5 (updated):    " + h.get("key5"));
+ 
+         // Delete and confirm miss
+-        System.out.println("Delete 'beta': " + h.deleteNode("beta"));
+-        System.out.println("Size after delete: " + h.getSize());
+-        System.out.println("Get 'beta': " + h.get("beta"));
+-
+-        System.out.println("Is empty: " + h.isEmpty());
++        System.out.println("Delete key10:          " + h.deleteNode("key10"));
++        System.out.println("Get key10 (deleted):   " + h.get("key10"));
++        System.out.println("Size after delete:     " + h.getSize());
++        System.out.println();
+     }
+ }

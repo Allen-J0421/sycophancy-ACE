@@ -1,0 +1,200 @@
+diff --git a/PopulationManager.java b/PopulationManager.java
+new file mode 100644
+index 000000000..fcb3d08b7
+--- /dev/null
++++ b/PopulationManager.java
+@@ -0,0 +1,76 @@
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Random;
++
++/**
++ * Manages the creature population for a simulation run: initial seeding,
++ * the live creature list, and newborn registration. SimulationEngine retains
++ * control over the act loop and calls into this service for list access and
++ * end-of-step bookkeeping.
++ *
++ * @version 2022/03/02
++ */
++public class PopulationManager
++{
++    private List<Creature> creatures;
++
++    public PopulationManager()
++    {
++        creatures = new ArrayList<>();
++    }
++
++    /**
++     * Returns the live creature list. Callers may iterate and mutate it
++     * (e.g. remove dead creatures via an Iterator) during the act loop.
++     */
++    public List<Creature> getCreatures() { return creatures; }
++
++    /**
++     * Clear the creature list without touching the field grid.
++     */
++    public void clear()
++    {
++        creatures.clear();
++    }
++
++    /**
++     * Append newborn creatures produced during the current step's act loop.
++     * @param newCreatures Creatures born this step.
++     */
++    public void mergeNewborns(List<Creature> newCreatures)
++    {
++        creatures.addAll(newCreatures);
++    }
++
++    /**
++     * Clear the field grid and randomly seed it with creatures according to
++     * the supplied configuration probabilities.
++     * @param field  The field to populate.
++     * @param config Spawn probabilities and grid dimensions.
++     */
++    public void populate(Field field, SimulationConfig config)
++    {
++        Random rand = Randomizer.getRandom();
++        field.clear();
++        for (int row = 0; row < field.getDepth(); row++) {
++            for (int col = 0; col < field.getWidth(); col++) {
++                if (rand.nextDouble() <= config.salmonCreationProbability) {
++                    Location location = new Location(row, col);
++                    creatures.add(new Salmon(true, field, location));
++                } else if (rand.nextDouble() <= config.codCreationProbability) {
++                    Location location = new Location(row, col);
++                    creatures.add(new Cod(true, field, location));
++                } else if (rand.nextDouble() <= config.seaweedCreationProbability) {
++                    Location location = new Location(row, col);
++                    creatures.add(new Seaweed(true, field, location));
++                } else if (rand.nextDouble() <= config.sharkCreationProbability) {
++                    Location location = new Location(row, col);
++                    creatures.add(new Shark(true, field, location));
++                } else if (rand.nextDouble() <= config.whaleCreationProbability) {
++                    Location location = new Location(row, col);
++                    creatures.add(new Whale(true, field, location));
++                }
++            }
++        }
++    }
++}
+diff --git a/SimulationEngine.java b/SimulationEngine.java
+index 74f684423..cfbe989c4 100644
+--- a/SimulationEngine.java
++++ b/SimulationEngine.java
+@@ -1,13 +1,12 @@
+-import java.util.Random;
+-import java.util.List;
+ import java.util.ArrayList;
+ import java.util.Iterator;
++import java.util.List;
+ 
+ /**
+- * Manages the pure simulation state and time-stepping logic: the creature
+- * population, field, environment (oxygen, weather, disease), and the act
+- * loop. Does not interact with the view. All tunable parameters are supplied
+- * via a SimulationConfig so they can be varied without changing engine logic.
++ * Manages the pure simulation state and time-stepping logic: environment
++ * (oxygen, weather, disease) and the act loop. Population state is delegated
++ * to PopulationManager. Does not interact with the view. All tunable
++ * parameters are supplied via a SimulationConfig.
+  *
+  * @version 2022/03/02
+  */
+@@ -15,11 +14,11 @@ public class SimulationEngine
+ {
+     private final SimulationConfig config;
+ 
+-    private List<Creature> creatures;
+-    private Field field;
+-    private int step;
++    private final Field field;
++    private PopulationManager populationManager;
+     private DiseaseManager diseaseManager;
+     private WeatherManager weatherManager;
++    private int step;
+     private double oxygenLevel;
+ 
+     /**
+@@ -29,13 +28,13 @@ public class SimulationEngine
+     public SimulationEngine(SimulationConfig config)
+     {
+         this.config = config;
+-        creatures = new ArrayList<>();
+         field = new Field(config.depth, config.width);
++        populationManager = new PopulationManager();
+         weatherManager = new WeatherManager(field, config.stormHappenProbability);
+         diseaseManager = new DiseaseManager();
+         oxygenLevel = 1;
+         Animal.populationDieOfDisease = 0;
+-        populate();
++        populationManager.populate(field, config);
+     }
+ 
+     public SimulationConfig getConfig() { return config; }
+@@ -63,6 +62,7 @@ public class SimulationEngine
+ 
+         double totalOxygenInvolved = 0;
+ 
++        List<Creature> creatures = populationManager.getCreatures();
+         diseaseManager.trySpread(creatures, step);
+ 
+         List<Creature> newCreatures = new ArrayList<>();
+@@ -82,7 +82,7 @@ public class SimulationEngine
+             diseaseManager.setIsSpread(diseaseManager.isStillActive(creatures));
+         }
+ 
+-        creatures.addAll(newCreatures);
++        populationManager.mergeNewborns(newCreatures);
+     }
+ 
+     /**
+@@ -91,44 +91,9 @@ public class SimulationEngine
+     public void reset()
+     {
+         step = 0;
+-        creatures.clear();
++        populationManager.clear();
+         oxygenLevel = 1;
+         Animal.populationDieOfDisease = 0;
+-        populate();
+-    }
+-
+-    /**
+-     * Randomly populate the field with Salmon, Seaweed, Shark and Whale.
+-     */
+-    private void populate()
+-    {
+-        Random rand = Randomizer.getRandom();
+-        field.clear();
+-        for (int row = 0; row < field.getDepth(); row++) {
+-            for (int col = 0; col < field.getWidth(); col++) {
+-                if (rand.nextDouble() <= config.salmonCreationProbability) {
+-                    Location location = new Location(row, col);
+-                    Salmon salmon = new Salmon(true, field, location);
+-                    creatures.add(salmon);
+-                } else if (rand.nextDouble() <= config.codCreationProbability) {
+-                    Location location = new Location(row, col);
+-                    Cod cod = new Cod(true, field, location);
+-                    creatures.add(cod);
+-                } else if (rand.nextDouble() <= config.seaweedCreationProbability) {
+-                    Location location = new Location(row, col);
+-                    Seaweed seaweed = new Seaweed(true, field, location);
+-                    creatures.add(seaweed);
+-                } else if (rand.nextDouble() <= config.sharkCreationProbability) {
+-                    Location location = new Location(row, col);
+-                    Shark shark = new Shark(true, field, location);
+-                    creatures.add(shark);
+-                } else if (rand.nextDouble() <= config.whaleCreationProbability) {
+-                    Location location = new Location(row, col);
+-                    Whale whale = new Whale(true, field, location);
+-                    creatures.add(whale);
+-                }
+-            }
+-        }
++        populationManager.populate(field, config);
+     }
+-
+ }

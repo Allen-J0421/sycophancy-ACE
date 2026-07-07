@@ -1,0 +1,309 @@
+diff --git a/Animal.java b/Animal.java
+index 9f532fa2d..2627a8e79 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -11,18 +11,6 @@ public abstract class Animal extends LivingOrganism
+     protected boolean isFemale;
+     // The age to which an animal can live.
+     protected int maxAge;
+-    // whether the animal is infected or not
+-    protected boolean infected;
+-    // The likelihood of an animal having a disease.
+-    protected double diseaseProbability;
+-    // The likelihood of an animal catching a disease from another animal
+-    protected double diseaseSpreadProbability;
+-    // The likelihood of an animal dying from catching the disease
+-    protected double deathFromInfectionProbability;
+-    // The likelihood of an animal becoming immune to the disease
+-    protected double immuneProbability;
+-    // whether the animal is immune or not
+-    protected boolean immune;
+     // The animals's age.
+     protected int age;
+     // The animals's food level, which is increased by eating prey.
+@@ -31,8 +19,9 @@ public abstract class Animal extends LivingOrganism
+     protected int maxFoodLevel;
+ 
+     // Behaviour components — wired at construction time.
+-    private final MovementBehaviour    movement;
+-    private final DietaryBehaviour     diet;
++    private final HealthBehaviour       health;
++    private final MovementBehaviour     movement;
++    private final DietaryBehaviour      diet;
+     private final ReproductiveBehaviour reproduction;
+ 
+     /**
+@@ -51,17 +40,11 @@ public abstract class Animal extends LivingOrganism
+     {
+         super(field, location);
+         alive = true;
+-        this.infected     = infected;
+-        this.immune       = immune;
++        this.health       = new StandardHealthBehaviour(infected, immune);
+         this.movement     = movement;
+         this.diet         = diet;
+         this.reproduction = reproduction;
+ 
+-        diseaseProbability          = 0.00000015;
+-        diseaseSpreadProbability    = 0.80;
+-        deathFromInfectionProbability = 0.13;
+-        immuneProbability           = 0.05;
+-
+         isFemale = rand.nextBoolean();
+     }
+ 
+@@ -78,41 +61,14 @@ public abstract class Animal extends LivingOrganism
+         incrementAge();
+         incrementHunger();
+ 
+-        // Infection may cause death or confer immunity.
+-        if (!getIsImmune() && getIsInfected())
++        if (health.progressDisease(rand))
+         {
+-            if (rand.nextDouble() <= deathFromInfectionProbability)
+-            {
+-                setDead();
+-            }
+-            else if (rand.nextDouble() <= immuneProbability)
+-            {
+-                immune   = true;
+-                infected = false;
+-            }
+-        }
+-        // Immunity may wane over time.
+-        else
+-        {
+-            if (rand.nextDouble() <= (immuneProbability / 15))
+-            {
+-                immune = false;
+-            }
++            setDead();
+         }
+ 
+         if (isAlive())
+         {
+-            if (!getIsImmune() && !getIsInfected())
+-            {
+-                if (surroundingsInfected() && rand.nextDouble() <= diseaseSpreadProbability)
+-                {
+-                    infected = true;
+-                }
+-                else if (rand.nextDouble() <= diseaseProbability)
+-                {
+-                    infected = true;
+-                }
+-            }
++            health.tryAcquireDisease(this, getField(), rand);
+ 
+             if (this.getIsFemale())
+             {
+@@ -251,7 +207,7 @@ public abstract class Animal extends LivingOrganism
+ 
+         for (int b = 0; b < births && free.size() > 0; b++)
+         {
+-            Animal newAnimal = createNewOffspring(this.getClass(), free, infected, immune, foodLevel);
++            Animal newAnimal = createNewOffspring(this.getClass(), free, health.isInfected(), health.isImmune(), foodLevel);
+             newAnimals.add(newAnimal);
+         }
+     }
+@@ -338,13 +294,25 @@ public abstract class Animal extends LivingOrganism
+     /** @return true if this animal is currently infected. */
+     public boolean getIsInfected()
+     {
+-        return infected;
++        return health.isInfected();
+     }
+ 
+     /** @return true if this animal is currently immune. */
+     public boolean getIsImmune()
+     {
+-        return immune;
++        return health.isImmune();
++    }
++
++    /**
++     * Attempt to infect this animal from an external source (e.g. prey consumed
++     * by a predator). Delegates to the health component.
++     *
++     * @param sourceIsInfected true if the infection source is infected.
++     * @param rand             The shared random generator.
++     */
++    protected void tryInfectFrom(boolean sourceIsInfected, SimRandom rand)
++    {
++        health.tryInfectFrom(sourceIsInfected, rand);
+     }
+ 
+     /**
+diff --git a/CarnivoreDiet.java b/CarnivoreDiet.java
+index b0e2af258..e7c71ba00 100644
+--- a/CarnivoreDiet.java
++++ b/CarnivoreDiet.java
+@@ -32,13 +32,7 @@ public class CarnivoreDiet implements DietaryBehaviour
+                         && rand.nextDouble() < preyCatchingProbability)
+                 {
+                     self.foodLevel += prey.beEaten();
+-
+-                    if (prey.getIsInfected() && !self.immune
+-                            && rand.nextDouble() <= self.diseaseSpreadProbability)
+-                    {
+-                        self.infected = true;
+-                    }
+-
++                    self.tryInfectFrom(prey.getIsInfected(), rand);
+                     return where;
+                 }
+             }
+diff --git a/HealthBehaviour.java b/HealthBehaviour.java
+new file mode 100644
+index 000000000..fd5696a04
+--- /dev/null
++++ b/HealthBehaviour.java
+@@ -0,0 +1,45 @@
++/**
++ * Strategy interface for an animal's biological health simulation.
++ * Encapsulates infection state, immunity state, and the per-step
++ * transitions between them, decoupling health logic from movement
++ * and dietary concerns in {@link Animal#act}.
++ */
++public interface HealthBehaviour
++{
++    /**
++     * Advance the disease/immunity state machine by one step.
++     * Handles death-from-infection and immunity acquisition or loss.
++     *
++     * @param rand The shared random generator.
++     * @return true if the animal has died from infection this step
++     *         (caller must invoke {@link Animal#setDead()}).
++     */
++    boolean progressDisease(SimRandom rand);
++
++    /**
++     * Attempt to infect the animal through environmental exposure.
++     * Only acts when the animal is susceptible (not immune, not already
++     * infected). Calls {@code self.surroundingsInfected()} lazily so
++     * the random generator is consumed only when needed.
++     *
++     * @param self  The animal being updated.
++     * @param field The field used for neighbour scanning.
++     * @param rand  The shared random generator.
++     */
++    void tryAcquireDisease(Animal self, Field field, SimRandom rand);
++
++    /**
++     * Attempt to infect this animal from a specific source (e.g. eating
++     * infected prey). Uses the disease-spread probability.
++     *
++     * @param sourceIsInfected true if the infection source is infected.
++     * @param rand             The shared random generator.
++     */
++    void tryInfectFrom(boolean sourceIsInfected, SimRandom rand);
++
++    /** @return true if the animal is currently infected. */
++    boolean isInfected();
++
++    /** @return true if the animal is currently immune. */
++    boolean isImmune();
++}
+diff --git a/StandardHealthBehaviour.java b/StandardHealthBehaviour.java
+new file mode 100644
+index 000000000..2551df59a
+--- /dev/null
++++ b/StandardHealthBehaviour.java
+@@ -0,0 +1,97 @@
++/**
++ * Standard biological health model shared by all animal species.
++ * Implements the infection/immunity state machine that was previously
++ * embedded in {@link Animal#act}.
++ *
++ * <p>Probability constants are the simulation-wide values established
++ * in the original code; they are uniform across all species.</p>
++ */
++public class StandardHealthBehaviour implements HealthBehaviour
++{
++    private static final double DISEASE_PROBABILITY              = 0.00000015;
++    private static final double DISEASE_SPREAD_PROBABILITY       = 0.80;
++    private static final double DEATH_FROM_INFECTION_PROBABILITY = 0.13;
++    private static final double IMMUNE_PROBABILITY               = 0.05;
++
++    private boolean infected;
++    private boolean immune;
++
++    /**
++     * Create a health component with the given initial state.
++     *
++     * @param infected Whether the animal starts infected.
++     * @param immune   Whether the animal starts immune.
++     */
++    public StandardHealthBehaviour(boolean infected, boolean immune)
++    {
++        this.infected = infected;
++        this.immune   = immune;
++    }
++
++    /**
++     * {@inheritDoc}
++     *
++     * <p>If infected and not immune: may die or gain immunity this step.
++     * Otherwise: immunity may wane. Preserves the exact RNG-consumption
++     * order of the original {@code Animal.act()} infection block.</p>
++     */
++    @Override
++    public boolean progressDisease(SimRandom rand)
++    {
++        if (!immune && infected)
++        {
++            if (rand.nextDouble() <= DEATH_FROM_INFECTION_PROBABILITY)
++            {
++                return true;
++            }
++            else if (rand.nextDouble() <= IMMUNE_PROBABILITY)
++            {
++                immune   = true;
++                infected = false;
++            }
++        }
++        else
++        {
++            if (rand.nextDouble() <= IMMUNE_PROBABILITY / 15)
++            {
++                immune = false;
++            }
++        }
++        return false;
++    }
++
++    /**
++     * {@inheritDoc}
++     *
++     * <p>{@code self.surroundingsInfected()} is called only when the
++     * animal is susceptible, matching the original short-circuit behaviour
++     * and preserving RNG order.</p>
++     */
++    @Override
++    public void tryAcquireDisease(Animal self, Field field, SimRandom rand)
++    {
++        if (!immune && !infected)
++        {
++            if (self.surroundingsInfected() && rand.nextDouble() <= DISEASE_SPREAD_PROBABILITY)
++            {
++                infected = true;
++            }
++            else if (rand.nextDouble() <= DISEASE_PROBABILITY)
++            {
++                infected = true;
++            }
++        }
++    }
++
++    @Override
++    public void tryInfectFrom(boolean sourceIsInfected, SimRandom rand)
++    {
++        if (sourceIsInfected && !immune && rand.nextDouble() <= DISEASE_SPREAD_PROBABILITY)
++        {
++            infected = true;
++        }
++    }
++
++    @Override public boolean isInfected() { return infected; }
++    @Override public boolean isImmune()   { return immune; }
++}

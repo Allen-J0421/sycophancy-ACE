@@ -1,0 +1,274 @@
+diff --git a/Field.java b/Field.java
+index 2013ce609..86c13b5e3 100644
+--- a/Field.java
++++ b/Field.java
+@@ -1,23 +1,20 @@
+-import java.util.Collections;
+-import java.util.LinkedList;
+ import java.util.List;
+-import java.util.Random;
+ 
+ /**
+  * Represent a rectangular grid of field positions.
+  * Each position is able to store a single animal.
++ * Grid traversal (adjacency enumeration) is delegated to GridNavigator.
+  *
+  * @version 2016.02.29
+  */
+ public class Field
+ {
+-    // A random number generator for providing random locations.
+-    private static final Random rand = Randomizer.getRandom();
+-    
+     // The depth and width of the field.
+     private int depth, width;
+     // Storage for the animals.
+     private Object[][] field;
++    // Handles all coordinate-based grid traversal.
++    private final GridNavigator navigator;
+ 
+     /**
+      * Represent a field of the given dimensions.
+@@ -29,8 +26,9 @@ public class Field
+         this.depth = depth;
+         this.width = width;
+         field = new Object[depth][width];
++        navigator = new GridNavigator(depth, width);
+     }
+-    
++
+     /**
+      * Empty the field.
+      */
+@@ -42,7 +40,7 @@ public class Field
+             }
+         }
+     }
+-    
++
+     /**
+      * Clear the given location.
+      * @param location The location to clear.
+@@ -51,7 +49,7 @@ public class Field
+     {
+         field[location.getRow()][location.getCol()] = null;
+     }
+-    
++
+     /**
+      * Place an animal at the given location.
+      * If there is already an animal at the location it will
+@@ -64,7 +62,7 @@ public class Field
+     {
+         place(animal, new Location(row, col));
+     }
+-    
++
+     /**
+      * Place an animal at the given location.
+      * If there is already an animal at the location it will
+@@ -76,7 +74,7 @@ public class Field
+     {
+         field[location.getRow()][location.getCol()] = animal;
+     }
+-    
++
+     /**
+      * Return the animal at the given location, if any.
+      * @param location Where in the field.
+@@ -86,7 +84,7 @@ public class Field
+     {
+         return getObjectAt(location.getRow(), location.getCol());
+     }
+-    
++
+     /**
+      * Return the animal at the given location, if any.
+      * @param row The desired row.
+@@ -97,7 +95,7 @@ public class Field
+     {
+         return field[row][col];
+     }
+-    
++
+     /**
+      * Generate a random location that is adjacent to the
+      * given location, or is the same location.
+@@ -108,10 +106,9 @@ public class Field
+      */
+     public Location randomAdjacentLocation(Location location)
+     {
+-        List<Location> adjacent = adjacentLocations(location);
+-        return adjacent.get(0);
++        return navigator.randomAdjacentLocation(location);
+     }
+-    
++
+     /**
+      * Get a shuffled list of the free adjacent locations.
+      * @param location Get locations adjacent to this.
+@@ -119,16 +116,9 @@ public class Field
+      */
+     public List<Location> getFreeAdjacentLocations(Location location)
+     {
+-        List<Location> free = new LinkedList<>();
+-        List<Location> adjacent = adjacentLocations(location);
+-        for(Location next : adjacent) {
+-            if(getObjectAt(next) == null) {
+-                free.add(next);
+-            }
+-        }
+-        return free;
++        return navigator.getFreeAdjacentLocations(location, loc -> getObjectAt(loc) != null);
+     }
+-    
++
+     /**
+      * Try to find a free location that is adjacent to the
+      * given location. If there is none, return null.
+@@ -139,7 +129,6 @@ public class Field
+      */
+     public Location freeAdjacentLocation(Location location)
+     {
+-        // The available free ones.
+         List<Location> free = getFreeAdjacentLocations(location);
+         if(free.size() > 0) {
+             return free.get(0);
+@@ -158,30 +147,7 @@ public class Field
+      */
+     public List<Location> adjacentLocations(Location location)
+     {
+-        assert location != null : "Null location passed to adjacentLocations";
+-        // The list of locations to be returned.
+-        List<Location> locations = new LinkedList<>();
+-        if(location != null) {
+-            int row = location.getRow();
+-            int col = location.getCol();
+-            for(int roffset = -1; roffset <= 1; roffset++) {
+-                int nextRow = row + roffset;
+-                if(nextRow >= 0 && nextRow < depth) {
+-                    for(int coffset = -1; coffset <= 1; coffset++) {
+-                        int nextCol = col + coffset;
+-                        // Exclude invalid locations and the original location.
+-                        if(nextCol >= 0 && nextCol < width && (roffset != 0 || coffset != 0)) {
+-                            locations.add(new Location(nextRow, nextCol));
+-                        }
+-                    }
+-                }
+-            }
+-            
+-            // Shuffle the list. Several other methods rely on the list
+-            // being in a random order.
+-            Collections.shuffle(locations, rand);
+-        }
+-        return locations;
++        return navigator.adjacentLocations(location);
+     }
+ 
+     /**
+@@ -192,7 +158,7 @@ public class Field
+     {
+         return depth;
+     }
+-    
++
+     /**
+      * Return the width of the field.
+      * @return The width of the field.
+diff --git a/GridNavigator.java b/GridNavigator.java
+new file mode 100644
+index 000000000..134cbf6bb
+--- /dev/null
++++ b/GridNavigator.java
+@@ -0,0 +1,91 @@
++import java.util.Collections;
++import java.util.LinkedList;
++import java.util.List;
++import java.util.Random;
++import java.util.function.Predicate;
++
++/**
++ * This file is part of the Predator-Prey Simulation.
++ *
++ * Encapsulates coordinate-based grid traversal for a rectangular grid,
++ * decoupled from any storage or occupancy implementation.
++ *
++ * @version 2022.03.02
++ */
++public class GridNavigator {
++
++    private static final Random rand = Randomizer.getRandom();
++
++    private final int depth;
++    private final int width;
++
++    /**
++     * @param depth The number of rows in the grid.
++     * @param width The number of columns in the grid.
++     */
++    public GridNavigator(int depth, int width) {
++        this.depth = depth;
++        this.width = width;
++    }
++
++    /**
++     * Return a shuffled list of locations adjacent to the given one.
++     * The list will not include the location itself.
++     * All locations will lie within the grid.
++     *
++     * @param location The location from which to generate adjacencies.
++     * @return A list of locations adjacent to that given.
++     */
++    public List<Location> adjacentLocations(Location location) {
++        assert location != null : "Null location passed to adjacentLocations";
++        List<Location> locations = new LinkedList<>();
++        if (location != null) {
++            int row = location.getRow();
++            int col = location.getCol();
++            for (int roffset = -1; roffset <= 1; roffset++) {
++                int nextRow = row + roffset;
++                if (nextRow >= 0 && nextRow < depth) {
++                    for (int coffset = -1; coffset <= 1; coffset++) {
++                        int nextCol = col + coffset;
++                        // Exclude invalid locations and the origin itself.
++                        if (nextCol >= 0 && nextCol < width && (roffset != 0 || coffset != 0)) {
++                            locations.add(new Location(nextRow, nextCol));
++                        }
++                    }
++                }
++            }
++            // Shuffle the list. Several other methods rely on the list being in a random order.
++            Collections.shuffle(locations, rand);
++        }
++        return locations;
++    }
++
++    /**
++     * Get a shuffled list of adjacent locations that satisfy the given free-cell predicate.
++     *
++     * @param location   The location whose neighbours are examined.
++     * @param isOccupied Returns true for any location that is already occupied.
++     * @return A list of adjacent locations for which isOccupied returns false.
++     */
++    public List<Location> getFreeAdjacentLocations(Location location, Predicate<Location> isOccupied) {
++        List<Location> free = new LinkedList<>();
++        for (Location next : adjacentLocations(location)) {
++            if (!isOccupied.test(next)) {
++                free.add(next);
++            }
++        }
++        return free;
++    }
++
++    /**
++     * Generate a random location adjacent to the given one, within the valid grid bounds.
++     * The shuffled list produced by adjacentLocations means get(0) is already random.
++     *
++     * @param location The location from which to generate an adjacency.
++     * @return A valid location within the grid area.
++     */
++    public Location randomAdjacentLocation(Location location) {
++        List<Location> adjacent = adjacentLocations(location);
++        return adjacent.get(0);
++    }
++}

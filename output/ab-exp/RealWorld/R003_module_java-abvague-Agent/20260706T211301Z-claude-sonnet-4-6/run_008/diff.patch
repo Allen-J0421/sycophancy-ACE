@@ -1,0 +1,187 @@
+diff --git a/Actor.java b/Actor.java
+index 67c6436c2..bd633c475 100644
+--- a/Actor.java
++++ b/Actor.java
+@@ -124,20 +124,6 @@ public abstract class Actor
+      */
+     protected Field getField() { return field; }
+     
+-    /**
+-     * Increase the age.
+-     * This could result in the actor's death.
+-     */
+-    protected void incrementAge()
+-    {
+-        currentAge++;
+-        
+-        if (currentAge > maxAge) {
+-           
+-            setDead();
+-        }
+-        
+-    }
+     /**
+      * Returns true if the actor can become a carcass and false if it can't.
+      * return if the actor can become a carcass.
+diff --git a/ActorLifecycle.java b/ActorLifecycle.java
+new file mode 100644
+index 000000000..0106c612c
+--- /dev/null
++++ b/ActorLifecycle.java
+@@ -0,0 +1,44 @@
++/**
++ * Centralized lifecycle manager for simulation actors.
++ * Applies age and hunger ticks before each act() call so that Actor subclasses
++ * can focus purely on behavioural logic.
++ *
++ * Carcasses are exempt: they have no aging or hunger in the simulation model.
++ */
++public class ActorLifecycle
++{
++    /**
++     * Apply one lifecycle tick to the given actor.
++     * Increments age for Consumers and Producers (killing if the maximum is
++     * exceeded), then decrements sustenance for Consumers (killing if depleted).
++     *
++     * @param actor The actor to tick.
++     */
++    public void tick(Actor actor)
++    {
++        if (actor instanceof Consumer)
++        {
++            tickAge(actor);
++            if (actor.getIsAlive()) tickHunger((Consumer) actor);
++        }
++        else if (actor instanceof Producer)
++        {
++            tickAge(actor);
++        }
++        // Carcass: no age or hunger lifecycle
++    }
++
++    private void tickAge(Actor actor)
++    {
++        actor.currentAge++;
++        if (actor.currentAge > actor.maxAge)
++        {
++            actor.setDead();
++        }
++    }
++
++    private void tickHunger(Consumer consumer)
++    {
++        consumer.incrementHunger();
++    }
++}
+diff --git a/Consumer.java b/Consumer.java
+index 929f56db7..75f0c1255 100644
+--- a/Consumer.java
++++ b/Consumer.java
+@@ -57,27 +57,22 @@ public abstract class Consumer extends Actor
+      * @param newConsumers A list to receive newly born consumers.
+      */
+     public void act(List<Actor> newConsumers)
+-    {   
+-        incrementAge();
+-        incrementHunger();
+-        if (getIsAlive())
++    {
++        giveBirth(newConsumers);
++        boolean wasPossibleToMove = huntForFood();
++        if (ifCarcass)
+         {
+-            giveBirth(newConsumers);
+-            boolean wasPossibleToMove = huntForFood();
+-            if(ifCarcass)
+-            {
+-                newConsumers.add(newCarcass);
+-                ifCarcass = false;
+-                newCarcass = null;
+-            }
+-            if(hasDisease())
+-            {                                                                                   
+-                diseaseEffect();
+-            }
+-            if (!wasPossibleToMove)
+-            {
+-                setDead();
+-            }
++            newConsumers.add(newCarcass);
++            ifCarcass = false;
++            newCarcass = null;
++        }
++        if (hasDisease())
++        {
++            diseaseEffect();
++        }
++        if (!wasPossibleToMove)
++        {
++            setDead();
+         }
+     }
+     /**
+@@ -269,7 +264,7 @@ public abstract class Consumer extends Actor
+     /**
+      * Make this consumer more hungry. This could result in the consumer's death.
+      */
+-    private void incrementHunger()
++    void incrementHunger()
+     {
+         sustenanceLevel--;
+         if (sustenanceLevel <= 0) setDead();
+diff --git a/Producer.java b/Producer.java
+index 43ca5810a..0335e646f 100644
+--- a/Producer.java
++++ b/Producer.java
+@@ -30,11 +30,7 @@ public abstract class Producer extends Actor
+      */
+     public void act(List<Actor> newProducers)
+     {
+-        incrementAge();
+-        if (getIsAlive())
+-        {
+-            giveBirth(newProducers);
+-        }
++        giveBirth(newProducers);
+     }
+     
+     /**
+diff --git a/Simulator.java b/Simulator.java
+index 067ae921d..172c7640b 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -26,6 +26,8 @@ public class Simulator
+     // A Boolean indicating whether or not to reset the StatisticsView:
+     public static boolean resetStatisticsView = false;
+ 
++    // Manages per-step age and hunger updates for all actors:
++    private final ActorLifecycle lifecycle;
+     // Populates the field with actors at simulation start/reset:
+     private final FieldPopulator populator;
+     // List of actors in the field:
+@@ -58,9 +60,10 @@ public class Simulator
+             width = DEFAULT_WIDTH;
+         }
+ 
+-        weather       = new WeatherSystem();
++        weather         = new WeatherSystem();
+         populationStats = new PopulationStats();
+-        populator     = new FieldPopulator();
++        lifecycle       = new ActorLifecycle();
++        populator       = new FieldPopulator();
+         actors        = new ArrayList<>();
+         field         = new Field(depth, width);
+ 
+@@ -127,7 +130,11 @@ public class Simulator
+         for (Iterator<Actor> it = actors.iterator(); it.hasNext(); )
+         {
+             Actor actor = it.next();
+-            actor.act(newActors);
++            lifecycle.tick(actor);
++            if (actor.getIsAlive())
++            {
++                actor.act(newActors);
++            }
+             if (!actor.getIsAlive()) it.remove();
+         }
+         actors.addAll(newActors);

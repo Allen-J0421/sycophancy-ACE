@@ -1,0 +1,372 @@
+diff --git a/FieldStats.java b/FieldStats.java
+deleted file mode 100644
+index d9b2deaf8..000000000
+--- a/FieldStats.java
++++ /dev/null
+@@ -1,143 +0,0 @@
+-import java.awt.Color;
+-import java.util.HashMap;
+-
+-/**
+- * This class collects and provides some statistical data on the state 
+- * of a field. It is flexible: it will create and maintain a counter 
+- * for any class of object that is found within the field.
+- *
+- * @version 26/02/2022
+- */
+-public class FieldStats
+-{
+-    // Counters for each type of entity (lion, zebra, etc.) in the simulation.
+-    private HashMap<Class, Counter> counters;
+-    // Whether the counters are currently up to date.
+-    private boolean countsValid;
+-
+-    /**
+-     * Construct a FieldStats object.
+-     */
+-    public FieldStats()
+-    {
+-        // Set up a collection for counters for each type of animal that
+-        // we might find
+-        counters = new HashMap<>();
+-        countsValid = true;
+-    }
+-
+-    /**
+-     * Get details of what is in the field.
+-     * 
+-     * @param field The field to get the population details of.
+-     * 
+-     * @return A string describing what is in the field.
+-     */
+-    public String getPopulationDetails(Field field)
+-    {
+-        StringBuffer buffer = new StringBuffer();
+-        if(!countsValid) {
+-            generateCounts(field);
+-        }
+-        for(Class key : counters.keySet()) {
+-            Counter info = counters.get(key);
+-            buffer.append(info.getName());
+-            buffer.append(": ");
+-            buffer.append(info.getCount());
+-            buffer.append(' ');
+-        }
+-        return buffer.toString();
+-    }
+-    
+-    /**
+-     * Invalidate the current set of statistics; reset all 
+-     * counts to zero.
+-     */
+-    public void reset()
+-    {
+-        countsValid = false;
+-        for(Class key : counters.keySet()) {
+-            Counter count = counters.get(key);
+-            count.reset();
+-        }
+-    }
+-
+-    /**
+-     * Increment the count for one object.
+-     * 
+-     * @param objectType The class of animal to increment.
+-     */
+-    public void incrementCount(Class objectType)
+-    {
+-        Counter count = counters.get(objectType);
+-        if(count == null) {
+-            // We do not have a counter for this species yet.
+-            // Create one.
+-            count = new Counter(objectType.getName());
+-            counters.put(objectType, count);
+-        }
+-        count.increment();
+-    }
+-
+-    /**
+-     * Indicate that an animal count has been completed.
+-     */
+-    public void countFinished()
+-    {
+-        countsValid = true;
+-    }
+-
+-    /**
+-     * Determine whether the simulation is still viable.
+-     * I.e., should it continue to run.
+-     * 
+-     * @return true If there is more than one species alive.
+-     */
+-    public boolean isViable(Field field)
+-    {
+-        // How many counts are non-zero.
+-        int nonZero = 0;
+-        if(!countsValid) 
+-        {
+-            generateCounts(field);
+-        }
+-        
+-        for(Class key : counters.keySet()) 
+-        {
+-            Counter info = counters.get(key);
+-            if(info.getCount() > 0) 
+-            {
+-                nonZero++;
+-            }
+-        }
+-        return nonZero > 1;
+-    }
+-    
+-    /**
+-     * Generate counts of the number of all species of 
+-     * animal and plant.
+-     * These are not kept up to date as animals and plants
+-     * are placed in the field, but only when a request
+-     * is made for the information.
+-     * 
+-     * @param field The field to generate the stats for.
+-     */
+-    private void generateCounts(Field field)
+-    {
+-        reset();
+-        for(int row = 0; row < field.getDepth(); row++) 
+-        {
+-            for(int col = 0; col < field.getWidth(); col++) 
+-            {
+-                Object object = field.getObjectAt(row, col, Animal.class);
+-                
+-                if(object != null) 
+-                {
+-                    incrementCount(object.getClass());
+-                }
+-            }
+-        }
+-        
+-        countsValid = true;
+-    }
+-}
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 544aedd21..a778d5ae8 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -40,8 +40,8 @@ public class SimulatorView extends JFrame
+     // A map for storing colors for participants in the simulation
+     private Map<Class, Color> colors;
+     
+-    // A statistics object computing and storing simulation information
+-    private FieldStats stats;
++    // Tracks population counts and health tallies across simulation steps.
++    private StatisticsTracker tracker;
+ 
+     /**
+      * Create a view of the given width and height.
+@@ -51,8 +51,8 @@ public class SimulatorView extends JFrame
+      */
+     public SimulatorView(int height, int width, JButton[] buttons)
+     {
+-        stats = new FieldStats();
+-        colors = new LinkedHashMap<>();
++        tracker = new StatisticsTracker();
++        colors  = new LinkedHashMap<>();
+ 
+         setTitle("Savannah Simulation");
+         stepLabel = new JLabel(STEP_PREFIX, JLabel.CENTER);
+@@ -215,66 +215,42 @@ public class SimulatorView extends JFrame
+         if(!isVisible()) {
+             setVisible(true);
+         }
+-            
++
++        tracker.update(field);
++
+         stepLabel.setText(STEP_PREFIX + Time.getStep());
+         timeLabel.setText(TIME_PREFIX + getTimeString());
+         weatherLabel.setText(WEATHER_PREFIX + Weather.getWeather() + "  ");
+-        stats.reset();
+-        
++
+         fieldView.preparePaint();
+-        
+-        // Used to tally up the respective counts.
+-        int numberOfInfected = 0;
+-        int numberOfImmune = 0;
+-        
+-        for(int row = 0; row < field.getDepth(); row++) 
++
++        for(int row = 0; row < field.getDepth(); row++)
+         {
+-            for(int col = 0; col < field.getWidth(); col++) 
++            for(int col = 0; col < field.getWidth(); col++)
+             {
+                 Animal animal = (Animal) field.getObjectAt(row, col, Animal.class);
+-                Plant plant = (Plant) field.getObjectAt(row, col, Plant.class);
+-                
+-                if(animal != null) 
++                Plant  plant  = (Plant)  field.getObjectAt(row, col, Plant.class);
++
++                if(animal != null)
+                 {
+-                    stats.incrementCount(animal.getClass());
+                     fieldView.drawMark(col, row, getColor(animal.getClass()));
+-                    
+-                    // Update the infected and immune counts
+-                    if (animal.getIsInfected())
+-                    {
+-                        numberOfInfected++;
+-                    }
+-                    
+-                    if (animal.getIsImmune())
+-                    {
+-                        numberOfImmune++;
+-                    }
+                 }
+-                // Only show the plant if an animal is not present
+-                else if(plant != null) 
++                else if(plant != null)
+                 {
+                     fieldView.drawMark(col, row, getColor(plant.getClass()));
+                 }
+-                else 
++                else
+                 {
+                     Color emptyColor = EMPTY_COLOR;
+                     fieldView.drawMark(col, row, emptyColor);
+                     fieldView.setBackground(emptyColor);
+                 }
+-                
+-                if (plant != null) 
+-                {
+-                   stats.incrementCount(plant.getClass()); 
+-                }
+             }
+         }
+-        
+-        stats.countFinished();
+-        
+-        infectedLabel.setText(INFECTED_PREFIX + numberOfInfected);
+-        immuneLabel.setText(IMMUNE_PREFIX + numberOfImmune);
+ 
+-        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(field));
++        infectedLabel.setText(INFECTED_PREFIX + tracker.getInfectedCount());
++        immuneLabel.setText(IMMUNE_PREFIX + tracker.getImmuneCount());
++        population.setText(POPULATION_PREFIX + tracker.getPopulationDetails());
+         fieldView.repaint();
+     }
+ 
+@@ -287,7 +263,7 @@ public class SimulatorView extends JFrame
+      */
+     public boolean isViable(Field field)
+     {
+-        return stats.isViable(field);
++        return tracker.isViable();
+     }
+     
+     /**
+diff --git a/StatisticsTracker.java b/StatisticsTracker.java
+new file mode 100644
+index 000000000..27b21a371
+--- /dev/null
++++ b/StatisticsTracker.java
+@@ -0,0 +1,100 @@
++import java.util.HashMap;
++import java.util.Map;
++
++/**
++ * Scans a {@link Field} to compute per-species population counts and
++ * animal health totals (infected, immune). Results are retained between
++ * calls so callers can read them without re-scanning the field.
++ */
++public class StatisticsTracker
++{
++    private final Map<Class, Counter> counters = new HashMap<>();
++    private int infectedCount;
++    private int immuneCount;
++
++    /**
++     * Scan the entire field and update all tracked statistics.
++     * Must be called before reading any result method.
++     *
++     * @param field The field to analyse.
++     */
++    public void update(Field field)
++    {
++        for (Counter c : counters.values())
++        {
++            c.reset();
++        }
++        infectedCount = 0;
++        immuneCount   = 0;
++
++        for (int row = 0; row < field.getDepth(); row++)
++        {
++            for (int col = 0; col < field.getWidth(); col++)
++            {
++                Animal animal = (Animal) field.getObjectAt(row, col, Animal.class);
++                Plant  plant  = (Plant)  field.getObjectAt(row, col, Plant.class);
++
++                if (animal != null)
++                {
++                    increment(animal.getClass());
++                    if (animal.getIsInfected()) infectedCount++;
++                    if (animal.getIsImmune())   immuneCount++;
++                }
++
++                if (plant != null)
++                {
++                    increment(plant.getClass());
++                }
++            }
++        }
++    }
++
++    /**
++     * Determine whether the simulation is still viable (more than one
++     * species alive). Uses the counts from the most recent {@link #update}.
++     *
++     * @return true if more than one species has a non-zero count.
++     */
++    public boolean isViable()
++    {
++        int nonZero = 0;
++        for (Counter c : counters.values())
++        {
++            if (c.getCount() > 0) nonZero++;
++        }
++        return nonZero > 1;
++    }
++
++    /**
++     * Build a human-readable population summary from the most recent
++     * {@link #update}.
++     *
++     * @return A string listing each species and its count.
++     */
++    public String getPopulationDetails()
++    {
++        StringBuilder sb = new StringBuilder();
++        for (Counter c : counters.values())
++        {
++            sb.append(c.getName()).append(": ").append(c.getCount()).append(' ');
++        }
++        return sb.toString();
++    }
++
++    /** @return Number of infected animals from the most recent {@link #update}. */
++    public int getInfectedCount() { return infectedCount; }
++
++    /** @return Number of immune animals from the most recent {@link #update}. */
++    public int getImmuneCount()   { return immuneCount; }
++
++    private void increment(Class type)
++    {
++        Counter c = counters.get(type);
++        if (c == null)
++        {
++            c = new Counter(type.getName());
++            counters.put(type, c);
++        }
++        c.increment();
++    }
++}

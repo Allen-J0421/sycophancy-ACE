@@ -1,0 +1,194 @@
+diff --git a/PrefixCalculator.java b/PrefixCalculator.java
+index 951652700..d2cf13403 100644
+--- a/PrefixCalculator.java
++++ b/PrefixCalculator.java
+@@ -1,39 +1,44 @@
++import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.List;
++import java.util.function.BinaryOperator;
+ 
+ @FunctionalInterface
+-public interface PrefixCalculator {
+-    int[] calculate(int[] arr);
++public interface PrefixCalculator<T> {
++    List<T> calculate(List<T> input, BinaryOperator<T> op, ZeroValueProvider<T> zero);
+ 
+-    static PrefixCalculator iterative() {
+-        return arr -> {
+-            int[] result = new int[arr.length];
+-            for (int i = 0; i < arr.length; i++) {
+-                result[i] = arr[i] + (i > 0 ? result[i - 1] : 0);
++    static <T> PrefixCalculator<T> iterative() {
++        return (input, op, zero) -> {
++            List<T> result = new ArrayList<>(input.size());
++            for (int i = 0; i < input.size(); i++) {
++                T prev = i > 0 ? result.get(i - 1) : zero.zero();
++                result.add(op.apply(prev, input.get(i)));
+             }
+             return result;
+         };
+     }
+ 
+-    static PrefixCalculator recursive() {
+-        return arr -> {
+-            int[] result = Arrays.copyOf(arr, arr.length);
+-            accumulate(result, result.length - 1);
+-            return result;
+-        };
++    static <T> PrefixCalculator<T> recursive() {
++        return (input, op, zero) -> accumulateRecursive(input, op, input.size() - 1);
+     }
+ 
+-    static PrefixCalculator parallel() {
+-        return arr -> {
+-            int[] result = Arrays.copyOf(arr, arr.length);
+-            Arrays.parallelPrefix(result, Integer::sum);
+-            return result;
++    static <T> PrefixCalculator<T> parallel() {
++        return (input, op, zero) -> {
++            @SuppressWarnings("unchecked")
++            T[] arr = (T[]) input.toArray();
++            Arrays.parallelPrefix(arr, op);
++            return new ArrayList<>(Arrays.asList(arr));
+         };
+     }
+ 
+-    private static void accumulate(int[] result, int i) {
+-        if (i > 0) {
+-            accumulate(result, i - 1);
+-            result[i] += result[i - 1];
++    private static <T> List<T> accumulateRecursive(List<T> input, BinaryOperator<T> op, int upTo) {
++        if (upTo == 0) {
++            List<T> base = new ArrayList<>();
++            base.add(input.get(0));
++            return base;
+         }
++        List<T> prev = accumulateRecursive(input, op, upTo - 1);
++        prev.add(op.apply(prev.get(prev.size() - 1), input.get(upTo)));
++        return prev;
+     }
+ }
+diff --git a/PrefixSum.java b/PrefixSum.java
+index 919697286..fe3db7b84 100644
+--- a/PrefixSum.java
++++ b/PrefixSum.java
+@@ -1,46 +1,69 @@
+-import java.util.Arrays;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++import java.util.function.BinaryOperator;
+ 
+-public class PrefixSum implements RangeSumQuery {
+-    private final int[] prefix;
++public class PrefixSum<T> implements RangeSumQuery<T> {
++    private final List<T> prefix;
++    private final BinaryOperator<T> difference;
+ 
+-    public static PrefixSum of(int[] arr) {
+-        return new PrefixSum(arr, PrefixCalculator.iterative());
++    public static PrefixSum<Integer> of(int[] arr) {
++        List<Integer> input = new ArrayList<>(arr.length);
++        for (int x : arr) input.add(x);
++        return of(input, Integer::sum, () -> 0, (a, b) -> a - b);
+     }
+ 
+-    public static PrefixSum of(int[] arr, PrefixCalculator calculator) {
+-        return new PrefixSum(arr, calculator);
++    public static <T> PrefixSum<T> of(List<T> input, BinaryOperator<T> op,
++                                       ZeroValueProvider<T> zero, BinaryOperator<T> difference) {
++        return new PrefixSum<>(input, op, zero, difference, PrefixCalculator.iterative());
+     }
+ 
+-    private PrefixSum(int[] arr, PrefixCalculator calculator) {
+-        if (arr == null) throw new IllegalArgumentException("Input array must not be null");
+-        if (arr.length == 0) throw new IllegalArgumentException("Input array must not be empty");
++    public static <T> PrefixSum<T> of(List<T> input, BinaryOperator<T> op,
++                                       ZeroValueProvider<T> zero, BinaryOperator<T> difference,
++                                       PrefixCalculator<T> calculator) {
++        return new PrefixSum<>(input, op, zero, difference, calculator);
++    }
++
++    private PrefixSum(List<T> input, BinaryOperator<T> op, ZeroValueProvider<T> zero,
++                      BinaryOperator<T> difference, PrefixCalculator<T> calculator) {
++        if (input == null)      throw new IllegalArgumentException("Input must not be null");
++        if (input.isEmpty())    throw new IllegalArgumentException("Input must not be empty");
++        if (op == null)         throw new IllegalArgumentException("Operator must not be null");
++        if (zero == null)       throw new IllegalArgumentException("Zero provider must not be null");
++        if (difference == null) throw new IllegalArgumentException("Difference operator must not be null");
+         if (calculator == null) throw new IllegalArgumentException("Calculator must not be null");
+-        prefix = calculator.calculate(arr);
++        this.prefix     = Collections.unmodifiableList(calculator.calculate(input, op, zero));
++        this.difference = difference;
+     }
+ 
+     @Override
+-    public int rangeSum(int l, int r) {
+-        if (l < 0 || r >= prefix.length) throw new IndexOutOfBoundsException(
+-                "Range [" + l + ", " + r + "] out of bounds for length " + prefix.length);
++    public T rangeSum(int l, int r) {
++        if (l < 0 || r >= prefix.size()) throw new IndexOutOfBoundsException(
++                "Range [" + l + ", " + r + "] out of bounds for length " + prefix.size());
+         if (l > r) throw new IllegalArgumentException("l (" + l + ") must not exceed r (" + r + ")");
+-        return prefix[r] - (l > 0 ? prefix[l - 1] : 0);
++        return l > 0 ? difference.apply(prefix.get(r), prefix.get(l - 1)) : prefix.get(r);
+     }
+ 
+     @Override
+-    public int[] toArray() {
+-        return Arrays.copyOf(prefix, prefix.length);
++    public List<T> toList() {
++        return prefix;
+     }
+ 
+     public static void main(String[] args) {
+-        int[] arr = {10, 20, 10, 5, 15};
++        // Integer — convenience overload, iterative by default
++        RangeSumQuery<Integer> intPs = PrefixSum.of(new int[]{10, 20, 10, 5, 15});
++        System.out.println(intPs.toList());       // [10, 30, 40, 45, 60]
++        System.out.println(intPs.rangeSum(1, 3)); // 35
+ 
+-        RangeSumQuery iterative = PrefixSum.of(arr);
+-        RangeSumQuery recursive = PrefixSum.of(arr, PrefixCalculator.recursive());
+-        RangeSumQuery parallel  = PrefixSum.of(arr, PrefixCalculator.parallel());
++        // Long
++        RangeSumQuery<Long> longPs = PrefixSum.of(
++                List.of(10L, 20L, 10L, 5L, 15L), Long::sum, () -> 0L, (a, b) -> a - b);
++        System.out.println(longPs.toList());      // [10, 30, 40, 45, 60]
+ 
+-        System.out.println(Arrays.toString(iterative.toArray())); // [10, 30, 40, 45, 60]
+-        System.out.println(Arrays.toString(recursive.toArray()));  // [10, 30, 40, 45, 60]
+-        System.out.println(Arrays.toString(parallel.toArray()));   // [10, 30, 40, 45, 60]
+-        System.out.println(iterative.rangeSum(1, 3));              // 35
++        // Double with recursive strategy
++        RangeSumQuery<Double> doublePs = PrefixSum.of(
++                List.of(1.5, 2.5, 3.0), Double::sum, () -> 0.0, (a, b) -> a - b,
++                PrefixCalculator.recursive());
++        System.out.println(doublePs.toList());    // [1.5, 4.0, 7.0]
+     }
+ }
+diff --git a/RangeSumQuery.java b/RangeSumQuery.java
+index 0a66b4c39..9567b0167 100644
+--- a/RangeSumQuery.java
++++ b/RangeSumQuery.java
+@@ -1,4 +1,6 @@
+-public interface RangeSumQuery {
+-    int rangeSum(int l, int r);
+-    int[] toArray();
++import java.util.List;
++
++public interface RangeSumQuery<T> {
++    T rangeSum(int l, int r);
++    List<T> toList();
+ }
+diff --git a/ZeroValueProvider.java b/ZeroValueProvider.java
+new file mode 100644
+index 000000000..92f5b3086
+--- /dev/null
++++ b/ZeroValueProvider.java
+@@ -0,0 +1,4 @@
++@FunctionalInterface
++public interface ZeroValueProvider<T> {
++    T zero();
++}

@@ -1,0 +1,228 @@
+diff --git a/merge_sort.java b/merge_sort.java
+index 5b0577ea1..9331e02a9 100644
+--- a/merge_sort.java
++++ b/merge_sort.java
+@@ -1,6 +1,10 @@
++import java.util.Arrays;
+ import java.util.Comparator;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.TimeUnit;
++import sorting.core.SortContext;
+ import sorting.core.SortObserver;
+-import sorting.core.Sorter;
+ 
+ class Main {
+     private static <T> void printArray(T[] arr) {
+@@ -9,41 +13,47 @@ class Main {
+         System.out.println();
+     }
+ 
+-    public static void main(String[] args) {
++    public static void main(String[] args) throws InterruptedException {
+         SortObserver logger = new SortObserver() {
+             public void onSortStart() {
+-                System.out.println("[sort started]");
++                System.out.printf("[thread %s] sort started%n",
++                    Thread.currentThread().getName());
+             }
+             public void onSortComplete(long durationNs, long comparisons) {
+-                System.out.printf("[done: %d ns, %d comparisons]%n", durationNs, comparisons);
++                System.out.printf("[thread %s] done: %d ns, %d comparisons%n",
++                    Thread.currentThread().getName(), durationNs, comparisons);
+             }
+         };
+ 
+-        Integer[] ints = {38, 27, 43, 10};
+-        Sorter.<Integer>builder()
++        // Build once; reuse safely across any number of sequential or concurrent sorts.
++        SortContext<Integer> ctx = SortContext.<Integer>builder()
+             .algorithm("merge")
+             .comparator(Comparator.naturalOrder())
+             .observer(logger)
+-            .build()
+-            .sort(ints);
+-        printArray(ints);
++            .build();
+ 
+-        Integer[] intsDesc = {38, 27, 43, 10};
+-        Sorter.<Integer>builder()
+-            .algorithm("merge")
+-            .comparator(Comparator.reverseOrder())
+-            .observer(logger)
+-            .build()
+-            .sort(intsDesc);
+-        printArray(intsDesc);
++        System.out.println("--- sequential reuse ---");
++        Integer[] a = {38, 27, 43, 10};
++        Integer[] b = {5, 1, 9, 3, 7};
++        ctx.sort(a);
++        printArray(a);
++        ctx.sort(b);
++        printArray(b);
+ 
+-        String[] words = {"Banana", "apple", "Cherry", "date"};
+-        Sorter.<String>builder()
+-            .algorithm("merge")
+-            .comparator(String.CASE_INSENSITIVE_ORDER)
+-            .observer(logger)
+-            .build()
+-            .sort(words);
+-        printArray(words);
++        System.out.println("--- concurrent reuse ---");
++        ExecutorService pool = Executors.newFixedThreadPool(3);
++        Integer[][] batches = {
++            {64, 25, 12, 22, 11},
++            {90, 45, 30, 60, 15},
++            {8, 4, 2, 6, 1}
++        };
++        for (Integer[] batch : batches) {
++            pool.submit(() -> {
++                ctx.sort(batch);
++                synchronized (Main.class) { printArray(batch); }
++            });
++        }
++        pool.shutdown();
++        pool.awaitTermination(5, TimeUnit.SECONDS);
+     }
+ }
+diff --git a/sorting/core/SortContext.java b/sorting/core/SortContext.java
+new file mode 100644
+index 000000000..4a821422e
+--- /dev/null
++++ b/sorting/core/SortContext.java
+@@ -0,0 +1,63 @@
++package sorting.core;
++
++import java.util.Comparator;
++
++public final class SortContext<T> {
++    private final Comparator<T> comparator;
++    private final SortStrategyFactory<T> strategyFactory;
++    private final SortObserver observer;
++
++    private SortContext(Builder<T> builder) {
++        this.comparator = builder.comparator;
++        this.strategyFactory = builder.strategyFactory;
++        this.observer = builder.observer;
++    }
++
++    // Thread-safe: CountingComparator and strategy are local to each invocation.
++    public void sort(T[] arr) {
++        CountingComparator<T> counting = new CountingComparator<>(comparator);
++        SortStrategy<T> strategy = strategyFactory.create(counting);
++        observer.onSortStart();
++        long start = System.nanoTime();
++        strategy.sort(arr);
++        observer.onSortComplete(System.nanoTime() - start, counting.getCount());
++    }
++
++    public static <T> Builder<T> builder() {
++        return new Builder<>();
++    }
++
++    public static final class Builder<T> {
++        private Comparator<T> comparator;
++        private SortStrategyFactory<T> strategyFactory;
++        private SortObserver observer = (duration, comparisons) -> {};
++
++        public Builder<T> comparator(Comparator<T> comparator) {
++            this.comparator = comparator;
++            return this;
++        }
++
++        public Builder<T> strategy(SortStrategyFactory<T> strategyFactory) {
++            this.strategyFactory = strategyFactory;
++            return this;
++        }
++
++        public Builder<T> algorithm(String name) {
++            this.strategyFactory = AlgorithmRegistry.get(name);
++            return this;
++        }
++
++        public Builder<T> observer(SortObserver observer) {
++            this.observer = observer;
++            return this;
++        }
++
++        public SortContext<T> build() {
++            if (comparator == null)
++                throw new IllegalStateException("A comparator must be provided");
++            if (strategyFactory == null)
++                throw new IllegalStateException("A sort strategy must be provided");
++            return new SortContext<>(this);
++        }
++    }
++}
+diff --git a/sorting/core/Sorter.java b/sorting/core/Sorter.java
+index df3f52aba..1c7b88594 100644
+--- a/sorting/core/Sorter.java
++++ b/sorting/core/Sorter.java
+@@ -1,62 +1,13 @@
+ package sorting.core;
+ 
+-import java.util.Comparator;
+-
+ public class Sorter<T> {
+-    private final Comparator<T> comparator;
+-    private final SortStrategyFactory<T> strategyFactory;
+-    private final SortObserver observer;
++    private final SortContext<T> context;
+ 
+-    private Sorter(Builder<T> builder) {
+-        this.comparator = builder.comparator;
+-        this.strategyFactory = builder.strategyFactory;
+-        this.observer = builder.observer;
++    public Sorter(SortContext<T> context) {
++        this.context = context;
+     }
+ 
+     public void sort(T[] arr) {
+-        CountingComparator<T> counting = new CountingComparator<>(comparator);
+-        SortStrategy<T> strategy = strategyFactory.create(counting);
+-        observer.onSortStart();
+-        long start = System.nanoTime();
+-        strategy.sort(arr);
+-        observer.onSortComplete(System.nanoTime() - start, counting.getCount());
+-    }
+-
+-    public static <T> Builder<T> builder() {
+-        return new Builder<>();
+-    }
+-
+-    public static class Builder<T> {
+-        private Comparator<T> comparator;
+-        private SortStrategyFactory<T> strategyFactory;
+-        private SortObserver observer = (duration, comparisons) -> {};
+-
+-        public Builder<T> comparator(Comparator<T> comparator) {
+-            this.comparator = comparator;
+-            return this;
+-        }
+-
+-        public Builder<T> strategy(SortStrategyFactory<T> strategyFactory) {
+-            this.strategyFactory = strategyFactory;
+-            return this;
+-        }
+-
+-        public Builder<T> algorithm(String name) {
+-            this.strategyFactory = AlgorithmRegistry.get(name);
+-            return this;
+-        }
+-
+-        public Builder<T> observer(SortObserver observer) {
+-            this.observer = observer;
+-            return this;
+-        }
+-
+-        public Sorter<T> build() {
+-            if (comparator == null)
+-                throw new IllegalStateException("A comparator must be provided");
+-            if (strategyFactory == null)
+-                throw new IllegalStateException("A sort strategy must be provided");
+-            return new Sorter<>(this);
+-        }
++        context.sort(arr);
+     }
+ }

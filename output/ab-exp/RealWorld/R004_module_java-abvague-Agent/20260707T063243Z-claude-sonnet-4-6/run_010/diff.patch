@@ -1,0 +1,164 @@
+diff --git a/Animal.java b/Animal.java
+index aee00fa26..73a238ada 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -6,7 +6,7 @@ import java.util.stream.Collectors;
+  *
+  * @version 2022.03.02
+  */
+-public abstract class Animal extends Organism implements Actor
++public abstract class Animal extends Organism implements Actor, Tickable
+ {
+     protected boolean isNocturnal;
+     protected Gender sex;
+@@ -98,6 +98,21 @@ public abstract class Animal extends Organism implements Actor
+         }
+     }
+ 
++    /**
++     * One lifecycle step: skip if asleep, apply pre-act disease propagation death,
++     * then delegate to act(). Eagle and any other subclass that overrides act() are
++     * handled transparently via polymorphism.
++     */
++    public void tick(int step, List<Actor> newActors, Environment environment)
++    {
++        if(isAwake(environment)) {
++            if(isDiseased() && getDisease().getPropagationRate() <= rand.nextDouble()) {
++                setDead();
++            }
++            act(newActors, environment);
++        }
++    }
++
+     /**
+      * Look for food adjacent to the current location.
+      * Only the first food is eaten.
+diff --git a/Hunter.java b/Hunter.java
+index 70e03345d..9cb8ab00d 100644
+--- a/Hunter.java
++++ b/Hunter.java
+@@ -5,7 +5,7 @@ import java.util.*;
+  * Hunters hunt all of the species in the simulation.
+  * @version 2022.03.02
+  */
+-public class Hunter implements Actor
++public class Hunter implements Actor, Tickable
+ {
+     private static boolean alive;
+     private Field field;
+@@ -40,9 +40,18 @@ public class Hunter implements Actor
+     }
+ 
+     /**
+-     * Makes the hunter hunt for nearby animals. 
+-     * @param environment The environment that the hunter resides in. 
+-     * @param newActors A list to receive new actors. 
++     * One lifecycle step: hunters have no sleep cycle or growth, so tick
++     * simply delegates to act().
++     */
++    public void tick(int step, List<Actor> newActors, Environment environment)
++    {
++        act(newActors, environment);
++    }
++
++    /**
++     * Makes the hunter hunt for nearby animals.
++     * @param environment The environment that the hunter resides in.
++     * @param newActors A list to receive new actors.
+      */
+     public void act(List<Actor> newActors, Environment environment)
+     {
+diff --git a/Plant.java b/Plant.java
+index 4b4d859da..1c533b131 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -1,3 +1,4 @@
++import java.util.List;
+ import java.util.Random;
+ 
+ /**
+@@ -5,7 +6,7 @@ import java.util.Random;
+  *
+  * @version 2022.03.02
+  */
+-public abstract class Plant extends Organism implements Actor
++public abstract class Plant extends Organism implements Actor, Tickable
+ {
+     // Growth behaviour component — initialised by each subclass constructor.
+     protected GrowthComponent growth;
+@@ -26,6 +27,18 @@ public abstract class Plant extends Organism implements Actor
+     /** Returns the number of simulation steps between each growth stage advance. */
+     public int STEPS_PER_STAGE() { return growth.getStepsPerStage(); }
+ 
++    /**
++     * One lifecycle step: run the plant's act() behaviour, then advance the
++     * growth stage whenever the global step counter hits the configured interval.
++     */
++    public void tick(int step, List<Actor> newActors, Environment environment)
++    {
++        act(newActors, environment);
++        if(step % STEPS_PER_STAGE() == 0) {
++            incrementGrowth();
++        }
++    }
++
+     /**
+      * Checks if the plant is still able to grow and advances the stage if so.
+      * @return true if the plant grew; false if already at full maturity.
+diff --git a/SimulationEngine.java b/SimulationEngine.java
+index 9554469e7..09bdf31ae 100644
+--- a/SimulationEngine.java
++++ b/SimulationEngine.java
+@@ -70,24 +70,7 @@ public class SimulationEngine
+         List<Actor> newActors = new ArrayList<>();
+         for(Iterator<Actor> it = actors.iterator(); it.hasNext(); ) {
+             Actor actor = it.next();
+-            if(actor instanceof Animal) {
+-                if(((Animal) actor).isAwake(environment)) {
+-                    if(((Animal) actor).isDiseased() && ((Animal) actor).getDisease().getPropagationRate() <= rand.nextDouble()) {
+-                        ((Animal) actor).setDead();
+-                    }
+-                    actor.act(newActors, environment);
+-                }
+-            }
+-            else {
+-                actor.act(newActors, environment);
+-            }
+-
+-            if(actor instanceof Plant) {
+-                if(step % ((Plant) actor).STEPS_PER_STAGE() == 0) {
+-                    ((Plant) actor).incrementGrowth();
+-                }
+-            }
+-
++            ((Tickable) actor).tick(step, newActors, environment);
+             if(!actor.isAlive()) {
+                 it.remove();
+             }
+diff --git a/Tickable.java b/Tickable.java
+new file mode 100644
+index 000000000..ca878f160
+--- /dev/null
++++ b/Tickable.java
+@@ -0,0 +1,21 @@
++import java.util.List;
++
++/**
++ * An entity that participates in the simulation's per-step lifecycle.
++ * SimulationEngine calls tick() on every actor each step; each implementing
++ * class encapsulates its own lifecycle rules (sleep/wake, growth, etc.)
++ * so the engine requires no knowledge of specific actor types.
++ *
++ * @version 2022.03.02
++ */
++public interface Tickable
++{
++    /**
++     * Execute one lifecycle step for this entity.
++     *
++     * @param step       The current global simulation step number.
++     * @param newActors  List to receive any new actors spawned this step.
++     * @param environment The current environment (time, weather).
++     */
++    void tick(int step, List<Actor> newActors, Environment environment);
++}

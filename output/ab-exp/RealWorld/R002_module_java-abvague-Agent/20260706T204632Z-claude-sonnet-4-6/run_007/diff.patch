@@ -1,0 +1,457 @@
+diff --git a/GridRenderer.java b/GridRenderer.java
+new file mode 100644
+index 000000000..38a7fc72e
+--- /dev/null
++++ b/GridRenderer.java
+@@ -0,0 +1,166 @@
++import javax.swing.*;
++import java.awt.*;
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++/**
++ * This file is part of the Predator-Prey Simulation.
++ *
++ * A Swing panel that renders a Field as a grid of colored rectangles.
++ * Owns the species-to-color registry, the off-screen image buffer, and
++ * the scale computation. The calling layer supplies a Field and this
++ * class handles all canvas work.
++ *
++ * @version 2022.03.02
++ */
++public class GridRenderer extends JPanel
++{
++    // Color painted into cells that contain no organism.
++    private static final Color EMPTY_COLOR = Color.white;
++    // Fallback color for species with no registered color.
++    private static final Color UNKNOWN_COLOR = Color.gray;
++    // Pixels per grid cell at the default (pre-resize) scale.
++    private static final int GRID_VIEW_SCALING_FACTOR = 6;
++
++    private final int gridWidth;
++    private final int gridHeight;
++
++    // Off-screen image buffer for flicker-free rendering.
++    private Image fieldImage;
++    // Graphics context for the off-screen buffer.
++    private Graphics bufferGraphics;
++    // Last known component size — used to detect resizes.
++    private Dimension size;
++    // Current cell-to-pixel scale factors.
++    private int xScale, yScale;
++
++    // Species-class → display color registry.
++    private final Map<Class, Color> colors;
++
++    /**
++     * Create a renderer sized for a grid of the given dimensions.
++     *
++     * @param height Number of rows in the grid.
++     * @param width  Number of columns in the grid.
++     */
++    public GridRenderer(int height, int width)
++    {
++        this.gridHeight = height;
++        this.gridWidth  = width;
++        this.size   = new Dimension(0, 0);
++        this.colors = new LinkedHashMap<>();
++    }
++
++    /**
++     * Register the display color for a species class.
++     *
++     * @param speciesClass The runtime class of the species.
++     * @param color        The color to use when painting cells of that species.
++     */
++    public void setColor(Class speciesClass, Color color)
++    {
++        colors.put(speciesClass, color);
++    }
++
++    /**
++     * Render the current state of the field onto the canvas.
++     * Prepares the off-screen buffer, paints every cell, then schedules
++     * a Swing repaint to copy the buffer to the screen.
++     *
++     * @param field The field whose contents are to be painted.
++     */
++    public void render(Field field)
++    {
++        preparePaint();
++        for (int row = 0; row < field.getDepth(); row++) {
++            for (int col = 0; col < field.getWidth(); col++) {
++                Object occupant = field.getObjectAt(row, col);
++                Color cellColor = (occupant != null) ? getColor(occupant.getClass()) : EMPTY_COLOR;
++                drawCell(col, row, cellColor);
++            }
++        }
++        repaint();
++    }
++
++    // -----------------------------------------------------------------------
++    // JPanel overrides
++    // -----------------------------------------------------------------------
++
++    /**
++     * Report the preferred canvas size to the Swing layout manager.
++     */
++    @Override
++    public Dimension getPreferredSize()
++    {
++        return new Dimension(gridWidth * GRID_VIEW_SCALING_FACTOR,
++                             gridHeight * GRID_VIEW_SCALING_FACTOR);
++    }
++
++    /**
++     * Copy the off-screen buffer to the screen, rescaling if the component
++     * has been resized since the last render.
++     */
++    @Override
++    public void paintComponent(Graphics g)
++    {
++        if (fieldImage != null) {
++            Dimension currentSize = getSize();
++            if (size.equals(currentSize)) {
++                g.drawImage(fieldImage, 0, 0, null);
++            }
++            else {
++                // Rescale the previous image to fit the new component size.
++                g.drawImage(fieldImage, 0, 0, currentSize.width, currentSize.height, null);
++            }
++        }
++    }
++
++    // -----------------------------------------------------------------------
++    // Private helpers
++    // -----------------------------------------------------------------------
++
++    /**
++     * Look up the registered color for a species, falling back to
++     * {@link #UNKNOWN_COLOR} if none has been registered.
++     */
++    private Color getColor(Class speciesClass)
++    {
++        Color col = colors.get(speciesClass);
++        return (col != null) ? col : UNKNOWN_COLOR;
++    }
++
++    /**
++     * Ensure the off-screen buffer and scale factors match the current
++     * component size. Reallocates the buffer on first call or after a resize.
++     */
++    private void preparePaint()
++    {
++        if (!size.equals(getSize())) {
++            size = getSize();
++            fieldImage    = createImage(size.width, size.height);
++            bufferGraphics = fieldImage.getGraphics();
++
++            xScale = size.width / gridWidth;
++            if (xScale < 1) {
++                xScale = GRID_VIEW_SCALING_FACTOR;
++            }
++            yScale = size.height / gridHeight;
++            if (yScale < 1) {
++                yScale = GRID_VIEW_SCALING_FACTOR;
++            }
++        }
++    }
++
++    /**
++     * Fill one grid cell in the off-screen buffer.
++     *
++     * @param col   Column index of the cell (x direction).
++     * @param row   Row index of the cell (y direction).
++     * @param color The color to paint.
++     */
++    private void drawCell(int col, int row, Color color)
++    {
++        bufferGraphics.setColor(color);
++        bufferGraphics.fillRect(col * xScale, row * yScale, xScale - 1, yScale - 1);
++    }
++}
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 32e6884a4..429bf5757 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -1,82 +1,69 @@
+ import javax.swing.*;
+ import java.awt.*;
+-import java.util.LinkedHashMap;
+-import java.util.Map;
+ 
+ /**
+- * A graphical view of the simulation grid.
+- * The view displays a colored rectangle for each location 
+- * representing its contents. It uses a default background color.
+- * Colors for each type of species can be defined using the
+- * setColor method.
++ * A graphical view of the simulation.
++ * Manages the window layout and the text labels (step, time, environment,
++ * population). Delegates all grid-painting work to GridRenderer.
+  *
+  * @version 2022.03.02
+  */
+ public class SimulatorView extends JFrame
+ {
+-    // Colors used for empty locations.
+-    private static final Color EMPTY_COLOR = Color.white;
+-
+-    // Color used for objects that have no defined color.
+-    private static final Color UNKNOWN_COLOR = Color.gray;
+-
+-    private final String STEP_PREFIX = "Step: ";
+-    private final String TIME_DAY_PREFIX = "Day: ";
+-    private final String TIME_HOUR_PREFIX = "Hour: ";
++    private final String STEP_PREFIX        = "Step: ";
++    private final String TIME_DAY_PREFIX    = "Day: ";
++    private final String TIME_HOUR_PREFIX   = "Hour: ";
+     private final String TIME_OF_DAY_PREFIX = "Time: ";
+-    private final String POPULATION_PREFIX = "Population: ";
+-    private final String WEATHER_PREFIX = "Weather: ";
++    private final String POPULATION_PREFIX  = "Population: ";
++    private final String WEATHER_PREFIX     = "Weather: ";
+ 
+     private JLabel stepLabel, population, infoLabel, timeLabel, environmentLabel;
+-    private FieldView fieldView;
+ 
+-    // A map for storing colors for participants in the simulation
+-    private Map<Class, Color> colors;
++    // Handles all canvas drawing for the simulation grid.
++    private GridRenderer renderer;
+ 
+     /**
+      * Create a view of the given width and height.
+-     * @param height The simulation's height.
+-     * @param width  The simulation's width.
++     * @param height The simulation's height (number of rows).
++     * @param width  The simulation's width (number of columns).
+      */
+     public SimulatorView(int height, int width)
+     {
+-        colors = new LinkedHashMap<>();
+-
+         setTitle("Predator Prey Simulation");
+-        stepLabel = new JLabel(STEP_PREFIX, JLabel.CENTER);
+-        timeLabel = new JLabel(" ", JLabel.CENTER);
++        stepLabel        = new JLabel(STEP_PREFIX, JLabel.CENTER);
++        timeLabel        = new JLabel(" ", JLabel.CENTER);
+         environmentLabel = new JLabel(" ", JLabel.CENTER);
+-        infoLabel = new JLabel(" ", JLabel.CENTER);
+-        population = new JLabel(POPULATION_PREFIX, JLabel.CENTER);
+-        
++        infoLabel        = new JLabel(" ", JLabel.CENTER);
++        population       = new JLabel(POPULATION_PREFIX, JLabel.CENTER);
++
+         setLocation(100, 50);
+-        
+-        fieldView = new FieldView(height, width);
++
++        renderer = new GridRenderer(height, width);
+ 
+         Container contents = getContentPane();
+-        
+-        JPanel infoPane = new JPanel(new BorderLayout());
+-            infoPane.add(stepLabel, BorderLayout.WEST);
+-            //infoPane.add(infoLabel, BorderLayout.CENTER);
+-            infoPane.add(timeLabel, BorderLayout.EAST);
+-            infoPane.add(environmentLabel, BorderLayout.CENTER);
+ 
++        JPanel infoPane = new JPanel(new BorderLayout());
++        infoPane.add(stepLabel,        BorderLayout.WEST);
++        infoPane.add(timeLabel,        BorderLayout.EAST);
++        infoPane.add(environmentLabel, BorderLayout.CENTER);
+ 
+-        contents.add(infoPane, BorderLayout.NORTH);
+-        contents.add(fieldView, BorderLayout.CENTER);
++        contents.add(infoPane,   BorderLayout.NORTH);
++        contents.add(renderer,   BorderLayout.CENTER);
+         contents.add(population, BorderLayout.SOUTH);
+         pack();
+         setVisible(true);
+     }
+-    
++
+     /**
+-     * Define a color to be used for a given class of animal.
+-     * @param animalClass The animal's Class object.
+-     * @param color The color to be used for the given class.
++     * Register a display color for a species class.
++     * Forwarded to the underlying GridRenderer.
++     *
++     * @param speciesClass The runtime class of the species.
++     * @param color        The color to use for that species.
+      */
+-    public void setColor(Class animalClass, Color color)
++    public void setColor(Class speciesClass, Color color)
+     {
+-        colors.put(animalClass, color);
++        renderer.setColor(speciesClass, color);
+     }
+ 
+     /**
+@@ -88,25 +75,10 @@ public class SimulatorView extends JFrame
+     }
+ 
+     /**
+-     * @return The color to be used for a given class of animal.
+-     */
+-    private Color getColor(Class animalClass)
+-    {
+-        Color col = colors.get(animalClass);
+-        if(col == null) {
+-            // no color defined for this class
+-            return UNKNOWN_COLOR;
+-        }
+-        else {
+-            return col;
+-        }
+-    }
+-
+-    /**
+-     * Paint the current state of the field and update the step counter.
++     * Update the step counter label and render the current field state.
+      * Population text must be supplied separately via {@link #updatePopulation(String)}.
+      *
+-     * @param step  Which iteration step it is.
++     * @param step  The current simulation step number.
+      * @param field The field whose contents are to be painted.
+      */
+     public void showStatus(int step, Field field)
+@@ -115,20 +87,7 @@ public class SimulatorView extends JFrame
+             setVisible(true);
+         }
+         stepLabel.setText(STEP_PREFIX + step);
+-
+-        fieldView.preparePaint();
+-        for (int row = 0; row < field.getDepth(); row++) {
+-            for (int col = 0; col < field.getWidth(); col++) {
+-                Object animal = field.getObjectAt(row, col);
+-                if (animal != null) {
+-                    fieldView.drawMark(col, row, getColor(animal.getClass()));
+-                }
+-                else {
+-                    fieldView.drawMark(col, row, EMPTY_COLOR);
+-                }
+-            }
+-        }
+-        fieldView.repaint();
++        renderer.render(field);
+     }
+ 
+     /**
+@@ -141,98 +100,26 @@ public class SimulatorView extends JFrame
+         population.setText(POPULATION_PREFIX + populationText);
+     }
+ 
+-    public void updateTimeLabel(int day, int hour){
+-        timeLabel.setText(TIME_DAY_PREFIX + (day) + " " + TIME_HOUR_PREFIX + (hour));
++    /**
++     * Update the time label with the current day and hour.
++     *
++     * @param day  The current simulation day.
++     * @param hour The current simulation hour.
++     */
++    public void updateTimeLabel(int day, int hour)
++    {
++        timeLabel.setText(TIME_DAY_PREFIX + day + " " + TIME_HOUR_PREFIX + hour);
+     }
+ 
+-    public void updateEnvironmentLabel(Weather weather, TimeOfDay time) {
+-        environmentLabel.setText(WEATHER_PREFIX + weather.getType().toString() + " " + TIME_OF_DAY_PREFIX + time);
+-    }
+-    
+     /**
+-     * Provide a graphical view of a rectangular field. This is 
+-     * a nested class (a class defined inside a class) which
+-     * defines a custom component for the user interface. This
+-     * component displays the field.
+-     * This is rather advanced GUI stuff - you can ignore this 
+-     * for your project if you like.
++     * Update the environment label with the current weather and time of day.
++     *
++     * @param weather The current weather state.
++     * @param time    The current time of day.
+      */
+-    private class FieldView extends JPanel
++    public void updateEnvironmentLabel(Weather weather, TimeOfDay time)
+     {
+-        private final int GRID_VIEW_SCALING_FACTOR = 6;
+-
+-        private int gridWidth, gridHeight;
+-        private int xScale, yScale;
+-        Dimension size;
+-        private Graphics g;
+-        private Image fieldImage;
+-
+-        /**
+-         * Create a new FieldView component.
+-         */
+-        public FieldView(int height, int width)
+-        {
+-            gridHeight = height;
+-            gridWidth = width;
+-            size = new Dimension(0, 0);
+-        }
+-
+-        /**
+-         * Tell the GUI manager how big we would like to be.
+-         */
+-        public Dimension getPreferredSize()
+-        {
+-            return new Dimension(gridWidth * GRID_VIEW_SCALING_FACTOR,
+-                                 gridHeight * GRID_VIEW_SCALING_FACTOR);
+-        }
+-
+-        /**
+-         * Prepare for a new round of painting. Since the component
+-         * may be resized, compute the scaling factor again.
+-         */
+-        public void preparePaint()
+-        {
+-            if(! size.equals(getSize())) {  // if the size has changed...
+-                size = getSize();
+-                fieldImage = fieldView.createImage(size.width, size.height);
+-                g = fieldImage.getGraphics();
+-
+-                xScale = size.width / gridWidth;
+-                if(xScale < 1) {
+-                    xScale = GRID_VIEW_SCALING_FACTOR;
+-                }
+-                yScale = size.height / gridHeight;
+-                if(yScale < 1) {
+-                    yScale = GRID_VIEW_SCALING_FACTOR;
+-                }
+-            }
+-        }
+-        
+-        /**
+-         * Paint on grid location on this field in a given color.
+-         */
+-        public void drawMark(int x, int y, Color color)
+-        {
+-            g.setColor(color);
+-            g.fillRect(x * xScale, y * yScale, xScale-1, yScale-1);
+-        }
+-
+-        /**
+-         * The field view component needs to be redisplayed. Copy the
+-         * internal image to screen.
+-         */
+-        public void paintComponent(Graphics g)
+-        {
+-            if(fieldImage != null) {
+-                Dimension currentSize = getSize();
+-                if(size.equals(currentSize)) {
+-                    g.drawImage(fieldImage, 0, 0, null);
+-                }
+-                else {
+-                    // Rescale the previous image.
+-                    g.drawImage(fieldImage, 0, 0, currentSize.width, currentSize.height, null);
+-                }
+-            }
+-        }
++        environmentLabel.setText(WEATHER_PREFIX + weather.getType().toString()
++                + " " + TIME_OF_DAY_PREFIX + time);
+     }
+ }

@@ -1,0 +1,203 @@
+diff --git a/rabinkarp/RabinKarpMatcher.java b/rabinkarp/RabinKarpMatcher.java
+index 829c21639..3d77c37ac 100644
+--- a/rabinkarp/RabinKarpMatcher.java
++++ b/rabinkarp/RabinKarpMatcher.java
+@@ -2,7 +2,7 @@ package rabinkarp;
+ 
+ import stringsearch.MatchResult;
+ import stringsearch.RollingHashMatcher;
+-import stringsearch.TextWindow;
++import stringsearch.SearchContext;
+ 
+ public final class RabinKarpMatcher extends RollingHashMatcher {
+     public static final int DEFAULT_RADIX = 256;
+@@ -13,20 +13,17 @@ public final class RabinKarpMatcher extends RollingHashMatcher {
+     }
+ 
+     MatchResult search(RabinKarpPattern compiledPat, CharSequence text) {
+-        int n = text.length();
+-        int m = compiledPat.length();
+-        TextWindow window = new TextWindow(text, 0, m);
+-        int txtHash = hashOf(window, window.length());
+-        MatchResult result = newResult(n - m + 1);
+-        while (window.start() <= n - m) {
+-            if (compiledPat.hash() == txtHash && window.startsWith(compiledPat.pattern())) {
+-                recordMatch(result, window.start());
++        SearchContext ctx = new SearchContext(compiledPat.pattern(), text);
++        int txtHash = hashOf(ctx.window(), ctx.window().length());
++        while (ctx.hasMore()) {
++            if (compiledPat.hash() == txtHash && ctx.window().startsWith(ctx.pattern())) {
++                ctx.recordMatch();
+             }
+-            if (window.start() < n - m) {
+-                txtHash = rollHash(txtHash, window.leaving(), window.entering(), compiledPat.highOrderFactor());
++            if (ctx.canAdvance()) {
++                txtHash = rollHash(txtHash, ctx.window().leaving(), ctx.window().entering(), compiledPat.highOrderFactor());
+             }
+-            window = window.slide();
++            ctx.advance();
+         }
+-        return result;
++        return ctx.result();
+     }
+ }
+diff --git a/rabinkarp/SearchStrategy.java b/rabinkarp/SearchStrategy.java
+index 7e1b34a31..ea4e05a4b 100644
+--- a/rabinkarp/SearchStrategy.java
++++ b/rabinkarp/SearchStrategy.java
+@@ -2,6 +2,7 @@ package rabinkarp;
+ 
+ import stringsearch.MatchResult;
+ import stringsearch.NaiveMatcher;
++import stringsearch.SearchContext;
+ import stringsearch.StringMatcher;
+ 
+ public enum SearchStrategy implements StringMatcher {
+@@ -15,7 +16,7 @@ public enum SearchStrategy implements StringMatcher {
+     }
+ 
+     @Override
+-    public MatchResult search(CharSequence pattern, CharSequence text) {
+-        return impl.search(pattern, text);
++    public MatchResult search(SearchContext ctx) {
++        return impl.search(ctx);
+     }
+ }
+diff --git a/stringsearch/NaiveMatcher.java b/stringsearch/NaiveMatcher.java
+index 26a136d57..2e1bb0094 100644
+--- a/stringsearch/NaiveMatcher.java
++++ b/stringsearch/NaiveMatcher.java
+@@ -2,15 +2,11 @@ package stringsearch;
+ 
+ public final class NaiveMatcher implements StringMatcher {
+     @Override
+-    public MatchResult search(CharSequence pattern, CharSequence text) {
+-        int m = pattern.length();
+-        int n = text.length();
+-        MatchResult result = new MatchResult();
+-        TextWindow window = new TextWindow(text, 0, m);
+-        while (window.start() <= n - m) {
+-            if (window.startsWith(pattern)) result.add(window.start());
+-            window = window.slide();
++    public MatchResult search(SearchContext ctx) {
++        while (ctx.hasMore()) {
++            if (ctx.window().startsWith(ctx.pattern())) ctx.recordMatch();
++            ctx.advance();
+         }
+-        return result;
++        return ctx.result();
+     }
+ }
+diff --git a/stringsearch/RollingHashMatcher.java b/stringsearch/RollingHashMatcher.java
+index f0c676a22..fa5a52906 100644
+--- a/stringsearch/RollingHashMatcher.java
++++ b/stringsearch/RollingHashMatcher.java
+@@ -8,24 +8,20 @@ public class RollingHashMatcher implements StringMatcher {
+     }
+ 
+     @Override
+-    public MatchResult search(CharSequence pattern, CharSequence text) {
+-        int m = pattern.length();
+-        int n = text.length();
+-        int patHash = hashCalculator.hash(pattern, m);
+-        int h = hashCalculator.highOrderFactor(m);
+-        TextWindow window = new TextWindow(text, 0, m);
+-        int txtHash = hashCalculator.hash(window, window.length());
+-        MatchResult result = new MatchResult(n - m + 1);
+-        while (window.start() <= n - m) {
+-            if (patHash == txtHash && window.startsWith(pattern)) {
+-                result.add(window.start());
++    public MatchResult search(SearchContext ctx) {
++        int patHash = hashCalculator.hash(ctx.pattern(), ctx.patternLength());
++        int h = hashCalculator.highOrderFactor(ctx.patternLength());
++        int txtHash = hashCalculator.hash(ctx.window(), ctx.window().length());
++        while (ctx.hasMore()) {
++            if (patHash == txtHash && ctx.window().startsWith(ctx.pattern())) {
++                ctx.recordMatch();
+             }
+-            if (window.start() < n - m) {
+-                txtHash = hashCalculator.roll(txtHash, window.leaving(), window.entering(), h);
++            if (ctx.canAdvance()) {
++                txtHash = hashCalculator.roll(txtHash, ctx.window().leaving(), ctx.window().entering(), h);
+             }
+-            window = window.slide();
++            ctx.advance();
+         }
+-        return result;
++        return ctx.result();
+     }
+ 
+     protected int hashOf(CharSequence seq, int length) {
+@@ -35,18 +31,4 @@ public class RollingHashMatcher implements StringMatcher {
+     protected int rollHash(int currentHash, char leaving, char entering, int highOrderFactor) {
+         return hashCalculator.roll(currentHash, leaving, entering, highOrderFactor);
+     }
+-
+-    /** For subclasses in other packages that cannot access MatchResult's package-private constructor. */
+-    protected MatchResult newResult() {
+-        return new MatchResult();
+-    }
+-
+-    protected MatchResult newResult(int capacity) {
+-        return new MatchResult(capacity);
+-    }
+-
+-    /** For subclasses in other packages that cannot access MatchResult's package-private add(). */
+-    protected void recordMatch(MatchResult result, int pos) {
+-        result.add(pos);
+-    }
+ }
+diff --git a/stringsearch/SearchContext.java b/stringsearch/SearchContext.java
+new file mode 100644
+index 000000000..4a5211495
+--- /dev/null
++++ b/stringsearch/SearchContext.java
+@@ -0,0 +1,33 @@
++package stringsearch;
++
++public final class SearchContext {
++    private final CharSequence pattern;
++    private final CharSequence text;
++    private TextWindow window;
++    private final MatchResult result;
++    private final int lastWindowStart;
++
++    public SearchContext(CharSequence pattern, CharSequence text) {
++        int m = pattern.length();
++        int n = text.length();
++        this.pattern = pattern;
++        this.text = text;
++        this.window = new TextWindow(text, 0, m);
++        this.result = new MatchResult(Math.max(0, n - m + 1));
++        this.lastWindowStart = n - m;
++    }
++
++    public CharSequence pattern() { return pattern; }
++    public CharSequence text() { return text; }
++    public TextWindow window() { return window; }
++    public int patternLength() { return pattern.length(); }
++    public int textLength() { return text.length(); }
++
++    public boolean hasMore() { return window.start() <= lastWindowStart; }
++    public boolean canAdvance() { return window.start() < lastWindowStart; }
++
++    public void advance() { window = window.slide(); }
++    public void recordMatch() { result.add(window.start()); }
++
++    public MatchResult result() { return result; }
++}
+diff --git a/stringsearch/StringMatcher.java b/stringsearch/StringMatcher.java
+index 5d21d7487..a8620edf1 100644
+--- a/stringsearch/StringMatcher.java
++++ b/stringsearch/StringMatcher.java
+@@ -1,5 +1,9 @@
+ package stringsearch;
+ 
+ public interface StringMatcher {
+-    MatchResult search(CharSequence pattern, CharSequence text);
++    MatchResult search(SearchContext ctx);
++
++    default MatchResult search(CharSequence pattern, CharSequence text) {
++        return search(new SearchContext(pattern, text));
++    }
+ }

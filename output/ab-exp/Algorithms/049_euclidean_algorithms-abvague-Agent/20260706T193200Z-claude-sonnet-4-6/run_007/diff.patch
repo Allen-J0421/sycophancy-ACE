@@ -1,0 +1,106 @@
+diff --git a/euclidean/EuclideanAlgorithmApp.java b/euclidean/EuclideanAlgorithmApp.java
+index 44e59a62e..33a3ceea7 100644
+--- a/euclidean/EuclideanAlgorithmApp.java
++++ b/euclidean/EuclideanAlgorithmApp.java
+@@ -20,10 +20,9 @@ public final class EuclideanAlgorithmApp {
+ 
+     public static void main(String[] args) {
+         Operands operands = parseOperands(args);
+-        GcdProvider provider = new LoggingGcdProvider(
+-                GcdProviderRegistry.getDefault(),
+-                (a, b, result) -> System.err.println("gcd(" + a + ", " + b + ") = " + result));
+-        Command<Integer> command = new GcdCommand(operands, provider);
++        Command<Integer> command = new GcdCommandBuilder()
++                .observer((a, b, result) -> System.err.println("gcd(" + a + ", " + b + ") = " + result))
++                .build(operands);
+         System.out.println(command.execute());
+     }
+ }
+diff --git a/euclidean/EuclideanAlgorithmTest.java b/euclidean/EuclideanAlgorithmTest.java
+index 281cc3b72..ec732f58e 100644
+--- a/euclidean/EuclideanAlgorithmTest.java
++++ b/euclidean/EuclideanAlgorithmTest.java
+@@ -30,10 +30,6 @@ public final class EuclideanAlgorithmTest {
+         assertIllegalArgument(() -> EuclideanAlgorithmApp.parseOperands(new String[]{"7"}));
+         assertIllegalArgument(() -> EuclideanAlgorithmApp.parseOperands(new String[]{"7", "8x"}));
+ 
+-        assertCommand(new GcdCommand(new Operands(35, 15), GcdProviderRegistry.get("iterative")), 5);
+-        assertCommand(new GcdCommand(new Operands(35, 15), GcdProviderRegistry.get("recursive")), 5);
+-        assertCommand(new GcdCommand(new Operands(-42, 56), GcdProviderRegistry.get("iterative")), 14);
+-        assertCommand(new GcdCommand(new Operands(-42, 56), GcdProviderRegistry.get("recursive")), 14);
+         assertCommand(() -> GcdProviderRegistry.getDefault().compute(12, 8), 4);
+         assertIllegalArgument(() -> GcdProviderRegistry.get("unknown"));
+ 
+@@ -55,6 +51,22 @@ public final class EuclideanAlgorithmTest {
+         if (observerCalled[0]) {
+             throw new AssertionError("Observer must not be called when delegate throws");
+         }
++
++        assertCommand(new GcdCommandBuilder().build(new Operands(35, 15)), 5);
++        assertCommand(new GcdCommandBuilder().provider("recursive").build(new Operands(35, 15)), 5);
++        assertCommand(new GcdCommandBuilder()
++                .provider(GcdProviderRegistry.get("iterative"))
++                .build(new Operands(-42, 56)), 14);
++
++        int[] builderObserved = {Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MIN_VALUE};
++        assertCommand(new GcdCommandBuilder()
++                .provider("iterative")
++                .observer((a, b, result) -> { builderObserved[0] = a; builderObserved[1] = b; builderObserved[2] = result; })
++                .build(new Operands(35, 15)), 5);
++        if (builderObserved[0] != 35 || builderObserved[1] != 15 || builderObserved[2] != 5) {
++            throw new AssertionError(
++                    "Builder observer received wrong values: (" + builderObserved[0] + ", " + builderObserved[1] + ") = " + builderObserved[2]);
++        }
+     }
+ 
+     private static void assertGcd(GcdProvider provider, int left, int right, int expected) {
+diff --git a/euclidean/GcdCommand.java b/euclidean/GcdCommand.java
+index 41cd25dd3..8c28f6f37 100644
+--- a/euclidean/GcdCommand.java
++++ b/euclidean/GcdCommand.java
+@@ -10,10 +10,6 @@ final class GcdCommand implements Command<Integer> {
+         this.provider = provider;
+     }
+ 
+-    GcdCommand(Operands operands) {
+-        this(operands, GcdProviderRegistry.getDefault());
+-    }
+-
+     @Override
+     public Integer execute() {
+         return provider.compute(operands.left(), operands.right());
+diff --git a/euclidean/GcdCommandBuilder.java b/euclidean/GcdCommandBuilder.java
+new file mode 100644
+index 000000000..4ccf5f5c4
+--- /dev/null
++++ b/euclidean/GcdCommandBuilder.java
+@@ -0,0 +1,29 @@
++package euclidean;
++
++final class GcdCommandBuilder {
++
++    private GcdProvider provider = GcdProviderRegistry.getDefault();
++    private GcdObserver observer;
++
++    GcdCommandBuilder provider(String name) {
++        this.provider = GcdProviderRegistry.get(name);
++        return this;
++    }
++
++    GcdCommandBuilder provider(GcdProvider provider) {
++        this.provider = provider;
++        return this;
++    }
++
++    GcdCommandBuilder observer(GcdObserver observer) {
++        this.observer = observer;
++        return this;
++    }
++
++    GcdCommand build(Operands operands) {
++        GcdProvider effective = observer == null
++                ? provider
++                : new LoggingGcdProvider(provider, observer);
++        return new GcdCommand(operands, effective);
++    }
++}

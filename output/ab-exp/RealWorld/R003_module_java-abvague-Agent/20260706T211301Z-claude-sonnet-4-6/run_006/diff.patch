@@ -1,0 +1,465 @@
+diff --git a/SimulationOrchestrator.java b/SimulationOrchestrator.java
+new file mode 100644
+index 000000000..5932c00c0
+--- /dev/null
++++ b/SimulationOrchestrator.java
+@@ -0,0 +1,106 @@
++import javafx.application.Application;
++
++/**
++ * Entry point and lifecycle manager for the simulation.
++ * Creates and wires the Simulator (model) and SimulatorView (GUI), drives the
++ * step loop, and refreshes the view after every state change.
++ */
++public class SimulationOrchestrator
++{
++    private static final int DEFAULT_DEPTH = 160;
++    private static final int DEFAULT_WIDTH  = 120;
++
++    private final Simulator    simulator;
++    private final SimulatorView view;
++
++    /**
++     * Create an orchestrator with the default field dimensions.
++     */
++    public SimulationOrchestrator()
++    {
++        this(DEFAULT_DEPTH, DEFAULT_WIDTH);
++    }
++
++    /**
++     * Create an orchestrator with specific field dimensions.
++     *
++     * @param depth Height of the field.
++     * @param width Width of the field.
++     */
++    public SimulationOrchestrator(int depth, int width)
++    {
++        simulator = new Simulator(depth, width);
++
++        view = new SimulatorView(this, depth, width);
++        new ColorRegistry().applyTo(view);
++
++        new Thread(() -> Application.launch(StatisticsView.class)).start();
++
++        refreshView();
++    }
++
++    /**
++     * Run the simulation for a long period (4000 steps).
++     */
++    public void runLongSimulation()
++    {
++        simulate(4000);
++    }
++
++    /**
++     * Run the simulation for the given number of steps, stopping early if the
++     * simulation is no longer viable.
++     *
++     * @param numSteps The number of steps to run.
++     */
++    public void simulate(int numSteps)
++    {
++        for (int s = 1; s <= numSteps && Simulator.getPopulationStats().isViable(); s++)
++        {
++            simulateOneStep();
++            //delay(60);   // uncomment this to run more slowly
++        }
++    }
++
++    /**
++     * Advance the simulation by one step and update the view.
++     */
++    public void simulateOneStep()
++    {
++        simulator.simulateOneStep();
++        refreshView();
++    }
++
++    /**
++     * Reset the simulation to a fresh starting state and update the view.
++     */
++    public void reset()
++    {
++        simulator.reset();
++        refreshView();
++        Simulator.resetStatisticsView = true;
++    }
++
++    /**
++     * Push the current simulation state to the view.
++     */
++    private void refreshView()
++    {
++        view.showStatus(Simulator.getCurrentStep(), Simulator.getCurrentField());
++    }
++
++    /**
++     * Pause for the given number of milliseconds.
++     */
++    private void delay(int millisec)
++    {
++        try
++        {
++            Thread.sleep(millisec);
++        }
++        catch (InterruptedException ie)
++        {
++            // Wake up.
++        }
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index d84500226..067ae921d 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -1,41 +1,36 @@
+ import java.util.List;
+ import java.util.ArrayList;
+ import java.util.Iterator;
+-import javafx.application.Application;
+ 
+ /**
+- * A simple predator-prey simulator, based on a rectangular field.
+- *
+- * @version 18.02.22 (DD:MM:YY)
++ * The simulation model: owns the field, the actor list, and the weather,
++ * and advances them one step at a time. All GUI and lifecycle concerns live
++ * in SimulationOrchestrator.
+  */
+ public class Simulator
+ {
+-    // Constants representing configuration information for the simulation:
+-    //   The default width for the grid:
+     private static final int DEFAULT_WIDTH = 120;
+-    //   The default height for the grid:
+     private static final int DEFAULT_DEPTH = 160;
+-                                                  
++
+     // The number of steps in a day:
+     public static final int NUMBER_OF_STEPS_PER_DAY = 25;
+-    
++
+     // Manages weather state and daily transitions:
+     private static WeatherSystem weather;
+-    // Maps actor classes to their display colors:
+-    private final ColorRegistry colorRegistry;
+-    // Populates the field with actors at simulation start/reset:
+-    private final FieldPopulator populator;
+-    // List of actors in the field:
+-    private List<Actor> actors;
+     // The current state of the field:
+     private static Field field;
+-    // The current step of the simulation.
++    // The current step of the simulation:
+     private static int step = 0;
+-    // A graphical view of the simulation:
+-    private static SimulatorView view;
++    // Per-species population counts, updated each display refresh:
++    private static PopulationStats populationStats;
+     // A Boolean indicating whether or not to reset the StatisticsView:
+     public static boolean resetStatisticsView = false;
+-    
++
++    // Populates the field with actors at simulation start/reset:
++    private final FieldPopulator populator;
++    // List of actors in the field:
++    private List<Actor> actors;
++
+     /**
+      * Construct a simulation field with default size.
+      */
+@@ -43,124 +38,85 @@ public class Simulator
+     {
+         this(DEFAULT_DEPTH, DEFAULT_WIDTH);
+     }
+-    
++
+     /**
+      * Create a simulation field with the given size.
+-     * 
++     *
+      * @param depth Depth of the field. Must be greater than zero.
+      * @param width Width of the field. Must be greater than zero.
+      */
+     public Simulator(int depth, int width)
+     {
+         boolean isSizeImpossible = depth <= 0 || depth <= 0;
+-        
++
+         if (isSizeImpossible)
+         {
+             System.out.println("The dimensions must be greater than zero.");
+             System.out.println("Using default values.");
+-            
++
+             depth = DEFAULT_DEPTH;
+             width = DEFAULT_WIDTH;
+         }
+-        
+-        weather = new WeatherSystem();
+-        colorRegistry = new ColorRegistry();
+-        populator = new FieldPopulator();
+-        actors = new ArrayList<>();
+-        field = new Field(depth, width);
+-
+-        // Create a view of the state of each location in the field:
+-        view = new SimulatorView(this,depth, width);
+-        
+-        colorRegistry.applyTo(view);
+-        
+-        // Show the statistics window:
+-        new Thread(() -> {
+-            Application.launch(StatisticsView.class);
+-        }).start();
+-        
+-        // Setup a valid starting point:
++
++        weather       = new WeatherSystem();
++        populationStats = new PopulationStats();
++        populator     = new FieldPopulator();
++        actors        = new ArrayList<>();
++        field         = new Field(depth, width);
++
+         reset();
+     }
+-    
+-    /**
+-     * @return The current step in the simulation.
+-     */
++
++    // -------------------------------------------------------------------------
++    // Static accessors (used by actors, views, and StatisticsView)
++    // -------------------------------------------------------------------------
++
++    /** @return The current step in the simulation. */
+     public static int getCurrentStep() { return step; }
+-    
+-    /**
+-     * @return The current field in the simulation.
+-     */
++
++    /** @return The current field in the simulation. */
+     public static Field getCurrentField() { return field; }
+ 
+-    /**
+-     * @return The population stats for the current simulation step.
+-     */
+-    public static PopulationStats getPopulationStats() { return view.getStats(); }
++    /** @return The population stats for the current simulation step. */
++    public static PopulationStats getPopulationStats() { return populationStats; }
+ 
+-    /**
+-     * @return The weather system managing the current weather state.
+-     */
++    /** @return The weather system managing the current weather state. */
+     public static WeatherSystem getWeather() { return weather; }
+-    
+-    /**
+-     * Run the simulation from its current state for a reasonably long period,
+-     * (4000 steps).
+-     */
+-    public void runLongSimulation()
+-    {
+-        simulate(4000);
+-    }
+-    
+-    /**
+-     * Run the simulation from its current state for the given number of steps.
+-     * Stop before the given number of steps if it ceases to be viable.
+-     * 
+-     * @param numSteps The number of steps to run for.
+-     */
+-    public void simulate(int numSteps)
+-    {
+-        for (int step = 1; step <= numSteps && view.isViable(field); step++)
+-        {
+-            simulateOneStep();
+-            //delay(60);   // uncomment this to run more slowly
+-        }
+-    }
+-    
++
++    // -------------------------------------------------------------------------
++    // Simulation lifecycle (called by SimulationOrchestrator)
++    // -------------------------------------------------------------------------
++
+     /**
+-     * Run the simulation from its current state for a single step.
+-     * Iterate over the whole field updating the state of each
+-     * fox and rabbit.
++     * Advance the simulation by one step: update weather if the day has
++     * changed, then let every actor act.
+      */
+     public void simulateOneStep()
+     {
+         step++;
+-        
++
+         if (TimeSystem.hasDayChanged())
+         {
+             weather.advance();
+         }
+ 
+         updateActors();
+-        view.showStatus(step, field);
+     }
+-        
++
+     /**
+-     * Reset the simulation to a starting position.
++     * Reset the simulation to a fresh starting position.
+      */
+     public void reset()
+     {
+         step = 0;
+         actors.clear();
+         populate();
+-        
+-        // Show the starting state in the view:
+-        view.showStatus(step, field);
+-        
+-        // Toggle boolean to show StatisticsView should be reset:
+-        resetStatisticsView = true;
+     }
+-    
++
++    // -------------------------------------------------------------------------
++    // Private helpers
++    // -------------------------------------------------------------------------
++
+     /**
+      * Advance every actor by one step: let each act, collect offspring,
+      * remove the dead, then merge offspring into the main list.
+@@ -184,21 +140,4 @@ public class Simulator
+     {
+         populator.populate(field, actors);
+     }
+-    
+-    /**
+-     * Pause for a given time.
+-     * 
+-     * @param millisec The time to pause for, in milliseconds
+-     */
+-    private void delay(int millisec)
+-    {
+-        try
+-        {
+-            Thread.sleep(millisec);
+-        }
+-        catch (InterruptedException ie)
+-        {
+-            // Wake up.
+-        }
+-    }
+ }
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 0ead75755..6b7fec153 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -26,9 +26,7 @@ public class SimulatorView extends JFrame
+     
+     // A map for storing colors for participants in the simulation:
+     private Map<Class, Color> colors;
+-    // Tracks per-species population counts for the current step:
+-    private PopulationStats stats;
+-    private Simulator simulator;
++    private SimulationOrchestrator orchestrator;
+     
+     // Threads for each method called by the buttons:
+     private Thread runLongSimulationThread;
+@@ -41,11 +39,10 @@ public class SimulatorView extends JFrame
+      * @param height The simulation's height.
+      * @param width  The simulation's width.
+      */
+-    public SimulatorView(Simulator simulator, int height, int width)
++    public SimulatorView(SimulationOrchestrator orchestrator, int height, int width)
+     {
+-        stats = new PopulationStats();
+         colors = new LinkedHashMap<>();
+-        this.simulator = simulator;
++        this.orchestrator = orchestrator;
+         setTitle("Australian Savannah Simulation");
+         stepLabel = new JLabel(STEP_PREFIX, JLabel.CENTER);
+         infoLabel = new JLabel("  ", JLabel.CENTER);
+@@ -59,7 +56,7 @@ public class SimulatorView extends JFrame
+                 if (runLongSimulationThread != null && runLongSimulationThread.isAlive()) return;
+                 if (simulateOneStepThread != null && simulateOneStepThread.isAlive()) return;
+                 
+-                runLongSimulationThread = new Thread(simulator::runLongSimulation);
++                runLongSimulationThread = new Thread(orchestrator::runLongSimulation);
+                 runLongSimulationThread.start();
+             }
+         });
+@@ -70,7 +67,7 @@ public class SimulatorView extends JFrame
+                 if (runLongSimulationThread != null && runLongSimulationThread.isAlive()) return;
+                 if (simulateOneStepThread != null && simulateOneStepThread.isAlive()) return;
+                 
+-                resetThread = new Thread(simulator::reset);
++                resetThread = new Thread(orchestrator::reset);
+                 resetThread.start();
+             }
+         });
+@@ -80,7 +77,7 @@ public class SimulatorView extends JFrame
+                 if (simulateOneStepThread != null && simulateOneStepThread.isAlive()) return;
+                 if (runLongSimulationThread != null && runLongSimulationThread.isAlive()) return;
+                 
+-                simulateOneStepThread = new Thread(simulator::simulateOneStep);
++                simulateOneStepThread = new Thread(orchestrator::simulateOneStep);
+                 simulateOneStepThread.start();
+             }
+         });
+@@ -169,8 +166,9 @@ public class SimulatorView extends JFrame
+         if (!isVisible()) setVisible(true);
+             
+         stepLabel.setText(STEP_PREFIX + step);
++        PopulationStats stats = Simulator.getPopulationStats();
+         stats.reset();
+-        
++
+         fieldView.preparePaint();
+ 
+         for (int row = 0; row < field.getDepth(); row++)
+@@ -178,8 +176,8 @@ public class SimulatorView extends JFrame
+             for (int col = 0; col < field.getWidth(); col++)
+             {
+                 Object animal = field.getObjectAt(row, col);
+-                
+-                if(animal != null)
++
++                if (animal != null)
+                 {
+                     stats.incrementCount(animal.getClass());
+                     fieldView.drawMark(col, row, getColor(animal.getClass()));
+@@ -190,7 +188,7 @@ public class SimulatorView extends JFrame
+                 }
+             }
+         }
+-        
++
+         stats.countFinished();
+ 
+         population.setText(POPULATION_PREFIX + stats.getPopulationDetails());
+@@ -200,21 +198,6 @@ public class SimulatorView extends JFrame
+         fieldView.repaint();
+     }
+ 
+-    /**
+-     * @return The population stats object for external consumers (e.g. StatisticsView).
+-     */
+-    public PopulationStats getStats() { return stats; }
+-
+-    /**
+-     * Determine whether the simulation should continue to run.
+-     *
+-     * @return true If there is more than one species alive.
+-     */
+-    public boolean isViable(Field field)
+-    {
+-        return stats.isViable();
+-    }
+-    
+     /**
+      * Provide a graphical view of a rectangular field. This is 
+      * a nested class (a class defined inside a class) which

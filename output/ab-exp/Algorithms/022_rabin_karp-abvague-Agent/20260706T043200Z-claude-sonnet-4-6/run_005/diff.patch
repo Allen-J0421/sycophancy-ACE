@@ -1,0 +1,207 @@
+diff --git a/rabinkarp/CompiledPattern.java b/rabinkarp/CompiledPattern.java
+index 6445c8d62..2c7fec438 100644
+--- a/rabinkarp/CompiledPattern.java
++++ b/rabinkarp/CompiledPattern.java
+@@ -13,16 +13,10 @@ final class CompiledPattern {
+         this.highOrderFactor = highOrderFactor;
+     }
+ 
+-    static CompiledPattern compile(CharSequence pattern, int radix, int modulus) {
++    static CompiledPattern compile(CharSequence pattern, HashCalculator calculator) {
+         int m = pattern.length();
+-        int h = 1;
+-        for (int i = 0; i < m - 1; i++) {
+-            h = (h * radix) % modulus;
+-        }
+-        int hash = 0;
+-        for (int i = 0; i < m; i++) {
+-            hash = (radix * hash + pattern.charAt(i)) % modulus;
+-        }
++        int hash = calculator.hash(pattern, m);
++        int h = calculator.highOrderFactor(m);
+         return new CompiledPattern(pattern, m, hash, h);
+     }
+ 
+diff --git a/rabinkarp/HashCalculator.java b/rabinkarp/HashCalculator.java
+new file mode 100644
+index 000000000..52d7f2946
+--- /dev/null
++++ b/rabinkarp/HashCalculator.java
+@@ -0,0 +1,7 @@
++package rabinkarp;
++
++public interface HashCalculator {
++    int hash(CharSequence seq, int length);
++    int highOrderFactor(int patternLength);
++    int roll(int currentHash, char leaving, char entering, int highOrderFactor);
++}
+diff --git a/rabinkarp/PolynomialHashCalculator.java b/rabinkarp/PolynomialHashCalculator.java
+new file mode 100644
+index 000000000..bc47d716f
+--- /dev/null
++++ b/rabinkarp/PolynomialHashCalculator.java
+@@ -0,0 +1,36 @@
++package rabinkarp;
++
++public final class PolynomialHashCalculator implements HashCalculator {
++    private final int radix;
++    private final int modulus;
++
++    public PolynomialHashCalculator(int radix, int modulus) {
++        this.radix = radix;
++        this.modulus = modulus;
++    }
++
++    @Override
++    public int hash(CharSequence seq, int length) {
++        int hash = 0;
++        for (int i = 0; i < length; i++) {
++            hash = (radix * hash + seq.charAt(i)) % modulus;
++        }
++        return hash;
++    }
++
++    @Override
++    public int highOrderFactor(int patternLength) {
++        int h = 1;
++        for (int i = 0; i < patternLength - 1; i++) {
++            h = (h * radix) % modulus;
++        }
++        return h;
++    }
++
++    @Override
++    public int roll(int currentHash, char leaving, char entering, int highOrderFactor) {
++        int hash = (radix * (currentHash - leaving * highOrderFactor) + entering) % modulus;
++        if (hash < 0) hash += modulus;
++        return hash;
++    }
++}
+diff --git a/rabinkarp/RabinKarpMatcher.java b/rabinkarp/RabinKarpMatcher.java
+index 98ea1ab23..96957d904 100644
+--- a/rabinkarp/RabinKarpMatcher.java
++++ b/rabinkarp/RabinKarpMatcher.java
+@@ -7,25 +7,7 @@ public final class RabinKarpMatcher extends RollingHashMatcher {
+     public static final int DEFAULT_MODULUS = 101;
+ 
+     public RabinKarpMatcher(int radix, int modulus) {
+-        super(radix, modulus);
+-    }
+-
+-    @Override
+-    public List<Integer> search(CharSequence pattern, CharSequence text) {
+-        CompiledPattern cp = CompiledPattern.compile(pattern, radix, modulus);
+-        int n = text.length();
+-        int m = cp.length();
+-        int txtHash = hashOf(text, m);
+-        List<Integer> result = allMatchPositions(n - m + 1);
+-        for (int i = 0; i <= n - m; i++) {
+-            if (cp.hash() == txtHash && matchesAt(text, cp.pattern(), i)) {
+-                result.add(i);
+-            }
+-            if (i < n - m) {
+-                txtHash = rollHash(txtHash, text.charAt(i), text.charAt(i + m), cp.highOrderFactor());
+-            }
+-        }
+-        return result;
++        super(new PolynomialHashCalculator(radix, modulus));
+     }
+ 
+     List<Integer> search(RabinKarpPattern pattern, CharSequence text) {
+diff --git a/rabinkarp/RabinKarpPattern.java b/rabinkarp/RabinKarpPattern.java
+index 80c2120af..24eb9369d 100644
+--- a/rabinkarp/RabinKarpPattern.java
++++ b/rabinkarp/RabinKarpPattern.java
+@@ -18,8 +18,9 @@ public final class RabinKarpPattern {
+     }
+ 
+     public static RabinKarpPattern compile(CharSequence pattern, int radix, int modulus) {
++        PolynomialHashCalculator calculator = new PolynomialHashCalculator(radix, modulus);
+         RabinKarpMatcher m = new RabinKarpMatcher(radix, modulus);
+-        CompiledPattern cp = CompiledPattern.compile(pattern, radix, modulus);
++        CompiledPattern cp = CompiledPattern.compile(pattern, calculator);
+         return new RabinKarpPattern(cp.pattern(), cp.length(), cp.hash(), cp.highOrderFactor(), m);
+     }
+ 
+diff --git a/rabinkarp/RabinKarpTest.java b/rabinkarp/RabinKarpTest.java
+index 2f1e0395e..ce0851652 100644
+--- a/rabinkarp/RabinKarpTest.java
++++ b/rabinkarp/RabinKarpTest.java
+@@ -8,6 +8,7 @@ public final class RabinKarpTest {
+     public static void main(String[] args) {
+         runSuite(StringMatcherFactory.rabinKarp(), "RabinKarpMatcher");
+         runSuite(StringMatcherFactory.naive(), "NaiveMatcher");
++        runSuite(StringMatcherFactory.rollingHash(new PolynomialHashCalculator(256, 101)), "RollingHashMatcher+PolynomialHashCalculator");
+ 
+         RabinKarpPattern compiled = RabinKarpPattern.compile("geeks");
+         expect(compiled.searchIn("geeksforgeeks"), List.of(0, 8), "compiled pattern: geeks in geeksforgeeks");
+diff --git a/rabinkarp/RollingHashMatcher.java b/rabinkarp/RollingHashMatcher.java
+index 4f29fc02a..d8458cf5b 100644
+--- a/rabinkarp/RollingHashMatcher.java
++++ b/rabinkarp/RollingHashMatcher.java
+@@ -3,27 +3,38 @@ package rabinkarp;
+ import java.util.ArrayList;
+ import java.util.List;
+ 
+-public abstract class RollingHashMatcher implements StringMatcher {
+-    protected final int radix;
+-    protected final int modulus;
++public class RollingHashMatcher implements StringMatcher {
++    protected final HashCalculator hashCalculator;
+ 
+-    protected RollingHashMatcher(int radix, int modulus) {
+-        this.radix = radix;
+-        this.modulus = modulus;
++    public RollingHashMatcher(HashCalculator hashCalculator) {
++        this.hashCalculator = hashCalculator;
+     }
+ 
+-    protected int hashOf(CharSequence seq, int length) {
+-        int hash = 0;
+-        for (int i = 0; i < length; i++) {
+-            hash = (radix * hash + seq.charAt(i)) % modulus;
++    @Override
++    public List<Integer> search(CharSequence pattern, CharSequence text) {
++        int m = pattern.length();
++        int n = text.length();
++        int patHash = hashCalculator.hash(pattern, m);
++        int h = hashCalculator.highOrderFactor(m);
++        int txtHash = hashCalculator.hash(text, m);
++        List<Integer> result = allMatchPositions(n - m + 1);
++        for (int i = 0; i <= n - m; i++) {
++            if (patHash == txtHash && matchesAt(text, pattern, i)) {
++                result.add(i);
++            }
++            if (i < n - m) {
++                txtHash = hashCalculator.roll(txtHash, text.charAt(i), text.charAt(i + m), h);
++            }
+         }
+-        return hash;
++        return result;
++    }
++
++    protected int hashOf(CharSequence seq, int length) {
++        return hashCalculator.hash(seq, length);
+     }
+ 
+     protected int rollHash(int currentHash, char leaving, char entering, int highOrderFactor) {
+-        int hash = (radix * (currentHash - leaving * highOrderFactor) + entering) % modulus;
+-        if (hash < 0) hash += modulus;
+-        return hash;
++        return hashCalculator.roll(currentHash, leaving, entering, highOrderFactor);
+     }
+ 
+     protected boolean matchesAt(CharSequence text, CharSequence pattern, int pos) {
+diff --git a/rabinkarp/StringMatcherFactory.java b/rabinkarp/StringMatcherFactory.java
+index aa0da6bbb..bbf7d692f 100644
+--- a/rabinkarp/StringMatcherFactory.java
++++ b/rabinkarp/StringMatcherFactory.java
+@@ -14,4 +14,8 @@ public final class StringMatcherFactory {
+     public static StringMatcher naive() {
+         return new NaiveMatcher();
+     }
++
++    public static StringMatcher rollingHash(HashCalculator calculator) {
++        return new RollingHashMatcher(calculator);
++    }
+ }

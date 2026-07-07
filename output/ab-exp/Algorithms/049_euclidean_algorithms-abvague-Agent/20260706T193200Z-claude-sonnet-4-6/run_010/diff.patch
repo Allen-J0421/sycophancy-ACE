@@ -1,0 +1,165 @@
+diff --git a/euclidean/EuclideanAlgorithmApp.java b/euclidean/EuclideanAlgorithmApp.java
+index 13de9d245..51b3ddf44 100644
+--- a/euclidean/EuclideanAlgorithmApp.java
++++ b/euclidean/EuclideanAlgorithmApp.java
+@@ -21,20 +21,12 @@ public final class EuclideanAlgorithmApp {
+     public static void main(String[] args) {
+         Operands operands = parseOperands(args);
+         Command<Result<Integer, GcdError>> command = new GcdCommandBuilder()
+-                .observer((a, b, result) -> {
+-                    if (result instanceof Result.Success<?, ?> s) {
+-                        System.err.println("gcd(" + a + ", " + b + ") = " + s.value());
+-                    } else if (result instanceof Result.Failure<?, ?> f) {
+-                        System.err.println("gcd(" + a + ", " + b + ") failed: " + ((GcdError) f.error()).reason());
+-                    }
+-                })
++                .observer((a, b, result) -> System.err.println(result.<String>fold(
++                        v -> "gcd(" + a + ", " + b + ") = " + v,
++                        e -> "gcd(" + a + ", " + b + ") failed: " + e.reason())))
+                 .build(operands);
+-        Result<Integer, GcdError> result = command.execute();
+-        if (result instanceof Result.Success<?, ?> s) {
+-            System.out.println(s.value());
+-        } else if (result instanceof Result.Failure<?, ?> f) {
+-            System.err.println("Error: " + ((GcdError) f.error()).reason());
+-            System.exit(1);
+-        }
++        command.execute().fold(
++                v -> { System.out.println(v); return null; },
++                e -> { System.err.println("Error: " + e.reason()); System.exit(1); return null; });
+     }
+ }
+diff --git a/euclidean/EuclideanAlgorithmTest.java b/euclidean/EuclideanAlgorithmTest.java
+index b63854694..890d0bd92 100644
+--- a/euclidean/EuclideanAlgorithmTest.java
++++ b/euclidean/EuclideanAlgorithmTest.java
+@@ -40,10 +40,13 @@ public final class EuclideanAlgorithmTest {
+                 GcdProviderRegistry.get("iterative"),
+                 (a, b, result) -> { observedArgs[0] = a; observedArgs[1] = b; observedResult[0] = result; });
+         assertCommand(() -> logging.compute(35, 15), 5);
+-        if (observedArgs[0] != 35 || observedArgs[1] != 15
+-                || !(observedResult[0] instanceof Result.Success<?, ?> s) || !s.value().equals(5)) {
++        @SuppressWarnings("unchecked")
++        int capturedValue = ((Result<Integer, GcdError>) observedResult[0]).fold(
++                v -> v,
++                e -> { throw new AssertionError("Observer captured Failure: " + e.reason()); });
++        if (observedArgs[0] != 35 || observedArgs[1] != 15 || capturedValue != 5) {
+             throw new AssertionError("Observer received wrong values: args=("
+-                    + observedArgs[0] + ", " + observedArgs[1] + ") result=" + observedResult[0]);
++                    + observedArgs[0] + ", " + observedArgs[1] + ") value=" + capturedValue);
+         }
+ 
+         // Observer is called with Failure — no special-case suppression.
+@@ -52,9 +55,10 @@ public final class EuclideanAlgorithmTest {
+                 GcdProviderRegistry.get("iterative"),
+                 (a, b, result) -> failureObserved[0] = result);
+         assertFailure(loggingOverflow, Integer.MIN_VALUE, 0);
+-        if (!(failureObserved[0] instanceof Result.Failure<?, ?>)) {
+-            throw new AssertionError("Observer must be called with Failure when computation overflows");
+-        }
++        @SuppressWarnings("unchecked")
++        Object __ = ((Result<Integer, GcdError>) failureObserved[0]).fold(
++                v -> { throw new AssertionError("Observer captured Success, expected Failure: " + v); },
++                e -> null);
+ 
+         // Builder: default, named provider, direct provider injection.
+         assertCommand(new GcdCommandBuilder().build(new Operands(35, 15)), 5);
+@@ -69,24 +73,28 @@ public final class EuclideanAlgorithmTest {
+                 .provider("iterative")
+                 .observer((a, b, result) -> builderObserved[0] = result)
+                 .build(new Operands(35, 15)), 5);
+-        if (!(builderObserved[0] instanceof Result.Success<?, ?> bs) || !bs.value().equals(5)) {
+-            throw new AssertionError("Builder observer received wrong result: " + builderObserved[0]);
++        @SuppressWarnings("unchecked")
++        int capturedBuilderValue = ((Result<Integer, GcdError>) builderObserved[0]).fold(
++                v -> v,
++                e -> { throw new AssertionError("Builder observer captured Failure: " + e.reason()); });
++        if (capturedBuilderValue != 5) {
++            throw new AssertionError("Builder observer received wrong result: " + capturedBuilderValue);
+         }
+     }
+ 
+     private static void assertGcd(GcdProvider provider, int left, int right, int expected) {
+-        Result<Integer, GcdError> result = provider.compute(left, right);
+-        if (!(result instanceof Result.Success<?, ?> s) || !s.value().equals(expected)) {
+-            throw new AssertionError(
+-                    "gcd(" + left + ", " + right + ") = " + result + "; expected " + expected);
++        int actual = provider.compute(left, right).fold(
++                v -> v,
++                e -> { throw new AssertionError("gcd(" + left + ", " + right + ") failed: " + e.reason()); });
++        if (actual != expected) {
++            throw new AssertionError("gcd(" + left + ", " + right + ") = " + actual + "; expected " + expected);
+         }
+     }
+ 
+     private static void assertFailure(GcdProvider provider, int a, int b) {
+-        Result<Integer, GcdError> result = provider.compute(a, b);
+-        if (!(result instanceof Result.Failure<?, ?>)) {
+-            throw new AssertionError("Expected Failure from gcd(" + a + ", " + b + ") but got: " + result);
+-        }
++        provider.compute(a, b).fold(
++                v -> { throw new AssertionError("Expected Failure from gcd(" + a + ", " + b + ") but got: " + v); },
++                e -> null);
+     }
+ 
+     private static void assertOperands(int left, int right, Operands op) {
+@@ -97,9 +105,11 @@ public final class EuclideanAlgorithmTest {
+     }
+ 
+     private static void assertCommand(Command<Result<Integer, GcdError>> command, int expected) {
+-        Result<Integer, GcdError> result = command.execute();
+-        if (!(result instanceof Result.Success<?, ?> s) || !s.value().equals(expected)) {
+-            throw new AssertionError("Command.execute() = " + result + "; expected " + expected);
++        int actual = command.execute().fold(
++                v -> v,
++                e -> { throw new AssertionError("Command failed: " + e.reason()); });
++        if (actual != expected) {
++            throw new AssertionError("Command.execute() = " + actual + "; expected " + expected);
+         }
+     }
+ 
+diff --git a/euclidean/Result.java b/euclidean/Result.java
+index b6e4679f2..cd5eacd23 100644
+--- a/euclidean/Result.java
++++ b/euclidean/Result.java
+@@ -6,4 +6,28 @@ sealed interface Result<T, E> permits Result.Success, Result.Failure {
+ 
+     static <T, E> Result<T, E> success(T value) { return new Success<>(value); }
+     static <T, E> Result<T, E> failure(E error) { return new Failure<>(error); }
++
++    @SuppressWarnings("unchecked")
++    default <U> Result<U, E> map(ResultMapper<T, U> mapper) {
++        if (this instanceof Result.Success<?, ?> s) {
++            return Result.success(mapper.apply((T) s.value()));
++        }
++        return (Result<U, E>) this;
++    }
++
++    @SuppressWarnings("unchecked")
++    default <F> Result<T, F> mapError(ResultMapper<E, F> mapper) {
++        if (this instanceof Result.Failure<?, ?> f) {
++            return Result.failure(mapper.apply((E) f.error()));
++        }
++        return (Result<T, F>) this;
++    }
++
++    @SuppressWarnings("unchecked")
++    default <R> R fold(ResultMapper<T, R> onSuccess, ResultMapper<E, R> onFailure) {
++        if (this instanceof Result.Success<?, ?> s) {
++            return onSuccess.apply((T) s.value());
++        }
++        return onFailure.apply((E) ((Result.Failure<?, ?>) this).error());
++    }
+ }
+diff --git a/euclidean/ResultMapper.java b/euclidean/ResultMapper.java
+new file mode 100644
+index 000000000..a36b1521f
+--- /dev/null
++++ b/euclidean/ResultMapper.java
+@@ -0,0 +1,6 @@
++package euclidean;
++
++@FunctionalInterface
++interface ResultMapper<T, U> {
++    U apply(T value);
++}

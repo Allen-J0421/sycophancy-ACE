@@ -1,0 +1,83 @@
+diff --git a/euclidean/EuclideanAlgorithmApp.java b/euclidean/EuclideanAlgorithmApp.java
+index e8fe573d6..44e59a62e 100644
+--- a/euclidean/EuclideanAlgorithmApp.java
++++ b/euclidean/EuclideanAlgorithmApp.java
+@@ -20,7 +20,10 @@ public final class EuclideanAlgorithmApp {
+ 
+     public static void main(String[] args) {
+         Operands operands = parseOperands(args);
+-        Command<Integer> command = new GcdCommand(operands, GcdProviderRegistry.getDefault());
++        GcdProvider provider = new LoggingGcdProvider(
++                GcdProviderRegistry.getDefault(),
++                (a, b, result) -> System.err.println("gcd(" + a + ", " + b + ") = " + result));
++        Command<Integer> command = new GcdCommand(operands, provider);
+         System.out.println(command.execute());
+     }
+ }
+diff --git a/euclidean/EuclideanAlgorithmTest.java b/euclidean/EuclideanAlgorithmTest.java
+index 8bcf9b9fb..281cc3b72 100644
+--- a/euclidean/EuclideanAlgorithmTest.java
++++ b/euclidean/EuclideanAlgorithmTest.java
+@@ -36,6 +36,25 @@ public final class EuclideanAlgorithmTest {
+         assertCommand(new GcdCommand(new Operands(-42, 56), GcdProviderRegistry.get("recursive")), 14);
+         assertCommand(() -> GcdProviderRegistry.getDefault().compute(12, 8), 4);
+         assertIllegalArgument(() -> GcdProviderRegistry.get("unknown"));
++
++        int[] observed = {Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MIN_VALUE};
++        GcdProvider logging = new LoggingGcdProvider(
++                GcdProviderRegistry.get("iterative"),
++                (a, b, result) -> { observed[0] = a; observed[1] = b; observed[2] = result; });
++        assertCommand(() -> logging.compute(35, 15), 5);
++        if (observed[0] != 35 || observed[1] != 15 || observed[2] != 5) {
++            throw new AssertionError(
++                    "Observer received wrong values: (" + observed[0] + ", " + observed[1] + ") = " + observed[2]);
++        }
++
++        boolean[] observerCalled = {false};
++        GcdProvider loggingOverflow = new LoggingGcdProvider(
++                GcdProviderRegistry.get("iterative"),
++                (a, b, result) -> observerCalled[0] = true);
++        assertOverflow(loggingOverflow, Integer.MIN_VALUE, 0);
++        if (observerCalled[0]) {
++            throw new AssertionError("Observer must not be called when delegate throws");
++        }
+     }
+ 
+     private static void assertGcd(GcdProvider provider, int left, int right, int expected) {
+diff --git a/euclidean/GcdObserver.java b/euclidean/GcdObserver.java
+new file mode 100644
+index 000000000..f5633e322
+--- /dev/null
++++ b/euclidean/GcdObserver.java
+@@ -0,0 +1,6 @@
++package euclidean;
++
++@FunctionalInterface
++interface GcdObserver {
++    void onCompute(int a, int b, int result);
++}
+diff --git a/euclidean/LoggingGcdProvider.java b/euclidean/LoggingGcdProvider.java
+new file mode 100644
+index 000000000..dde71ec41
+--- /dev/null
++++ b/euclidean/LoggingGcdProvider.java
+@@ -0,0 +1,19 @@
++package euclidean;
++
++final class LoggingGcdProvider implements GcdProvider {
++
++    private final GcdProvider delegate;
++    private final GcdObserver observer;
++
++    LoggingGcdProvider(GcdProvider delegate, GcdObserver observer) {
++        this.delegate = delegate;
++        this.observer = observer;
++    }
++
++    @Override
++    public int compute(int a, int b) {
++        int result = delegate.compute(a, b);
++        observer.onCompute(a, b, result);
++        return result;
++    }
++}

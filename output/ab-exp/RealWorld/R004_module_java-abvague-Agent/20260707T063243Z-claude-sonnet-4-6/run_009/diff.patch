@@ -1,0 +1,355 @@
+diff --git a/AgeingComponent.java b/AgeingComponent.java
+new file mode 100644
+index 000000000..85cc298e0
+--- /dev/null
++++ b/AgeingComponent.java
+@@ -0,0 +1,41 @@
++import java.util.Random;
++
++/**
++ * Tracks the age of an entity and signals when it should die of old age.
++ * Constructed with a maximum lifespan; tick() increments age each step
++ * and returns true when the entity has exceeded its maximum.
++ *
++ * @version 2022.03.02
++ */
++public class AgeingComponent
++{
++    private static final Random rand = Randomizer.getRandom();
++
++    private int age;
++    private final int maxAge;
++
++    /**
++     * @param maxAge    Maximum age before the entity should die.
++     * @param randomAge If true, start at a random age in [0, maxAge); otherwise start at 0.
++     */
++    public AgeingComponent(int maxAge, boolean randomAge)
++    {
++        this.maxAge = maxAge;
++        this.age    = randomAge ? rand.nextInt(maxAge) : 0;
++    }
++
++    /**
++     * Advance age by one step.
++     * @return true if the entity has exceeded its maximum age and should die.
++     */
++    public boolean tick()
++    {
++        age++;
++        return age > maxAge;
++    }
++
++    public int getAge() { return age; }
++
++    /** Returns true if the entity has reached the given minimum age. */
++    public boolean isOldEnough(double minAge) { return age >= minAge; }
++}
+diff --git a/Animal.java b/Animal.java
+index 523afa939..aee00fa26 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -8,10 +8,7 @@ import java.util.stream.Collectors;
+  */
+ public abstract class Animal extends Organism implements Actor
+ {
+-
+-    protected int age;
+     protected boolean isNocturnal;
+-    protected int foodLevel;
+     protected Gender sex;
+ 
+     protected static final Random rand = Randomizer.getRandom();
+@@ -24,6 +21,10 @@ public abstract class Animal extends Organism implements Actor
+ 
+     protected final DiseaseManager diseaseManager = new DiseaseManager(this);
+ 
++    // Behaviour components — constructed in the constructor using the species' constants.
++    protected final AgeingComponent ageing;
++    protected final HungerComponent hunger;
++
+ 
+     // Declaring abstract methods to obtain fields used by subclasses
+     // These methods have been declared in order to use common methods in the Animal class, reducing repeatability
+@@ -41,20 +42,14 @@ public abstract class Animal extends Organism implements Actor
+      * @param field The field currently occupied.
+      * @param location The location within the field.
+      * @param randomAge The animal's random starting age.
+-     * @param sex The animal's gender. 
++     * @param sex The animal's gender.
+      */
+     public Animal(Field field, Location location, boolean randomAge, Gender sex)
+     {
+         super(field, location);
+         this.sex = sex;
+-        if(randomAge) {
+-            this.age = rand.nextInt(MAX_AGE());
+-            foodLevel = rand.nextInt(MAX_FOOD_LEVEL());
+-        }
+-        else {
+-            this.age = 0;
+-            foodLevel = MAX_FOOD_LEVEL();
+-        }
++        this.ageing = new AgeingComponent(MAX_AGE(), randomAge);
++        this.hunger = new HungerComponent(MAX_FOOD_LEVEL(), randomAge);
+         diseaseManager.processRandomContraction();
+     }
+ 
+@@ -115,7 +110,7 @@ public abstract class Animal extends Organism implements Actor
+         diseaseManager.checkContactSpread(adjacent, field);
+         Iterator<Location> it = adjacent.iterator();
+         // only eats if it's not full (food level less than max)
+-        while(it.hasNext() && foodLevel <= MAX_FOOD_LEVEL()) {
++        while(it.hasNext() && hunger.isNotFull()) {
+             Location where = it.next();
+             Object animal = field.getObjectAt(where);
+             if(animal != null && DIET().contains(animal.getClass()))
+@@ -125,11 +120,7 @@ public abstract class Animal extends Organism implements Actor
+                 if(food.isAlive())
+                 {
+                     food.setDead();
+-                    int newFoodLevel = foodLevel + food.FOOD_VALUE();
+-
+-                    // caps the food level at the maximum
+-                    foodLevel = Math.min(newFoodLevel, MAX_FOOD_LEVEL());
+-
++                    hunger.eat(food.FOOD_VALUE());
+                     return where;
+                 }
+                 return where;
+@@ -142,7 +133,7 @@ public abstract class Animal extends Organism implements Actor
+      * Check whether this animal is to give birth at this step.
+      * New births will be made into free adjacent locations.
+      * @param newAnimals A list to return newly born animals.
+-     * @param environment The environment that the animal resides in. 
++     * @param environment The environment that the animal resides in.
+      */
+     protected abstract void giveBirth(List<Actor> newAnimals, Environment environment);
+ 
+@@ -175,16 +166,16 @@ public abstract class Animal extends Organism implements Actor
+ 
+     /**
+      * Returns true if the animal is able to breed.
+-     * Returns false if otherwise. 
++     * Returns false if otherwise.
+      */
+     protected boolean canBreed()
+     {
+-        return (age >= BREEDING_AGE() && getPotentialMates().size() > 0);
++        return (ageing.isOldEnough(BREEDING_AGE()) && getPotentialMates().size() > 0);
+     }
+ 
+     /**
+      * Returns a list of potential mates. Mates have to be
+-     * of a opposite gender. 
++     * of a opposite gender.
+      * @return List<Organism> A list of potential mates.
+      */
+     protected List<Organism> getPotentialMates()
+@@ -209,8 +200,7 @@ public abstract class Animal extends Organism implements Actor
+      */
+     protected void incrementAge()
+     {
+-        this.age++;
+-        if(this.age > MAX_AGE()) {
++        if(ageing.tick()) {
+             setDead();
+         }
+     }
+@@ -220,8 +210,7 @@ public abstract class Animal extends Organism implements Actor
+      */
+     protected void incrementHunger()
+     {
+-        foodLevel--;
+-        if(foodLevel <= 0) {
++        if(hunger.tick()) {
+             setDead();
+         }
+     }
+diff --git a/Grass.java b/Grass.java
+index 06dc34b42..8bf2f680f 100644
+--- a/Grass.java
++++ b/Grass.java
+@@ -30,12 +30,8 @@ public class Grass extends Plant
+     public Grass(Field field, Location location)
+     {
+         super(field, location);
+-
+-        NUMBER_OF_STAGES = 3;
+-        STEPS_PER_STAGE = 2;
+-        STAGE_OF_GROWTH = rand.nextInt(NUMBER_OF_STAGES);
+-        FOOD_VALUE = STAGE_OF_GROWTH;
+-
++        growth = new GrowthComponent(3, 2);
++        FOOD_VALUE = growth.getStage();
+     }
+ 
+ 
+@@ -97,7 +93,7 @@ public class Grass extends Plant
+      */
+     public boolean incrementGrowth()
+     {
+-        if(super.incrementGrowth()) {
++        if (growth.increment()) {
+             FOOD_VALUE++;
+             return true;
+         }
+diff --git a/GrowthComponent.java b/GrowthComponent.java
+new file mode 100644
+index 000000000..7db1f6c43
+--- /dev/null
++++ b/GrowthComponent.java
+@@ -0,0 +1,44 @@
++import java.util.Random;
++
++/**
++ * Tracks the growth stage of a plant entity. increment() advances the stage and
++ * returns whether growth occurred; the caller can react (e.g. increasing food value).
++ * Starts at a random stage so newly created plants vary in maturity.
++ *
++ * @version 2022.03.02
++ */
++public class GrowthComponent
++{
++    private static final Random rand = Randomizer.getRandom();
++
++    private int stageOfGrowth;
++    private final int numberOfStages;
++    private final int stepsPerStage;
++
++    /**
++     * @param numberOfStages Total number of growth stages.
++     * @param stepsPerStage  Simulation steps between each stage advance (used by engine).
++     */
++    public GrowthComponent(int numberOfStages, int stepsPerStage)
++    {
++        this.numberOfStages = numberOfStages;
++        this.stepsPerStage  = stepsPerStage;
++        this.stageOfGrowth  = rand.nextInt(numberOfStages);
++    }
++
++    /**
++     * Advance the growth stage by one, if not yet at full maturity.
++     * @return true if the stage actually increased.
++     */
++    public boolean increment()
++    {
++        if (stageOfGrowth < numberOfStages) {
++            stageOfGrowth++;
++            return true;
++        }
++        return false;
++    }
++
++    public int getStage()         { return stageOfGrowth; }
++    public int getStepsPerStage() { return stepsPerStage; }
++}
+diff --git a/HungerComponent.java b/HungerComponent.java
+new file mode 100644
+index 000000000..8955507ca
+--- /dev/null
++++ b/HungerComponent.java
+@@ -0,0 +1,50 @@
++import java.util.Random;
++
++/**
++ * Tracks the food level of an entity and signals when it should die of hunger.
++ * tick() decrements the food level each step; eat() restores it up to the maximum.
++ *
++ * @version 2022.03.02
++ */
++public class HungerComponent
++{
++    private static final Random rand = Randomizer.getRandom();
++
++    private int foodLevel;
++    private final int maxFoodLevel;
++
++    /**
++     * @param maxFoodLevel Upper bound on food level.
++     * @param randomStart  If true, start at a random food level in [0, maxFoodLevel); otherwise start full.
++     */
++    public HungerComponent(int maxFoodLevel, boolean randomStart)
++    {
++        this.maxFoodLevel = maxFoodLevel;
++        this.foodLevel    = randomStart ? rand.nextInt(maxFoodLevel) : maxFoodLevel;
++    }
++
++    /**
++     * Decrease food level by one step.
++     * @return true if the entity has starved and should die.
++     */
++    public boolean tick()
++    {
++        foodLevel--;
++        return foodLevel <= 0;
++    }
++
++    /**
++     * Consume food, capping at maxFoodLevel.
++     * @param amount The food value gained from eating.
++     */
++    public void eat(int amount)
++    {
++        foodLevel = Math.min(foodLevel + amount, maxFoodLevel);
++    }
++
++    public int getFoodLevel()    { return foodLevel; }
++    public int getMaxFoodLevel() { return maxFoodLevel; }
++
++    /** Returns true when the entity has not yet reached its maximum food level (willing to eat). */
++    public boolean isNotFull()   { return foodLevel <= maxFoodLevel; }
++}
+diff --git a/Plant.java b/Plant.java
+index d5520d59f..4b4d859da 100644
+--- a/Plant.java
++++ b/Plant.java
+@@ -7,17 +7,11 @@ import java.util.Random;
+  */
+ public abstract class Plant extends Organism implements Actor
+ {
+-    // the stages of growth for  plant
+-    protected int NUMBER_OF_STAGES;
+-    protected int STEPS_PER_STAGE = 1;
+-    protected int STAGE_OF_GROWTH;
++    // Growth behaviour component — initialised by each subclass constructor.
++    protected GrowthComponent growth;
+ 
+-
+-    // Implementing abstract methods to return fields to be used by the superclass
+-    public int STEPS_PER_STAGE(){ return STEPS_PER_STAGE; }
+     protected static final Random rand = Randomizer.getRandom();
+-    
+-    
++
+     /**
+      * Create a new plant at location in field.
+      *
+@@ -29,19 +23,15 @@ public abstract class Plant extends Organism implements Actor
+         super(field, location);
+     }
+ 
++    /** Returns the number of simulation steps between each growth stage advance. */
++    public int STEPS_PER_STAGE() { return growth.getStepsPerStage(); }
++
+     /**
+-     * Checks if the plant is still able to growth
+-     * Returns true and increments the growth of the plant 
+-     * if the plant hasn't reached its final stage.
+-     * Returns false otherwise
++     * Checks if the plant is still able to grow and advances the stage if so.
++     * @return true if the plant grew; false if already at full maturity.
+      */
+-    public boolean incrementGrowth() {
+-        if(STAGE_OF_GROWTH < NUMBER_OF_STAGES){
+-            STAGE_OF_GROWTH++;
+-            return true;
+-        }
+-        return false;
++    public boolean incrementGrowth()
++    {
++        return growth.increment();
+     }
+-    
+-    
+ }

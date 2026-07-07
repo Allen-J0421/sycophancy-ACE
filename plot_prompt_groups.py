@@ -28,16 +28,16 @@ _AGENT_SUFFIX = "-Agent"
 _ABLATION_CONFIG = _SCRIPT_DIR / "config" / "ablation_B_plus_A_core8.json"
 
 
-def cell_order() -> list[str]:
+def cell_order(ablation_config: Path = _ABLATION_CONFIG) -> list[str]:
     """Canonical cell order from the ablation config (controls first)."""
     try:
-        data = json.loads(_ABLATION_CONFIG.read_text(encoding="utf-8"))
+        data = json.loads(ablation_config.read_text(encoding="utf-8"))
         return [str(c["id"]) for c in data.get("cells", [])]
     except (OSError, json.JSONDecodeError, KeyError):
         return []
 
 
-def cell_dirs(suite_dir: Path) -> list[tuple[str, Path]]:
+def cell_dirs(suite_dir: Path, ablation_config: Path = _ABLATION_CONFIG) -> list[tuple[str, Path]]:
     """Return ``(cell_id, dir)`` for each ``<cellid>-Agent`` folder, in config order."""
     found: dict[str, Path] = {}
     for entry in sorted(suite_dir.iterdir()):
@@ -51,7 +51,7 @@ def cell_dirs(suite_dir: Path) -> list[tuple[str, Path]]:
 
     ordered: list[tuple[str, Path]] = []
     seen: set[str] = set()
-    for cell_id in cell_order():
+    for cell_id in cell_order(ablation_config):
         if cell_id in found:
             ordered.append((cell_id, found[cell_id]))
             seen.add(cell_id)
@@ -231,6 +231,16 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="Suite dir (e.g. output/prompt-expert/Algorithms/001_binary_search).",
     )
+    parser.add_argument(
+        "--ablation-config",
+        type=Path,
+        default=_ABLATION_CONFIG,
+        help=(
+            "Ablation config JSON whose cells[].id order determines chart cell order "
+            "(default: config/ablation_B_plus_A_core8.json). Pass "
+            "config/ablation_novice_4.json for the prompt-novice suite."
+        ),
+    )
     args = parser.parse_args(argv)
 
     suite_dir = args.suite_dir.resolve()
@@ -238,7 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Suite directory not found: {suite_dir}", file=sys.stderr)
         return 2
 
-    cells = cell_dirs(suite_dir)
+    cells = cell_dirs(suite_dir, args.ablation_config)
     if not cells:
         print(f"No <cellid>-Agent cell folders found in {suite_dir}", file=sys.stderr)
         return 2

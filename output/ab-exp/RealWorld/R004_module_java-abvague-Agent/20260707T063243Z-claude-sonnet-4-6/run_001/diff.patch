@@ -1,0 +1,230 @@
+diff --git a/Animal.java b/Animal.java
+index e9408dd3c..8cfda40da 100644
+--- a/Animal.java
++++ b/Animal.java
+@@ -16,13 +16,13 @@ public abstract class Animal extends Organism implements Actor
+ 
+     protected static final Random rand = Randomizer.getRandom();
+ 
+-    // An animal is either male or female 
++    // An animal is either male or female
+     protected enum Gender {
+         MALE,
+         FEMALE
+     }
+-    // An animal's chance of contracting a disease at birth
+-    private double RANDOM_CONTRACTION_RATE = 0.002;
++
++    protected final DiseaseManager diseaseManager = new DiseaseManager(this);
+ 
+ 
+     // Declaring abstract methods to obtain fields used by subclasses
+@@ -55,7 +55,7 @@ public abstract class Animal extends Organism implements Actor
+             this.age = 0;
+             foodLevel = MAX_FOOD_LEVEL();
+         }
+-        randomlyContractDisease();
++        diseaseManager.processRandomContraction();
+     }
+ 
+     /**
+@@ -66,7 +66,7 @@ public abstract class Animal extends Organism implements Actor
+      */
+     public void act(List<Actor> newAnimals, Environment environment)
+     {
+-        randomlyContractDisease();
++        diseaseManager.processRandomContraction();
+         incrementAge();
+         incrementHunger();
+         if(isAlive()) {
+@@ -96,9 +96,7 @@ public abstract class Animal extends Organism implements Actor
+                 setDead();
+             }
+ 
+-            if(isDiseased() && getDisease().getLethalityRate() <= rand.nextDouble()){
+-                // every step, check if the Animal is diseased
+-                // if it is Diseased, and a random double is less than the lethality rate, the Animal dies
++            if(diseaseManager.isLethalStep()) {
+                 setDead();
+             }
+ 
+@@ -114,30 +112,17 @@ public abstract class Animal extends Organism implements Actor
+     {
+         Field field = getField();
+         List<Location> adjacent = field.adjacentLocations(getLocation());
+-        for(Location loc : adjacent){
+-            if(field.getObjectAt(loc) != null && !(field.getObjectAt(loc) instanceof Hunter)){
+-                Organism organism = (Organism) field.getObjectAt(loc);
+-                if (organism.isDiseased() && organism.getDisease().getDiseaseType() != DiseaseType.CONTACT && organism.getDisease().getPropagationRate() <= rand.nextDouble()){
+-                    // contracts the first contact disease it encounters amongst the adjacent animals
+-                    this.setDisease(organism.getDisease());
+-                    break;
+-                }
+-            }
+-        }
++        diseaseManager.checkContactSpread(adjacent, field);
+         Iterator<Location> it = adjacent.iterator();
+         // only eats if it's not full (food level less than max)
+         while(it.hasNext() && foodLevel <= MAX_FOOD_LEVEL()) {
+             Location where = it.next();
+             Object animal = field.getObjectAt(where);
+-            if(animal != null && DIET().contains(animal.getClass())) 
++            if(animal != null && DIET().contains(animal.getClass()))
+             {
+                 Organism food = (Organism) animal;
+-                if (food.isDiseased() &&  food.getDisease().getDiseaseType() == DiseaseType.FOODBORNE && food.getDisease().getPropagationRate() <= rand.nextDouble()) 
+-                {
+-                    // contracts disease from food if it has a disease and that disease is foodborne
+-                    setDisease(food.getDisease());
+-                }
+-                if(food.isAlive()) 
++                diseaseManager.checkFoodborneSpread(food);
++                if(food.isAlive())
+                 {
+                     food.setDead();
+                     int newFoodLevel = foodLevel + food.FOOD_VALUE();
+@@ -153,17 +138,6 @@ public abstract class Animal extends Organism implements Actor
+         return null;
+     }
+ 
+-    /**
+-     * Returns true if an animal contracts a disease at birth.
+-     * Returns false if otherwise. 
+-     */
+-    protected void randomlyContractDisease()
+-    {
+-        if(rand.nextDouble() <= RANDOM_CONTRACTION_RATE) {
+-            setDisease(new Disease());
+-        }
+-    }
+-
+     /**
+      * Check whether this animal is to give birth at this step.
+      * New births will be made into free adjacent locations.
+@@ -194,9 +168,7 @@ public abstract class Animal extends Organism implements Actor
+         if(canBreed() && rand.nextDouble() <= BREEDING_PROBABILITY()) {
+             births = rand.nextInt(MAX_LITTER_SIZE()) + 1;
+             Animal mate = (Animal) getPotentialMates().get(rand.nextInt(getPotentialMates().size()));
+-            if(mate.isDiseased() && mate.getDisease().getDiseaseType() == DiseaseType.SEXUAL){
+-                this.setDisease(mate.getDisease());
+-            }
++            diseaseManager.checkSexualSpread(mate);
+         }
+         return births;
+     }
+diff --git a/DiseaseManager.java b/DiseaseManager.java
+new file mode 100644
+index 000000000..7861c6647
+--- /dev/null
++++ b/DiseaseManager.java
+@@ -0,0 +1,86 @@
++import java.util.List;
++import java.util.Random;
++
++/**
++ * Manages all disease-related logic for an Animal: random contraction,
++ * contact/foodborne/sexual transmission, and per-step lethality checks.
++ *
++ * @version 2022.03.02
++ */
++public class DiseaseManager
++{
++    private static final double RANDOM_CONTRACTION_RATE = 0.002;
++    private static final Random rand = Randomizer.getRandom();
++
++    private final Animal animal;
++
++    public DiseaseManager(Animal animal)
++    {
++        this.animal = animal;
++    }
++
++    /**
++     * Randomly infects the animal with a new Disease at the base contraction rate.
++     */
++    public void processRandomContraction()
++    {
++        if (rand.nextDouble() <= RANDOM_CONTRACTION_RATE) {
++            animal.setDisease(new Disease());
++        }
++    }
++
++    /**
++     * Checks adjacent locations for diseased organisms and potentially
++     * transmits a non-contact disease to the animal.
++     * @param adjacent The list of adjacent locations to scan.
++     * @param field    The field containing the organisms.
++     */
++    public void checkContactSpread(List<Location> adjacent, Field field)
++    {
++        for (Location loc : adjacent) {
++            Object obj = field.getObjectAt(loc);
++            if (obj != null && !(obj instanceof Hunter)) {
++                Organism organism = (Organism) obj;
++                if (organism.isDiseased()
++                        && organism.getDisease().getDiseaseType() != DiseaseType.CONTACT
++                        && organism.getDisease().getPropagationRate() <= rand.nextDouble()) {
++                    animal.setDisease(organism.getDisease());
++                    break;
++                }
++            }
++        }
++    }
++
++    /**
++     * Potentially transmits a foodborne disease from eaten food to the animal.
++     * @param food The organism being consumed.
++     */
++    public void checkFoodborneSpread(Organism food)
++    {
++        if (food.isDiseased()
++                && food.getDisease().getDiseaseType() == DiseaseType.FOODBORNE
++                && food.getDisease().getPropagationRate() <= rand.nextDouble()) {
++            animal.setDisease(food.getDisease());
++        }
++    }
++
++    /**
++     * Potentially transmits a sexually-transmitted disease from a mate.
++     * @param mate The animal being bred with.
++     */
++    public void checkSexualSpread(Animal mate)
++    {
++        if (mate.isDiseased() && mate.getDisease().getDiseaseType() == DiseaseType.SEXUAL) {
++            animal.setDisease(mate.getDisease());
++        }
++    }
++
++    /**
++     * Returns true if the animal's disease kills it this step.
++     */
++    public boolean isLethalStep()
++    {
++        return animal.isDiseased()
++                && animal.getDisease().getLethalityRate() <= rand.nextDouble();
++    }
++}
+diff --git a/Eagle.java b/Eagle.java
+index d80a3bd5e..89dab7875 100644
+--- a/Eagle.java
++++ b/Eagle.java
+@@ -82,7 +82,7 @@ public class Eagle extends Animal
+      */
+     public void act(List<Actor> newAnimals, Environment environment)
+     {
+-        randomlyContractDisease();
++        diseaseManager.processRandomContraction();
+         incrementAge();
+         incrementHunger();
+         if(isAlive()) {
+@@ -104,9 +104,7 @@ public class Eagle extends Animal
+             }
+             // removing overcrowding for eagles since they're above everyone
+ 
+-            if(isDiseased() && getDisease().getLethalityRate() <= rand.nextDouble()){
+-                // every step, check if the Animal is diseased
+-                // if it is Diseased, and a random double is less than the lethality rate, the Animal dies
++            if(diseaseManager.isLethalStep()) {
+                 setDead();
+             }
+ 

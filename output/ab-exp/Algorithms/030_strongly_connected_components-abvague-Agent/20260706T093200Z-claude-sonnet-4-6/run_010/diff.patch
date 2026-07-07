@@ -1,0 +1,118 @@
+diff --git a/strongly_connected_components.java b/strongly_connected_components.java
+index d94f4772b..02dff7360 100644
+--- a/strongly_connected_components.java
++++ b/strongly_connected_components.java
+@@ -1,7 +1,6 @@
+ import java.util.Arrays;
+ import java.util.ArrayList;
+ import java.util.List;
+-import java.util.Stack;
+ import java.util.function.Consumer;
+ import java.util.function.IntConsumer;
+ 
+@@ -65,29 +64,57 @@ class GraphFactory {
+ 
+ class TraversalState {
+     private final boolean[] visited;
+-    private final Stack<Integer> finishOrder;
++    private final int[] finishOrder;
++    private final int finishCount;
+ 
+-    TraversalState(int vertexCount) {
+-        visited = new boolean[vertexCount];
+-        finishOrder = new Stack<>();
++    private TraversalState(boolean[] visited, int[] finishOrder, int finishCount) {
++        this.visited = visited;
++        this.finishOrder = finishOrder;
++        this.finishCount = finishCount;
+     }
+ 
+-    boolean isVisited(int u)   { return visited[u]; }
+-    void markVisited(int u)    { visited[u] = true; }
+-    void recordFinished(int u) { finishOrder.push(u); }
+-    boolean hasPending()       { return !finishOrder.isEmpty(); }
+-    int popNext()              { return finishOrder.pop(); }
++    static TraversalState empty(int vertexCount) {
++        return new TraversalState(new boolean[vertexCount], new int[vertexCount], 0);
++    }
++
++    boolean isVisited(int u) { return visited[u]; }
++
++    TraversalState withVisited(int u) {
++        boolean[] next = Arrays.copyOf(visited, visited.length);
++        next[u] = true;
++        return new TraversalState(next, finishOrder, finishCount);
++    }
++
++    TraversalState withFinished(int u) {
++        int[] next = Arrays.copyOf(finishOrder, finishOrder.length);
++        next[finishCount] = u;
++        return new TraversalState(visited, next, finishCount + 1);
++    }
++
++    boolean hasPending() { return finishCount > 0; }
++    int peekNext()       { return finishOrder[finishCount - 1]; }
++
++    TraversalState withPopped() {
++        return new TraversalState(visited, finishOrder, finishCount - 1);
++    }
++}
++
++@FunctionalInterface
++interface StateTransition {
++    TraversalState apply(TraversalState state, int vertex);
+ }
+ 
+ class GraphTraversal {
+-    static void dfs(NeighborProvider provider, int start, TraversalState state,
+-                    IntConsumer onEnter, IntConsumer onExit) {
+-        state.markVisited(start);
+-        onEnter.accept(start);
++    static TraversalState dfs(NeighborProvider provider, int start, TraversalState state,
++                               StateTransition onEnter, StateTransition onExit) {
++        state = state.withVisited(start);
++        state = onEnter.apply(state, start);
++        TraversalState[] current = {state};
+         provider.neighbors(start, v -> {
+-            if (!state.isVisited(v)) dfs(provider, v, state, onEnter, onExit);
++            if (!current[0].isVisited(v))
++                current[0] = dfs(provider, v, current[0], onEnter, onExit);
+         });
+-        onExit.accept(start);
++        return onExit.apply(current[0], start);
+     }
+ }
+ 
+@@ -100,22 +127,27 @@ class KosarajuSCC implements SCCAlgorithm {
+     @Override
+     public List<List<Integer>> findSCCs(Graph graph) {
+         int V = graph.vertexCount();
+-        TraversalState pass1 = new TraversalState(V);
++        TraversalState pass1 = TraversalState.empty(V);
+ 
+         for (int i = 0; i < V; i++) {
+             if (!pass1.isVisited(i))
+-                GraphTraversal.dfs(graph, i, pass1, u -> {}, pass1::recordFinished);
++                pass1 = GraphTraversal.dfs(graph, i, pass1,
++                    (s, u) -> s,
++                    (s, u) -> s.withFinished(u));
+         }
+ 
+         Graph reversed = graph.reverse();
+-        TraversalState pass2 = new TraversalState(V);
++        TraversalState pass2 = TraversalState.empty(V);
+         List<List<Integer>> sccs = new ArrayList<>();
+ 
+         while (pass1.hasPending()) {
+-            int u = pass1.popNext();
++            int u = pass1.peekNext();
++            pass1 = pass1.withPopped();
+             if (!pass2.isVisited(u)) {
+                 List<Integer> component = new ArrayList<>();
+-                GraphTraversal.dfs(reversed, u, pass2, component::add, u2 -> {});
++                pass2 = GraphTraversal.dfs(reversed, u, pass2,
++                    (s, v) -> { component.add(v); return s; },
++                    (s, v) -> s);
+                 sccs.add(component);
+             }
+         }

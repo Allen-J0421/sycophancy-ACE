@@ -1,0 +1,207 @@
+diff --git a/PopulationStatsMonitor.java b/PopulationStatsMonitor.java
+new file mode 100644
+index 000000000..8c021f0bf
+--- /dev/null
++++ b/PopulationStatsMonitor.java
+@@ -0,0 +1,65 @@
++/**
++ * This file is part of the Predator-Prey Simulation.
++ *
++ * Observes a Field each step and maintains population counts via FieldStats.
++ * Provides viability checks and population summaries without any GUI involvement.
++ *
++ * @version 2022.03.02
++ */
++public class PopulationStatsMonitor
++{
++    private final FieldStats stats;
++
++    /**
++     * Construct a monitor backed by a fresh FieldStats instance.
++     */
++    public PopulationStatsMonitor()
++    {
++        stats = new FieldStats();
++    }
++
++    /**
++     * Scan the entire field and update the population counts.
++     * Must be called once per step before querying population data.
++     *
++     * @param field The field to observe.
++     */
++    public void observe(Field field)
++    {
++        stats.reset();
++        for (int row = 0; row < field.getDepth(); row++) {
++            for (int col = 0; col < field.getWidth(); col++) {
++                Object obj = field.getObjectAt(row, col);
++                if (obj != null) {
++                    stats.incrementCount(obj.getClass());
++                }
++            }
++        }
++        stats.countFinished();
++    }
++
++    /**
++     * Return a human-readable summary of current population counts.
++     * Call {@link #observe(Field)} first to ensure counts are fresh.
++     *
++     * @param field The field the counts were collected from.
++     * @return A string listing each species and its count.
++     */
++    public String getPopulationSummary(Field field)
++    {
++        return stats.getPopulationDetails(field);
++    }
++
++    /**
++     * Determine whether the simulation is still viable (more than one
++     * species has a non-zero population).
++     * Call {@link #observe(Field)} first to ensure counts are fresh.
++     *
++     * @param field The field the counts were collected from.
++     * @return true if more than one species remains alive.
++     */
++    public boolean isViable(Field field)
++    {
++        return stats.isViable(field);
++    }
++}
+diff --git a/Simulator.java b/Simulator.java
+index 737e4543f..c712e7073 100644
+--- a/Simulator.java
++++ b/Simulator.java
+@@ -18,6 +18,8 @@ public class Simulator
+     private SimulatorView view;
+     // Owns all simulation state and step logic.
+     private SimulationController controller;
++    // Observes the field and maintains population counts.
++    private PopulationStatsMonitor monitor;
+ 
+     /**
+      * Construct a simulation field with default size.
+@@ -43,6 +45,7 @@ public class Simulator
+ 
+         view = new SimulatorView(depth, width);
+         controller = new SimulationController(depth, width);
++        monitor = new PopulationStatsMonitor();
+ 
+         reset();
+     }
+@@ -64,7 +67,7 @@ public class Simulator
+      */
+     public void simulate(int numSteps)
+     {
+-        for (int i = 1; i <= numSteps && view.isViable(controller.getField()); i++) {
++        for (int i = 1; i <= numSteps && monitor.isViable(controller.getField()); i++) {
+             simulateOneStep();
+             delay(5);
+         }
+@@ -76,7 +79,9 @@ public class Simulator
+     public void simulateOneStep()
+     {
+         controller.advance();
++        monitor.observe(controller.getField());
+         view.showStatus(controller.getStep(), controller.getField());
++        view.updatePopulation(monitor.getPopulationSummary(controller.getField()));
+         view.updateTimeLabel(controller.getDay(), controller.getHour());
+         view.updateEnvironmentLabel(controller.getCurrentWeather(), controller.getCurrentTime());
+     }
+@@ -96,7 +101,9 @@ public class Simulator
+     {
+         Populator populator = new Populator(view);
+         controller.reset(populator);
++        monitor.observe(controller.getField());
+         view.showStatus(controller.getStep(), controller.getField());
++        view.updatePopulation(monitor.getPopulationSummary(controller.getField()));
+     }
+ 
+     /**
+diff --git a/SimulatorView.java b/SimulatorView.java
+index ed915aef6..32e6884a4 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -29,11 +29,9 @@ public class SimulatorView extends JFrame
+ 
+     private JLabel stepLabel, population, infoLabel, timeLabel, environmentLabel;
+     private FieldView fieldView;
+-    
++
+     // A map for storing colors for participants in the simulation
+     private Map<Class, Color> colors;
+-    // A statistics object computing and storing simulation information
+-    private FieldStats stats;
+ 
+     /**
+      * Create a view of the given width and height.
+@@ -42,7 +40,6 @@ public class SimulatorView extends JFrame
+      */
+     public SimulatorView(int height, int width)
+     {
+-        stats = new FieldStats();
+         colors = new LinkedHashMap<>();
+ 
+         setTitle("Predator Prey Simulation");
+@@ -106,25 +103,24 @@ public class SimulatorView extends JFrame
+     }
+ 
+     /**
+-     * Show the current status of the field.
+-     * @param step Which iteration step it is.
+-     * @param field The field whose status is to be displayed.
++     * Paint the current state of the field and update the step counter.
++     * Population text must be supplied separately via {@link #updatePopulation(String)}.
++     *
++     * @param step  Which iteration step it is.
++     * @param field The field whose contents are to be painted.
+      */
+     public void showStatus(int step, Field field)
+     {
+-        if(!isVisible()) {
++        if (!isVisible()) {
+             setVisible(true);
+         }
+         stepLabel.setText(STEP_PREFIX + step);
+-        stats.reset();
+-        
+-        fieldView.preparePaint();
+ 
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
++        fieldView.preparePaint();
++        for (int row = 0; row < field.getDepth(); row++) {
++            for (int col = 0; col < field.getWidth(); col++) {
+                 Object animal = field.getObjectAt(row, col);
+-                if(animal != null) {
+-                    stats.incrementCount(animal.getClass());
++                if (animal != null) {
+                     fieldView.drawMark(col, row, getColor(animal.getClass()));
+                 }
+                 else {
+@@ -132,19 +128,17 @@ public class SimulatorView extends JFrame
+                 }
+             }
+         }
+-        stats.countFinished();
+-
+-        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(field));
+         fieldView.repaint();
+     }
+ 
+     /**
+-     * Determine whether the simulation should continue to run.
+-     * @return true If there is more than one species alive.
++     * Update the population label with the given pre-computed summary string.
++     *
++     * @param populationText A summary of current population counts.
+      */
+-    public boolean isViable(Field field)
++    public void updatePopulation(String populationText)
+     {
+-        return stats.isViable(field);
++        population.setText(POPULATION_PREFIX + populationText);
+     }
+ 
+     public void updateTimeLabel(int day, int hour){

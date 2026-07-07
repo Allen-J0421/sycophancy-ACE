@@ -1,0 +1,667 @@
+diff --git a/FieldRenderer.java b/FieldRenderer.java
+new file mode 100644
+index 000000000..2b996e691
+--- /dev/null
++++ b/FieldRenderer.java
+@@ -0,0 +1,129 @@
++import java.awt.*;
++import javax.swing.*;
++import java.util.*;
++
++/**
++ * A JPanel that renders a Field grid as a scaled pixel image and manages
++ * the per-species color map. Consumers call render() each simulation step;
++ * the panel handles preparePaint, cell drawing, stats accumulation, and repaint.
++ *
++ * @version 2022.03.02
++ */
++class FieldRenderer extends JPanel
++{
++    static final Color EMPTY_COLOR   = Color.white;
++    static final Color UNKNOWN_COLOR = Color.gray;
++
++    private static final int GRID_VIEW_SCALING_FACTOR = 4;
++
++    private final int gridWidth, gridHeight;
++    private int xScale, yScale;
++    private Dimension size;
++    private Graphics g;
++    private Image fieldImage;
++
++    private final Map<Class, Color> colors = new LinkedHashMap<>();
++
++    FieldRenderer(int height, int width)
++    {
++        gridHeight = height;
++        gridWidth  = width;
++        size = new Dimension(0, 0);
++    }
++
++    /** Set the display color for a species class. */
++    public void setColor(Class cls, Color color)
++    {
++        colors.put(cls, color);
++    }
++
++    /** Return the display color for a species class, or UNKNOWN_COLOR if unset. */
++    public Color getColor(Class cls)
++    {
++        Color col = colors.get(cls);
++        return col != null ? col : UNKNOWN_COLOR;
++    }
++
++    /**
++     * Synchronise the renderer color for one species to match a checkbox state.
++     * Un-checking hides the species (white); re-checking restores the default color.
++     */
++    public void updateColorForClass(Class cls, boolean isChecked)
++    {
++        if (!isChecked) {
++            setColor(cls, Color.white);
++        }
++        else if (getColor(cls).equals(Color.white) || getColor(cls).equals(UNKNOWN_COLOR)) {
++            setColor(cls, SimulationInfo.DEFAULT_COLOR_MAP.get(cls));
++        }
++    }
++
++    /**
++     * Scan every cell of the field: accumulate counts into stats, draw each cell,
++     * mark counting complete, then trigger a Swing repaint.
++     *
++     * @param field The field to scan.
++     * @param stats The FieldStats object to accumulate counts into.
++     */
++    public void render(Field field, FieldStats stats)
++    {
++        preparePaint();
++        for(int row = 0; row < field.getDepth(); row++) {
++            for(int col = 0; col < field.getWidth(); col++) {
++                Object actor = field.getObjectAt(row, col);
++                if(actor != null) {
++                    stats.incrementCount(actor.getClass());
++                    if(actor instanceof Organism && ((Organism) actor).isDiseased()) {
++                        stats.incrementDiseasedCount();
++                    }
++                    drawMark(col, row, getColor(actor.getClass()));
++                }
++                else {
++                    drawMark(col, row, EMPTY_COLOR);
++                }
++            }
++        }
++        stats.countFinished();
++        repaint();
++    }
++
++    @Override
++    public Dimension getPreferredSize()
++    {
++        return new Dimension(gridWidth  * GRID_VIEW_SCALING_FACTOR,
++                             gridHeight * GRID_VIEW_SCALING_FACTOR);
++    }
++
++    @Override
++    public void paintComponent(Graphics g)
++    {
++        if(fieldImage != null) {
++            Dimension currentSize = getSize();
++            if(size.equals(currentSize)) {
++                g.drawImage(fieldImage, 0, 0, null);
++            }
++            else {
++                g.drawImage(fieldImage, 0, 0, currentSize.width, currentSize.height, null);
++            }
++        }
++    }
++
++    private void preparePaint()
++    {
++        if(!size.equals(getSize())) {
++            size = getSize();
++            fieldImage = createImage(size.width, size.height);
++            g = fieldImage.getGraphics();
++            xScale = size.width / gridWidth;
++            if(xScale < 1) xScale = GRID_VIEW_SCALING_FACTOR;
++            yScale = size.height / gridHeight;
++            if(yScale < 1) yScale = GRID_VIEW_SCALING_FACTOR;
++        }
++    }
++
++    private void drawMark(int x, int y, Color color)
++    {
++        g.setColor(color);
++        g.fillRect(x * xScale, y * yScale, xScale - 1, yScale - 1);
++    }
++}
+diff --git a/PopulationStatsPanel.java b/PopulationStatsPanel.java
+new file mode 100644
+index 000000000..ab7149cd3
+--- /dev/null
++++ b/PopulationStatsPanel.java
+@@ -0,0 +1,91 @@
++import java.awt.*;
++import javax.swing.*;
++import java.util.*;
++
++/**
++ * A JPanel that displays per-species population checkboxes and the current
++ * disease count. Owns a FieldStats instance; checkbox toggles push color
++ * changes directly into the FieldRenderer.
++ *
++ * @version 2022.03.02
++ */
++class PopulationStatsPanel extends JPanel
++{
++    private final FieldStats stats;
++    private final FieldRenderer renderer;
++    private final Map<Class<?>, JCheckBox> classToCheckBox;
++    private final JLabel diseasedPopulation;
++
++    PopulationStatsPanel(FieldRenderer renderer)
++    {
++        this.renderer = renderer;
++        this.stats = new FieldStats();
++
++        JCheckBox grassCheckBox  = new JCheckBox("Grass: 0",  true);
++        JCheckBox mouseCheckBox  = new JCheckBox("Mouse: 0",  true);
++        JCheckBox deerCheckBox   = new JCheckBox("Deer: 0",   true);
++        JCheckBox wolfCheckBox   = new JCheckBox("Wolf: 0",   true);
++        JCheckBox coyoteCheckBox = new JCheckBox("Coyote: 0", true);
++        JCheckBox hunterCheckBox = new JCheckBox("Hunter: 0", true);
++        JCheckBox eagleCheckBox  = new JCheckBox("Eagle: 0",  true);
++
++        diseasedPopulation = new JLabel("Diseased: 0", JLabel.LEFT);
++
++        classToCheckBox = Map.ofEntries(
++                Map.entry(Deer.class,   deerCheckBox),
++                Map.entry(Coyote.class, coyoteCheckBox),
++                Map.entry(Wolf.class,   wolfCheckBox),
++                Map.entry(Mouse.class,  mouseCheckBox),
++                Map.entry(Grass.class,  grassCheckBox),
++                Map.entry(Hunter.class, hunterCheckBox),
++                Map.entry(Eagle.class,  eagleCheckBox)
++        );
++
++        for(Class cls : SimulationInfo.ALL_ACTORS) {
++            classToCheckBox.get(cls).setForeground(SimulationInfo.DEFAULT_COLOR_MAP.get(cls));
++        }
++
++        // Each checkbox toggle immediately updates the renderer's color for that species.
++        for(Map.Entry<Class<?>, JCheckBox> entry : classToCheckBox.entrySet()) {
++            Class<?> cls = entry.getKey();
++            JCheckBox box = entry.getValue();
++            box.addItemListener(e -> renderer.updateColorForClass(cls, box.isSelected()));
++        }
++
++        setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
++        add(new JLabel("POPULATIONS"));
++        add(grassCheckBox);
++        add(mouseCheckBox);
++        add(deerCheckBox);
++        add(wolfCheckBox);
++        add(coyoteCheckBox);
++        add(hunterCheckBox);
++        add(eagleCheckBox);
++        add(diseasedPopulation);
++    }
++
++    /**
++     * Refresh checkbox text and the disease count label from the current stats.
++     */
++    public void updateDisplay()
++    {
++        for(Class cls : SimulationInfo.ALL_ACTORS) {
++            classToCheckBox.get(cls).setText(stats.getCountDetails(cls));
++        }
++        diseasedPopulation.setText(stats.getDiseasedPopulation());
++    }
++
++    /**
++     * Push the current checkbox visibility state into the renderer color map.
++     * Called after each render pass so that any checkbox changes take effect.
++     */
++    public void syncColorsToRenderer()
++    {
++        for(Map.Entry<Class<?>, JCheckBox> entry : classToCheckBox.entrySet()) {
++            renderer.updateColorForClass(entry.getKey(), entry.getValue().isSelected());
++        }
++    }
++
++    public FieldStats getStats()           { return stats; }
++    public boolean isViable(Field field)   { return stats.isViable(field); }
++}
+diff --git a/SimulatorView.java b/SimulatorView.java
+index 091f130c8..7d1fbb749 100644
+--- a/SimulatorView.java
++++ b/SimulatorView.java
+@@ -3,48 +3,24 @@ import java.awt.event.*;
+ import javax.swing.*;
+ import java.util.*;
+ 
+-
+ /**
+- * A graphical view of the simulation   grid.
+- * The view displays a colored rectangle for each location
+- * representing its contents. It uses a default background color.
+- * Colors for each type of species can be defined using the
+- * setColor method.
++ * High-level GUI window for the simulation. Owns the status label bar and
++ * the control buttons, and delegates rendering to FieldRenderer and
++ * statistics display to PopulationStatsPanel.
+  *
+  * @version 2022.03.3
+  */
+ public class SimulatorView extends JFrame
+ {
+-    // Colors used for empty locations.
+-    private static final Color EMPTY_COLOR = Color.white;
+-
+-
+-
+-    // Color used for objects that have no defined color.
+-    private static final Color UNKNOWN_COLOR = Color.gray;
+-
+-    private final String STEP_PREFIX = "Step: ";
+-    private final String POPULATION_PREFIX = "Population: ";
+-    private final String DISEASED_PREFIX = "Diseased: ";
+-    private JLabel stepLabel, population, infoLabel, diseasedPopulation;
+-    private FieldView fieldView;
+-
+-    // adding the labels for weather and time
++    private final String STEP_PREFIX    = "Step: ";
+     private final String WEATHER_PREFIX = "Weather: ";
+-    private final String TIME_PREFIX = "Time: ";
+-    private JLabel weatherLabel, timeLabel;
++    private final String TIME_PREFIX    = "Time: ";
+ 
+-    // adding the new buttons
+-    private JButton oneStepButton,stopButton, longButton, resetButton;
+-    private JCheckBox grassCheckBox, mouseCheckBox, deerCheckBox, wolfCheckBox, coyoteCheckBox, hunterCheckBox, eagleCheckBox;
+-    private Map<Class<?>, JCheckBox> classToCheckBox;
+-
+-
+-    // A map for storing colors for participants in the simulation
+-    private Map<Class, Color> colors;
+-    // A statistics object computing and storing simulation information
+-    private FieldStats stats;
++    private JLabel stepLabel, infoLabel, weatherLabel, timeLabel;
++    private JButton oneStepButton, stopButton, longButton, resetButton;
+ 
++    private final FieldRenderer renderer;
++    private final PopulationStatsPanel statsPanel;
+ 
+     /**
+      * Create a view of the given width and height.
+@@ -53,195 +29,73 @@ public class SimulatorView extends JFrame
+      */
+     public SimulatorView(int height, int width)
+     {
+-        stats = new FieldStats();
+-        colors = new LinkedHashMap<>();
++        renderer   = new FieldRenderer(height, width);
++        statsPanel = new PopulationStatsPanel(renderer);
+ 
+         setTitle("Prey and predator simulation");
+-        stepLabel = new JLabel(STEP_PREFIX, JLabel.CENTER);
+-        infoLabel = new JLabel("  ", JLabel.CENTER);
+-        population = new JLabel(POPULATION_PREFIX, JLabel.CENTER);
+-        diseasedPopulation = new JLabel(DISEASED_PREFIX, JLabel.LEFT);
+-
+ 
++        stepLabel    = new JLabel(STEP_PREFIX,    JLabel.CENTER);
++        infoLabel    = new JLabel("  ",           JLabel.CENTER);
+         weatherLabel = new JLabel(WEATHER_PREFIX, JLabel.CENTER);
+-        timeLabel = new JLabel(TIME_PREFIX, JLabel.CENTER);
++        timeLabel    = new JLabel(TIME_PREFIX,    JLabel.CENTER);
+ 
++        oneStepButton = new JButton("Simulate 1 step");
++        stopButton    = new JButton("Stop simulation");
++        longButton    = new JButton("Play 4000 steps");
++        resetButton   = new JButton("Reset simulation");
+ 
+         JPanel toolbar = new JPanel();
+-        toolbar.setLayout(new GridLayout(3, 1));
+-        oneStepButton = new JButton("Simulate 1 step");
+-        stopButton = new JButton("Stop simulation");
+-        longButton = new JButton("Play 4000 steps");
+-        resetButton = new JButton("Reset simulation");
++        toolbar.setLayout(new BoxLayout(toolbar, BoxLayout.Y_AXIS));
+         toolbar.add(oneStepButton);
+         toolbar.add(longButton);
+         toolbar.add(stopButton);
+         toolbar.add(resetButton);
+-
+-
+-        setLocation(0, 0);
+-
+-        fieldView = new FieldView(height, width);
+-
+-        Container contents = getContentPane();
++        toolbar.add(statsPanel);
+ 
+         JPanel infoPane = new JPanel(new BorderLayout());
+-        toolbar.setLayout(new BoxLayout(toolbar, BoxLayout.Y_AXIS));
+-
+-        infoPane.add(stepLabel, BorderLayout.WEST);
+-        infoPane.add(infoLabel, BorderLayout.CENTER);
++        infoPane.add(stepLabel,    BorderLayout.WEST);
++        infoPane.add(infoLabel,    BorderLayout.CENTER);
+         infoPane.add(weatherLabel, BorderLayout.CENTER);
+-        infoPane.add(timeLabel, BorderLayout.EAST);
+-
+-        contents.add(infoPane, BorderLayout.NORTH);
+-        contents.add(fieldView, BorderLayout.CENTER);
+-//        contents.add(population, BorderLayout.SOUTH);
+-        contents.add(toolbar, BorderLayout.EAST);
+-
+-
+-
+-        grassCheckBox = new JCheckBox("Grass: 0", true);
+-        mouseCheckBox = new JCheckBox("Mouse: 0", true);
+-        deerCheckBox = new JCheckBox("Deer: 0", true);
+-        wolfCheckBox = new JCheckBox("Wolf: 0", true);
+-        coyoteCheckBox = new JCheckBox("Coyote: 0", true);
+-        hunterCheckBox = new JCheckBox("Hunter: 0", true);
+-        eagleCheckBox = new JCheckBox("Eagle: 0", true);
+-
+-
+-        classToCheckBox = Map.ofEntries(
+-                Map.entry(Deer.class, deerCheckBox),
+-                Map.entry(Coyote.class, coyoteCheckBox),
+-                Map.entry(Wolf.class, wolfCheckBox),
+-                Map.entry(Mouse.class, mouseCheckBox),
+-                Map.entry(Grass.class, grassCheckBox),
+-                Map.entry(Hunter.class, hunterCheckBox),
+-                Map.entry(Eagle.class, eagleCheckBox)
+-        );
+-
+-        for(Class cls : SimulationInfo.ALL_ACTORS){
+-            classToCheckBox.get(cls).setForeground(SimulationInfo.DEFAULT_COLOR_MAP.get(cls));
+-        }
+-
+-        deerCheckBox.addItemListener(e -> checkCheckBoxByColor(Deer.class));
+-        coyoteCheckBox.addItemListener(e -> checkCheckBoxByColor(Coyote.class));
+-        wolfCheckBox.addItemListener(e -> checkCheckBoxByColor(Wolf.class));
+-        mouseCheckBox.addItemListener(e -> checkCheckBoxByColor(Mouse.class));
+-        grassCheckBox.addItemListener(e -> checkCheckBoxByColor(Grass.class));
+-        hunterCheckBox.addItemListener(e -> checkCheckBoxByColor(Hunter.class));
+-        eagleCheckBox.addItemListener(e -> checkCheckBoxByColor(Eagle.class));
+-
+-
+-        JPanel checkboxes = new JPanel();
+-        checkboxes.setLayout(new BoxLayout(checkboxes, BoxLayout.Y_AXIS));
+-        checkboxes.add(new JLabel("POPULATIONS"));
+-        checkboxes.add(grassCheckBox);
+-        checkboxes.add(mouseCheckBox);
+-        checkboxes.add(deerCheckBox);
+-        checkboxes.add(wolfCheckBox);
+-        checkboxes.add(coyoteCheckBox);
+-        checkboxes.add(hunterCheckBox);
+-        checkboxes.add(eagleCheckBox);
+-        checkboxes.add(diseasedPopulation);
+-
+-        toolbar.add(checkboxes);
+-
++        infoPane.add(timeLabel,    BorderLayout.EAST);
+ 
++        Container contents = getContentPane();
++        contents.add(infoPane,  BorderLayout.NORTH);
++        contents.add(renderer,  BorderLayout.CENTER);
++        contents.add(toolbar,   BorderLayout.EAST);
+ 
++        setLocation(0, 0);
+         pack();
+         setVisible(false);
+ 
+-        setColorsByCheckBox();
+-
+-
++        statsPanel.syncColorsToRenderer();
+     }
+ 
+-    /**
+-     * Adding an actionListener for the oneStepButton
+-     */
+-    public void addOneStepButtonListener(ActionListener listener) {
+-        oneStepButton.addActionListener(listener);
+-    }
++    /** Register an action listener on the one-step button. */
++    public void addOneStepButtonListener(ActionListener listener) { oneStepButton.addActionListener(listener); }
+ 
+-    /**
+-     * Adding an actionListener for the oneStepButton
+-     */
+-    public void addResetButtonListener(ActionListener listener) {
+-        resetButton.addActionListener(listener);
+-    }
++    /** Register an action listener on the reset button. */
++    public void addResetButtonListener(ActionListener listener)   { resetButton.addActionListener(listener); }
+ 
+-    /**
+-     * Adding an actionListener for the stopButton
+-     */
+-    public void addStopButtonListener(ActionListener listener) {
+-        stopButton.addActionListener(listener);
+-    }
++    /** Register an action listener on the stop button. */
++    public void addStopButtonListener(ActionListener listener)    { stopButton.addActionListener(listener); }
+ 
+-    /**
+-     * Adding an actionListener for the longButton
+-     */
+-    public void addLongButtonListener(ActionListener listener) {
+-        longButton.addActionListener(listener);
+-    }
+-
+-
+-    /**
+-     * Define a color to be used for a given class of animal.
+-     * @param animalClass The animal's Class object.
+-     * @param color The color to be used for the given class.
+-     */
+-    public void setColor(Class animalClass, Color color)
+-    {
+-        colors.put(animalClass, color);
+-    }
++    /** Register an action listener on the long-run button. */
++    public void addLongButtonListener(ActionListener listener)    { longButton.addActionListener(listener); }
+ 
+-    /**
+-     * Display a short information label at the top of the window.
+-     */
+-    public void setInfoText(String text)
+-    {
+-        infoLabel.setText(text);
+-    }
++    /** Set the display color for a species class. */
++    public void setColor(Class cls, Color color) { renderer.setColor(cls, color); }
+ 
+-    /**
+-     * @return The color to be used for a given class of animal.
+-     */
+-    private Color getColor(Class animalClass)
+-    {
+-        Color col = colors.get(animalClass);
+-        if(col == null) {
+-            // no color defined for this class
+-            return UNKNOWN_COLOR;
+-        }
+-        else {
+-            return col;
+-        }
+-    }
+-
+-    public void setColorsByCheckBox(){
+-        for(Class c : new Class[] {Grass.class, Deer.class, Coyote.class, Wolf.class, Eagle.class, Hunter.class}){
+-            if(!classToCheckBox.get(c).isSelected()){
+-                setColor(c, Color.white);
+-            }
+-            else if(classToCheckBox.get(c).isSelected() && getColor(c).equals(UNKNOWN_COLOR)){
+-                setColor(c, SimulationInfo.DEFAULT_COLOR_MAP.get(c));
+-            }
+-        }
+-    }
+-
+-    public void checkCheckBoxByColor(Class c){
+-        if(!classToCheckBox.get(c).isSelected()){
+-            setColor(c, Color.white);
+-        }
+-        else if(classToCheckBox.get(c).isSelected() && getColor(c).equals(Color.white)){
+-            setColor(c, SimulationInfo.DEFAULT_COLOR_MAP.get(c));
+-        }
+-    }
++    /** Display a short information label at the top of the window. */
++    public void setInfoText(String text) { infoLabel.setText(text); }
+ 
+     /**
+-     * Show the current status of the field.
+-     * @param step Which iteration step it is.
+-     * @param field The field whose status is to be displayed.
++     * Show the current status of the field: update labels, render the grid,
++     * refresh population counts, and sync checkbox-driven colors.
++     *
++     * @param step    The current simulation step.
++     * @param weather Current weather string.
++     * @param time    Current time-of-day string.
++     * @param field   The field to render.
+      */
+     public void showStatus(int step, String weather, String time, Field field)
+     {
+@@ -252,131 +106,19 @@ public class SimulatorView extends JFrame
+         stepLabel.setText(STEP_PREFIX + step);
+         weatherLabel.setText(WEATHER_PREFIX + weather);
+         timeLabel.setText(TIME_PREFIX + time);
+-        stats.reset();
+-
+-        fieldView.preparePaint();
+-
+-        for(int row = 0; row < field.getDepth(); row++) {
+-            for(int col = 0; col < field.getWidth(); col++) {
+-                Object actor = field.getObjectAt(row, col);
+-                if(actor != null) {
+-                    stats.incrementCount(actor.getClass());
+-                    if(actor instanceof Organism){
+-                        if(((Organism) actor).isDiseased()){
+-                            stats.incrementDiseasedCount();
+-                        }
+-                    }
+-                    fieldView.drawMark(col, row, getColor(actor.getClass()));
+-                }
+-                else {
+-                    fieldView.drawMark(col, row, EMPTY_COLOR);
+-                }
+-            }
+-        }
+-        stats.countFinished();
+-        for(Class cls : SimulationInfo.ALL_ACTORS){
+-            classToCheckBox.get(cls).setText(stats.getCountDetails(cls));
+-        }
+ 
+-//        population.setText(POPULATION_PREFIX + stats.getPopulationDetails(field));
+-        diseasedPopulation.setText(stats.getDiseasedPopulation());
+-        setColorsByCheckBox();
+-        fieldView.repaint();
++        statsPanel.getStats().reset();
++        renderer.render(field, statsPanel.getStats());
++        statsPanel.updateDisplay();
++        statsPanel.syncColorsToRenderer();
+     }
+ 
+     /**
+      * Determine whether the simulation should continue to run.
+-     * @return true If there is more than one species alive.
++     * @return true if there is more than one species alive.
+      */
+     public boolean isViable(Field field)
+     {
+-        return stats.isViable(field);
+-    }
+-
+-    /**
+-     * Provide a graphical view of a rectangular field. This is
+-     * a nested class (a class defined inside a class) which
+-     * defines a custom component for the user interface. This
+-     * component displays the field.
+-     * This is rather advanced GUI stuff - you can ignore This
+-     * for your project if you like.
+-     */
+-    private class FieldView extends JPanel
+-    {
+-        private final int GRID_VIEW_SCALING_FACTOR = 4;
+-
+-        private int gridWidth, gridHeight;
+-        private int xScale, yScale;
+-        Dimension size;
+-        private Graphics g;
+-        private Image fieldImage;
+-
+-        /**
+-         * Create a new FieldView component.
+-         */
+-        public FieldView(int height, int width)
+-        {
+-            gridHeight = height;
+-            gridWidth = width;
+-            size = new Dimension(0, 0);
+-        }
+-
+-        /**
+-         * Tell the GUI manager how big we would like to be.
+-         */
+-        public Dimension getPreferredSize()
+-        {
+-            return new Dimension(gridWidth * GRID_VIEW_SCALING_FACTOR,
+-                                 gridHeight * GRID_VIEW_SCALING_FACTOR);
+-        }
+-
+-        /**
+-         * Prepare for a new round of painting. Since the component
+-         * may be resized, compute the scaling factor again.
+-         */
+-        public void preparePaint()
+-        {
+-            if(! size.equals(getSize())) {  // if the size has changed...
+-                size = getSize();
+-                fieldImage = fieldView.createImage(size.width, size.height);
+-                g = fieldImage.getGraphics();
+-
+-                xScale = size.width / gridWidth;
+-                if(xScale < 1) {
+-                    xScale = GRID_VIEW_SCALING_FACTOR;
+-                }
+-                yScale = size.height / gridHeight;
+-                if(yScale < 1) {
+-                    yScale = GRID_VIEW_SCALING_FACTOR;
+-                }
+-            }
+-        }
+-
+-        /**
+-         * Paint on grid location on the field in a given color.
+-         */
+-        public void drawMark(int x, int y, Color color)
+-        {
+-            g.setColor(color);
+-            g.fillRect(x * xScale, y * yScale, xScale-1, yScale-1);
+-        }
+-
+-        /**
+-         * The field view component needs to be redisplayed. Copy the
+-         * internal image to screen.
+-         */
+-        public void paintComponent(Graphics g)
+-        {
+-            if(fieldImage != null) {
+-                Dimension currentSize = getSize();
+-                if(size.equals(currentSize)) {
+-                    g.drawImage(fieldImage, 0, 0, null);
+-                }
+-                else {
+-                    // Rescale the previous image.
+-                    g.drawImage(fieldImage, 0, 0, currentSize.width, currentSize.height, null);
+-                }
+-            }
+-        }
++        return statsPanel.isViable(field);
+     }
+ }

@@ -1,0 +1,486 @@
+diff --git a/Consumer.java b/Consumer.java
+index bd709d9be..346dbf419 100644
+--- a/Consumer.java
++++ b/Consumer.java
+@@ -13,7 +13,6 @@ public abstract class Consumer extends Actor
+     // Properties shared between all consumers:
+     private static final int STARTING_SUSTENANCE_LEVEL = 20;
+     private static final double NEW_DISEASE = 0.0005;
+-    private static final double NIGHT_PREY_MISS_PROBABILITY = 0.5;
+     private static Random rand = Randomizer.getRandom();
+ 
+     // Properties unique to this consumer:
+@@ -22,14 +21,14 @@ public abstract class Consumer extends Actor
+     private int maxSustenanceLevel;
+     private ArrayList<Class> prey;
+     private Disease disease;
+-    private boolean ifCarcass;
+-    private Carcass newCarcass;
+     private boolean canEatCarcass;
+     private boolean primaryConsumer;
+-    
++
++    private final ForagingService foragingService;
++
+     /**
+      * Create a new consumer at a location in the field.
+-     * 
++     *
+      * @param field               The field currently occupied.
+      * @param location            The location within the field.
+      * @param consumptionWorth    The worth of the consumer if consumed.
+@@ -48,24 +47,19 @@ public abstract class Consumer extends Actor
+         this.breedingAge = breedingAge;
+         this.primaryConsumer = primaryConsumer;
+         sustenanceLevel = 30;
++        foragingService = new ForagingService(prey, canEatCarcass);
+     }
+-    
++
+     /**
+      * Make this consumer act - that is: make it do
+      * whatever it wants/needs to do.
+-     * 
++     *
+      * @param newConsumers A list to receive newly born consumers.
+      */
+     public void act(List<Actor> newConsumers)
+     {
+         giveBirth(newConsumers);
+-        boolean wasPossibleToMove = huntForFood();
+-        if (ifCarcass)
+-        {
+-            newConsumers.add(newCarcass);
+-            ifCarcass = false;
+-            newCarcass = null;
+-        }
++        boolean wasPossibleToMove = huntForFood(newConsumers);
+         if (hasDisease())
+         {
+             diseaseEffect();
+@@ -110,7 +104,7 @@ public abstract class Consumer extends Actor
+     private void checkForFatalDisease()
+     {
+         if(hasDisease() && disease.diseaseFinished())
+-        {   
++        {
+             if(disease.isFatal())
+             {
+                 setDead();
+@@ -140,28 +134,48 @@ public abstract class Consumer extends Actor
+     }
+     /**
+      * Hunt for food by moving toward it.
++     * Delegates scanning and eating logic to ForagingService and applies the result.
+      */
+-    private boolean huntForFood()
++    private boolean huntForFood(List<Actor> newActors)
+     {
+-        // Move towards a source of food if found:
+-        Location newLocation = findFood();
+-        
+-        if (newLocation == null)
+-        { 
+-            // No food found - try to move to a free location:
+-            newLocation = getField().freeAdjacentLocation(getLocation());
++        ForagingResult result = foragingService.forage(this);
++
++        if (result.found())
++        {
++            if (result.clampSustenanceToMax)
++            {
++                sustenanceLevel = maxSustenanceLevel;
++            }
++            else
++            {
++                sustenanceLevel += result.sustenanceDelta;
++            }
++            if (result.contractedDisease)
++            {
++                disease = new Disease();
++            }
++            if (result.generatedCarcass != null)
++            {
++                newActors.add(result.generatedCarcass);
++            }
++            setLocation(result.foodLocation);
++            return true;
++        }
++
++        // No food found - try to move to a free location:
++        Location freeLocation = getField().freeAdjacentLocation(getLocation());
++        if (freeLocation != null)
++        {
++            setLocation(freeLocation);
++            return true;
+         }
+-        
+-        // See if it was possible to move.
+-        if (newLocation != null) setLocation(newLocation);
+-        
+-        return newLocation != null;
++        return false;
+     }
+-    
++
+     /**
+      * Set the starting age of the consumer, dependent on whether a random
+      * age has been selected.
+-     * 
++     *
+      * @param randomAge If true, the age is random, otherwise it's 0.
+      */
+     protected void setStartingAge(boolean randomAge)
+@@ -169,12 +183,12 @@ public abstract class Consumer extends Actor
+         if (randomAge) currentAge = rand.nextInt(maxAge) ;
+         else           currentAge = 0;
+     }
+-    
+-    
++
++
+     /**
+      * Check whether or not this consumer is to give birth at this step.
+      * New births will be made into free adjacent locations.
+-     * 
++     *
+      * @param newConsumers A list to return newly born consumers.
+      */
+     private void giveBirth(List<Actor> newConsumers)
+@@ -182,18 +196,18 @@ public abstract class Consumer extends Actor
+         if (!checkForValidMate()) return;
+         BirthManager.spawnConsumerOffspring(this, breed(), newConsumers);
+     }
+-    
++
+     /**
+      * @return True if there is a valid mate in an adjacent location for the consumer.
+      */
+     private boolean checkForValidMate()
+-    {   
++    {
+         Field field = getField();
+-        
++
+         for (Location location : field.adjacentLocations(getLocation()))
+         {
+             Object object = field.getObjectAt(location);
+-            
++
+             if (object instanceof Consumer                 // Is there a consumer in that location?
+                 && object.getClass() == this.getClass()    // Is the consumer of the same type as this one?
+                 && ((Consumer) object).canBreed()          // Can that consumer breed?
+@@ -202,36 +216,36 @@ public abstract class Consumer extends Actor
+                 return true; // We have found a valid mate.
+             }
+         }
+-        
++
+         return false; // We didn't manage to find a valid mate.
+     }
+-        
++
+     /**
+      * Generate a number representing the number of births,
+      * if it can breed.
+-     * 
++     *
+      * @return The number of births (may be zero).
+      */
+     private int breed()
+     {
+         int births = 0;
+-        
++
+         boolean willBreed = rand.nextDouble()
+                             <= getBreedingProbability();
+-                            
++
+         if (canBreed() && willBreed)
+             births = rand.nextInt(getMaxBirthsAtOnce()) + 1;
+-        
++
+         return births;
+     }
+ 
+     /**
+      * A consumer can breed if it has reached the breeding age.
+-     * 
++     *
+      * @return True if the consumer can breed, false otherwise.
+      */
+     private boolean canBreed() { return currentAge >= breedingAge; }
+-    
++
+     /**
+      * Make this consumer more hungry. This could result in the consumer's death.
+      */
+@@ -240,100 +254,20 @@ public abstract class Consumer extends Actor
+         sustenanceLevel--;
+         if (sustenanceLevel <= 0) setDead();
+     }
+-    
++
++    /** @return This consumer's current sustenance level (read by ForagingService). */
++    int getSustenanceLevel() { return sustenanceLevel; }
++
+     /**
+-     * Look for prey adjacent to the current location.
+-     * Only the first live prey is eaten.
+-     * 
+-     * @return Where food was found, or null if it wasn't.
++     * @return This consumer's own {@code maxSustenanceLevel} field.
++     *         Note: this shadows the identically named field in Actor and is never
++     *         explicitly set in the constructor, so it defaults to 0.  ForagingService
++     *         must use this value to replicate the original eat() overflow check.
+      */
+-    private Location findFood()
+-    {
+-        // Get adjacent locations:
+-        Field field;
+-        field = getField();
+-        List<Location> adjacentLocations = field.adjacentLocations(getLocation());
+-        
+-        Iterator<Location> it = adjacentLocations.iterator();
+-        
+-        while (it.hasNext())
+-        {
+-            Location where = it.next();
+-            Object object = field.getObjectAt(where);
+-            
+-            for (Class preyClass : prey)
+-            {   
+-                if (preyClass.isInstance(object))
+-                {   
+-                    Actor actor = (Actor) object;
+-                    
+-                    if (actor.getIsAlive())
+-                    {   
+-                        // If it's night, there is a probability of missing the prey:
+-                        if (TimeSystem.isNightTime())
+-                        {   
+-                            if (rand.nextDouble() <= 1.0 - NIGHT_PREY_MISS_PROBABILITY)
+-                            {   
+-                                
+-                                return eat(actor);
+-                            }
+-                        }
+-                        else
+-                        {
+-                            
+-                            return eat(actor);
+-                        }
+-                    }
+-                }
+-            }
+-            if(Carcass.class.isInstance(object))
+-            {   
+-                if(canEatCarcass)
+-                {
+-                    Carcass carcass = (Carcass) object;
+-                    if(carcass.isDiseased())
+-                    {
+-                        this.disease = giveDisease();
+-                    }
+-                    sustenanceLevel += carcass.getConsumptionWorth();
+-                    carcass.setDead();
+-                    return where;
+-                }
+-            }
+-        }
+-        
+-        return null;
+-    }
++    int getMaxSustenanceForEating() { return maxSustenanceLevel; }
++
+     protected boolean becomeCarcass()
+     {
+         return true;
+     }
+-    /**
+-     * Makes the animal eat the food and generate a carcass if necessary.
+-     * @param actor The actor who is to be eaten.
+-     */
+-    private Location eat(Actor actor)
+-    {   
+-        Location location = actor.getLocation();
+-        int actorConsumptionWorth = actor.getConsumptionWorth();
+-        if(actor.becomeCarcass())
+-        {   
+-            actor.setDead();
+-            if((sustenanceLevel + actorConsumptionWorth) > maxSustenanceLevel)
+-            {   
+-                int foodLeft = (sustenanceLevel + consumptionWorth) - maxSustenanceLevel;
+-                sustenanceLevel = this.maxSustenanceLevel;
+-                Carcass carcass = new Carcass(getField(),location,foodLeft);
+-                newCarcass = carcass;
+-                ifCarcass = true;
+-                return getLocation();
+-            }  
+-        }
+-        if(sustenanceLevel + actorConsumptionWorth <= maxSustenanceLevel)
+-        {
+-            sustenanceLevel += actorConsumptionWorth;
+-            return location;
+-        }
+-        return null;
+-    }
+-}
+\ No newline at end of file
++}
+diff --git a/ForagingResult.java b/ForagingResult.java
+new file mode 100644
+index 000000000..5171fc1f4
+--- /dev/null
++++ b/ForagingResult.java
+@@ -0,0 +1,38 @@
++/**
++ * Immutable record of a single forage attempt.
++ * ForagingService computes one of these; Consumer reads and applies it.
++ */
++class ForagingResult
++{
++    static final ForagingResult NO_FOOD = new ForagingResult(null, 0, false, null, false);
++
++    /** Where the consumer should move. Null means no food was found. */
++    final Location foodLocation;
++
++    /** Sustenance to add to the consumer's current level (when clampSustenanceToMax is false). */
++    final int sustenanceDelta;
++
++    /**
++     * When true the consumer's sustenance should be set to its own maximum rather than
++     * incremented — applies to the prey-overfull case.
++     */
++    final boolean clampSustenanceToMax;
++
++    /** Non-null when eating prey produced a leftover carcass. */
++    final Carcass generatedCarcass;
++
++    /** True when the consumer ate a diseased carcass. */
++    final boolean contractedDisease;
++
++    ForagingResult(Location foodLocation, int sustenanceDelta, boolean clampSustenanceToMax,
++                   Carcass generatedCarcass, boolean contractedDisease)
++    {
++        this.foodLocation        = foodLocation;
++        this.sustenanceDelta     = sustenanceDelta;
++        this.clampSustenanceToMax = clampSustenanceToMax;
++        this.generatedCarcass    = generatedCarcass;
++        this.contractedDisease   = contractedDisease;
++    }
++
++    boolean found() { return foodLocation != null; }
++}
+diff --git a/ForagingService.java b/ForagingService.java
+new file mode 100644
+index 000000000..0eeb2d9a9
+--- /dev/null
++++ b/ForagingService.java
+@@ -0,0 +1,106 @@
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Random;
++
++/**
++ * Encapsulates all foraging, eating, and carcass-generation logic that was
++ * previously spread across Consumer.findFood() and Consumer.eat().
++ * One instance is created per Consumer and held for its lifetime.
++ */
++public class ForagingService
++{
++    private static final double NIGHT_PREY_MISS_PROBABILITY = 0.5;
++    private static final Random rand = Randomizer.getRandom();
++
++    private final ArrayList<Class> prey;
++    private final boolean canEatCarcass;
++
++    public ForagingService(ArrayList<Class> prey, boolean canEatCarcass)
++    {
++        this.prey         = prey;
++        this.canEatCarcass = canEatCarcass;
++    }
++
++    /**
++     * Scan cells adjacent to {@code consumer} for prey or a carcass.
++     * Returns a {@link ForagingResult} describing what was found (and consumed);
++     * {@link ForagingResult#NO_FOOD} when nothing edible was reachable.
++     * Does NOT modify any field on {@code consumer} — the caller applies the result.
++     */
++    public ForagingResult forage(Consumer consumer)
++    {
++        Field field = consumer.getField();
++
++        for (Location where : field.adjacentLocations(consumer.getLocation()))
++        {
++            Object object = field.getObjectAt(where);
++
++            // Check for live prey (mirrors the for-each over prey inside the while loop):
++            for (Class preyClass : prey)
++            {
++                if (preyClass.isInstance(object))
++                {
++                    Actor actor = (Actor) object;
++                    if (actor.getIsAlive())
++                    {
++                        boolean canCapture;
++                        if (TimeSystem.isNightTime())
++                        {
++                            canCapture = rand.nextDouble() <= 1.0 - NIGHT_PREY_MISS_PROBABILITY;
++                        }
++                        else
++                        {
++                            canCapture = true;
++                        }
++                        if (canCapture)
++                        {
++                            ForagingResult result = computeEat(consumer, actor);
++                            if (result != null) return result;
++                        }
++                    }
++                }
++            }
++
++            // Check for a carcass (checked after the prey loop, matching original order):
++            if (Carcass.class.isInstance(object) && canEatCarcass)
++            {
++                Carcass carcass = (Carcass) object;
++                boolean diseased = carcass.isDiseased();
++                int worth = carcass.getConsumptionWorth();
++                carcass.setDead();
++                return new ForagingResult(where, worth, false, null, diseased);
++            }
++        }
++
++        return ForagingResult.NO_FOOD;
++    }
++
++    /**
++     * Attempt to eat a live prey actor and compute the resulting sustenance change
++     * and optional overflow carcass.  Returns null when eating is not possible
++     * (e.g. the prey does not become a carcass and the consumer is overfull).
++     */
++    private ForagingResult computeEat(Consumer consumer, Actor actor)
++    {
++        Location preyLocation = actor.getLocation();
++        int worth = actor.getConsumptionWorth();
++        int sustenance = consumer.getSustenanceLevel();
++        int maxSustenance = consumer.getMaxSustenanceForEating();
++
++        if (actor.becomeCarcass())
++        {
++            actor.setDead();
++            if (sustenance + worth > maxSustenance)
++            {
++                int foodLeft = (sustenance + consumer.getConsumptionWorth()) - maxSustenance;
++                Carcass carcass = new Carcass(consumer.getField(), preyLocation, foodLeft);
++                return new ForagingResult(consumer.getLocation(), 0, true, carcass, false);
++            }
++        }
++        if (sustenance + worth <= maxSustenance)
++        {
++            return new ForagingResult(preyLocation, worth, false, null, false);
++        }
++        return null;
++    }
++}

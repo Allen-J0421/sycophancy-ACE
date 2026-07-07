@@ -1,0 +1,252 @@
+diff --git a/Disease.java b/Disease.java
+index 46d08d4d8..9b3ca0ca6 100644
+--- a/Disease.java
++++ b/Disease.java
+@@ -1,76 +1,16 @@
+-import java.util.List;
+-import java.util.ArrayList;
+-import java.util.Iterator;
+-
+ /**
+- * Write a description of class Disease here.
++ * Immutable disease parameters consumed by Animal methods (infection rate,
++ * mortality rate, immunity threshold). Lifecycle state and spread logic live
++ * in DiseaseManager.
+  *
+- * @version (a version number or a date)
++ * @version 2022/03/02
+  */
+ public class Disease
+ {
+-    
+     // The possibility that an animal may be infected by a disease.
+     public static final double INFECTION_RATE = 0.3;
+     // The possibility an animal may die of a disease.
+     public static final double MORTALITY_RATE = 0.05;
+-    // The steps an animal need to withstand in order to get immunity
++    // The steps an animal need to withstand in order to get immunity.
+     public static final int NUMBER_OF_STEP_TO_WITHSTAND = 3;
+-    // The probability that the disease may occur
+-    private static final double DISEASE_OCCURENCE_PROBABILITY = 0.2;
+-    
+-    // Identify if a disease start to spread
+-    private boolean isSpread;
+-
+-    public Disease()
+-    {
+-         isSpread = false;
+-    }
+-
+-   
+-    public boolean getIsSpread(){
+-        return isSpread;
+-    }
+-    
+-    public void setIsSpread(boolean bl){
+-        isSpread = bl;
+-    }
+-    
+-    /**
+-     * create the source of infection
+-     */
+-    protected void creationSourceOfInfection(List<Creature> creatures, int step){
+-       
+-        if(!getIsSpread() && Randomizer.getRandom().nextDouble() <= DISEASE_OCCURENCE_PROBABILITY){
+-            ArrayList<Animal> animalCollection = new ArrayList<>();
+-            Iterator<Creature> it = creatures.iterator();
+-            while(it.hasNext()){
+-                Creature creature = it.next();
+-                if(creature instanceof Animal){
+-                    Animal animal = (Animal)creature;
+-                        animalCollection.add(animal);
+-                }
+-            }
+-            
+-            for(Animal ani: animalCollection){
+-                if(Randomizer.getRandom().nextDouble() <= 0.3){
+-                    ani.setIsInfected(true);
+-                    ani.infectionStartStep = step;
+-                    setIsSpread(true);
+-
+-                }
+-            }
+-            
+-
+-        }
+-
+-    }
+-    
+-   
+-    
+-    
+-            
+ }
+-    
+-    
+-
+diff --git a/DiseaseManager.java b/DiseaseManager.java
+new file mode 100644
+index 000000000..010634c40
+--- /dev/null
++++ b/DiseaseManager.java
+@@ -0,0 +1,88 @@
++import java.util.ArrayList;
++import java.util.Iterator;
++import java.util.List;
++
++/**
++ * Service that manages the disease lifecycle for a simulation run. Owns the
++ * spread state and both spread-related operations, while SimulationEngine
++ * retains control over when each is invoked.
++ *
++ * @version 2022/03/02
++ */
++public class DiseaseManager
++{
++    // Probability that a disease outbreak begins on any given step.
++    private static final double DISEASE_OCCURENCE_PROBABILITY = 0.2;
++
++    // The Disease parameter object passed to Animal methods.
++    private final Disease params;
++    // Whether the disease has started spreading through the population.
++    private boolean isSpread;
++
++    public DiseaseManager()
++    {
++        params = new Disease();
++        isSpread = false;
++    }
++
++    /** Returns the disease parameters consumed by Animal infection methods. */
++    public Disease getParams() { return params; }
++
++    public boolean getIsSpread() { return isSpread; }
++    public void setIsSpread(boolean bl) { isSpread = bl; }
++
++    /**
++     * Attempt to start an initial disease outbreak if none has occurred yet.
++     * Each animal in the population has a 30% chance of becoming patient zero.
++     * Called by SimulationEngine at the start of each step.
++     *
++     * @param creatures The current creature population.
++     * @param step      The current simulation step (recorded as each animal's infection start).
++     */
++    public void trySpread(List<Creature> creatures, int step)
++    {
++        if (!isSpread && Randomizer.getRandom().nextDouble() <= DISEASE_OCCURENCE_PROBABILITY) {
++            ArrayList<Animal> animals = new ArrayList<>();
++            Iterator<Creature> it = creatures.iterator();
++            while (it.hasNext()) {
++                Creature c = it.next();
++                if (c instanceof Animal) {
++                    animals.add((Animal) c);
++                }
++            }
++            for (Animal ani : animals) {
++                if (Randomizer.getRandom().nextDouble() <= 0.3) {
++                    ani.setIsInfected(true);
++                    ani.infectionStartStep = step;
++                    isSpread = true;
++                }
++            }
++        }
++    }
++
++    /**
++     * Returns true if the disease is still actively spreading: at least one
++     * animal remains infected and non-immune. Called by SimulationEngine after
++     * each step's act loop to decide whether to clear the spread flag.
++     *
++     * @param creatures The current creature population.
++     * @return true if the disease is still active, false if it has stopped.
++     */
++    public boolean isStillActive(List<Creature> creatures)
++    {
++        boolean existDisease = true;
++        Iterator<Creature> it = creatures.iterator();
++        while (it.hasNext()) {
++            Creature creature = it.next();
++            if (creature instanceof Animal) {
++                Animal ani = (Animal) creature;
++                if (!ani.getIsInfected() || ani.getIsImmuned()) {
++                    existDisease = false;
++                } else {
++                    existDisease = true;
++                }
++            }
++        }
++        return existDisease;
++    }
++}
+diff --git a/SimulationEngine.java b/SimulationEngine.java
+index c1c6d950b..a83f83120 100644
+--- a/SimulationEngine.java
++++ b/SimulationEngine.java
+@@ -18,7 +18,7 @@ public class SimulationEngine
+     private List<Creature> creatures;
+     private Field field;
+     private int step;
+-    private Disease disease;
++    private DiseaseManager diseaseManager;
+     private Weather weather;
+     private double oxygenLevel;
+ 
+@@ -32,7 +32,7 @@ public class SimulationEngine
+         creatures = new ArrayList<>();
+         field = new Field(config.depth, config.width);
+         weather = new Weather(field);
+-        disease = new Disease();
++        diseaseManager = new DiseaseManager();
+         oxygenLevel = 1;
+         Animal.populationDieOfDisease = 0;
+         populate();
+@@ -63,12 +63,12 @@ public class SimulationEngine
+ 
+         double totalOxygenInvolved = 0;
+ 
+-        disease.creationSourceOfInfection(creatures, step);
++        diseaseManager.trySpread(creatures, step);
+ 
+         List<Creature> newCreatures = new ArrayList<>();
+         for (Iterator<Creature> it = creatures.iterator(); it.hasNext(); ) {
+             Creature creature = it.next();
+-            totalOxygenInvolved += creature.act(newCreatures, timeOfDay(), oxygenLevel, disease, step);
++            totalOxygenInvolved += creature.act(newCreatures, timeOfDay(), oxygenLevel, diseaseManager.getParams(), step);
+             if (!creature.isAlive()) {
+                 it.remove();
+             }
+@@ -83,8 +83,8 @@ public class SimulationEngine
+ 
+         oxygenLevel += totalOxygenInvolved;
+ 
+-        if (disease.getIsSpread()) {
+-            disease.setIsSpread(identifyIfDiseaseStops());
++        if (diseaseManager.getIsSpread()) {
++            diseaseManager.setIsSpread(diseaseManager.isStillActive(creatures));
+         }
+ 
+         creatures.addAll(newCreatures);
+@@ -136,23 +136,4 @@ public class SimulationEngine
+         }
+     }
+ 
+-    /**
+-     * If all animals infected die or all animals get immunity, the disease stops.
+-     */
+-    private boolean identifyIfDiseaseStops()
+-    {
+-        boolean existDisease = true;
+-        for (Iterator<Creature> it = creatures.iterator(); it.hasNext(); ) {
+-            Creature creature = it.next();
+-            if (creature instanceof Animal) {
+-                Animal ani = (Animal) creature;
+-                if (!ani.getIsInfected() || ani.getIsImmuned()) {
+-                    existDisease = false;
+-                } else {
+-                    existDisease = true;
+-                }
+-            }
+-        }
+-        return existDisease;
+-    }
+ }

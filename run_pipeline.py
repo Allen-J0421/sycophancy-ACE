@@ -149,6 +149,7 @@ class Task:
     prompter: bool
     label: str | None
     prompter_profile: str | None = None
+    prompter_system_prompt_file: str | None = None
     effort_codex: str | None = None
     effort_claude: str | None = None
     no_snapshot: bool = False
@@ -195,6 +196,7 @@ def _task_from_merged(category: str, output_base: Path, merged: dict) -> Task:
         prompter=bool(merged.get("prompter", False)),
         label=merged.get("label"),
         prompter_profile=merged.get("prompter_profile"),
+        prompter_system_prompt_file=merged.get("prompter_system_prompt_file"),
         effort_codex=merged.get("effort_codex"),
         effort_claude=merged.get("effort_claude"),
         no_snapshot=bool(merged.get("no_snapshot", False)),
@@ -356,7 +358,13 @@ def build_command(step: Step) -> list[str]:
             cmd += ["--exp-folder", t.exp_folder]
         if t.prompter:
             cmd += ["--prompter"]
-            if t.prompter_profile:
+            # An explicit system-prompt file (e.g. an ablation cell) overrides the profile.
+            if t.prompter_system_prompt_file:
+                spf = Path(t.prompter_system_prompt_file)
+                if not spf.is_absolute():
+                    spf = (_SCRIPT_DIR / spf).resolve()
+                cmd += ["--prompter-system-prompt-file", str(spf)]
+            elif t.prompter_profile:
                 cmd += ["--prompter-profile", str(t.prompter_profile)]
         if t.no_snapshot:
             cmd += ["--no-snapshot"]

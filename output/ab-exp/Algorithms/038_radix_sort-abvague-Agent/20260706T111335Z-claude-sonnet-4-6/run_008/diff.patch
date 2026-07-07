@@ -1,0 +1,163 @@
+diff --git a/radix_sort.java b/radix_sort.java
+index db3080bad..f2b07b3b9 100644
+--- a/radix_sort.java
++++ b/radix_sort.java
+@@ -92,6 +92,55 @@ class BaseExtractor implements DigitExtractor {
+     }
+ }
+ 
++interface CountSortStrategy {
++    <T> void apply(Sortable<T> s, Pass<T> pass);
++
++    CountSortStrategy STABLE      = new StableCountSort();
++    CountSortStrategy BUCKET_LIST = new BucketListCountSort();
++}
++
++class StableCountSort implements CountSortStrategy {
++
++    @SuppressWarnings("unchecked")
++    public <T> void apply(Sortable<T> s, Pass<T> pass) {
++        int n = s.size();
++        // plain Object[] avoids the generic-array restriction; cast back to T on write-through is safe
++        Object[] output = new Object[n];
++        int[] count = new int[pass.base()];
++
++        for (int i = 0; i < n; i++)
++            count[pass.bucket(s.get(i))]++;
++
++        for (int i = 1; i < pass.base(); i++)
++            count[i] += count[i - 1];
++
++        for (int i = n - 1; i >= 0; i--) {
++            int bucket = pass.bucket(s.get(i));
++            output[count[bucket] - 1] = s.get(i);
++            count[bucket]--;
++        }
++
++        for (int i = 0; i < n; i++)
++            s.set(i, (T) output[i]);
++    }
++}
++
++class BucketListCountSort implements CountSortStrategy {
++
++    @SuppressWarnings("unchecked")
++    public <T> void apply(Sortable<T> s, Pass<T> pass) {
++        List<T>[] buckets = new List[pass.base()];
++        for (int i = 0; i < pass.base(); i++) buckets[i] = new ArrayList<>();
++
++        for (int i = 0; i < s.size(); i++)
++            buckets[pass.bucket(s.get(i))].add(s.get(i));
++
++        int pos = 0;
++        for (List<T> bucket : buckets)
++            for (T item : bucket) s.set(pos++, item);
++    }
++}
++
+ class RadixSorterFactory {
+ 
+     static final RadixSorterFactory DECIMAL = new RadixSorterFactory(DigitExtractor.DECIMAL);
+@@ -99,13 +148,23 @@ class RadixSorterFactory {
+     static final RadixSorterFactory BASE256  = new RadixSorterFactory(DigitExtractor.BASE256);
+ 
+     private final DigitExtractor digits;
++    private final CountSortStrategy strategy;
+ 
+     public RadixSorterFactory(DigitExtractor digits) {
++        this(digits, CountSortStrategy.STABLE);
++    }
++
++    private RadixSorterFactory(DigitExtractor digits, CountSortStrategy strategy) {
+         this.digits = digits;
++        this.strategy = strategy;
++    }
++
++    public RadixSorterFactory withStrategy(CountSortStrategy strategy) {
++        return new RadixSorterFactory(digits, strategy);
+     }
+ 
+     public <T> RadixSorter<T> create(ToIntFunction<T> keyOf) {
+-        return new RadixSorter<>(keyOf, digits);
++        return new RadixSorter<>(keyOf, digits, strategy);
+     }
+ }
+ 
+@@ -129,16 +188,18 @@ class RadixSorter<T> {
+ 
+     private final ToIntFunction<T> keyOf;
+     private final DigitExtractor digits;
++    private final CountSortStrategy strategy;
+ 
+-    RadixSorter(ToIntFunction<T> keyOf, DigitExtractor digits) {
++    RadixSorter(ToIntFunction<T> keyOf, DigitExtractor digits, CountSortStrategy strategy) {
+         this.keyOf = keyOf;
+         this.digits = digits;
++        this.strategy = strategy;
+     }
+ 
+     public void sort(Sortable<T> s) {
+         int max = getMax(s);
+         for (int p = 0; p < digits.passCount(max); p++)
+-            countSort(s, new Pass<>(keyOf, digits, p));
++            strategy.apply(s, new Pass<>(keyOf, digits, p));
+     }
+ 
+     private int getMax(Sortable<T> s) {
+@@ -149,47 +210,22 @@ class RadixSorter<T> {
+         }
+         return max;
+     }
+-
+-    @SuppressWarnings("unchecked")
+-    private void countSort(Sortable<T> s, Pass<T> pass) {
+-        int n = s.size();
+-        // plain Object[] avoids the generic-array restriction; cast back to T on write-through is safe
+-        Object[] output = new Object[n];
+-        int[] count = new int[pass.base()];
+-
+-        for (int i = 0; i < n; i++)
+-            count[pass.bucket(s.get(i))]++;
+-
+-        for (int i = 1; i < pass.base(); i++)
+-            count[i] += count[i - 1];
+-
+-        for (int i = n - 1; i >= 0; i--) {
+-            int bucket = pass.bucket(s.get(i));
+-            output[count[bucket] - 1] = s.get(i);
+-            count[bucket]--;
+-        }
+-
+-        for (int i = 0; i < n; i++)
+-            s.set(i, (T) output[i]);
+-    }
+ }
+ 
+ class Radix {
+ 
+     public static void main(String[] args) {
+-        RadixSorterFactory decimal = RadixSorterFactory.DECIMAL;
+-        RadixSorterFactory hex     = RadixSorterFactory.HEX;
+-
+-        Integer[] arr = { 170, 45, 75, 90, 802, 24, 2, 66 };
+-        decimal.create(Integer::intValue).sort(Sortable.of(arr));
+-        System.out.println("Array/decimal: " + Arrays.toString(arr));
++        Integer[] arr1 = { 170, 45, 75, 90, 802, 24, 2, 66 };
++        RadixSorterFactory.DECIMAL.create(Integer::intValue).sort(Sortable.of(arr1));
++        System.out.println("Prefix-sum:  " + Arrays.toString(arr1));
+ 
+-        List<Integer> list = new ArrayList<>(Arrays.asList(170, 45, 75, 90, 802, 24, 2, 66));
+-        hex.create(Integer::intValue).sort(Sortable.of(list));
+-        System.out.println("List/hex:      " + list);
++        Integer[] arr2 = { 170, 45, 75, 90, 802, 24, 2, 66 };
++        RadixSorterFactory.DECIMAL.withStrategy(CountSortStrategy.BUCKET_LIST)
++            .create(Integer::intValue).sort(Sortable.of(arr2));
++        System.out.println("Bucket-list: " + Arrays.toString(arr2));
+ 
+         List<String> words = new ArrayList<>(Arrays.asList("banana", "fig", "apple", "kiwi", "date"));
+-        decimal.create(String::length).sort(Sortable.of(words));
+-        System.out.println("List/length:   " + words);
++        RadixSorterFactory.HEX.create(String::length).sort(Sortable.of(words));
++        System.out.println("By length:   " + words);
+     }
+ }

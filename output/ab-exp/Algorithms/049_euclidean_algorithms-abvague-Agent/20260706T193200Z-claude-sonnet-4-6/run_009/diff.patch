@@ -1,0 +1,241 @@
+diff --git a/euclidean/EuclideanAlgorithm.java b/euclidean/EuclideanAlgorithm.java
+index 01e01433c..1c6ed4094 100644
+--- a/euclidean/EuclideanAlgorithm.java
++++ b/euclidean/EuclideanAlgorithm.java
+@@ -12,7 +12,7 @@ public final class EuclideanAlgorithm {
+         return EuclideanAlgorithm::recursiveGcd;
+     }
+ 
+-    private static GcdResult iterativeGcd(int a, int b) {
++    private static Result<Integer, GcdError> iterativeGcd(int a, int b) {
+         long x = Math.abs((long) a);
+         long y = Math.abs((long) b);
+         while (y != 0) {
+@@ -23,18 +23,18 @@ public final class EuclideanAlgorithm {
+         return toResult(x);
+     }
+ 
+-    private static GcdResult recursiveGcd(int a, int b) {
++    private static Result<Integer, GcdError> recursiveGcd(int a, int b) {
+         return recursiveGcd(Math.abs((long) a), Math.abs((long) b));
+     }
+ 
+-    private static GcdResult recursiveGcd(long x, long y) {
++    private static Result<Integer, GcdError> recursiveGcd(long x, long y) {
+         return y == 0 ? toResult(x) : recursiveGcd(y, x % y);
+     }
+ 
+-    private static GcdResult toResult(long value) {
++    private static Result<Integer, GcdError> toResult(long value) {
+         if (value > Integer.MAX_VALUE) {
+-            return new GcdResult.Failure("Result out of int range: " + value);
++            return Result.failure(new GcdError("Result out of int range: " + value));
+         }
+-        return new GcdResult.Success((int) value);
++        return Result.success((int) value);
+     }
+ }
+diff --git a/euclidean/EuclideanAlgorithmApp.java b/euclidean/EuclideanAlgorithmApp.java
+index 9e77e4e8d..13de9d245 100644
+--- a/euclidean/EuclideanAlgorithmApp.java
++++ b/euclidean/EuclideanAlgorithmApp.java
+@@ -20,20 +20,20 @@ public final class EuclideanAlgorithmApp {
+ 
+     public static void main(String[] args) {
+         Operands operands = parseOperands(args);
+-        Command<GcdResult> command = new GcdCommandBuilder()
++        Command<Result<Integer, GcdError>> command = new GcdCommandBuilder()
+                 .observer((a, b, result) -> {
+-                    if (result instanceof GcdResult.Success s) {
++                    if (result instanceof Result.Success<?, ?> s) {
+                         System.err.println("gcd(" + a + ", " + b + ") = " + s.value());
+-                    } else if (result instanceof GcdResult.Failure f) {
+-                        System.err.println("gcd(" + a + ", " + b + ") failed: " + f.reason());
++                    } else if (result instanceof Result.Failure<?, ?> f) {
++                        System.err.println("gcd(" + a + ", " + b + ") failed: " + ((GcdError) f.error()).reason());
+                     }
+                 })
+                 .build(operands);
+-        GcdResult result = command.execute();
+-        if (result instanceof GcdResult.Success s) {
++        Result<Integer, GcdError> result = command.execute();
++        if (result instanceof Result.Success<?, ?> s) {
+             System.out.println(s.value());
+-        } else if (result instanceof GcdResult.Failure f) {
+-            System.err.println("Error: " + f.reason());
++        } else if (result instanceof Result.Failure<?, ?> f) {
++            System.err.println("Error: " + ((GcdError) f.error()).reason());
+             System.exit(1);
+         }
+     }
+diff --git a/euclidean/EuclideanAlgorithmTest.java b/euclidean/EuclideanAlgorithmTest.java
+index a06affe40..b63854694 100644
+--- a/euclidean/EuclideanAlgorithmTest.java
++++ b/euclidean/EuclideanAlgorithmTest.java
+@@ -33,26 +33,26 @@ public final class EuclideanAlgorithmTest {
+         assertCommand(() -> GcdProviderRegistry.getDefault().compute(12, 8), 4);
+         assertIllegalArgument(() -> GcdProviderRegistry.get("unknown"));
+ 
+-        // Observer receives GcdResult for both success and failure outcomes.
++        // Observer receives Result<Integer, GcdError> for both success and failure outcomes.
+         int[] observedArgs = {Integer.MIN_VALUE, Integer.MIN_VALUE};
+-        GcdResult[] observedResult = {null};
++        Object[] observedResult = {null};
+         GcdProvider logging = new LoggingGcdProvider(
+                 GcdProviderRegistry.get("iterative"),
+                 (a, b, result) -> { observedArgs[0] = a; observedArgs[1] = b; observedResult[0] = result; });
+         assertCommand(() -> logging.compute(35, 15), 5);
+         if (observedArgs[0] != 35 || observedArgs[1] != 15
+-                || !(observedResult[0] instanceof GcdResult.Success s) || s.value() != 5) {
++                || !(observedResult[0] instanceof Result.Success<?, ?> s) || !s.value().equals(5)) {
+             throw new AssertionError("Observer received wrong values: args=("
+                     + observedArgs[0] + ", " + observedArgs[1] + ") result=" + observedResult[0]);
+         }
+ 
+-        // Observer is now called even on failure — no special-case suppression.
+-        GcdResult[] failureObserved = {null};
++        // Observer is called with Failure — no special-case suppression.
++        Object[] failureObserved = {null};
+         GcdProvider loggingOverflow = new LoggingGcdProvider(
+                 GcdProviderRegistry.get("iterative"),
+                 (a, b, result) -> failureObserved[0] = result);
+         assertFailure(loggingOverflow, Integer.MIN_VALUE, 0);
+-        if (!(failureObserved[0] instanceof GcdResult.Failure)) {
++        if (!(failureObserved[0] instanceof Result.Failure<?, ?>)) {
+             throw new AssertionError("Observer must be called with Failure when computation overflows");
+         }
+ 
+@@ -63,28 +63,28 @@ public final class EuclideanAlgorithmTest {
+                 .provider(GcdProviderRegistry.get("iterative"))
+                 .build(new Operands(-42, 56)), 14);
+ 
+-        // Builder: observer wiring through GcdResult.
+-        GcdResult[] builderObserved = {null};
++        // Builder: observer wiring through Result<Integer, GcdError>.
++        Object[] builderObserved = {null};
+         assertCommand(new GcdCommandBuilder()
+                 .provider("iterative")
+                 .observer((a, b, result) -> builderObserved[0] = result)
+                 .build(new Operands(35, 15)), 5);
+-        if (!(builderObserved[0] instanceof GcdResult.Success bs) || bs.value() != 5) {
++        if (!(builderObserved[0] instanceof Result.Success<?, ?> bs) || !bs.value().equals(5)) {
+             throw new AssertionError("Builder observer received wrong result: " + builderObserved[0]);
+         }
+     }
+ 
+     private static void assertGcd(GcdProvider provider, int left, int right, int expected) {
+-        GcdResult result = provider.compute(left, right);
+-        if (!(result instanceof GcdResult.Success s) || s.value() != expected) {
++        Result<Integer, GcdError> result = provider.compute(left, right);
++        if (!(result instanceof Result.Success<?, ?> s) || !s.value().equals(expected)) {
+             throw new AssertionError(
+                     "gcd(" + left + ", " + right + ") = " + result + "; expected " + expected);
+         }
+     }
+ 
+     private static void assertFailure(GcdProvider provider, int a, int b) {
+-        GcdResult result = provider.compute(a, b);
+-        if (!(result instanceof GcdResult.Failure)) {
++        Result<Integer, GcdError> result = provider.compute(a, b);
++        if (!(result instanceof Result.Failure<?, ?>)) {
+             throw new AssertionError("Expected Failure from gcd(" + a + ", " + b + ") but got: " + result);
+         }
+     }
+@@ -96,9 +96,9 @@ public final class EuclideanAlgorithmTest {
+         }
+     }
+ 
+-    private static void assertCommand(Command<GcdResult> command, int expected) {
+-        GcdResult result = command.execute();
+-        if (!(result instanceof GcdResult.Success s) || s.value() != expected) {
++    private static void assertCommand(Command<Result<Integer, GcdError>> command, int expected) {
++        Result<Integer, GcdError> result = command.execute();
++        if (!(result instanceof Result.Success<?, ?> s) || !s.value().equals(expected)) {
+             throw new AssertionError("Command.execute() = " + result + "; expected " + expected);
+         }
+     }
+diff --git a/euclidean/GcdCommand.java b/euclidean/GcdCommand.java
+index 3200d58b2..b46ccb2e3 100644
+--- a/euclidean/GcdCommand.java
++++ b/euclidean/GcdCommand.java
+@@ -1,6 +1,6 @@
+ package euclidean;
+ 
+-final class GcdCommand implements Command<GcdResult> {
++final class GcdCommand implements Command<Result<Integer, GcdError>> {
+ 
+     private final Operands operands;
+     private final GcdProvider provider;
+@@ -11,7 +11,7 @@ final class GcdCommand implements Command<GcdResult> {
+     }
+ 
+     @Override
+-    public GcdResult execute() {
++    public Result<Integer, GcdError> execute() {
+         return provider.compute(operands.left(), operands.right());
+     }
+ }
+diff --git a/euclidean/GcdObserver.java b/euclidean/GcdObserver.java
+index abd1e3738..f000c9bf2 100644
+--- a/euclidean/GcdObserver.java
++++ b/euclidean/GcdObserver.java
+@@ -2,5 +2,5 @@ package euclidean;
+ 
+ @FunctionalInterface
+ interface GcdObserver {
+-    void onCompute(int a, int b, GcdResult result);
++    void onCompute(int a, int b, Result<Integer, GcdError> result);
+ }
+diff --git a/euclidean/GcdProvider.java b/euclidean/GcdProvider.java
+index a96199d44..fa08c3b2c 100644
+--- a/euclidean/GcdProvider.java
++++ b/euclidean/GcdProvider.java
+@@ -2,5 +2,5 @@ package euclidean;
+ 
+ @FunctionalInterface
+ interface GcdProvider {
+-    GcdResult compute(int a, int b);
++    Result<Integer, GcdError> compute(int a, int b);
+ }
+diff --git a/euclidean/GcdResult.java b/euclidean/GcdResult.java
+index 2df6bbee9..c2531ba14 100644
+--- a/euclidean/GcdResult.java
++++ b/euclidean/GcdResult.java
+@@ -1,6 +1,3 @@
+ package euclidean;
+ 
+-sealed interface GcdResult permits GcdResult.Success, GcdResult.Failure {
+-    record Success(int value) implements GcdResult {}
+-    record Failure(String reason) implements GcdResult {}
+-}
++record GcdError(String reason) {}
+diff --git a/euclidean/LoggingGcdProvider.java b/euclidean/LoggingGcdProvider.java
+index b3013cddd..e1d59b5d6 100644
+--- a/euclidean/LoggingGcdProvider.java
++++ b/euclidean/LoggingGcdProvider.java
+@@ -11,8 +11,8 @@ final class LoggingGcdProvider implements GcdProvider {
+     }
+ 
+     @Override
+-    public GcdResult compute(int a, int b) {
+-        GcdResult result = delegate.compute(a, b);
++    public Result<Integer, GcdError> compute(int a, int b) {
++        Result<Integer, GcdError> result = delegate.compute(a, b);
+         observer.onCompute(a, b, result);
+         return result;
+     }
+diff --git a/euclidean/Result.java b/euclidean/Result.java
+new file mode 100644
+index 000000000..b6e4679f2
+--- /dev/null
++++ b/euclidean/Result.java
+@@ -0,0 +1,9 @@
++package euclidean;
++
++sealed interface Result<T, E> permits Result.Success, Result.Failure {
++    record Success<T, E>(T value) implements Result<T, E> {}
++    record Failure<T, E>(E error) implements Result<T, E> {}
++
++    static <T, E> Result<T, E> success(T value) { return new Success<>(value); }
++    static <T, E> Result<T, E> failure(E error) { return new Failure<>(error); }
++}
