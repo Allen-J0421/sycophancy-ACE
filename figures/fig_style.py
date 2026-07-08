@@ -29,6 +29,7 @@ REPO_ROOT = FIG_DIR.parent
 OUTPUT_ROOT = REPO_ROOT / "output"
 FIG_OUT_DIR = FIG_DIR / "output"
 FIG_OUT_DIR.mkdir(parents=True, exist_ok=True)
+PAPER_FIG_DIR = REPO_ROOT.parent / "paper" / "figures"
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -68,8 +69,8 @@ MODEL_ORDER = [
 
 # Short, two-line tick labels keep the model axis legible at paper size.
 MODEL_TICK = {
-    "claude-opus-4-8": "Claude\nOpus 4.8",
-    "claude-sonnet-4-6": "Claude\nSonnet 4.6",
+    "claude-opus-4-8": "Opus\n4.8",
+    "claude-sonnet-4-6": "Sonnet\n4.6",
     "gpt-5.5": "GPT-5.5",
     "gpt-5.4-mini": "GPT-5.4\nmini",
     "gpt-5.4": "GPT-5.4",
@@ -80,8 +81,8 @@ SUITES = {
     "RealWorld": "R001-R010",
 }
 SUITE_LABEL = {
-    "Algorithms": "Algorithms (001–050)",
-    "RealWorld": "RealWorld (R001–R010)",
+    "Algorithms": "Algorithms",
+    "RealWorld": "OOP Homeworks",
 }
 # Repository-type styling for the side-by-side Algorithms-vs-RealWorld comparison.
 SUITE_HATCH = {"Algorithms": "", "RealWorld": "////"}
@@ -97,29 +98,40 @@ def apply_rc() -> None:
             "font.family": "serif",
             "font.serif": ["DejaVu Serif", "Times New Roman", "Nimbus Roman"],
             "mathtext.fontset": "dejavuserif",
-            "font.size": 9,
-            "axes.titlesize": 10,
-            "axes.labelsize": 9,
+            "font.size": 11,
+            "axes.titlesize": 12,
+            "axes.labelsize": 11,
+            "axes.labelweight": "bold",
             "axes.linewidth": 0.8,
             "axes.spines.top": False,
             "axes.spines.right": False,
             "xtick.direction": "out",
             "ytick.direction": "out",
-            "xtick.labelsize": 8,
-            "ytick.labelsize": 8,
-            "legend.fontsize": 8,
+            "xtick.labelsize": 10,
+            "ytick.labelsize": 10,
+            "legend.fontsize": 10,
             "legend.frameon": False,
             "figure.dpi": 150,
             "savefig.dpi": 300,
             "savefig.bbox": "tight",
+            "figure.constrained_layout.use": False,
             "pdf.fonttype": 42,  # embed TrueType so the PDF is editable
             "ps.fonttype": 42,
         }
     )
 
 
+_PAPER_COLORS = {
+    "claude-opus-4-8":   "#111111",  # near-black   (~7 % gray)
+    "gpt-5.5":           "#C00000",  # dark red     (~23% gray)
+    "claude-sonnet-4-6": "#4472C4",  # medium blue  (~43% gray)
+    "gpt-5.4":           "#70AD47",  # medium green (~56% gray)
+    "gpt-5.4-mini":      "#FFC000",  # amber        (~74% gray)
+}
+
+
 def model_color(model: str) -> str:
-    return COLORS.get(model, "#555555")
+    return _PAPER_COLORS.get(model, COLORS.get(model, "#555555"))
 
 
 def _hex_to_rgb(h: str):
@@ -139,12 +151,15 @@ def grid(ax, axis: str = "y") -> None:
 
 
 def savefig(fig, name: str) -> list[Path]:
-    """Write both a PNG (raster preview) and a PDF (vector, for LaTeX)."""
+    """Write PNG + PDF to figures/output/ and copy PDF to paper/figures/."""
+    import shutil
     outs = []
     for ext in ("png", "pdf"):
         out = FIG_OUT_DIR / f"{name}.{ext}"
         fig.savefig(out)
         outs.append(out)
+        if ext == "pdf" and PAPER_FIG_DIR.is_dir():
+            shutil.copy2(out, PAPER_FIG_DIR / out.name)
     plt.close(fig)
     return outs
 
@@ -246,7 +261,7 @@ def grouped_suite_bars(
     """
     suites = list(data)
     x = np.arange(len(models))
-    bw = 0.38
+    bw = 0.42
     offsets = {suites[0]: -bw / 2, suites[1]: +bw / 2}
     for suite in suites:
         sd = data[suite]
@@ -263,7 +278,7 @@ def grouped_suite_bars(
             hatch=SUITE_HATCH[suite],
             edgecolor="white" if suite == "Algorithms" else "0.25",
             linewidth=0.6,
-            error_kw=dict(elinewidth=0.8, capsize=2, ecolor="0.3"),
+            error_kw=dict(elinewidth=2.0, capsize=4, ecolor="0.3"),
             zorder=3,
         )
         if annotate:
@@ -276,8 +291,8 @@ def grouped_suite_bars(
                     xytext=(0, 3),
                     ha="center",
                     va="bottom",
-                    fontsize=6.5,
-                    color="0.2",
+                    fontsize=9,
+                    color="0.15",
                 )
     ax.set_xticks(x)
     ax.set_xticklabels([MODEL_TICK.get(m, m) for m in models])
