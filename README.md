@@ -188,6 +188,27 @@ Long batch runs hit provider usage caps — a **Claude session limit**, a **Code
 
 Detection knobs live in `config/prompt.env` (all optional): `LIMIT_DETECT_ENABLED` (default `true`); `LIMIT_GEMINI_SURFACE` / `LIMIT_GEMINI_SURFACE_503` (default `false` — the prompter keeps its silent fixed-prompt fallback unless you opt in); `LIMIT_CLAUDE_PATTERNS_FILE` / `LIMIT_CODEX_PATTERNS_FILE` (extra detection regexes). Orchestrator defaults (`LIMIT_AUTO_PAUSE`, `LIMIT_MAX_WAIT_MINUTES`, `LIMIT_POLL_INTERVAL_SECONDS`, `LIMIT_BUFFER_MINUTES`, `LIMIT_FIXED_WAIT_MINUTES`, `LIMIT_CLEANUP_DEAD_RUNS`) live there too; the CLI flags above override them.
 
+#### Usage guard (proactive, Claude + Codex)
+
+Detection above only fires *after* a limit hits, and the in-flight run is then thrown away (~13% of Claude usage in the G-series; Codex spend-cap hits corrupted 15 R-series runs). The usage guard ([`agent_usage.py`](agent_usage.py)) reads live plan usage without a model call — Claude via `claude -p /usage --no-session-persistence` (~1.5 s), Codex via `codex app-server` `account/rateLimits/read` (~6 s; 5-hour `primary` + weekly `secondary` window) — and acts at two points:
+
+1. **Before each run** (`run_pipeline`): if a window is at its ceiling, that provider's runs are held until it resets while the other provider's steps keep running. If the run is *expected* to cross the session ceiling and other-provider work is available, it is deferred too. The expected usage starts at `*_RUN_ESTIMATE` and is replaced by the measured before/after delta of recent runs per model.
+2. **Before each turn** (`run_experiment`): if `used% + expected turn%` would reach a ceiling, the run **pauses** until the reset and then continues the same session (turns resume one conversation). The per-turn % is learned from consecutive probes (initially `*_TURN_ESTIMATE`). Only a wait longer than `*_MAX_PAUSE_MINUTES` (typically a weekly reset) falls back to the abort → `blocked` → re-run path above.
+
+Settings (env vars override `config/prompt.env`). Claude reads `LIMIT_GUARD_<KEY>`, Codex `LIMIT_GUARD_CODEX_<KEY>`:
+
+| Key | Claude | Codex | Meaning |
+|---|---|---|---|
+| `ENABLED` | `true` | `true` | Guard on/off for that provider |
+| `SESSION_CEILING` | `80` | `100` | % of the 5-hour window no turn may be expected to reach |
+| `WEEKLY_CEILING` | `80` | `100` | Same for weekly windows (Claude: "all models" + any per-model window matching the model id) |
+| `RUN_ESTIMATE` / `TURN_ESTIMATE` | `40` / `5` | `40` / `5` | Session % per run / turn until measured |
+| `MAX_PAUSE_MINUTES` | `480` | `480` | Longest in-run pause before aborting as a limit |
+| `PROBE_TIMEOUT_SECONDS` | `60` | `60` | Probe timeout |
+| `USE_CREDITS` | — | `false` | On plans with credits, a full window spills onto credits until the (unreported) workspace spend cap. `false` pauses at a full window instead; `true` keeps running on credits |
+
+If a probe fails (CLI missing / logged out, `/usage` wording changed) the guard is a no-op and reactive detection still applies. Interactive use of the same account counts toward the same windows. Check usage by hand with `python agent_usage.py claude` or `python agent_usage.py codex` (`--json` for machine output).
+
 **Corrupted-branch cleanup is a separate, manual step.** A re-run leaves the discarded run's **experiment branch** behind in the dataset repo (the limited turn was committed `--allow-empty` before detection fired). The pipeline does **not** delete branches; instead it *logs* every discarded/dead run to **`output/corrupted_branches.jsonl`** (provider limits, and wholesale-dead runs where every iteration failed). After a batch finishes, review the log and delete the branches yourself with [`clean_corrupted_branches.py`](clean_corrupted_branches.py):
 
 ```bash
@@ -411,6 +432,7 @@ experiment_runner/     Phase 1 library: coding-agent loop, git, prompter, limit 
 run_refdiff.py         Phase 2: RefDiff batch (Java / JavaScript)
 compute_signals.py     Phase 3: sycophancy signals S1–S6
 run_pipeline.py        Batch orchestrator over pipeline_plan.json (provider-limit auto-pause)
+agent_usage.py         Claude/Codex usage probes + usage-guard policy (also a CLI)
 check_plan.py          Pre-flight sanity check for pipeline_plan.json
 clean_corrupted_branches.py  Manual review/cleanup of corrupted experiment branches
 pipeline_plan.json     Editable batch planner

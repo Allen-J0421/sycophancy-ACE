@@ -25,6 +25,7 @@ from experiment_runner.models import ExperimentConfig, IterationResult, Prompter
 from experiment_runner.prompter import extract_final_agent_message
 from experiment_runner.prompt_source import PromptSource
 from experiment_runner.result_paths import prompt_txt_path, stamp_from_log_csv
+from experiment_runner.usage_gate import UsageGate, build_usage_gate
 from experiment_runner.util import eprint, sanitize_slug
 
 
@@ -39,12 +40,14 @@ class ExperimentRunner:
         agent: CodingAgent,
         prompt_source: PromptSource,
         limit_cfg: LimitDetectConfig | None = None,
+        usage_gate: UsageGate | None = None,
     ) -> None:
         self.config = config
         self.git = git
         self.agent = agent
         self.prompt_source = prompt_source
         self.limit_cfg = limit_cfg if limit_cfg is not None else LimitDetectConfig()
+        self.usage_gate = usage_gate
 
     @classmethod
     def from_config(cls, config: ExperimentConfig) -> ExperimentRunner:
@@ -57,6 +60,7 @@ class ExperimentRunner:
             agent=agent,
             prompt_source=prompt_source,
             limit_cfg=config.limit_detect,
+            usage_gate=build_usage_gate(config.agent, config.effective_model),
         )
 
     def iter_results(self, initial_sha: str) -> Iterator[IterationResult]:
@@ -74,6 +78,10 @@ class ExperimentRunner:
             return turn.prompt
 
         for i in range(1, self.config.iterations + 1):
+            # Pause (not abort) before a turn that would start past a usage ceiling. Runs
+            # before the prompter call so the prompt isn't generated hours before it is sent.
+            if self.usage_gate is not None:
+                self.usage_gate.wait_for_headroom()
             clarification_prompter_jsonl.clear()
             turn = self.prompt_source.next_prompt(last_turn_input)
             result = run_iteration(

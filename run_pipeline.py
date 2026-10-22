@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import agent_usage  # stdlib-only sibling module (usage guard policy + usage probes)
+
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _DEFAULT_PLAN = _SCRIPT_DIR / "pipeline_plan.json"
 _DEFAULT_OUTPUT = _SCRIPT_DIR / "output"
@@ -485,6 +487,16 @@ class PauseConfig:
     fixed_wait_min: int = 60
     cleanup: bool = True
     max_attempts: int = 5
+    # Per-provider usage guards ("claude", "codex"). Empty unless loaded from env/prompt.env
+    # (build_pause_config), so a bare PauseConfig() never shells out to a usage probe.
+    guards: dict[str, agent_usage.GuardConfig] = field(default_factory=dict)
+
+    def guard_for(self, step: "Step") -> agent_usage.GuardConfig | None:
+        """The enabled guard for a run_exp step's coding-agent provider, if any."""
+        if not step.model:
+            return None
+        guard = self.guards.get(_agent_for_model(step.model))
+        return guard if guard is not None and guard.enabled else None
 
     @property
     def max_wait_s(self) -> int:
@@ -565,6 +577,10 @@ def build_pause_config(args: argparse.Namespace) -> PauseConfig:
         if args.fixed_wait_minutes is not None
         else _env_int("LIMIT_FIXED_WAIT_MINUTES", pe, default=60),
         cleanup=_env_bool("LIMIT_CLEANUP_DEAD_RUNS", pe, default=True),
+        guards={
+            prov: agent_usage.load_guard_config(lambda key: _env_value(key, pe), prov)
+            for prov in agent_usage.PROVIDERS
+        },
     )
 
 
@@ -645,6 +661,40 @@ def _sleep_until(target: datetime, *, poll_s: int) -> None:
         time.sleep(chunk)
 
 
+def usage_start_check(
+    step: Step,
+    pending: list[Step],
+    blocked_until: dict[str, datetime],
+    estimator: agent_usage.RunEstimator,
+    cfg: PauseConfig,
+) -> tuple[agent_usage.StartDecision, agent_usage.UsageSnapshot | None]:
+    """Usage-guard check before starting a Claude/Codex run_exp step. Returns the decision
+    plus the probe snapshot (kept to learn how much session % the run actually used)."""
+    guard = cfg.guard_for(step)
+    provider = _agent_for_model(step.model)
+    snap = agent_usage.probe_usage(provider, timeout_s=guard.probe_timeout_s)
+    unavailable = blocked_until.keys() | {provider}
+    other_work = any(
+        s is not step and not (step_providers(s) & unavailable) for s in pending
+    )
+    now = datetime.now(timezone.utc)
+    decision = agent_usage.start_decision(
+        snap,
+        step.model,
+        guard,
+        estimate=estimator.estimate(f"{provider}::{step.model}"),
+        other_work=other_work,
+        fallback_until=now + timedelta(minutes=cfg.fixed_wait_min),
+    )
+    if not decision.ok and decision.until is not None:
+        # Buffer past the reset, and never re-check sooner than one poll (stale usage).
+        until = decision.until + timedelta(minutes=cfg.buffer_min)
+        decision = agent_usage.StartDecision(
+            False, max(until, now + timedelta(seconds=cfg.poll_s)), decision.reason,
+        )
+    return decision, snap
+
+
 def schedule_run_exp(
     run_exp_steps: list[Step],
     state: State,
@@ -670,6 +720,8 @@ def schedule_run_exp(
 
     blocked_until: dict[str, datetime] = {}
     attempts: dict[str, int] = {}
+    estimator = agent_usage.RunEstimator(
+        lambda key: cfg.guards[key.split("::")[0]].run_estimate)
 
     while pending:
         now = datetime.now(timezone.utc)
@@ -698,8 +750,27 @@ def schedule_run_exp(
             _sleep_until(earliest, poll_s=cfg.poll_s)
             continue
 
+        before = None
+        guard = cfg.guard_for(runnable)
+        if guard is not None:
+            provider = _agent_for_model(runnable.model)
+            decision, before = usage_start_check(runnable, pending, blocked_until, estimator, cfg)
+            eprint(f"  [usage-guard] {provider}: {agent_usage.describe(before)}")
+            if not decision.ok:
+                blocked_until[provider] = decision.until
+                eprint(f"  [usage-guard] holding {provider} runs until "
+                       f"{decision.until.isoformat()} ({decision.reason})")
+                continue
+
         pending.remove(runnable)
         status, detail = run_step(runnable, dry_run=False)
+        if before is not None:
+            key = f"{provider}::{runnable.model}"
+            after = agent_usage.probe_usage(provider, timeout_s=guard.probe_timeout_s)
+            used = estimator.observe(key, before, after)
+            if used is not None:
+                eprint(f"  [usage-guard] {runnable.model} run used ~{used:g}% of the session; "
+                       f"next estimate {estimator.estimate(key):g}%")
         if status == "blocked":
             marker = read_limit_marker(runnable.task)
             provider = (marker or {}).get("provider") or (_agent_for_model(runnable.model) if runnable.model else "?")

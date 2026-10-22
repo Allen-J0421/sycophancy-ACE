@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Limit kinds.
 SESSION_LIMIT = "session_limit"
+WEEKLY_LIMIT = "weekly_limit"
 SPEND_CAP = "spend_cap"
 QUOTA = "quota"
 OVERLOAD = "overload"
