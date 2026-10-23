@@ -325,6 +325,16 @@ def load_prompter_config(
 
     api_key = require_env_var("GEMINI_API_KEY")
     model = require_env_var("PROMPTER_MODEL")
+    entries, _ = load_prompt_env_entries()
+    defaults = PrompterConfig(api_key="", model="", system_prompt="", nudge="", fallback_prompt="")
+
+    def _number(key: str, default: float) -> float:
+        raw = non_empty_string(os.environ.get(key)) or entries.get(key)
+        try:
+            return float(raw) if raw else default
+        except ValueError:
+            return default
+
     return PrompterConfig(
         api_key=api_key,
         model=model,
@@ -333,4 +343,6 @@ def load_prompter_config(
         fallback_prompt=fallback_prompt,
         clarification_nudge=clarification_nudge,
         profile=profile_name,
+        retry_attempts=max(0, int(_number("PROMPTER_RETRY_ATTEMPTS", defaults.retry_attempts))),
+        retry_backoff_s=max(0.0, _number("PROMPTER_RETRY_BACKOFF_SECONDS", defaults.retry_backoff_s)),
     )

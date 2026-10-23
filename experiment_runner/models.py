@@ -106,6 +106,10 @@ class PrompterConfig:
     fallback_prompt: str
     clarification_nudge: str = "The coding agent asked for clarification above."
     profile: str = "novice"
+    # Transient Gemini errors (5xx) are retried with exponential backoff before the turn
+    # falls back to ``fallback_prompt`` (which would silently change the experiment's prompt).
+    retry_attempts: int = 4
+    retry_backoff_s: float = 15.0
 
 
 @dataclass(frozen=True)

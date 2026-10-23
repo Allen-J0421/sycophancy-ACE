@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import sys
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,10 @@ DIFF_HEADER = "Changes from the last iteration:"
 FIRST_TURN_NUDGE = (
     "Review the codebase above and ask the coding agent for your first refactoring request."
 )
+# Transient server-side failures worth retrying (503 = "high demand" overload). 429 is a
+# quota, not a blip; it is left to limit detection (LIMIT_GEMINI_SURFACE).
+RETRYABLE_STATUS = frozenset({500, 502, 503, 504})
+_MAX_BACKOFF_S = 300.0
 
 
 def extract_gemini_text(response_json: dict[str, Any]) -> str | None:
@@ -130,6 +136,7 @@ class GeminiPrompter:
     _codebase_snapshot: str = ""
     _client: genai.Client | None = field(default=None, init=False, repr=False)
     _chat: Any | None = field(default=None, init=False, repr=False)
+    _sleep: Callable[[float], None] = field(default=time.sleep, repr=False)
 
     def set_codebase_snapshot(self, snapshot: str) -> None:
         self._codebase_snapshot = snapshot
@@ -205,6 +212,34 @@ class GeminiPrompter:
             },
         )
 
+    def _send(self, chat: Any, text: str, *, phase: str) -> Any:
+        """``chat.send_message`` with exponential backoff on transient 5xx errors.
+
+        Each retried failure is logged as a ``retry`` event (not ``error``, so Gemini limit
+        detection only ever sees the final outcome); the last failure is re-raised for the
+        caller's fallback path. A failed send does not enter the chat history, so retrying
+        the same message cannot duplicate it.
+        """
+        attempts = self.config.retry_attempts
+        for attempt in range(attempts + 1):
+            try:
+                return chat.send_message(text)
+            except APIError as exc:
+                if exc.code not in RETRYABLE_STATUS or attempt == attempts:
+                    raise
+                delay = min(self.config.retry_backoff_s * 2 ** attempt, _MAX_BACKOFF_S)
+                err_text = non_empty_string(exc.message) or str(exc)
+                self._log_event(
+                    "retry",
+                    text=err_text,
+                    payload={"status_code": exc.code, "attempt": attempt + 1,
+                             "max_attempts": attempts, "backoff_s": delay, "phase": phase},
+                )
+                eprint(f"[prompter] turn {self.turn}: API error {exc.code} ({phase}); "
+                       f"retry {attempt + 1}/{attempts} in {delay:g}s")
+                self._sleep(delay)
+        raise AssertionError("unreachable")
+
     def next_request(self, turn_input: PrompterTurnInput | None = None) -> str:
         self.turn += 1
         user_text = self._build_user_text(turn_input)
@@ -220,7 +255,7 @@ class GeminiPrompter:
 
         chat = self._ensure_chat()
         try:
-            response = chat.send_message(user_text)
+            response = self._send(chat, user_text, phase="request")
         except APIError as exc:
             err_text = non_empty_string(exc.message) or str(exc)
             self._log_event(
@@ -271,7 +306,7 @@ class GeminiPrompter:
 
         chat = self._ensure_chat()
         try:
-            response = chat.send_message(user_text)
+            response = self._send(chat, user_text, phase="clarification")
         except APIError as exc:
             err_text = non_empty_string(exc.message) or str(exc)
             self._log_event(
