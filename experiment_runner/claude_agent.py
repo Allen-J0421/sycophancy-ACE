@@ -7,7 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from experiment_runner.constants import CLAUDE_AUTO_FLAGS, DEFAULT_TIMEOUT
+from experiment_runner.constants import CLAUDE_AUTO_FLAGS, CLAUDE_ENV, DEFAULT_TIMEOUT
 from experiment_runner.models import AgentRunResult
 from experiment_runner.util import run_text_command
 
@@ -103,7 +103,7 @@ class ClaudeAgent:
         )
         t0 = time.monotonic()
         try:
-            proc = run_text_command(cmd, cwd=self.work_dir, timeout=self.timeout)
+            proc = run_text_command(cmd, cwd=self.work_dir, timeout=self.timeout, env=CLAUDE_ENV)
             out = proc.stdout or ""
             err = proc.stderr or ""
             jsonl = "\n".join([out, err])

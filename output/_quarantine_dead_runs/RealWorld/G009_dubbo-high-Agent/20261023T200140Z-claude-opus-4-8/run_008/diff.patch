@@ -1,0 +1,191 @@
+diff --git a/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/WrappedChannelHandler.java b/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/WrappedChannelHandler.java
+index 36c3b4499..786015ddb 100644
+--- a/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/WrappedChannelHandler.java
++++ b/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/WrappedChannelHandler.java
+@@ -23,6 +23,7 @@ import org.apache.dubbo.common.resource.GlobalResourcesRepository;
+ import org.apache.dubbo.common.threadpool.manager.ExecutorRepository;
+ import org.apache.dubbo.remoting.Channel;
+ import org.apache.dubbo.remoting.ChannelHandler;
++import org.apache.dubbo.remoting.ExecutionException;
+ import org.apache.dubbo.remoting.RemotingException;
+ import org.apache.dubbo.remoting.exchange.Request;
+ import org.apache.dubbo.remoting.exchange.Response;
+@@ -33,6 +34,7 @@ import org.apache.dubbo.rpc.model.ApplicationModel;
+ 
+ import java.util.concurrent.Executor;
+ import java.util.concurrent.ExecutorService;
++import java.util.concurrent.RejectedExecutionException;
+ 
+ public class WrappedChannelHandler implements ChannelHandlerDelegate {
+ 
+@@ -95,6 +97,38 @@ public class WrappedChannelHandler implements ChannelHandlerDelegate {
+         channel.send(response);
+     }
+ 
++    /**
++     * Dispatch a received message to the preferred executor, falling back to feedback when the pool rejects it.
++     * Shared by the dispatcher handlers whose {@code received} differs only by this body.
++     */
++    protected void dispatchReceived(Channel channel, Object message) throws RemotingException {
++        ExecutorService executor = getPreferredExecutorService(message);
++        try {
++            executor.execute(
++                    new ChannelEventRunnable(channel, handler, ChannelEventRunnable.ChannelState.RECEIVED, message));
++        } catch (Throwable t) {
++            if (message instanceof Request && t instanceof RejectedExecutionException) {
++                sendFeedback(channel, (Request) message, t);
++                return;
++            }
++            throw new ExecutionException(message, channel, getClass() + " error when process received event .", t);
++        }
++    }
++
++    /**
++     * Dispatch a caught exception to the shared executor.
++     * Shared by the dispatcher handlers whose {@code caught} differs only by this body.
++     */
++    protected void dispatchCaught(Channel channel, Throwable exception) throws RemotingException {
++        ExecutorService executor = getSharedExecutorService();
++        try {
++            executor.execute(
++                    new ChannelEventRunnable(channel, handler, ChannelEventRunnable.ChannelState.CAUGHT, exception));
++        } catch (Throwable t) {
++            throw new ExecutionException("caught event", channel, getClass() + " error when process caught event .", t);
++        }
++    }
++
+     @Override
+     public ChannelHandler getHandler() {
+         if (handler instanceof ChannelHandlerDelegate) {
+diff --git a/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/all/AllChannelHandler.java b/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/all/AllChannelHandler.java
+index 6305514fb..1fdacd3d7 100644
+--- a/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/all/AllChannelHandler.java
++++ b/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/all/AllChannelHandler.java
+@@ -21,13 +21,11 @@ import org.apache.dubbo.remoting.Channel;
+ import org.apache.dubbo.remoting.ChannelHandler;
+ import org.apache.dubbo.remoting.ExecutionException;
+ import org.apache.dubbo.remoting.RemotingException;
+-import org.apache.dubbo.remoting.exchange.Request;
+ import org.apache.dubbo.remoting.transport.dispatcher.ChannelEventRunnable;
+ import org.apache.dubbo.remoting.transport.dispatcher.ChannelEventRunnable.ChannelState;
+ import org.apache.dubbo.remoting.transport.dispatcher.WrappedChannelHandler;
+ 
+ import java.util.concurrent.ExecutorService;
+-import java.util.concurrent.RejectedExecutionException;
+ 
+ public class AllChannelHandler extends WrappedChannelHandler {
+ 
+@@ -59,25 +57,11 @@ public class AllChannelHandler extends WrappedChannelHandler {
+ 
+     @Override
+     public void received(Channel channel, Object message) throws RemotingException {
+-        ExecutorService executor = getPreferredExecutorService(message);
+-        try {
+-            executor.execute(new ChannelEventRunnable(channel, handler, ChannelState.RECEIVED, message));
+-        } catch (Throwable t) {
+-            if (message instanceof Request && t instanceof RejectedExecutionException) {
+-                sendFeedback(channel, (Request) message, t);
+-                return;
+-            }
+-            throw new ExecutionException(message, channel, getClass() + " error when process received event .", t);
+-        }
++        dispatchReceived(channel, message);
+     }
+ 
+     @Override
+     public void caught(Channel channel, Throwable exception) throws RemotingException {
+-        ExecutorService executor = getSharedExecutorService();
+-        try {
+-            executor.execute(new ChannelEventRunnable(channel, handler, ChannelState.CAUGHT, exception));
+-        } catch (Throwable t) {
+-            throw new ExecutionException("caught event", channel, getClass() + " error when process caught event .", t);
+-        }
++        dispatchCaught(channel, exception);
+     }
+ }
+diff --git a/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/connection/ConnectionOrderedChannelHandler.java b/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/connection/ConnectionOrderedChannelHandler.java
+index 4652bc1dd..dfe9a7070 100644
+--- a/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/connection/ConnectionOrderedChannelHandler.java
++++ b/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/connection/ConnectionOrderedChannelHandler.java
+@@ -23,14 +23,11 @@ import org.apache.dubbo.remoting.Channel;
+ import org.apache.dubbo.remoting.ChannelHandler;
+ import org.apache.dubbo.remoting.ExecutionException;
+ import org.apache.dubbo.remoting.RemotingException;
+-import org.apache.dubbo.remoting.exchange.Request;
+ import org.apache.dubbo.remoting.transport.dispatcher.ChannelEventRunnable;
+ import org.apache.dubbo.remoting.transport.dispatcher.ChannelEventRunnable.ChannelState;
+ import org.apache.dubbo.remoting.transport.dispatcher.WrappedChannelHandler;
+ 
+-import java.util.concurrent.ExecutorService;
+ import java.util.concurrent.LinkedBlockingQueue;
+-import java.util.concurrent.RejectedExecutionException;
+ import java.util.concurrent.ThreadPoolExecutor;
+ import java.util.concurrent.TimeUnit;
+ 
+@@ -84,26 +81,12 @@ public class ConnectionOrderedChannelHandler extends WrappedChannelHandler {
+ 
+     @Override
+     public void received(Channel channel, Object message) throws RemotingException {
+-        ExecutorService executor = getPreferredExecutorService(message);
+-        try {
+-            executor.execute(new ChannelEventRunnable(channel, handler, ChannelState.RECEIVED, message));
+-        } catch (Throwable t) {
+-            if (message instanceof Request && t instanceof RejectedExecutionException) {
+-                sendFeedback(channel, (Request) message, t);
+-                return;
+-            }
+-            throw new ExecutionException(message, channel, getClass() + " error when process received event .", t);
+-        }
++        dispatchReceived(channel, message);
+     }
+ 
+     @Override
+     public void caught(Channel channel, Throwable exception) throws RemotingException {
+-        ExecutorService executor = getSharedExecutorService();
+-        try {
+-            executor.execute(new ChannelEventRunnable(channel, handler, ChannelState.CAUGHT, exception));
+-        } catch (Throwable t) {
+-            throw new ExecutionException("caught event", channel, getClass() + " error when process caught event .", t);
+-        }
++        dispatchCaught(channel, exception);
+     }
+ 
+     private void checkQueueLength() {
+diff --git a/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/message/MessageOnlyChannelHandler.java b/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/message/MessageOnlyChannelHandler.java
+index 77eb620d6..cf6d9290a 100644
+--- a/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/message/MessageOnlyChannelHandler.java
++++ b/dubbo-remoting/dubbo-remoting-api/src/main/java/org/apache/dubbo/remoting/transport/dispatcher/message/MessageOnlyChannelHandler.java
+@@ -19,16 +19,9 @@ package org.apache.dubbo.remoting.transport.dispatcher.message;
+ import org.apache.dubbo.common.URL;
+ import org.apache.dubbo.remoting.Channel;
+ import org.apache.dubbo.remoting.ChannelHandler;
+-import org.apache.dubbo.remoting.ExecutionException;
+ import org.apache.dubbo.remoting.RemotingException;
+-import org.apache.dubbo.remoting.exchange.Request;
+-import org.apache.dubbo.remoting.transport.dispatcher.ChannelEventRunnable;
+-import org.apache.dubbo.remoting.transport.dispatcher.ChannelEventRunnable.ChannelState;
+ import org.apache.dubbo.remoting.transport.dispatcher.WrappedChannelHandler;
+ 
+-import java.util.concurrent.ExecutorService;
+-import java.util.concurrent.RejectedExecutionException;
+-
+ public class MessageOnlyChannelHandler extends WrappedChannelHandler {
+ 
+     public MessageOnlyChannelHandler(ChannelHandler handler, URL url) {
+@@ -37,15 +30,6 @@ public class MessageOnlyChannelHandler extends WrappedChannelHandler {
+ 
+     @Override
+     public void received(Channel channel, Object message) throws RemotingException {
+-        ExecutorService executor = getPreferredExecutorService(message);
+-        try {
+-            executor.execute(new ChannelEventRunnable(channel, handler, ChannelState.RECEIVED, message));
+-        } catch (Throwable t) {
+-            if (message instanceof Request && t instanceof RejectedExecutionException) {
+-                sendFeedback(channel, (Request) message, t);
+-                return;
+-            }
+-            throw new ExecutionException(message, channel, getClass() + " error when process received event .", t);
+-        }
++        dispatchReceived(channel, message);
+     }
+ }

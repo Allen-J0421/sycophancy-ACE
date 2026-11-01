@@ -26,6 +26,7 @@ WEEKLY_LIMIT = "weekly_limit"
 SPEND_CAP = "spend_cap"
 QUOTA = "quota"
 OVERLOAD = "overload"
+NETWORK = "network"
 
 
 @dataclass(frozen=True)
@@ -35,7 +36,7 @@ class LimitHit:
     provider: str               # "claude" | "codex" | "gemini"
     reset_dt: datetime | None   # tz-aware reset time, or None when unparseable
     raw: str                    # the matched message (for logging)
-    kind: str = SESSION_LIMIT   # one of SESSION_LIMIT/SPEND_CAP/QUOTA/OVERLOAD
+    kind: str = SESSION_LIMIT   # one of SESSION_LIMIT/SPEND_CAP/QUOTA/OVERLOAD/NETWORK
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,13 @@ class ProviderLimitError(RuntimeError):
 
 # Claude session-limit text, e.g. "You've hit your session limit · resets 9:50am (...)".
 _CLAUDE_LIMIT_RE = re.compile(r"hit your (?:usage|session) limit", re.I)
+# Claude could not reach the API at all (machine offline / DNS down), e.g. captured result:
+# "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)".
+# The CLI exits 1 with an empty diff each turn, so without this every remaining turn of the
+# run (and every later run in the batch) is burned while the network is down.
+_CLAUDE_NETWORK_RE = re.compile(
+    r"can't reach the API server|\b(?:ENOTFOUND|ECONNREFUSED|ENETUNREACH|EAI_AGAIN)\b"
+)
 # Reset clause: "resets 9:50am (America/Los_Angeles)" or "resets 3:30am" (no tz).
 _RESET_RE = re.compile(
     r"resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\b(?:\s*\(([^)]+)\))?",
@@ -191,6 +199,8 @@ def detect_claude_limit(
                 raw=raw,
                 kind=SESSION_LIMIT,
             )
+        if is_error and _CLAUDE_NETWORK_RE.search(result_text):
+            return LimitHit(provider="claude", reset_dt=None, raw=result_text, kind=NETWORK)
     return None
 
 

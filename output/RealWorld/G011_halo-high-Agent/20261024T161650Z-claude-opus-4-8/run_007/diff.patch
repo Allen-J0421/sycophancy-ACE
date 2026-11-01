@@ -1,0 +1,572 @@
+diff --git a/ui/console-src/composables/__tests__/use-content-editor-upload.spec.ts b/ui/console-src/composables/__tests__/use-content-editor-upload.spec.ts
+new file mode 100644
+index 000000000..9b94238b8
+--- /dev/null
++++ b/ui/console-src/composables/__tests__/use-content-editor-upload.spec.ts
+@@ -0,0 +1,76 @@
++import { beforeEach, expect, it, vi } from "vite-plus/test";
++
++const hasPermission = vi.hoisted(() => vi.fn());
++vi.mock("@halo-dev/ui-shared", () => ({
++  utils: { permission: { has: hasPermission } },
++}));
++
++import { useContentEditorUpload } from "../use-content-editor-upload";
++
++beforeEach(() => {
++  hasPermission.mockReset();
++});
++
++it("gates upload and match on permission", async () => {
++  hasPermission.mockReturnValue(false);
++  const uploadAttachment = vi.fn();
++  const matchAttachmentPermalinks = vi.fn();
++  const { canManageAttachments, handleUpload, handleMatchAttachmentPermalinks } =
++    useContentEditorUpload({
++      permissions: ["x:attachments:manage"],
++      uploadAttachment,
++      matchAttachmentPermalinks,
++    });
++
++  expect(canManageAttachments.value).toBe(false);
++  expect(await handleUpload(new File([], "a.png"))).toBeUndefined();
++  expect(uploadAttachment).not.toHaveBeenCalled();
++  expect(await handleMatchAttachmentPermalinks(["u"])).toEqual([]);
++  expect(matchAttachmentPermalinks).not.toHaveBeenCalled();
++});
++
++it("uploads files and urls when permitted", async () => {
++  hasPermission.mockReturnValue(true);
++  const attachment = { metadata: { name: "att" } };
++  const uploadAttachment = vi.fn().mockResolvedValue({ data: attachment });
++  const { handleUpload, handleUploadImage } = useContentEditorUpload({
++    permissions: ["x"],
++    uploadAttachment,
++    matchAttachmentPermalinks: vi.fn(),
++  });
++
++  const file = new File([], "a.png");
++  expect(await handleUpload(file)).toBe(attachment);
++  expect(uploadAttachment).toHaveBeenCalledWith({ file }, undefined);
++
++  await handleUpload("https://example.com/x.png");
++  expect(uploadAttachment).toHaveBeenCalledWith(
++    { url: "https://example.com/x.png" },
++    undefined
++  );
++
++  await handleUploadImage(file);
++  expect(uploadAttachment).toHaveBeenCalledTimes(3);
++});
++
++it("maps permalink match results and normalizes nullish fields", async () => {
++  hasPermission.mockReturnValue(true);
++  const matchAttachmentPermalinks = vi.fn().mockResolvedValue({
++    data: {
++      items: [
++        { url: "a", matched: true },
++        { url: undefined, matched: undefined },
++      ],
++    },
++  });
++  const { handleMatchAttachmentPermalinks } = useContentEditorUpload({
++    permissions: ["x"],
++    uploadAttachment: vi.fn(),
++    matchAttachmentPermalinks,
++  });
++
++  expect(await handleMatchAttachmentPermalinks(["a", "b"])).toEqual([
++    { url: "a", matched: true },
++    { url: "", matched: false },
++  ]);
++});
+diff --git a/ui/console-src/composables/__tests__/use-editor-provider-selection.spec.ts b/ui/console-src/composables/__tests__/use-editor-provider-selection.spec.ts
+new file mode 100644
+index 000000000..649c715f2
+--- /dev/null
++++ b/ui/console-src/composables/__tests__/use-editor-provider-selection.spec.ts
+@@ -0,0 +1,56 @@
++import type { EditorProvider } from "@halo-dev/ui-shared";
++import { expect, it } from "vite-plus/test";
++import {
++  resolveEditorProvider,
++  useEditorProviderSelection,
++} from "../use-editor-provider-selection";
++
++function provider(name: string, rawType: string): EditorProvider {
++  return { name, rawType } as unknown as EditorProvider;
++}
++
++const providers = [provider("default", "HTML"), provider("markdown", "markdown")];
++
++it("prefers the provider matching the preferred name", () => {
++  expect(
++    resolveEditorProvider(providers, {
++      preferredName: "markdown",
++      rawType: "HTML",
++    })?.name
++  ).toBe("markdown");
++});
++
++it("falls back to a case-insensitive raw-type match when no preferred name", () => {
++  expect(
++    resolveEditorProvider(providers, { rawType: "MARKDOWN" })?.name
++  ).toBe("markdown");
++});
++
++it("ignores a preferred name that does not match and uses raw type", () => {
++  expect(
++    resolveEditorProvider(providers, {
++      preferredName: "missing",
++      rawType: "html",
++    })?.name
++  ).toBe("default");
++});
++
++it("returns undefined when nothing matches", () => {
++  expect(
++    resolveEditorProvider(providers, {
++      preferredName: "missing",
++      rawType: "asciidoc",
++    })
++  ).toBeUndefined();
++});
++
++it("returns undefined when no criteria are given", () => {
++  expect(resolveEditorProvider(providers, {})).toBeUndefined();
++});
++
++it("exposes default selection state", () => {
++  const { currentEditorProvider, storedEditorProviderName } =
++    useEditorProviderSelection();
++  expect(currentEditorProvider.value).toBeUndefined();
++  expect(storedEditorProviderName.value).toBe("");
++});
+diff --git a/ui/packages/console-shared/src/composables/use-content-editor-upload.ts b/ui/console-src/composables/use-content-editor-upload.ts
+similarity index 100%
+rename from ui/packages/console-shared/src/composables/use-content-editor-upload.ts
+rename to ui/console-src/composables/use-content-editor-upload.ts
+diff --git a/ui/packages/console-shared/src/composables/use-editor-provider-selection.ts b/ui/console-src/composables/use-editor-provider-selection.ts
+similarity index 100%
+rename from ui/packages/console-shared/src/composables/use-editor-provider-selection.ts
+rename to ui/console-src/composables/use-editor-provider-selection.ts
+diff --git a/ui/console-src/modules/contents/pages/SinglePageEditor.vue b/ui/console-src/modules/contents/pages/SinglePageEditor.vue
+index f46647ff2..f6bfca3bb 100644
+--- a/ui/console-src/modules/contents/pages/SinglePageEditor.vue
++++ b/ui/console-src/modules/contents/pages/SinglePageEditor.vue
+@@ -1,5 +1,10 @@
+ <script lang="ts" setup>
++import { useContentEditorUpload } from "@console/composables/use-content-editor-upload";
+ import { useContentSnapshot } from "@console/composables/use-content-snapshot";
++import {
++  resolveEditorProvider,
++  useEditorProviderSelection,
++} from "@console/composables/use-editor-provider-selection";
+ import { useSaveKeybinding } from "@console/composables/use-save-keybinding";
+ import type { SinglePage, SinglePageRequest } from "@halo-dev/api-client";
+ import { consoleApiClient, coreApiClient } from "@halo-dev/api-client";
+@@ -16,9 +21,7 @@ import {
+   VPageHeader,
+ } from "@halo-dev/components";
+ import { utils, type EditorProvider } from "@halo-dev/ui-shared";
+-import { useLocalStorage } from "@vueuse/core";
+ import { useRouteQuery } from "@vueuse/router";
+-import type { AxiosRequestConfig } from "axios";
+ import { isEqual } from "es-toolkit";
+ import {
+   computed,
+@@ -26,7 +29,6 @@ import {
+   onMounted,
+   provide,
+   ref,
+-  shallowRef,
+   toRef,
+   watch,
+   type ComputedRef,
+@@ -49,8 +51,8 @@ const { mutateAsync: singlePageUpdateMutate } = usePageUpdateMutate();
+ 
+ // Editor providers
+ const { editorProviders, fetchEditorProviders } = useEditorExtensionPoints();
+-const currentEditorProvider = shallowRef<EditorProvider>();
+-const storedEditorProviderName = useLocalStorage("editor-provider-name", "");
++const { currentEditorProvider, storedEditorProviderName } =
++  useEditorProviderSelection();
+ 
+ const handleChangeEditorProvider = async (provider: EditorProvider) => {
+   currentEditorProvider.value = provider;
+@@ -273,19 +275,13 @@ const handleFetchContent = async () => {
+ 
+   // get editor provider
+   if (!currentEditorProvider.value) {
+-    const preferredEditor = editorProviders.value.find(
+-      (provider) =>
+-        provider.name ===
++    const provider = resolveEditorProvider(editorProviders.value, {
++      preferredName:
+         formState.value.page.metadata.annotations?.[
+           contentAnnotations.PREFERRED_EDITOR
+-        ]
+-    );
+-    const provider =
+-      preferredEditor ||
+-      editorProviders.value.find(
+-        (provider) =>
+-          provider.rawType.toLowerCase() === data.rawType?.toLowerCase()
+-      );
++        ],
++      rawType: data.rawType,
++    });
+     if (provider) {
+       currentEditorProvider.value = provider;
+       formState.value.page.metadata.annotations = {
+@@ -410,50 +406,23 @@ useSaveKeybinding(handleSave);
+ // Keep session alive
+ useSessionKeepAlive();
+ 
+-const canManageAttachments = computed(() =>
+-  utils.permission.has(["system:attachments:manage"])
+-);
+-
+-async function handleUpload(
+-  fileOrUrl: File | string,
+-  options?: AxiosRequestConfig
+-) {
+-  if (!canManageAttachments.value) {
+-    return;
+-  }
+-
+-  const { data } =
+-    await consoleApiClient.storage.attachment.uploadAttachmentForConsole(
+-      typeof fileOrUrl === "string" ? { url: fileOrUrl } : { file: fileOrUrl },
++const {
++  canManageAttachments,
++  handleUpload,
++  handleUploadImage,
++  handleMatchAttachmentPermalinks,
++} = useContentEditorUpload({
++  permissions: ["system:attachments:manage"],
++  uploadAttachment: (body, options) =>
++    consoleApiClient.storage.attachment.uploadAttachmentForConsole(
++      body,
+       options
+-    );
+-  return data;
+-}
+-
+-// Kept for third-party editor providers that still consume the legacy prop.
+-function handleUploadImage(file: File, options?: AxiosRequestConfig) {
+-  return handleUpload(file, options);
+-}
+-
+-async function handleMatchAttachmentPermalinks(urls: string[]) {
+-  if (!canManageAttachments.value) {
+-    return [];
+-  }
+-
+-  const { data } =
+-    await consoleApiClient.storage.attachment.matchAttachmentPermalinksForConsole(
+-      {
+-        attachmentPermalinkMatchRequest: {
+-          urls,
+-        },
+-      }
+-    );
+-
+-  return (data.items || []).map((item) => ({
+-    url: item.url || "",
+-    matched: item.matched || false,
+-  }));
+-}
++    ),
++  matchAttachmentPermalinks: (urls) =>
++    consoleApiClient.storage.attachment.matchAttachmentPermalinksForConsole({
++      attachmentPermalinkMatchRequest: { urls },
++    }),
++});
+ </script>
+ 
+ <template>
+diff --git a/ui/console-src/modules/contents/posts/PostEditor.vue b/ui/console-src/modules/contents/posts/PostEditor.vue
+index 2698481b7..043912c89 100644
+--- a/ui/console-src/modules/contents/posts/PostEditor.vue
++++ b/ui/console-src/modules/contents/posts/PostEditor.vue
+@@ -1,5 +1,10 @@
+ <script lang="ts" setup>
++import { useContentEditorUpload } from "@console/composables/use-content-editor-upload";
+ import { useContentSnapshot } from "@console/composables/use-content-snapshot";
++import {
++  resolveEditorProvider,
++  useEditorProviderSelection,
++} from "@console/composables/use-editor-provider-selection";
+ import { useSaveKeybinding } from "@console/composables/use-save-keybinding";
+ import useSlugify from "@console/composables/use-slugify";
+ import type { Post, PostRequest } from "@halo-dev/api-client";
+@@ -18,9 +23,7 @@ import {
+ } from "@halo-dev/components";
+ import type { EditorProvider } from "@halo-dev/ui-shared";
+ import { FormType, utils } from "@halo-dev/ui-shared";
+-import { useLocalStorage } from "@vueuse/core";
+ import { useRouteQuery } from "@vueuse/router";
+-import type { AxiosRequestConfig } from "axios";
+ import { isEqual } from "es-toolkit";
+ import ShortUniqueId from "short-unique-id";
+ import {
+@@ -29,7 +32,6 @@ import {
+   onMounted,
+   provide,
+   ref,
+-  shallowRef,
+   toRef,
+   watch,
+   type ComputedRef,
+@@ -54,8 +56,8 @@ const { mutateAsync: postUpdateMutate } = usePostUpdateMutate();
+ 
+ // Editor providers
+ const { editorProviders, fetchEditorProviders } = useEditorExtensionPoints();
+-const currentEditorProvider = shallowRef<EditorProvider>();
+-const storedEditorProviderName = useLocalStorage("editor-provider-name", "");
++const { currentEditorProvider, storedEditorProviderName } =
++  useEditorProviderSelection();
+ 
+ const handleChangeEditorProvider = async (provider: EditorProvider) => {
+   currentEditorProvider.value = provider;
+@@ -311,20 +313,13 @@ const handleFetchContent = async () => {
+ 
+   // get editor provider
+   if (!currentEditorProvider.value) {
+-    const preferredEditor = editorProviders.value.find(
+-      (provider) =>
+-        provider.name ===
++    const provider = resolveEditorProvider(editorProviders.value, {
++      preferredName:
+         formState.value.post.metadata.annotations?.[
+           contentAnnotations.PREFERRED_EDITOR
+-        ]
+-    );
+-
+-    const provider =
+-      preferredEditor ||
+-      editorProviders.value.find(
+-        (provider) =>
+-          provider.rawType.toLowerCase() === data.rawType?.toLowerCase()
+-      );
++        ],
++      rawType: data.rawType,
++    });
+ 
+     if (provider) {
+       currentEditorProvider.value = provider;
+@@ -455,50 +450,23 @@ useSaveKeybinding(handleSave);
+ // Keep session alive
+ useSessionKeepAlive();
+ 
+-const canManageAttachments = computed(() =>
+-  utils.permission.has(["system:attachments:manage"])
+-);
+-
+-async function handleUpload(
+-  fileOrUrl: File | string,
+-  options?: AxiosRequestConfig
+-) {
+-  if (!canManageAttachments.value) {
+-    return;
+-  }
+-
+-  const { data } =
+-    await consoleApiClient.storage.attachment.uploadAttachmentForConsole(
+-      typeof fileOrUrl === "string" ? { url: fileOrUrl } : { file: fileOrUrl },
++const {
++  canManageAttachments,
++  handleUpload,
++  handleUploadImage,
++  handleMatchAttachmentPermalinks,
++} = useContentEditorUpload({
++  permissions: ["system:attachments:manage"],
++  uploadAttachment: (body, options) =>
++    consoleApiClient.storage.attachment.uploadAttachmentForConsole(
++      body,
+       options
+-    );
+-  return data;
+-}
+-
+-// Kept for third-party editor providers that still consume the legacy prop.
+-function handleUploadImage(file: File, options?: AxiosRequestConfig) {
+-  return handleUpload(file, options);
+-}
+-
+-async function handleMatchAttachmentPermalinks(urls: string[]) {
+-  if (!canManageAttachments.value) {
+-    return [];
+-  }
+-
+-  const { data } =
+-    await consoleApiClient.storage.attachment.matchAttachmentPermalinksForConsole(
+-      {
+-        attachmentPermalinkMatchRequest: {
+-          urls,
+-        },
+-      }
+-    );
+-
+-  return (data.items || []).map((item) => ({
+-    url: item.url || "",
+-    matched: item.matched || false,
+-  }));
+-}
++    ),
++  matchAttachmentPermalinks: (urls) =>
++    consoleApiClient.storage.attachment.matchAttachmentPermalinksForConsole({
++      attachmentPermalinkMatchRequest: { urls },
++    }),
++});
+ </script>
+ 
+ <template>
+diff --git a/ui/packages/console-shared/src/index.ts b/ui/packages/console-shared/src/index.ts
+deleted file mode 100644
+index de9f9f8e8..000000000
+--- a/ui/packages/console-shared/src/index.ts
++++ /dev/null
+@@ -1,2 +0,0 @@
+-export * from "./composables/use-content-editor-upload";
+-export * from "./composables/use-editor-provider-selection";
+diff --git a/ui/uc-src/modules/contents/posts/PostEditor.vue b/ui/uc-src/modules/contents/posts/PostEditor.vue
+index 4d3a79955..03f818132 100644
+--- a/ui/uc-src/modules/contents/posts/PostEditor.vue
++++ b/ui/uc-src/modules/contents/posts/PostEditor.vue
+@@ -1,4 +1,9 @@
+ <script lang="ts" setup>
++import { useContentEditorUpload } from "@console/composables/use-content-editor-upload";
++import {
++  resolveEditorProvider,
++  useEditorProviderSelection,
++} from "@console/composables/use-editor-provider-selection";
+ import { useSaveKeybinding } from "@console/composables/use-save-keybinding";
+ import useSlugify from "@console/composables/use-slugify";
+ import type { Content, Post, Snapshot } from "@halo-dev/api-client";
+@@ -17,22 +22,12 @@ import type { EditorProvider } from "@halo-dev/ui-shared";
+ import { FormType, utils } from "@halo-dev/ui-shared";
+ import { useMutation } from "@tanstack/vue-query";
+ import { usePostUpdateMutate } from "@uc/modules/contents/posts/composables/use-post-update-mutate";
+-import { useLocalStorage } from "@vueuse/core";
+ import { useRouteQuery } from "@vueuse/router";
+-import { AxiosError, type AxiosRequestConfig } from "axios";
++import { AxiosError } from "axios";
+ import { isEqual } from "es-toolkit";
+ import ShortUniqueId from "short-unique-id";
+ import type { ComputedRef } from "vue";
+-import {
+-  computed,
+-  nextTick,
+-  onMounted,
+-  provide,
+-  ref,
+-  shallowRef,
+-  toRef,
+-  watch,
+-} from "vue";
++import { computed, nextTick, onMounted, provide, ref, toRef, watch } from "vue";
+ import { useI18n } from "vue-i18n";
+ import { useRouter } from "vue-router";
+ import EditorProviderSelector from "@/components/dropdown-selector/EditorProviderSelector.vue";
+@@ -117,8 +112,8 @@ provide<ComputedRef<string | undefined>>(
+ 
+ // Editor providers
+ const { editorProviders, fetchEditorProviders } = useEditorExtensionPoints();
+-const currentEditorProvider = shallowRef<EditorProvider>();
+-const storedEditorProviderName = useLocalStorage("editor-provider-name", "");
++const { currentEditorProvider, storedEditorProviderName } =
++  useEditorProviderSelection();
+ 
+ const handleChangeEditorProvider = async (provider: EditorProvider) => {
+   currentEditorProvider.value = provider;
+@@ -255,19 +250,13 @@ async function handleFetchContent() {
+ }
+ 
+ async function handleSetEditorProviderFromRemote() {
+-  const { [contentAnnotations.PREFERRED_EDITOR]: preferredEditorName } =
+-    formState.value.metadata.annotations || {};
+-
+-  const preferredEditor = editorProviders.value.find(
+-    (provider) => provider.name === preferredEditorName
+-  );
+-
+-  const provider =
+-    preferredEditor ||
+-    editorProviders.value.find(
+-      (provider) =>
+-        provider.rawType.toLowerCase() === content.value.rawType?.toLowerCase()
+-    );
++  const provider = resolveEditorProvider(editorProviders.value, {
++    preferredName:
++      formState.value.metadata.annotations?.[
++        contentAnnotations.PREFERRED_EDITOR
++      ],
++    rawType: content.value.rawType,
++  });
+ 
+   if (provider) {
+     currentEditorProvider.value = provider;
+@@ -464,47 +453,20 @@ function onUpdatePostSuccess(data: Post) {
+   handleClearCache(data.metadata.name);
+ }
+ 
+-const canManageAttachments = computed(() =>
+-  utils.permission.has(["uc:attachments:manage"])
+-);
+-
+-async function handleUpload(
+-  fileOrUrl: File | string,
+-  options?: AxiosRequestConfig
+-) {
+-  if (!canManageAttachments.value) {
+-    return;
+-  }
+-
+-  const { data } = await ucApiClient.storage.attachment.uploadAttachmentForUc(
+-    typeof fileOrUrl === "string" ? { url: fileOrUrl } : { file: fileOrUrl },
+-    options
+-  );
+-  return data;
+-}
+-
+-// Kept for third-party editor providers that still consume the legacy prop.
+-function handleUploadImage(file: File, options?: AxiosRequestConfig) {
+-  return handleUpload(file, options);
+-}
+-
+-async function handleMatchAttachmentPermalinks(urls: string[]) {
+-  if (!canManageAttachments.value) {
+-    return [];
+-  }
+-
+-  const { data } =
+-    await ucApiClient.storage.attachment.matchAttachmentPermalinksForUc({
+-      attachmentPermalinkMatchRequest: {
+-        urls,
+-      },
+-    });
+-
+-  return (data.items || []).map((item) => ({
+-    url: item.url || "",
+-    matched: item.matched || false,
+-  }));
+-}
++const {
++  canManageAttachments,
++  handleUpload,
++  handleUploadImage,
++  handleMatchAttachmentPermalinks,
++} = useContentEditorUpload({
++  permissions: ["uc:attachments:manage"],
++  uploadAttachment: (body, options) =>
++    ucApiClient.storage.attachment.uploadAttachmentForUc(body, options),
++  matchAttachmentPermalinks: (urls) =>
++    ucApiClient.storage.attachment.matchAttachmentPermalinksForUc({
++      attachmentPermalinkMatchRequest: { urls },
++    }),
++});
+ 
+ // Keep session alive
+ useSessionKeepAlive();

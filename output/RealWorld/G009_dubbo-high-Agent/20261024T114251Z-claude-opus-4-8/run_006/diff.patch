@@ -1,0 +1,972 @@
+diff --git a/dubbo-rpc/dubbo-rpc-triple/src/main/java/org/apache/dubbo/rpc/protocol/tri/rest/argument/GeneralTypeConverter.java b/dubbo-rpc/dubbo-rpc-triple/src/main/java/org/apache/dubbo/rpc/protocol/tri/rest/argument/GeneralTypeConverter.java
+index c950aa64c..41231e313 100644
+--- a/dubbo-rpc/dubbo-rpc-triple/src/main/java/org/apache/dubbo/rpc/protocol/tri/rest/argument/GeneralTypeConverter.java
++++ b/dubbo-rpc/dubbo-rpc-triple/src/main/java/org/apache/dubbo/rpc/protocol/tri/rest/argument/GeneralTypeConverter.java
+@@ -108,6 +108,14 @@ public class GeneralTypeConverter implements TypeConverter {
+ 
+     private static final Logger LOGGER = LoggerFactory.getLogger(GeneralTypeConverter.class);
+ 
++    /**
++     * Sentinel returned by the per-source-type conversion helpers to signal that the source was not
++     * handled and conversion should fall through to the shared container/constructor/JSON handling.
++     * A plain {@code null} cannot be used for this because {@code null} is itself a valid conversion
++     * result (e.g. an empty string converted to a non-primitive scalar).
++     */
++    private static final Object NOT_HANDLED = new Object();
++
+     private final CompositeArgumentConverter converter;
+     private final CodecUtils codecUtils;
+     private final HttpJsonUtils httpJsonUtils;
+@@ -167,318 +175,31 @@ public class GeneralTypeConverter implements TypeConverter {
+         }
+ 
+         if (source instanceof CharSequence) {
+-            String str = source.toString();
+-
+-            if (targetClass == String.class) {
+-                return str;
+-            }
+-
+-            if (str.isEmpty() || "null".equals(str) || "NULL".equals(str)) {
+-                return emptyDefault(targetClass);
+-            }
+-
+-            switch (targetClass.getName()) {
+-                case "java.lang.Double":
+-                case "double":
+-                    return Double.valueOf(str);
+-                case "java.lang.Float":
+-                case "float":
+-                    return Float.valueOf(str);
+-                case "java.lang.Long":
+-                case "long":
+-                    return isHexNumber(str) ? Long.decode(str) : Long.valueOf(str);
+-                case "java.lang.Integer":
+-                case "int":
+-                    return isHexNumber(str) ? Integer.decode(str) : Integer.valueOf(str);
+-                case "java.lang.Short":
+-                case "short":
+-                    return isHexNumber(str) ? Short.decode(str) : Short.valueOf(str);
+-                case "java.lang.Character":
+-                case "char":
+-                    if (str.length() == 1) {
+-                        return str.charAt(0);
+-                    }
+-                    throw new RestParameterException("Can not convert String(" + str + ") to char, must only 1 char");
+-                case "java.lang.Byte":
+-                case "byte":
+-                    return isHexNumber(str) ? Byte.decode(str) : Byte.valueOf(str);
+-                case "java.lang.Boolean":
+-                    return toBoolean(str);
+-                case "boolean":
+-                    return toBoolean(str) == Boolean.TRUE;
+-                case "java.math.BigInteger":
+-                    return new BigInteger(str);
+-                case "java.math.BigDecimal":
+-                    return new BigDecimal(str);
+-                case "java.lang.Number":
+-                    return str.indexOf('.') == -1 ? doConvert(str, Long.class) : doConvert(str, Double.class);
+-                case "java.util.Date":
+-                    return DateUtils.parse(str);
+-                case "java.util.Calendar":
+-                    Calendar cal = Calendar.getInstance();
+-                    cal.setTimeInMillis(DateUtils.parse(str).getTime());
+-                    return cal;
+-                case "java.sql.Timestamp":
+-                    return new Timestamp(DateUtils.parse(str).getTime());
+-                case "java.time.Instant":
+-                    return DateUtils.parse(str).toInstant();
+-                case "java.time.ZonedDateTime":
+-                    return toZonedDateTime(str);
+-                case "java.time.LocalDate":
+-                    return toZonedDateTime(str).toLocalDate();
+-                case "java.time.LocalTime":
+-                    return toZonedDateTime(str).toLocalTime();
+-                case "java.time.LocalDateTime":
+-                    return toZonedDateTime(str).toLocalDateTime();
+-                case "java.time.ZoneId":
+-                    return TimeZone.getTimeZone(str).toZoneId();
+-                case "java.util.TimeZone":
+-                    return TimeZone.getTimeZone(str);
+-                case "java.io.File":
+-                    return new File(str);
+-                case "java.nio.file.Path":
+-                    return Paths.get(str);
+-                case "java.nio.charset.Charset":
+-                    return Charset.forName(str);
+-                case "java.net.InetAddress":
+-                    return InetAddress.getByName(str);
+-                case "java.net.URI":
+-                    return new URI(str);
+-                case "java.net.URL":
+-                    return new URL(str);
+-                case "java.util.UUID":
+-                    return UUID.fromString(str);
+-                case "java.util.Locale":
+-                    String[] parts = StringUtils.tokenize(str, '-', '_');
+-                    switch (parts.length) {
+-                        case 2:
+-                            return new Locale(parts[0], parts[1]);
+-                        case 3:
+-                            return new Locale(parts[0], parts[1], parts[2]);
+-                        default:
+-                            return new Locale(parts[0]);
+-                    }
+-                case "java.util.Currency":
+-                    return Currency.getInstance(str);
+-                case "java.util.regex.Pattern":
+-                    return Pattern.compile(str);
+-                case "java.lang.Class":
+-                    return ClassUtils.loadClass(str);
+-                case "[B":
+-                    return str.getBytes(UTF_8);
+-                case "[C":
+-                    return str.toCharArray();
+-                case "java.util.OptionalInt":
+-                    return OptionalInt.of(isHexNumber(str) ? Integer.decode(str) : Integer.parseInt(str));
+-                case "java.util.OptionalLong":
+-                    return OptionalLong.of(isHexNumber(str) ? Long.decode(str) : Long.parseLong(str));
+-                case "java.util.OptionalDouble":
+-                    return OptionalDouble.of(Double.parseDouble(str));
+-                case "java.util.Properties":
+-                    Properties properties = new Properties();
+-                    properties.load(new StringReader(str));
+-                    return properties;
+-                default:
+-            }
+-
+-            if (targetClass.isEnum()) {
+-                try {
+-                    return Enum.valueOf((Class<Enum>) targetClass, str);
+-                } catch (Exception ignored) {
+-                }
+-            }
+-
+-            target = jsonToObject(str, targetClass);
+-            if (target != null) {
+-                return target;
+-            }
+-
+-            if (targetClass.isArray()) {
+-                List<String> list = tokenizeToList(str);
+-                int n = list.size();
+-                Class itemType = targetClass.getComponentType();
+-                if (itemType == String.class) {
+-                    return list.toArray(StringUtils.EMPTY_STRING_ARRAY);
+-                }
+-                Object arr = Array.newInstance(itemType, n);
+-                for (int i = 0; i < n; i++) {
+-                    Array.set(arr, i, doConvert(list.get(i), itemType));
+-                }
+-                return arr;
+-            } else if (Collection.class.isAssignableFrom(targetClass)) {
+-                target = convertCollection(tokenizeToList(str), targetClass);
+-                if (target != null) {
+-                    return target;
+-                }
+-            } else if (Map.class.isAssignableFrom(targetClass)) {
+-                target = convertMap(tokenizeToMap(str), targetClass);
+-                if (target != null) {
+-                    return target;
+-                }
++            Object result = fromCharSequence(source.toString(), targetClass);
++            if (result != NOT_HANDLED) {
++                return result;
+             }
+         } else if (source instanceof Number) {
+-            Number num = (Number) source;
+-
+-            switch (targetClass.getName()) {
+-                case "java.lang.String":
+-                    return source.toString();
+-                case "java.lang.Double":
+-                case "double":
+-                    return num.doubleValue();
+-                case "java.lang.Float":
+-                case "float":
+-                    return num.floatValue();
+-                case "java.lang.Long":
+-                case "long":
+-                    return num.longValue();
+-                case "java.lang.Integer":
+-                case "int":
+-                    return num.intValue();
+-                case "java.lang.Short":
+-                case "short":
+-                    return num.shortValue();
+-                case "java.lang.Character":
+-                case "char":
+-                    return (char) num.intValue();
+-                case "java.lang.Byte":
+-                case "byte":
+-                    return num.byteValue();
+-                case "java.lang.Boolean":
+-                case "boolean":
+-                    return toBoolean(num);
+-                case "java.math.BigInteger":
+-                    return BigInteger.valueOf(num.longValue());
+-                case "java.math.BigDecimal":
+-                    return BigDecimal.valueOf(num.doubleValue());
+-                case "java.util.Date":
+-                    return new Date(num.longValue());
+-                case "java.util.Calendar":
+-                    Calendar cal = Calendar.getInstance();
+-                    cal.setTimeInMillis(num.longValue());
+-                    return cal;
+-                case "java.sql.Timestamp":
+-                    return new Timestamp(num.longValue());
+-                case "java.time.Instant":
+-                    return Instant.ofEpochMilli(num.longValue());
+-                case "java.time.ZonedDateTime":
+-                    return toZonedDateTime(num);
+-                case "java.time.LocalDate":
+-                    return toZonedDateTime(num).toLocalDate();
+-                case "java.time.LocalTime":
+-                    return toZonedDateTime(num).toLocalTime();
+-                case "java.time.LocalDateTime":
+-                    return toZonedDateTime(num).toLocalDateTime();
+-                case "java.util.TimeZone":
+-                    return toTimeZone(num.intValue());
+-                case "[B":
+-                    return toBytes(num);
+-                case "[C":
+-                    return new char[] {(char) num.intValue()};
+-                case "java.util.OptionalInt":
+-                    return OptionalInt.of(num.intValue());
+-                case "java.util.OptionalLong":
+-                    return OptionalLong.of(num.longValue());
+-                case "java.util.OptionalDouble":
+-                    return OptionalDouble.of(num.doubleValue());
+-                default:
+-            }
+-
+-            if (targetClass.isEnum()) {
+-                for (T e : targetClass.getEnumConstants()) {
+-                    if (((Enum) e).ordinal() == num.intValue()) {
+-                        return e;
+-                    }
+-                }
++            Object result = fromNumber((Number) source, targetClass);
++            if (result != NOT_HANDLED) {
++                return result;
+             }
+         } else if (source instanceof Date) {
+-            Date date = (Date) source;
+-            switch (targetClass.getName()) {
+-                case "java.lang.String":
+-                    return DateUtils.format(date);
+-                case "java.lang.Long":
+-                case "long":
+-                    return date.getTime();
+-                case "java.lang.Integer":
+-                case "int":
+-                    return (int) (date.getTime() / 1000);
+-                case "java.util.Calendar":
+-                    Calendar cal = Calendar.getInstance();
+-                    cal.setTimeInMillis(date.getTime());
+-                    return cal;
+-                case "java.time.Instant":
+-                    return date.toInstant();
+-                case "java.time.ZonedDateTime":
+-                    return toZonedDateTime(date.getTime());
+-                case "java.time.LocalDate":
+-                    return toZonedDateTime(date.getTime()).toLocalDate();
+-                case "java.time.LocalTime":
+-                    return toZonedDateTime(date.getTime()).toLocalTime();
+-                case "java.time.LocalDateTime":
+-                    return toZonedDateTime(date.getTime()).toLocalDateTime();
+-                default:
++            Object result = fromDate((Date) source, targetClass);
++            if (result != NOT_HANDLED) {
++                return result;
+             }
+         } else if (source instanceof TemporalAccessor) {
+             return doConvert(DateUtils.toDate((TemporalAccessor) source), targetClass);
+         } else if (source instanceof Enum) {
+-            Enum en = (Enum) source;
+-            if (targetClass == String.class) {
+-                return en.toString();
+-            }
+-            if (targetClass == int.class || targetClass == Integer.class) {
+-                return en.ordinal();
+-            }
+-            if (Number.class.isAssignableFrom(targetClass)) {
+-                return doConvert(en.ordinal(), targetClass);
+-            }
+-            if (targetClass.isEnum()) {
+-                return Enum.valueOf((Class<Enum>) targetClass, en.name());
++            Object result = fromEnum((Enum) source, targetClass);
++            if (result != NOT_HANDLED) {
++                return result;
+             }
+         } else if (source instanceof byte[]) {
+-            byte[] bytes = (byte[]) source;
+-
+-            if (bytes.length == 0) {
+-                return emptyDefault(targetClass);
+-            }
+-
+-            switch (targetClass.getName()) {
+-                case "java.lang.String":
+-                    return new String(bytes, UTF_8);
+-                case "java.lang.Double":
+-                case "double":
+-                    return ByteBuffer.wrap(bytes).getDouble();
+-                case "java.lang.Float":
+-                case "float":
+-                    return ByteBuffer.wrap(bytes).getFloat();
+-                case "java.lang.Long":
+-                case "long":
+-                    return ByteBuffer.wrap(bytes).getLong();
+-                case "java.lang.Integer":
+-                case "int":
+-                    return ByteBuffer.wrap(bytes).getInt();
+-                case "java.lang.Short":
+-                case "short":
+-                    return ByteBuffer.wrap(bytes).getShort();
+-                case "java.lang.Character":
+-                case "char":
+-                    return ByteBuffer.wrap(bytes).getChar();
+-                case "java.lang.Byte":
+-                case "byte":
+-                    return bytes[0];
+-                case "java.lang.Boolean":
+-                case "boolean":
+-                    return bytes[0] == (byte) 0 ? Boolean.FALSE : Boolean.TRUE;
+-                case "java.math.BigInteger":
+-                    return new BigInteger(bytes);
+-                case "java.util.Properties":
+-                    Properties properties = new Properties();
+-                    properties.load(new ByteArrayInputStream(bytes));
+-                    return properties;
+-                default:
+-            }
+-
+-            target = jsonToObject(new String(bytes, StandardCharsets.ISO_8859_1), targetClass);
+-            if (target != null) {
+-                return target;
++            Object result = fromByteArray((byte[]) source, targetClass);
++            if (result != NOT_HANDLED) {
++                return result;
+             }
+         }
+ 
+@@ -637,6 +358,325 @@ public class GeneralTypeConverter implements TypeConverter {
+         return null;
+     }
+ 
++    private Object fromCharSequence(String str, Class targetClass) throws Exception {
++        if (targetClass == String.class) {
++            return str;
++        }
++
++        if (str.isEmpty() || "null".equals(str) || "NULL".equals(str)) {
++            return emptyDefault(targetClass);
++        }
++
++        switch (targetClass.getName()) {
++            case "java.lang.Double":
++            case "double":
++                return Double.valueOf(str);
++            case "java.lang.Float":
++            case "float":
++                return Float.valueOf(str);
++            case "java.lang.Long":
++            case "long":
++                return isHexNumber(str) ? Long.decode(str) : Long.valueOf(str);
++            case "java.lang.Integer":
++            case "int":
++                return isHexNumber(str) ? Integer.decode(str) : Integer.valueOf(str);
++            case "java.lang.Short":
++            case "short":
++                return isHexNumber(str) ? Short.decode(str) : Short.valueOf(str);
++            case "java.lang.Character":
++            case "char":
++                if (str.length() == 1) {
++                    return str.charAt(0);
++                }
++                throw new RestParameterException("Can not convert String(" + str + ") to char, must only 1 char");
++            case "java.lang.Byte":
++            case "byte":
++                return isHexNumber(str) ? Byte.decode(str) : Byte.valueOf(str);
++            case "java.lang.Boolean":
++                return toBoolean(str);
++            case "boolean":
++                return toBoolean(str) == Boolean.TRUE;
++            case "java.math.BigInteger":
++                return new BigInteger(str);
++            case "java.math.BigDecimal":
++                return new BigDecimal(str);
++            case "java.lang.Number":
++                return str.indexOf('.') == -1 ? doConvert(str, Long.class) : doConvert(str, Double.class);
++            case "java.util.Date":
++                return DateUtils.parse(str);
++            case "java.util.Calendar":
++                Calendar cal = Calendar.getInstance();
++                cal.setTimeInMillis(DateUtils.parse(str).getTime());
++                return cal;
++            case "java.sql.Timestamp":
++                return new Timestamp(DateUtils.parse(str).getTime());
++            case "java.time.Instant":
++                return DateUtils.parse(str).toInstant();
++            case "java.time.ZonedDateTime":
++                return toZonedDateTime(str);
++            case "java.time.LocalDate":
++                return toZonedDateTime(str).toLocalDate();
++            case "java.time.LocalTime":
++                return toZonedDateTime(str).toLocalTime();
++            case "java.time.LocalDateTime":
++                return toZonedDateTime(str).toLocalDateTime();
++            case "java.time.ZoneId":
++                return TimeZone.getTimeZone(str).toZoneId();
++            case "java.util.TimeZone":
++                return TimeZone.getTimeZone(str);
++            case "java.io.File":
++                return new File(str);
++            case "java.nio.file.Path":
++                return Paths.get(str);
++            case "java.nio.charset.Charset":
++                return Charset.forName(str);
++            case "java.net.InetAddress":
++                return InetAddress.getByName(str);
++            case "java.net.URI":
++                return new URI(str);
++            case "java.net.URL":
++                return new URL(str);
++            case "java.util.UUID":
++                return UUID.fromString(str);
++            case "java.util.Locale":
++                String[] parts = StringUtils.tokenize(str, '-', '_');
++                switch (parts.length) {
++                    case 2:
++                        return new Locale(parts[0], parts[1]);
++                    case 3:
++                        return new Locale(parts[0], parts[1], parts[2]);
++                    default:
++                        return new Locale(parts[0]);
++                }
++            case "java.util.Currency":
++                return Currency.getInstance(str);
++            case "java.util.regex.Pattern":
++                return Pattern.compile(str);
++            case "java.lang.Class":
++                return ClassUtils.loadClass(str);
++            case "[B":
++                return str.getBytes(UTF_8);
++            case "[C":
++                return str.toCharArray();
++            case "java.util.OptionalInt":
++                return OptionalInt.of(isHexNumber(str) ? Integer.decode(str) : Integer.parseInt(str));
++            case "java.util.OptionalLong":
++                return OptionalLong.of(isHexNumber(str) ? Long.decode(str) : Long.parseLong(str));
++            case "java.util.OptionalDouble":
++                return OptionalDouble.of(Double.parseDouble(str));
++            case "java.util.Properties":
++                Properties properties = new Properties();
++                properties.load(new StringReader(str));
++                return properties;
++            default:
++        }
++
++        if (targetClass.isEnum()) {
++            try {
++                return Enum.valueOf((Class<Enum>) targetClass, str);
++            } catch (Exception ignored) {
++            }
++        }
++
++        Object target = jsonToObject(str, targetClass);
++        if (target != null) {
++            return target;
++        }
++
++        if (targetClass.isArray()) {
++            List<String> list = tokenizeToList(str);
++            int n = list.size();
++            Class itemType = targetClass.getComponentType();
++            if (itemType == String.class) {
++                return list.toArray(StringUtils.EMPTY_STRING_ARRAY);
++            }
++            Object arr = Array.newInstance(itemType, n);
++            for (int i = 0; i < n; i++) {
++                Array.set(arr, i, doConvert(list.get(i), itemType));
++            }
++            return arr;
++        } else if (Collection.class.isAssignableFrom(targetClass)) {
++            target = convertCollection(tokenizeToList(str), targetClass);
++            if (target != null) {
++                return target;
++            }
++        } else if (Map.class.isAssignableFrom(targetClass)) {
++            target = convertMap(tokenizeToMap(str), targetClass);
++            if (target != null) {
++                return target;
++            }
++        }
++        return NOT_HANDLED;
++    }
++
++    private Object fromNumber(Number num, Class targetClass) {
++        switch (targetClass.getName()) {
++            case "java.lang.String":
++                return num.toString();
++            case "java.lang.Double":
++            case "double":
++                return num.doubleValue();
++            case "java.lang.Float":
++            case "float":
++                return num.floatValue();
++            case "java.lang.Long":
++            case "long":
++                return num.longValue();
++            case "java.lang.Integer":
++            case "int":
++                return num.intValue();
++            case "java.lang.Short":
++            case "short":
++                return num.shortValue();
++            case "java.lang.Character":
++            case "char":
++                return (char) num.intValue();
++            case "java.lang.Byte":
++            case "byte":
++                return num.byteValue();
++            case "java.lang.Boolean":
++            case "boolean":
++                return toBoolean(num);
++            case "java.math.BigInteger":
++                return BigInteger.valueOf(num.longValue());
++            case "java.math.BigDecimal":
++                return BigDecimal.valueOf(num.doubleValue());
++            case "java.util.Date":
++                return new Date(num.longValue());
++            case "java.util.Calendar":
++                Calendar cal = Calendar.getInstance();
++                cal.setTimeInMillis(num.longValue());
++                return cal;
++            case "java.sql.Timestamp":
++                return new Timestamp(num.longValue());
++            case "java.time.Instant":
++                return Instant.ofEpochMilli(num.longValue());
++            case "java.time.ZonedDateTime":
++                return toZonedDateTime(num);
++            case "java.time.LocalDate":
++                return toZonedDateTime(num).toLocalDate();
++            case "java.time.LocalTime":
++                return toZonedDateTime(num).toLocalTime();
++            case "java.time.LocalDateTime":
++                return toZonedDateTime(num).toLocalDateTime();
++            case "java.util.TimeZone":
++                return toTimeZone(num.intValue());
++            case "[B":
++                return toBytes(num);
++            case "[C":
++                return new char[] {(char) num.intValue()};
++            case "java.util.OptionalInt":
++                return OptionalInt.of(num.intValue());
++            case "java.util.OptionalLong":
++                return OptionalLong.of(num.longValue());
++            case "java.util.OptionalDouble":
++                return OptionalDouble.of(num.doubleValue());
++            default:
++        }
++
++        if (targetClass.isEnum()) {
++            for (Object e : targetClass.getEnumConstants()) {
++                if (((Enum) e).ordinal() == num.intValue()) {
++                    return e;
++                }
++            }
++        }
++        return NOT_HANDLED;
++    }
++
++    private Object fromEnum(Enum en, Class targetClass) throws Exception {
++        if (targetClass == String.class) {
++            return en.toString();
++        }
++        if (targetClass == int.class || targetClass == Integer.class) {
++            return en.ordinal();
++        }
++        if (Number.class.isAssignableFrom(targetClass)) {
++            return doConvert(en.ordinal(), targetClass);
++        }
++        if (targetClass.isEnum()) {
++            return Enum.valueOf((Class<Enum>) targetClass, en.name());
++        }
++        return NOT_HANDLED;
++    }
++
++    private Object fromDate(Date date, Class targetClass) {
++        switch (targetClass.getName()) {
++            case "java.lang.String":
++                return DateUtils.format(date);
++            case "java.lang.Long":
++            case "long":
++                return date.getTime();
++            case "java.lang.Integer":
++            case "int":
++                return (int) (date.getTime() / 1000);
++            case "java.util.Calendar":
++                Calendar cal = Calendar.getInstance();
++                cal.setTimeInMillis(date.getTime());
++                return cal;
++            case "java.time.Instant":
++                return date.toInstant();
++            case "java.time.ZonedDateTime":
++                return toZonedDateTime(date.getTime());
++            case "java.time.LocalDate":
++                return toZonedDateTime(date.getTime()).toLocalDate();
++            case "java.time.LocalTime":
++                return toZonedDateTime(date.getTime()).toLocalTime();
++            case "java.time.LocalDateTime":
++                return toZonedDateTime(date.getTime()).toLocalDateTime();
++            default:
++        }
++        return NOT_HANDLED;
++    }
++
++    private Object fromByteArray(byte[] bytes, Class targetClass) throws Exception {
++        if (bytes.length == 0) {
++            return emptyDefault(targetClass);
++        }
++
++        switch (targetClass.getName()) {
++            case "java.lang.String":
++                return new String(bytes, UTF_8);
++            case "java.lang.Double":
++            case "double":
++                return ByteBuffer.wrap(bytes).getDouble();
++            case "java.lang.Float":
++            case "float":
++                return ByteBuffer.wrap(bytes).getFloat();
++            case "java.lang.Long":
++            case "long":
++                return ByteBuffer.wrap(bytes).getLong();
++            case "java.lang.Integer":
++            case "int":
++                return ByteBuffer.wrap(bytes).getInt();
++            case "java.lang.Short":
++            case "short":
++                return ByteBuffer.wrap(bytes).getShort();
++            case "java.lang.Character":
++            case "char":
++                return ByteBuffer.wrap(bytes).getChar();
++            case "java.lang.Byte":
++            case "byte":
++                return bytes[0];
++            case "java.lang.Boolean":
++            case "boolean":
++                return bytes[0] == (byte) 0 ? Boolean.FALSE : Boolean.TRUE;
++            case "java.math.BigInteger":
++                return new BigInteger(bytes);
++            case "java.util.Properties":
++                Properties properties = new Properties();
++                properties.load(new ByteArrayInputStream(bytes));
++                return properties;
++            default:
++        }
++
++        Object target = jsonToObject(new String(bytes, StandardCharsets.ISO_8859_1), targetClass);
++        if (target != null) {
++            return target;
++        }
++        return NOT_HANDLED;
++    }
++
+     private Object doConvert(Object source, Type targetType) throws Exception {
+         if (targetType instanceof Class) {
+             return doConvert(source, (Class) targetType);
+diff --git a/dubbo-rpc/dubbo-rpc-triple/src/test/java/org/apache/dubbo/rpc/protocol/tri/rest/argument/GeneralTypeConverterCharacterizationTest.java b/dubbo-rpc/dubbo-rpc-triple/src/test/java/org/apache/dubbo/rpc/protocol/tri/rest/argument/GeneralTypeConverterCharacterizationTest.java
+new file mode 100644
+index 000000000..dacd7543b
+--- /dev/null
++++ b/dubbo-rpc/dubbo-rpc-triple/src/test/java/org/apache/dubbo/rpc/protocol/tri/rest/argument/GeneralTypeConverterCharacterizationTest.java
+@@ -0,0 +1,287 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.dubbo.rpc.protocol.tri.rest.argument;
++
++import org.apache.dubbo.rpc.model.FrameworkModel;
++
++import java.lang.reflect.Type;
++import java.math.BigDecimal;
++import java.math.BigInteger;
++import java.nio.ByteBuffer;
++import java.nio.charset.Charset;
++import java.nio.charset.StandardCharsets;
++import java.util.Arrays;
++import java.util.Currency;
++import java.util.Date;
++import java.util.List;
++import java.util.Locale;
++import java.util.Optional;
++import java.util.OptionalInt;
++import java.util.UUID;
++
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.assertArrayEquals;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNull;
++import static org.junit.jupiter.api.Assertions.assertSame;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++/**
++ * Characterization tests that pin the current observable behavior of
++ * {@link GeneralTypeConverter} before refactoring its dispatch logic.
++ *
++ * <p>These tests intentionally assert the behavior as it exists today (including
++ * any quirks); they form a safety net so a behavior-preserving refactor can be
++ * verified. They are not a specification of "correct" behavior.
++ */
++class GeneralTypeConverterCharacterizationTest {
++
++    private final GeneralTypeConverter converter = new GeneralTypeConverter(FrameworkModel.defaultModel());
++
++    // Used to obtain a ParameterizedType for the Type-based conversion path.
++    public List<Integer> intList;
++
++    private enum Color {
++        RED,
++        GREEN,
++        BLUE
++    }
++
++    // ---- null / passthrough / Optional -------------------------------------
++
++    @Test
++    void nullSourceUsesTypeDefaults() {
++        assertEquals(0, converter.convert(null, int.class));
++        assertEquals(0L, converter.convert(null, long.class));
++        assertEquals(Boolean.FALSE, converter.convert(null, boolean.class));
++        assertNull(converter.convert(null, Integer.class));
++        assertNull(converter.convert(null, String.class));
++    }
++
++    @Test
++    void sameTypePassesThrough() {
++        String s = "abc";
++        assertSame(s, converter.convert(s, String.class));
++        Integer i = 5;
++        assertSame(i, converter.convert(i, Integer.class));
++    }
++
++    @Test
++    void optionalTargetWrapsSource() {
++        assertEquals(Optional.of("x"), converter.convert("x", Optional.class));
++    }
++
++    @Test
++    void optionalSourceIsUnwrapped() {
++        assertEquals(5, converter.convert(Optional.of("5"), Integer.class));
++        assertNull(converter.convert(Optional.empty(), Integer.class));
++    }
++
++    // ---- String -> number / boolean / char ---------------------------------
++
++    @Test
++    void stringToNumbers() {
++        assertEquals(42, converter.convert("42", Integer.class));
++        assertEquals(42, converter.convert("42", int.class));
++        assertEquals(100L, converter.convert("100", Long.class));
++        assertEquals((short) 5, converter.convert("5", Short.class));
++        assertEquals((byte) 7, converter.convert("7", Byte.class));
++        assertEquals(3.14d, converter.convert("3.14", Double.class));
++        assertEquals(3.14f, converter.convert("3.14", Float.class));
++        assertEquals(new BigInteger("123"), converter.convert("123", BigInteger.class));
++        assertEquals(0, ((BigDecimal) converter.convert("1.5", BigDecimal.class)).compareTo(new BigDecimal("1.5")));
++    }
++
++    @Test
++    void stringHexNumbersAreDecoded() {
++        assertEquals(31, converter.convert("0x1F", Integer.class));
++        assertEquals(255L, converter.convert("0xFF", Long.class));
++    }
++
++    @Test
++    void stringToNumberAbstractPicksLongOrDouble() {
++        assertEquals(42L, converter.convert("42", Number.class));
++        assertEquals(4.2d, converter.convert("4.2", Number.class));
++    }
++
++    @Test
++    void stringToBooleanVariants() {
++        assertEquals(Boolean.TRUE, converter.convert("true", Boolean.class));
++        assertEquals(true, converter.convert("true", boolean.class));
++        assertEquals(Boolean.TRUE, converter.convert("on", Boolean.class));
++        assertEquals(Boolean.TRUE, converter.convert("yes", Boolean.class));
++        assertEquals(Boolean.TRUE, converter.convert("1", Boolean.class));
++        assertEquals(Boolean.FALSE, converter.convert("0", Boolean.class));
++        assertEquals(Boolean.FALSE, converter.convert("off", Boolean.class));
++    }
++
++    @Test
++    void stringToChar() {
++        assertEquals('A', converter.convert("A", Character.class));
++        assertThrows(RuntimeException.class, () -> converter.convert("AB", char.class));
++    }
++
++    @Test
++    void emptyOrNullLiteralStringsUseEmptyDefaults() {
++        // non-primitive, non-container -> null
++        assertNull(converter.convert("", Integer.class));
++        assertNull(converter.convert("null", Integer.class));
++        assertNull(converter.convert("NULL", Integer.class));
++        // primitive -> type default
++        assertEquals(0, converter.convert("", int.class));
++        assertEquals(0, converter.convert("null", int.class));
++        // container -> empty container
++        assertTrue(((List<?>) converter.convert("", List.class)).isEmpty());
++    }
++
++    // ---- String -> misc value types ----------------------------------------
++
++    @Test
++    void stringToValueTypes() {
++        assertEquals(new Locale("en", "US"), converter.convert("en-US", Locale.class));
++        assertEquals(Currency.getInstance("USD"), converter.convert("USD", Currency.class));
++        assertEquals(StandardCharsets.UTF_8, converter.convert("UTF-8", Charset.class));
++        UUID uuid = UUID.randomUUID();
++        assertEquals(uuid, converter.convert(uuid.toString(), UUID.class));
++        assertEquals(Integer.class, converter.convert("java.lang.Integer", Class.class));
++    }
++
++    @Test
++    void stringToByteAndCharArrays() {
++        assertArrayEquals("hi".getBytes(StandardCharsets.UTF_8), converter.convert("hi", byte[].class));
++        assertArrayEquals(new char[] {'h', 'i'}, converter.convert("hi", char[].class));
++    }
++
++    @Test
++    void stringToOptionalInt() {
++        assertEquals(OptionalInt.of(5), converter.convert("5", OptionalInt.class));
++    }
++
++    @Test
++    void stringToEnum() {
++        assertEquals(Color.GREEN, converter.convert("GREEN", Color.class));
++    }
++
++    @Test
++    void stringToArrayAndCollection() {
++        assertArrayEquals(new int[] {1, 2, 3}, converter.convert("1,2,3", int[].class));
++        assertArrayEquals(new String[] {"a", "b"}, converter.convert("a,b", String[].class));
++        assertEquals(Arrays.asList("a", "b", "c"), converter.convert("a,b,c", List.class));
++    }
++
++    // ---- Number source ------------------------------------------------------
++
++    @Test
++    void numberConversions() {
++        assertEquals("42", converter.convert(42, String.class));
++        assertEquals(42.0d, converter.convert(42, Double.class));
++        assertEquals(42L, converter.convert(42, Long.class));
++        assertEquals('A', converter.convert(65, Character.class));
++        assertEquals(Boolean.TRUE, converter.convert(42, Boolean.class));
++        assertEquals(Boolean.FALSE, converter.convert(0, Boolean.class));
++        assertEquals(new Date(1000L), converter.convert(1000L, Date.class));
++    }
++
++    @Test
++    void numberToEnumByOrdinal() {
++        assertEquals(Color.GREEN, converter.convert(1, Color.class));
++    }
++
++    // ---- Enum source --------------------------------------------------------
++
++    @Test
++    void enumConversions() {
++        assertEquals("RED", converter.convert(Color.RED, String.class));
++        assertEquals(1, converter.convert(Color.GREEN, Integer.class));
++        assertEquals(1, converter.convert(Color.GREEN, int.class));
++    }
++
++    // ---- byte[] source ------------------------------------------------------
++
++    @Test
++    void byteArrayConversions() {
++        assertEquals("hi", converter.convert("hi".getBytes(StandardCharsets.UTF_8), String.class));
++        byte[] intBytes = ByteBuffer.allocate(4).putInt(42).array();
++        assertEquals(42, converter.convert(intBytes, Integer.class));
++        assertNull(converter.convert(new byte[0], Integer.class));
++    }
++
++    // ---- Date source --------------------------------------------------------
++
++    @Test
++    void dateConversions() {
++        Date date = new Date(1000L);
++        assertEquals(1000L, converter.convert(date, Long.class));
++        assertEquals(1000L, converter.convert(date, long.class));
++        assertEquals(java.time.Instant.ofEpochMilli(1000L), converter.convert(date, java.time.Instant.class));
++    }
++
++    // ---- Map target ---------------------------------------------------------
++
++    @Test
++    void mapConversion() {
++        Object result = converter.convert(java.util.Collections.singletonMap("a", "1"), java.util.HashMap.class);
++        assertEquals(java.util.Collections.singletonMap("a", "1"), result);
++        assertTrue(result instanceof java.util.HashMap);
++    }
++
++    // ---- byte[] -> boolean --------------------------------------------------
++
++    @Test
++    void byteArrayToBoolean() {
++        assertEquals(Boolean.FALSE, converter.convert(new byte[] {0}, Boolean.class));
++        assertEquals(Boolean.TRUE, converter.convert(new byte[] {1}, Boolean.class));
++    }
++
++    // ---- collection/array source collapsing to scalar ----------------------
++
++    @Test
++    void collectionAndArrayCollapseToFirstElement() {
++        assertEquals(7, converter.convert(Arrays.asList("7", "8"), Integer.class));
++        assertEquals(9, converter.convert(new String[] {"9", "10"}, Integer.class));
++        assertNull(converter.convert(Arrays.asList(), Integer.class));
++    }
++
++    // ---- fall-through: single-arg constructor -------------------------------
++
++    @Test
++    void singleArgConstructorFallback() {
++        Object sb = converter.convert("abc", StringBuilder.class);
++        assertEquals("abc", sb.toString());
++    }
++
++    // ---- Type (generic) based conversion path -------------------------------
++
++    @Test
++    void parameterizedListConversion() throws Exception {
++        Type listType = GeneralTypeConverterCharacterizationTest.class
++                .getField("intList")
++                .getGenericType();
++        Object result = converter.convert("1,2,3", listType);
++        assertEquals(Arrays.asList(1, 2, 3), result);
++    }
++
++    @Test
++    void nullTargetReturnsSourceUnchanged() {
++        Object src = new Object();
++        assertSame(src, converter.convert(src, (Class<?>) null));
++        assertFalse(converter.convert("x", (Class<?>) null) instanceof Integer);
++    }
++}

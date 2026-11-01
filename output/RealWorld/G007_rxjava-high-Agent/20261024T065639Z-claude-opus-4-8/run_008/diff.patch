@@ -1,0 +1,141 @@
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableHelper.java b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableHelper.java
+index cead290de..7670be05d 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableHelper.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableHelper.java
+@@ -64,7 +64,18 @@ public enum StreamableHelper {
+             IntConsumer thenAcceptor, CompletableFuture<T> result) {
+         stage.whenComplete((v, e) -> {
+             if (winner.compareAndSet(0, id)) {
+-                thenAcceptor.accept(id);
++                try {
++                    thenAcceptor.accept(id);
++                } catch (Throwable ex) {
++                    // A throwing acceptor must not strand the result: the loser's CAS has
++                    // already failed, so complete it here instead of hanging forever.
++                    Exceptions.throwIfFatal(ex);
++                    if (e != null) {
++                        ex.addSuppressed(e);
++                    }
++                    result.completeExceptionally(ex);
++                    return;
++                }
+                 if (e != null) {
+                     result.completeExceptionally(e);
+                 } else {
+@@ -82,17 +93,37 @@ public enum StreamableHelper {
+      * @param first the first stage to wait for
+      * @param second the second stage to wait for
+      * @param thenAcceptor the callback that receives who won
++     * @return a {@code CompletableFuture} that completes normally once the acceptor has run, or
++     * exceptionally if the acceptor threw; callers that complete their own futures inside the acceptor
++     * can chain on this to avoid hanging when the acceptor fails.
+      */
+-    public static <T> void whenEither(CompletionStage<T> first, CompletionStage<T> second, IntConsumer thenAcceptor) {
++    @CheckReturnValue
++    @NonNull
++    public static <T> CompletableFuture<Void> whenEither(CompletionStage<T> first, CompletionStage<T> second, IntConsumer thenAcceptor) {
++        var result = new CompletableFuture<Void>();
+         var winner = new AtomicInteger();
+-        first.whenComplete((_, _) -> {
+-            if (winner.compareAndSet(0, 1)) {
+-                thenAcceptor.accept(1);
+-            }
+-        });
+-        second.whenComplete((_, _) -> {
+-            if (winner.compareAndSet(0, 2)) {
+-                thenAcceptor.accept(2);
++        armEither(first, 1, winner, thenAcceptor, result);
++        armEither(second, 2, winner, thenAcceptor, result);
++        return result;
++    }
++
++    /**
++     * Arms one side of a {@link #whenEither}: when {@code stage} wins the {@code winner} race under the
++     * given {@code id}, runs the acceptor and completes {@code result} normally, or exceptionally if the
++     * acceptor throws.
++     */
++    private static <T> void armEither(CompletionStage<T> stage, int id, AtomicInteger winner,
++            IntConsumer thenAcceptor, CompletableFuture<Void> result) {
++        stage.whenComplete((_, _) -> {
++            if (winner.compareAndSet(0, id)) {
++                try {
++                    thenAcceptor.accept(id);
++                } catch (Throwable ex) {
++                    Exceptions.throwIfFatal(ex);
++                    result.completeExceptionally(ex);
++                    return;
++                }
++                result.complete(null);
+             }
+         });
+     }
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableTimeout.java b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableTimeout.java
+index 062c80489..66c364d30 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableTimeout.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableTimeout.java
+@@ -96,6 +96,12 @@ implements Streamable<T> {
+                     })
+                     ;
+                 }
++            }).whenComplete((_, e) -> {
++                // If the acceptor above threw (e.g. a dispose() failed) it may not have completed
++                // mainNextResume; surface the error instead of leaving the downstream hanging.
++                if (e != null) {
++                    mainNextResume.completeExceptionally(e);
++                }
+             });
+             return mainNextResume;
+         }
+diff --git a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableHelperTest.java b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableHelperTest.java
+index ec35b13d3..ecc92abfd 100644
+--- a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableHelperTest.java
++++ b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableHelperTest.java
+@@ -17,6 +17,7 @@ import static org.junit.jupiter.api.Assertions.*;
+ 
+ import java.util.List;
+ import java.util.concurrent.*;
++import java.util.concurrent.atomic.AtomicInteger;
+ 
+ import org.junit.jupiter.api.Test;
+ 
+@@ -112,4 +113,40 @@ public class StreamableHelperTest extends StreamableBaseTest {
+         assertFalse(StreamableHelper.awaitAllBoolean(List.of(Streamer.NEXT_FALSE, Streamer.NEXT_TRUE)).join(),
+                 "should have been (false, true) -> false");
+     }
++
++    @Test
++    public void raceAcceptorCrashCompletesResult() throws Exception {
++        // A throwing acceptor must not leave the result future hanging forever.
++        var cf = StreamableHelper.race(
++                CompletableFuture.completedFuture(1),
++                new CompletableFuture<Integer>(),
++                w -> { throw new TestException(); });
++
++        var ex = assertThrows(ExecutionException.class, () -> cf.get(5, TimeUnit.SECONDS));
++        assertTrue(ex.getCause() instanceof TestException, String.valueOf(ex.getCause()));
++    }
++
++    @Test
++    public void whenEitherAcceptorCrashCompletesResult() throws Exception {
++        // A throwing acceptor must surface via the returned future rather than hanging.
++        var cf = StreamableHelper.whenEither(
++                CompletableFuture.completedFuture(1),
++                new CompletableFuture<Integer>(),
++                w -> { throw new TestException(); });
++
++        var ex = assertThrows(ExecutionException.class, () -> cf.get(5, TimeUnit.SECONDS));
++        assertTrue(ex.getCause() instanceof TestException, String.valueOf(ex.getCause()));
++    }
++
++    @Test
++    public void whenEitherNormalCompletes() throws Exception {
++        var winner = new AtomicInteger();
++        var cf = StreamableHelper.whenEither(
++                CompletableFuture.completedFuture(1),
++                new CompletableFuture<Integer>(),
++                winner::set);
++
++        cf.get(5, TimeUnit.SECONDS);
++        assertEquals(1, winner.get());
++    }
+ }

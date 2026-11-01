@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 
 from experiment_runner.clarification import (
@@ -13,8 +14,23 @@ from experiment_runner.coding_agent import CodingAgent
 from experiment_runner.git_repo import GitRepository
 from experiment_runner.models import AgentKind, IterationResult, agent_run_ok
 from experiment_runner.prompter import extract_final_agent_message
+from experiment_runner.util import eprint
 
 ClarificationResponder = Callable[[str], str]
+
+
+def count_result_events(jsonl_text: str) -> int:
+    """Number of `result` events in a Claude stream-json turn (1 for a normal turn)."""
+    count = 0
+    for line in jsonl_text.splitlines():
+        if '"type":"result"' not in line and '"type": "result"' not in line:
+            continue
+        try:
+            if json.loads(line).get("type") == "result":
+                count += 1
+        except (json.JSONDecodeError, AttributeError):
+            continue
+    return count
 
 
 def run_iteration(
@@ -78,6 +94,16 @@ def run_iteration(
             f" [{agent_kind} failed exit={agent_result.exit_code} "
             f"timed_out={int(agent_result.timed_out)}]"
         )
+
+    folded = git.fold_agent_commits(previous_sha)
+    if folded:
+        eprint(f"[run_{iteration:03d}] folded {folded} agent commit(s) into the iteration commit")
+    results = count_result_events(jsonl_text)
+    if results > 1:
+        # Background tasks are disabled for Claude; if a session still re-woke itself, the
+        # turn holds work the prompter did not ask for. Flag it rather than hide it.
+        eprint(f"[run_{iteration:03d}] WARNING: agent emitted {results} result events "
+               "(session continued on its own); this turn's diff may include unrequested work")
 
     commit_sha = git.commit(commit_message)
 

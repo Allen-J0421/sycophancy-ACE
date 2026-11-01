@@ -1,0 +1,191 @@
+diff --git a/jadx-core/src/test/java/jadx/core/xmlgen/entry/ValuesParserTest.java b/jadx-core/src/test/java/jadx/core/xmlgen/entry/ValuesParserTest.java
+index 47cc009f3..7b0c81ab8 100644
+--- a/jadx-core/src/test/java/jadx/core/xmlgen/entry/ValuesParserTest.java
++++ b/jadx-core/src/test/java/jadx/core/xmlgen/entry/ValuesParserTest.java
+@@ -1,18 +1,179 @@
+ package jadx.core.xmlgen.entry;
+ 
++import java.util.HashMap;
+ import java.util.Map;
+ 
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Nested;
+ import org.junit.jupiter.api.Test;
+ 
+-import jadx.core.utils.android.AndroidResourcesMap;
+-
+-import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThat;
+ 
++/**
++ * Characterization tests for {@link ValuesParser#decodeValue(int, int)}, the central decoder that
++ * turns a raw (dataType, data) pair into its resource-value string. They pin the current output so
++ * the logic can be changed safely later.
++ * <p>
++ * The {@code TYPE_*} data-type codes are {@code protected} in {@code ParserConstants} and not
++ * visible
++ * here, so they are mirrored as local literals (kept in sync with {@code ParserConstants}).
++ */
+ class ValuesParserTest {
+ 
+-	@Test
+-	void testResMapLoad() {
+-		Map<Integer, String> androidResMap = AndroidResourcesMap.getMap();
+-		assertThat(androidResMap).isNotNull().isNotEmpty();
++	// Mirror of ParserConstants.TYPE_* data-type codes.
++	private static final int TYPE_NULL = 0x00;
++	private static final int TYPE_REFERENCE = 0x01;
++	private static final int TYPE_ATTRIBUTE = 0x02;
++	private static final int TYPE_FLOAT = 0x04;
++	private static final int TYPE_DIMENSION = 0x05;
++	private static final int TYPE_FRACTION = 0x06;
++	private static final int TYPE_DYNAMIC_REFERENCE = 0x07;
++	private static final int TYPE_DYNAMIC_ATTRIBUTE = 0x08;
++	private static final int TYPE_INT_DEC = 0x10;
++	private static final int TYPE_INT_HEX = 0x11;
++	private static final int TYPE_INT_BOOLEAN = 0x12;
++	private static final int TYPE_INT_COLOR_ARGB8 = 0x1c;
++	private static final int TYPE_INT_COLOR_RGB8 = 0x1d;
++	private static final int TYPE_INT_COLOR_ARGB4 = 0x1e;
++	private static final int TYPE_INT_COLOR_RGB4 = 0x1f;
++
++	private static ValuesParser parser(Map<Integer, String> resMap) {
++		// strings pool is only consulted for TYPE_STRING, which these tests don't exercise
++		return new ValuesParser(null, resMap);
++	}
++
++	private static ValuesParser parser() {
++		return parser(new HashMap<>());
++	}
++
++	private static String decode(int dataType, int data) {
++		return parser().decodeValue(dataType, data);
++	}
++
++	@Nested
++	@DisplayName("integers and booleans")
++	class Integers {
++		@Test
++		void nullType() {
++			assertThat(decode(TYPE_NULL, 123)).isNull();
++		}
++
++		@Test
++		void decimal() {
++			assertThat(decode(TYPE_INT_DEC, 42)).isEqualTo("42");
++			assertThat(decode(TYPE_INT_DEC, -1)).isEqualTo("-1");
++		}
++
++		@Test
++		void hex() {
++			assertThat(decode(TYPE_INT_HEX, 255)).isEqualTo("0xff");
++			assertThat(decode(TYPE_INT_HEX, 0)).isEqualTo("0x0");
++		}
++
++		@Test
++		void bool() {
++			assertThat(decode(TYPE_INT_BOOLEAN, 0)).isEqualTo("false");
++			assertThat(decode(TYPE_INT_BOOLEAN, 1)).isEqualTo("true");
++			assertThat(decode(TYPE_INT_BOOLEAN, -1)).isEqualTo("true");
++		}
++
++		@Test
++		void floatValue() {
++			// 0x3FC00000 == 1.5f
++			assertThat(decode(TYPE_FLOAT, 0x3FC00000)).isEqualTo("1.5");
++		}
++	}
++
++	@Nested
++	@DisplayName("colors")
++	class Colors {
++		@Test
++		void argb8() {
++			assertThat(decode(TYPE_INT_COLOR_ARGB8, 0xAABBCCDD)).isEqualTo("#aabbccdd");
++		}
++
++		@Test
++		void rgb8MasksAlpha() {
++			assertThat(decode(TYPE_INT_COLOR_RGB8, 0xFF112233)).isEqualTo("#112233");
++		}
++
++		@Test
++		void argb4() {
++			assertThat(decode(TYPE_INT_COLOR_ARGB4, 0x1234)).isEqualTo("#1234");
++		}
++
++		@Test
++		void rgb4() {
++			assertThat(decode(TYPE_INT_COLOR_RGB4, 0x123)).isEqualTo("#123");
++		}
++	}
++
++	@Nested
++	@DisplayName("dimensions and fractions delegate to complex decoding")
++	class ComplexValues {
++		@Test
++		void dimension() {
++			assertThat(decode(TYPE_DIMENSION, 0x1001)).isEqualTo("16dp");
++		}
++
++		@Test
++		void fraction() {
++			assertThat(decode(TYPE_FRACTION, 0x4010)).isEqualTo("50%");
++		}
++	}
++
++	@Nested
++	@DisplayName("references and attributes")
++	class References {
++		@Test
++		void resolvedReference() {
++			Map<Integer, String> resMap = new HashMap<>();
++			resMap.put(0x7f010001, "string/app_name");
++			assertThat(parser(resMap).decodeValue(TYPE_REFERENCE, 0x7f010001)).isEqualTo("@string/app_name");
++		}
++
++		@Test
++		void dynamicReferenceUsesSameResolution() {
++			Map<Integer, String> resMap = new HashMap<>();
++			resMap.put(0x7f010001, "string/app_name");
++			assertThat(parser(resMap).decodeValue(TYPE_DYNAMIC_REFERENCE, 0x7f010001)).isEqualTo("@string/app_name");
++		}
++
++		@Test
++		void zeroReference() {
++			assertThat(decode(TYPE_REFERENCE, 0)).isEqualTo("0");
++		}
++
++		@Test
++		void unknownReference() {
++			// app-range id (0x7f...) that is absent from the resMap and not an android resource
++			assertThat(decode(TYPE_REFERENCE, 0x7f999999)).isEqualTo("?unknown_ref: 7f999999");
++		}
++
++		@Test
++		void resolvedAttribute() {
++			Map<Integer, String> resMap = new HashMap<>();
++			resMap.put(0x7f020002, "attr/theme");
++			assertThat(parser(resMap).decodeValue(TYPE_ATTRIBUTE, 0x7f020002)).isEqualTo("?attr/theme");
++		}
++
++		@Test
++		void unknownAttribute() {
++			assertThat(decode(TYPE_ATTRIBUTE, 0x7f999999)).isEqualTo("?unknown_attr_ref: 7f999999");
++		}
++	}
++
++	@Nested
++	@DisplayName("unsupported / unknown types")
++	class Unsupported {
++		@Test
++		void dynamicAttribute() {
++			assertThat(decode(TYPE_DYNAMIC_ATTRIBUTE, 5)).isEqualTo("  TYPE_DYNAMIC_ATTRIBUTE: 5");
++		}
++
++		@Test
++		void unknownDataType() {
++			assertThat(decode(0x99, 7)).isEqualTo("  ?0x99 7");
++		}
+ 	}
+ }

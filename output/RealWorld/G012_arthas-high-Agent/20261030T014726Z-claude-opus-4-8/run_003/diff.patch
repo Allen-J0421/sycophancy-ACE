@@ -1,0 +1,144 @@
+diff --git a/core/src/main/java/com/taobao/arthas/core/shell/term/impl/http/DirectoryBrowser.java b/core/src/main/java/com/taobao/arthas/core/shell/term/impl/http/DirectoryBrowser.java
+index 5ee8564b0..f4508648e 100644
+--- a/core/src/main/java/com/taobao/arthas/core/shell/term/impl/http/DirectoryBrowser.java
++++ b/core/src/main/java/com/taobao/arthas/core/shell/term/impl/http/DirectoryBrowser.java
+@@ -96,40 +96,17 @@ public class DirectoryBrowser {
+ 
+         if (listFiles != null) {
+             Arrays.sort(listFiles);
++            // SimpleDateFormat 非线程安全，每次调用新建一个局部实例，在本次顺序遍历中复用。
++            SimpleDateFormat lastModifiedFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+             for (File f : listFiles) {
+                 if (f.isDirectory()) {
+-                    String name = f.getName() + "/";
+-                    String part1Format = String.format(linePart1Str, name, name, name);
+-                    sb.append(part1Format);
+-
+-                    String linePart2 = name + "</a>";
+-                    String part2Format = String.format(linePart2Str, linePart2);
+-                    sb.append(part2Format);
+-
+-                    SimpleDateFormat simpleDateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+-                    String modifyStr = simpleDateFormat.format(new Date(f.lastModified()));
+-
+-                    sb.append(modifyStr);
+-                    sb.append("         -      ").append("\r\n");
++                    appendEntry(sb, f, f.getName() + "/", lastModifiedFormat, "         -      ");
+                 }
+             }
+ 
+             for (File f : listFiles) {
+                 if (f.isFile()) {
+-                    String name = f.getName();
+-                    String part1Format = String.format(linePart1Str, name, name, name);
+-                    sb.append(part1Format);
+-
+-                    String linePart2 = name + "</a>";
+-                    String part2Format = String.format(linePart2Str, linePart2);
+-                    sb.append(part2Format);
+-
+-                    SimpleDateFormat simpleDateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+-                    String modifyStr = simpleDateFormat.format(new Date(f.lastModified()));
+-                    sb.append(modifyStr);
+-
+-                    String sizeStr = String.format("%10d      ", f.length());
+-                    sb.append(sizeStr).append("\r\n");
++                    appendEntry(sb, f, f.getName(), lastModifiedFormat, String.format("%10d      ", f.length()));
+                 }
+             }
+         }
+@@ -138,6 +115,17 @@ public class DirectoryBrowser {
+         return sb.toString();
+     }
+ 
++    /**
++     * 追加目录列表中的一行：链接、名称、最后修改时间与尾列（目录为占位符，文件为大小）。
++     */
++    private static void appendEntry(StringBuilder sb, File file, String name, SimpleDateFormat lastModifiedFormat,
++                                    String sizeColumn) {
++        sb.append(String.format(linePart1Str, name, name, name));
++        sb.append(String.format(linePart2Str, name + "</a>"));
++        sb.append(lastModifiedFormat.format(new Date(file.lastModified())));
++        sb.append(sizeColumn).append("\r\n");
++    }
++
+     /**
+      *  write data here,still return not null just to know succeeded.
+      * @param dir
+diff --git a/core/src/test/java/com/taobao/arthas/core/shell/term/impl/http/DirectoryBrowserTest.java b/core/src/test/java/com/taobao/arthas/core/shell/term/impl/http/DirectoryBrowserTest.java
+new file mode 100644
+index 000000000..9a121fc4f
+--- /dev/null
++++ b/core/src/test/java/com/taobao/arthas/core/shell/term/impl/http/DirectoryBrowserTest.java
+@@ -0,0 +1,71 @@
++package com.taobao.arthas.core.shell.term.impl.http;
++
++import java.io.File;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.text.SimpleDateFormat;
++import java.util.Comparator;
++import java.util.Date;
++import java.util.stream.Stream;
++
++import org.junit.After;
++import org.junit.Assert;
++import org.junit.Before;
++import org.junit.Test;
++
++/**
++ * Characterization test for {@link DirectoryBrowser#renderDir(File, boolean)} output rows.
++ */
++public class DirectoryBrowserTest {
++
++    private Path tempDir;
++
++    @Before
++    public void setUp() throws IOException {
++        tempDir = Files.createTempDirectory("arthas-dir-browser-test");
++    }
++
++    @After
++    public void tearDown() throws IOException {
++        if (tempDir != null && Files.exists(tempDir)) {
++            try (Stream<Path> paths = Files.walk(tempDir)) {
++                paths.sorted(Comparator.reverseOrder()).map(Path::toFile).forEach(File::delete);
++            }
++        }
++    }
++
++    @Test
++    public void testRenderDirRowsForDirectoryAndFile() throws IOException {
++        File subDir = new File(tempDir.toFile(), "subdir");
++        Assert.assertTrue(subDir.mkdir());
++
++        File file = new File(tempDir.toFile(), "file.txt");
++        Files.write(file.toPath(), "hello".getBytes(StandardCharsets.UTF_8));
++
++        long fixedTime = 1531204354000L;
++        Assert.assertTrue(subDir.setLastModified(fixedTime));
++        Assert.assertTrue(file.setLastModified(fixedTime));
++
++        String rendered = DirectoryBrowser.renderDir(tempDir.toFile(), false);
++
++        String date = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date(fixedTime));
++
++        String expectedDirRow = String.format("<a href=\"%s\" title=\"%s\">", "subdir/", "subdir/")
++                + String.format("%-60s", "subdir/</a>")
++                + date
++                + "         -      \r\n";
++
++        String expectedFileRow = String.format("<a href=\"%s\" title=\"%s\">", "file.txt", "file.txt")
++                + String.format("%-60s", "file.txt</a>")
++                + date
++                + String.format("%10d      ", file.length())
++                + "\r\n";
++
++        Assert.assertTrue("directory row missing: \n" + rendered, rendered.contains(expectedDirRow));
++        Assert.assertTrue("file row missing: \n" + rendered, rendered.contains(expectedFileRow));
++        // directories are listed before files
++        Assert.assertTrue(rendered.indexOf(expectedDirRow) < rendered.indexOf(expectedFileRow));
++    }
++}

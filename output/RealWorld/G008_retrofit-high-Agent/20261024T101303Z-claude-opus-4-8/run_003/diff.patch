@@ -1,0 +1,91 @@
+diff --git a/retrofit/java-test/src/test/java/retrofit2/CallTest.java b/retrofit/java-test/src/test/java/retrofit2/CallTest.java
+index b1cb78e89..36994aa27 100644
+--- a/retrofit/java-test/src/test/java/retrofit2/CallTest.java
++++ b/retrofit/java-test/src/test/java/retrofit2/CallTest.java
+@@ -748,6 +748,47 @@ public final class CallTest {
+     assertThat(failureRef.get()).hasMessageThat().isEqualTo("Canceled");
+   }
+ 
++  @Test
++  public void callbackExceptionDeliveredToUncaughtExceptionHandler() throws Exception {
++    Retrofit retrofit =
++        new Retrofit.Builder()
++            .baseUrl(server.url("/"))
++            .addConverterFactory(new ToStringConverterFactory())
++            .build();
++    Service service = retrofit.create(Service.class);
++
++    server.enqueue(new MockResponse().setBody("Hi"));
++
++    final RuntimeException thrown = new RuntimeException("Broken!");
++    final AtomicReference<Throwable> uncaughtRef = new AtomicReference<>();
++    final CountDownLatch latch = new CountDownLatch(1);
++
++    Thread.UncaughtExceptionHandler original = Thread.getDefaultUncaughtExceptionHandler();
++    Thread.setDefaultUncaughtExceptionHandler(
++        (thread, throwable) -> {
++          uncaughtRef.set(throwable);
++          latch.countDown();
++        });
++    try {
++      service
++          .getString()
++          .enqueue(
++              new Callback<String>() {
++                @Override
++                public void onResponse(Call<String> call, Response<String> response) {
++                  throw thrown;
++                }
++
++                @Override
++                public void onFailure(Call<String> call, Throwable t) {}
++              });
++      assertTrue(latch.await(10, SECONDS));
++    } finally {
++      Thread.setDefaultUncaughtExceptionHandler(original);
++    }
++    assertThat(uncaughtRef.get()).isSameInstanceAs(thrown);
++  }
++
+   @Test
+   public void cloningExecutedRequestDoesNotCopyState() throws IOException {
+     Retrofit retrofit =
+diff --git a/retrofit/src/main/java/retrofit2/OkHttpCall.java b/retrofit/src/main/java/retrofit2/OkHttpCall.java
+index ff6761226..fe1cbd4a2 100644
+--- a/retrofit/src/main/java/retrofit2/OkHttpCall.java
++++ b/retrofit/src/main/java/retrofit2/OkHttpCall.java
+@@ -164,7 +164,7 @@ final class OkHttpCall<T> implements Call<T> {
+               callback.onResponse(OkHttpCall.this, response);
+             } catch (Throwable t) {
+               throwIfFatal(t);
+-              t.printStackTrace(); // TODO this is not great
++              deliverCallbackException(t);
+             }
+           }
+ 
+@@ -178,12 +178,24 @@ final class OkHttpCall<T> implements Call<T> {
+               callback.onFailure(OkHttpCall.this, e);
+             } catch (Throwable t) {
+               throwIfFatal(t);
+-              t.printStackTrace(); // TODO this is not great
++              deliverCallbackException(t);
+             }
+           }
+         });
+   }
+ 
++  /**
++   * Delivers an exception thrown by a user-supplied {@link Callback} to the current thread's {@link
++   * Thread.UncaughtExceptionHandler}. The callback has already been invoked, so there is no caller
++   * to propagate the failure to; routing it through the uncaught handler lets applications observe
++   * it (for example via a logging framework or crash reporter) while still defaulting to printing
++   * the stack trace to {@code System.err} when no handler is installed.
++   */
++  private static void deliverCallbackException(Throwable t) {
++    Thread thread = Thread.currentThread();
++    thread.getUncaughtExceptionHandler().uncaughtException(thread, t);
++  }
++
+   @Override
+   public synchronized boolean isExecuted() {
+     return executed;

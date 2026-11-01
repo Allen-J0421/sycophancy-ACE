@@ -1,0 +1,364 @@
+diff --git a/lottie/src/main/java/com/airbnb/lottie/LottieDrawable.java b/lottie/src/main/java/com/airbnb/lottie/LottieDrawable.java
+index f63036227..74f768a5d 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/LottieDrawable.java
++++ b/lottie/src/main/java/com/airbnb/lottie/LottieDrawable.java
+@@ -55,7 +55,6 @@ import java.lang.annotation.RetentionPolicy;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Collections;
+-import java.util.Iterator;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.concurrent.Executor;
+@@ -433,16 +432,14 @@ public class LottieDrawable extends Drawable implements Drawable.Callback, Anima
+     setProgress(animator.getAnimatedFraction());
+ 
+     // We copy the tasks to a new ArrayList so that if this method is called from multiple threads,
+-    // then there won't be two iterators iterating and removing at the same time.
+-    Iterator<LazyCompositionTask> it = new ArrayList<>(lazyCompositionTasks).iterator();
+-    while (it.hasNext()) {
+-      LazyCompositionTask t = it.next();
++    // then there won't be two iterators iterating at the same time.
++    List<LazyCompositionTask> tasks = new ArrayList<>(lazyCompositionTasks);
++    for (LazyCompositionTask t : tasks) {
+       // The task should never be null but it appears to happen in rare cases. Maybe it's an oem-specific or ART bug.
+       // https://github.com/airbnb/lottie-android/issues/1702
+       if (t != null) {
+         t.run(composition);
+       }
+-      it.remove();
+     }
+     lazyCompositionTasks.clear();
+ 
+@@ -486,10 +483,7 @@ public class LottieDrawable extends Drawable implements Drawable.Callback, Anima
+    */
+   public AsyncUpdates getAsyncUpdates() {
+     AsyncUpdates asyncUpdates = this.asyncUpdates;
+-    if (asyncUpdates != null) {
+-      return asyncUpdates;
+-    }
+-    return L.getDefaultAsyncUpdates();
++    return asyncUpdates != null ? asyncUpdates : L.getDefaultAsyncUpdates();
+   }
+ 
+   /**
+@@ -900,14 +894,13 @@ public class LottieDrawable extends Drawable implements Drawable.Callback, Anima
+    */
+   @RestrictTo(RestrictTo.Scope.LIBRARY)
+   public Marker getMarkerForAnimationsDisabled() {
+-    Marker marker = null;
+     for (String markerName : ALLOWED_REDUCED_MOTION_MARKERS) {
+-      marker = composition.getMarker(markerName);
++      Marker marker = composition.getMarker(markerName);
+       if (marker != null) {
+-        break;
++        return marker;
+       }
+     }
+-    return marker;
++    return null;
+   }
+ 
+   @MainThread
+@@ -1482,9 +1475,9 @@ public class LottieDrawable extends Drawable implements Drawable.Callback, Anima
+     } else {
+       List<KeyPath> elements = resolveKeyPath(keyPath);
+ 
+-      for (int i = 0; i < elements.size(); i++) {
++      for (KeyPath element : elements) {
+         //noinspection ConstantConditions
+-        elements.get(i).getResolvedElement().addValueCallback(property, callback);
++        element.getResolvedElement().addValueCallback(property, callback);
+       }
+       invalidate = !elements.isEmpty();
+     }
+diff --git a/lottie/src/main/java/com/airbnb/lottie/animation/content/BaseStrokeContent.java b/lottie/src/main/java/com/airbnb/lottie/animation/content/BaseStrokeContent.java
+index 141b416bb..cad91eaad 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/animation/content/BaseStrokeContent.java
++++ b/lottie/src/main/java/com/airbnb/lottie/animation/content/BaseStrokeContent.java
+@@ -307,25 +307,17 @@ public abstract class BaseStrokeContent
+       L.beginSection("StrokeContent#getBounds");
+     }
+     path.reset();
+-    for (int i = 0; i < pathGroups.size(); i++) {
+-      PathGroup pathGroup = pathGroups.get(i);
+-      for (int j = 0; j < pathGroup.paths.size(); j++) {
+-        path.addPath(pathGroup.paths.get(j).getPath(), parentMatrix);
++    for (PathGroup pathGroup : pathGroups) {
++      for (PathContent pathContent : pathGroup.paths) {
++        path.addPath(pathContent.getPath(), parentMatrix);
+       }
+     }
+     path.computeBounds(rect, false);
+ 
+     float width = ((FloatKeyframeAnimation) widthAnimation).getFloatValue();
+-    rect.set(rect.left - width / 2f, rect.top - width / 2f,
+-        rect.right + width / 2f, rect.bottom + width / 2f);
+-    outBounds.set(rect);
+-    // Add padding to account for rounding errors.
+-    outBounds.set(
+-        outBounds.left - 1,
+-        outBounds.top - 1,
+-        outBounds.right + 1,
+-        outBounds.bottom + 1
+-    );
++    float halfWidth = width / 2f;
++    outBounds.set(rect.left - halfWidth - 1, rect.top - halfWidth - 1,
++        rect.right + halfWidth + 1, rect.bottom + halfWidth + 1);
+     if (L.isTraceEnabled()) {
+       L.endSection("StrokeContent#getBounds");
+     }
+diff --git a/lottie/src/main/java/com/airbnb/lottie/animation/content/ContentGroup.java b/lottie/src/main/java/com/airbnb/lottie/animation/content/ContentGroup.java
+index ed858ebf3..0adb57593 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/animation/content/ContentGroup.java
++++ b/lottie/src/main/java/com/airbnb/lottie/animation/content/ContentGroup.java
+@@ -122,8 +122,7 @@ public class ContentGroup implements DrawingContent, PathContent,
+   List<PathContent> getPathList() {
+     if (pathContents == null) {
+       pathContents = new ArrayList<>();
+-      for (int i = 0; i < contents.size(); i++) {
+-        Content content = contents.get(i);
++      for (Content content : contents) {
+         if (content instanceof PathContent) {
+           pathContents.add((PathContent) content);
+         }
+@@ -213,8 +212,8 @@ public class ContentGroup implements DrawingContent, PathContent,
+ 
+   private boolean hasTwoOrMoreDrawableContent() {
+     int drawableContentCount = 0;
+-    for (int i = 0; i < contents.size(); i++) {
+-      if (contents.get(i) instanceof DrawingContent) {
++    for (Content content : contents) {
++      if (content instanceof DrawingContent) {
+         drawableContentCount += 1;
+         if (drawableContentCount >= 2) {
+           return true;
+@@ -255,11 +254,9 @@ public class ContentGroup implements DrawingContent, PathContent,
+ 
+     if (keyPath.propagateToChildren(getName(), depth)) {
+       int newDepth = depth + keyPath.incrementDepthBy(getName(), depth);
+-      for (int i = 0; i < contents.size(); i++) {
+-        Content content = contents.get(i);
++      for (Content content : contents) {
+         if (content instanceof KeyPathElement) {
+-          KeyPathElement element = (KeyPathElement) content;
+-          element.resolveKeyPath(keyPath, newDepth, accumulator, currentPartialKeyPath);
++          ((KeyPathElement) content).resolveKeyPath(keyPath, newDepth, accumulator, currentPartialKeyPath);
+         }
+       }
+     }
+diff --git a/lottie/src/main/java/com/airbnb/lottie/animation/content/EllipseContent.java b/lottie/src/main/java/com/airbnb/lottie/animation/content/EllipseContent.java
+index 9cb5dfd5b..99adb5f43 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/animation/content/EllipseContent.java
++++ b/lottie/src/main/java/com/airbnb/lottie/animation/content/EllipseContent.java
+@@ -56,8 +56,7 @@ public class EllipseContent
+   }
+ 
+   @Override public void setContents(List<Content> contentsBefore, List<Content> contentsAfter) {
+-    for (int i = 0; i < contentsBefore.size(); i++) {
+-      Content content = contentsBefore.get(i);
++    for (Content content : contentsBefore) {
+       if (content instanceof TrimPathContent && ((TrimPathContent) content).getType() == ShapeTrimPath.Type.SIMULTANEOUSLY) {
+         TrimPathContent trimPath = (TrimPathContent) content;
+         trimPaths.addTrimPath(trimPath);
+diff --git a/lottie/src/main/java/com/airbnb/lottie/animation/content/FillContent.java b/lottie/src/main/java/com/airbnb/lottie/animation/content/FillContent.java
+index 5f4a5fb71..9476d6154 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/animation/content/FillContent.java
++++ b/lottie/src/main/java/com/airbnb/lottie/animation/content/FillContent.java
+@@ -77,8 +77,7 @@ public class FillContent
+   }
+ 
+   @Override public void setContents(List<Content> contentsBefore, List<Content> contentsAfter) {
+-    for (int i = 0; i < contentsAfter.size(); i++) {
+-      Content content = contentsAfter.get(i);
++    for (Content content : contentsAfter) {
+       if (content instanceof PathContent) {
+         paths.add((PathContent) content);
+       }
+@@ -123,8 +122,8 @@ public class FillContent
+     }
+ 
+     path.reset();
+-    for (int i = 0; i < paths.size(); i++) {
+-      path.addPath(paths.get(i).getPath(), parentMatrix);
++    for (PathContent p : paths) {
++      path.addPath(p.getPath(), parentMatrix);
+     }
+ 
+     canvas.drawPath(path, paint);
+@@ -136,8 +135,8 @@ public class FillContent
+ 
+   @Override public void getBounds(RectF outBounds, Matrix parentMatrix, boolean applyParents) {
+     path.reset();
+-    for (int i = 0; i < paths.size(); i++) {
+-      this.path.addPath(paths.get(i).getPath(), parentMatrix);
++    for (PathContent p : paths) {
++      path.addPath(p.getPath(), parentMatrix);
+     }
+     path.computeBounds(outBounds, false);
+     // Add padding to account for rounding errors.
+diff --git a/lottie/src/main/java/com/airbnb/lottie/animation/content/GradientFillContent.java b/lottie/src/main/java/com/airbnb/lottie/animation/content/GradientFillContent.java
+index 1900e5d2e..78a5d7c3c 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/animation/content/GradientFillContent.java
++++ b/lottie/src/main/java/com/airbnb/lottie/animation/content/GradientFillContent.java
+@@ -101,8 +101,7 @@ public class GradientFillContent
+   }
+ 
+   @Override public void setContents(List<Content> contentsBefore, List<Content> contentsAfter) {
+-    for (int i = 0; i < contentsAfter.size(); i++) {
+-      Content content = contentsAfter.get(i);
++    for (Content content : contentsAfter) {
+       if (content instanceof PathContent) {
+         paths.add((PathContent) content);
+       }
+@@ -117,8 +116,8 @@ public class GradientFillContent
+       L.beginSection("GradientFillContent#draw");
+     }
+     path.reset();
+-    for (int i = 0; i < paths.size(); i++) {
+-      path.addPath(paths.get(i).getPath(), parentMatrix);
++    for (PathContent p : paths) {
++      path.addPath(p.getPath(), parentMatrix);
+     }
+ 
+     path.computeBounds(boundsRect, false);
+@@ -164,8 +163,8 @@ public class GradientFillContent
+ 
+   @Override public void getBounds(RectF outBounds, Matrix parentMatrix, boolean applyParents) {
+     path.reset();
+-    for (int i = 0; i < paths.size(); i++) {
+-      path.addPath(paths.get(i).getPath(), parentMatrix);
++    for (PathContent p : paths) {
++      path.addPath(p.getPath(), parentMatrix);
+     }
+ 
+     path.computeBounds(outBounds, false);
+diff --git a/lottie/src/main/java/com/airbnb/lottie/animation/content/MergePathsContent.java b/lottie/src/main/java/com/airbnb/lottie/animation/content/MergePathsContent.java
+index b69d71349..2e11e1962 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/animation/content/MergePathsContent.java
++++ b/lottie/src/main/java/com/airbnb/lottie/animation/content/MergePathsContent.java
+@@ -43,8 +43,8 @@ public class MergePathsContent implements PathContent, GreedyContent {
+   }
+ 
+   @Override public void setContents(List<Content> contentsBefore, List<Content> contentsAfter) {
+-    for (int i = 0; i < pathContents.size(); i++) {
+-      pathContents.get(i).setContents(contentsBefore, contentsAfter);
++    for (PathContent pathContent : pathContents) {
++      pathContent.setContents(contentsBefore, contentsAfter);
+     }
+   }
+ 
+@@ -81,8 +81,8 @@ public class MergePathsContent implements PathContent, GreedyContent {
+   }
+ 
+   private void addPaths() {
+-    for (int i = 0; i < pathContents.size(); i++) {
+-      path.addPath(pathContents.get(i).getPath());
++    for (PathContent pathContent : pathContents) {
++      path.addPath(pathContent.getPath());
+     }
+   }
+ 
+diff --git a/lottie/src/main/java/com/airbnb/lottie/animation/content/PolystarContent.java b/lottie/src/main/java/com/airbnb/lottie/animation/content/PolystarContent.java
+index 9c5fc83c6..a52ccdfe2 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/animation/content/PolystarContent.java
++++ b/lottie/src/main/java/com/airbnb/lottie/animation/content/PolystarContent.java
+@@ -99,8 +99,7 @@ public class PolystarContent
+   }
+ 
+   @Override public void setContents(List<Content> contentsBefore, List<Content> contentsAfter) {
+-    for (int i = 0; i < contentsBefore.size(); i++) {
+-      Content content = contentsBefore.get(i);
++    for (Content content : contentsBefore) {
+       if (content instanceof TrimPathContent &&
+           ((TrimPathContent) content).getType() == ShapeTrimPath.Type.SIMULTANEOUSLY) {
+         TrimPathContent trimPath = (TrimPathContent) content;
+diff --git a/lottie/src/main/java/com/airbnb/lottie/animation/content/RectangleContent.java b/lottie/src/main/java/com/airbnb/lottie/animation/content/RectangleContent.java
+index 89a966ff2..df8c0e285 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/animation/content/RectangleContent.java
++++ b/lottie/src/main/java/com/airbnb/lottie/animation/content/RectangleContent.java
+@@ -70,8 +70,7 @@ public class RectangleContent
+ 
+   @Override
+   public void setContents(List<Content> contentsBefore, List<Content> contentsAfter) {
+-    for (int i = 0; i < contentsBefore.size(); i++) {
+-      Content content = contentsBefore.get(i);
++    for (Content content : contentsBefore) {
+       if (content instanceof TrimPathContent &&
+           ((TrimPathContent) content).getType() == ShapeTrimPath.Type.SIMULTANEOUSLY) {
+         TrimPathContent trimPath = (TrimPathContent) content;
+diff --git a/lottie/src/main/java/com/airbnb/lottie/animation/content/RepeaterContent.java b/lottie/src/main/java/com/airbnb/lottie/animation/content/RepeaterContent.java
+index f59b3e86f..94a291921 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/animation/content/RepeaterContent.java
++++ b/lottie/src/main/java/com/airbnb/lottie/animation/content/RepeaterContent.java
+@@ -134,8 +134,7 @@ public class RepeaterContent implements DrawingContent, PathContent, GreedyConte
+   @Override public void resolveKeyPath(
+       KeyPath keyPath, int depth, List<KeyPath> accumulator, KeyPath currentPartialKeyPath) {
+     MiscUtils.resolveKeyPath(keyPath, depth, accumulator, currentPartialKeyPath, this);
+-    for (int i = 0; i < contentGroup.getContents().size(); i++) {
+-      Content content = contentGroup.getContents().get(i);
++    for (Content content : contentGroup.getContents()) {
+       if (content instanceof KeyPathElementContent) {
+         MiscUtils.resolveKeyPath(keyPath, depth, accumulator, currentPartialKeyPath, (KeyPathElementContent) content);
+       }
+diff --git a/lottie/src/main/java/com/airbnb/lottie/animation/content/ShapeContent.java b/lottie/src/main/java/com/airbnb/lottie/animation/content/ShapeContent.java
+index b2deb2da2..20807b604 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/animation/content/ShapeContent.java
++++ b/lottie/src/main/java/com/airbnb/lottie/animation/content/ShapeContent.java
+@@ -50,8 +50,7 @@ public class ShapeContent implements PathContent, BaseKeyframeAnimation.Animatio
+ 
+   @Override public void setContents(List<Content> contentsBefore, List<Content> contentsAfter) {
+     @Nullable List<ShapeModifierContent> shapeModifierContents = null;
+-    for (int i = 0; i < contentsBefore.size(); i++) {
+-      Content content = contentsBefore.get(i);
++    for (Content content : contentsBefore) {
+       if (content instanceof TrimPathContent &&
+           ((TrimPathContent) content).getType() == ShapeTrimPath.Type.SIMULTANEOUSLY) {
+         // Trim path individually will be handled by the stroke where paths are combined.
+diff --git a/lottie/src/main/java/com/airbnb/lottie/animation/keyframe/MaskKeyframeAnimation.java b/lottie/src/main/java/com/airbnb/lottie/animation/keyframe/MaskKeyframeAnimation.java
+index c27a3556b..437eb30dc 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/animation/keyframe/MaskKeyframeAnimation.java
++++ b/lottie/src/main/java/com/airbnb/lottie/animation/keyframe/MaskKeyframeAnimation.java
+@@ -18,10 +18,9 @@ public class MaskKeyframeAnimation {
+     this.masks = masks;
+     this.maskAnimations = new ArrayList<>(masks.size());
+     this.opacityAnimations = new ArrayList<>(masks.size());
+-    for (int i = 0; i < masks.size(); i++) {
+-      this.maskAnimations.add(masks.get(i).getMaskPath().createAnimation());
+-      AnimatableIntegerValue opacity = masks.get(i).getOpacity();
+-      opacityAnimations.add(opacity.createAnimation());
++    for (Mask mask : masks) {
++      this.maskAnimations.add(mask.getMaskPath().createAnimation());
++      opacityAnimations.add(mask.getOpacity().createAnimation());
+     }
+   }
+ 
+diff --git a/lottie/src/main/java/com/airbnb/lottie/model/layer/CompositionLayer.java b/lottie/src/main/java/com/airbnb/lottie/model/layer/CompositionLayer.java
+index 8752d47fb..d7dd0baf6 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/model/layer/CompositionLayer.java
++++ b/lottie/src/main/java/com/airbnb/lottie/model/layer/CompositionLayer.java
+@@ -255,8 +255,8 @@ public class CompositionLayer extends BaseLayer {
+   @Override
+   protected void resolveChildKeyPath(KeyPath keyPath, int depth, List<KeyPath> accumulator,
+       KeyPath currentPartialKeyPath) {
+-    for (int i = 0; i < layers.size(); i++) {
+-      layers.get(i).resolveKeyPath(keyPath, depth, accumulator, currentPartialKeyPath);
++    for (BaseLayer layer : layers) {
++      layer.resolveKeyPath(keyPath, depth, accumulator, currentPartialKeyPath);
+     }
+   }
+ 
+diff --git a/lottie/src/main/java/com/airbnb/lottie/utils/MiscUtils.java b/lottie/src/main/java/com/airbnb/lottie/utils/MiscUtils.java
+index 896a292a2..984f50875 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/utils/MiscUtils.java
++++ b/lottie/src/main/java/com/airbnb/lottie/utils/MiscUtils.java
+@@ -24,8 +24,7 @@ public class MiscUtils {
+     PointF initialPoint = shapeData.getInitialPoint();
+     outPath.moveTo(initialPoint.x, initialPoint.y);
+     pathFromDataCurrentPoint.set(initialPoint.x, initialPoint.y);
+-    for (int i = 0; i < shapeData.getCurves().size(); i++) {
+-      CubicCurveData curveData = shapeData.getCurves().get(i);
++    for (CubicCurveData curveData : shapeData.getCurves()) {
+       PointF cp1 = curveData.getControlPoint1();
+       PointF cp2 = curveData.getControlPoint2();
+       PointF vertex = curveData.getVertex();

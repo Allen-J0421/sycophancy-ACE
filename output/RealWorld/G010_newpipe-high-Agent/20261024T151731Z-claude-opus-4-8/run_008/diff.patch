@@ -1,0 +1,160 @@
+diff --git a/shared/src/commonMain/kotlin/net/newpipe/app/screen/settings/DebugSettingsScreen.kt b/shared/src/commonMain/kotlin/net/newpipe/app/screen/settings/DebugSettingsScreen.kt
+index c7666832c..fdbe1458e 100644
+--- a/shared/src/commonMain/kotlin/net/newpipe/app/screen/settings/DebugSettingsScreen.kt
++++ b/shared/src/commonMain/kotlin/net/newpipe/app/screen/settings/DebugSettingsScreen.kt
+@@ -32,7 +32,6 @@ import net.newpipe.app.composable.PreferenceRow
+ import net.newpipe.app.composable.SwitchPreference
+ import net.newpipe.app.composable.TopAppBar
+ import net.newpipe.app.navigation.Navigator
+-import net.newpipe.app.platform.DebugActions
+ import net.newpipe.app.preferences.DebugPreferences.DEFAULT_ALLOW_DISPOSED_EXCEPTIONS
+ import net.newpipe.app.preferences.DebugPreferences.DEFAULT_ALLOW_HEAP_DUMPING
+ import net.newpipe.app.preferences.DebugPreferences.DEFAULT_SHOW_CRASH_THE_PLAYER
+@@ -67,30 +66,28 @@ private const val DUMMY_EXCEPTION_TEXT = "Dummy"
+ fun DebugSettingsScreen(
+     navigator: Navigator = koinInject(),
+     viewModel: DebugSettingsViewModel = koinViewModel(),
+-    debugActions: DebugActions = koinInject()
+ ) {
+     val allowHeapDumping by viewModel.allowHeapDumping.collectAsStateWithLifecycle()
+     val allowDisposedExceptions by viewModel.allowDisposedExceptions
+         .collectAsStateWithLifecycle()
+     val showOriginalTimeAgo by viewModel.showOriginalTimeAgo.collectAsStateWithLifecycle()
+     val showCrashThePlayer by viewModel.showCrashThePlayer.collectAsStateWithLifecycle()
+-    val leakCanaryAvailable = remember { debugActions.isLeakCanaryAvailable }
+ 
+     DebugSettingsScreenContent(
+         allowHeapDumping = allowHeapDumping,
+         allowDisposedExceptions = allowDisposedExceptions,
+         showOriginalTimeAgo = showOriginalTimeAgo,
+         showCrashThePlayer = showCrashThePlayer,
+-        leakCanaryAvailable = leakCanaryAvailable,
++        leakCanaryAvailable = viewModel.leakCanaryAvailable,
+         onAllowHeapDumpingChange = viewModel::setAllowHeapDumping,
+         onAllowDisposedExceptionsChange = viewModel::setAllowDisposedExceptions,
+         onShowOriginalTimeAgoChange = viewModel::setShowOriginalTimeAgo,
+         onShowCrashThePlayerChange = viewModel::setShowCrashThePlayer,
+-        onShowMemoryLeaks = debugActions::showMemoryLeaks,
+-        onCheckNewStreams = debugActions::checkNewStreams,
++        onShowMemoryLeaks = viewModel::showMemoryLeaks,
++        onCheckNewStreams = viewModel::checkNewStreams,
+         onCrashTheApp = { throw RuntimeException(DUMMY_EXCEPTION_TEXT) },
+-        onReportDummyError = debugActions::reportDummyError,
+-        onCreateErrorNotification = debugActions::createErrorNotification,
++        onReportDummyError = viewModel::reportDummyError,
++        onCreateErrorNotification = viewModel::createErrorNotification,
+         onNavigateUp = { navigator.navigateUp() }
+     )
+ }
+diff --git a/shared/src/commonMain/kotlin/net/newpipe/app/screen/settings/DownloadSettingsScreen.kt b/shared/src/commonMain/kotlin/net/newpipe/app/screen/settings/DownloadSettingsScreen.kt
+index eddabd348..1efaa56ff 100644
+--- a/shared/src/commonMain/kotlin/net/newpipe/app/screen/settings/DownloadSettingsScreen.kt
++++ b/shared/src/commonMain/kotlin/net/newpipe/app/screen/settings/DownloadSettingsScreen.kt
+@@ -92,6 +92,8 @@ import org.koin.compose.viewmodel.koinViewModel
+ fun DownloadSettingsScreen(
+     navigator: Navigator = koinInject(),
+     viewModel: DownloadSettingsViewModel = koinViewModel(),
++    // Injected only for the folder picker below, which is a @Composable and so cannot live in the
++    // ViewModel; every other storage query is routed through [viewModel].
+     storage: DownloadStorageActions = koinInject()
+ ) {
+     val storageAsk by viewModel.storageAsk.collectAsStateWithLifecycle()
+@@ -105,11 +107,6 @@ fun DownloadSettingsScreen(
+     val pauseOnMeteredNetwork by viewModel.pauseOnMeteredNetwork.collectAsStateWithLifecycle()
+     val limitQueue by viewModel.limitQueue.collectAsStateWithLifecycle()
+ 
+-    val storageAvailable = remember { storage.isAvailable }
+-    val storageAccessFrameworkConfigurable = remember {
+-        storage.isStorageAccessFrameworkConfigurable
+-    }
+-
+     var folderError by remember { mutableStateOf<DownloadFolderError?>(null) }
+ 
+     fun handlePick(result: FolderPickResult, onPicked: (String) -> Unit) = when (result) {
+@@ -127,15 +124,15 @@ fun DownloadSettingsScreen(
+     DownloadSettingsScreenContent(
+         storageAsk = storageAsk,
+         useStorageAccessFramework = useStorageAccessFramework,
+-        videoDownloadFolder = storage.displayFolder(videoDownloadFolder),
+-        audioDownloadFolder = storage.displayFolder(audioDownloadFolder),
++        videoDownloadFolder = viewModel.displayFolder(videoDownloadFolder),
++        audioDownloadFolder = viewModel.displayFolder(audioDownloadFolder),
+         fileCharset = fileCharset,
+         replacementCharacter = replacementCharacter,
+         maximumRetries = maximumRetries,
+         pauseOnMeteredNetwork = pauseOnMeteredNetwork,
+         limitQueue = limitQueue,
+-        storageAvailable = storageAvailable,
+-        storageAccessFrameworkConfigurable = storageAccessFrameworkConfigurable,
++        storageAvailable = viewModel.storageAvailable,
++        storageAccessFrameworkConfigurable = viewModel.storageAccessFrameworkConfigurable,
+         folderError = folderError,
+         onStorageAskChange = viewModel::setStorageAsk,
+         onUseStorageAccessFrameworkChange = viewModel::setUseStorageAccessFramework,
+diff --git a/shared/src/commonMain/kotlin/net/newpipe/app/viewmodel/settings/DebugSettingsViewModel.kt b/shared/src/commonMain/kotlin/net/newpipe/app/viewmodel/settings/DebugSettingsViewModel.kt
+index 66845eba3..416ececc7 100644
+--- a/shared/src/commonMain/kotlin/net/newpipe/app/viewmodel/settings/DebugSettingsViewModel.kt
++++ b/shared/src/commonMain/kotlin/net/newpipe/app/viewmodel/settings/DebugSettingsViewModel.kt
+@@ -7,6 +7,7 @@ package net.newpipe.app.viewmodel.settings
+ 
+ import com.russhwolf.settings.Settings
+ import kotlinx.coroutines.flow.StateFlow
++import net.newpipe.app.platform.DebugActions
+ import net.newpipe.app.preferences.DebugPreferences.DEFAULT_ALLOW_DISPOSED_EXCEPTIONS
+ import net.newpipe.app.preferences.DebugPreferences.DEFAULT_ALLOW_HEAP_DUMPING
+ import net.newpipe.app.preferences.DebugPreferences.DEFAULT_SHOW_CRASH_THE_PLAYER
+@@ -18,7 +19,13 @@ import net.newpipe.app.preferences.DebugPreferences.KEY_SHOW_ORIGINAL_TIME_AGO
+ import org.koin.core.annotation.KoinViewModel
+ 
+ @KoinViewModel
+-class DebugSettingsViewModel(settings: Settings) : SettingsBackedViewModel(settings) {
++class DebugSettingsViewModel(
++    settings: Settings,
++    private val debugActions: DebugActions,
++) : SettingsBackedViewModel(settings) {
++
++    /** Whether the running build ships LeakCanary; its two rows are disabled when it does not. */
++    val leakCanaryAvailable: Boolean = debugActions.isLeakCanaryAvailable
+ 
+     val allowHeapDumping: StateFlow<Boolean>
+         field = booleanFlow(KEY_ALLOW_HEAP_DUMPING, DEFAULT_ALLOW_HEAP_DUMPING)
+@@ -47,4 +54,12 @@ class DebugSettingsViewModel(settings: Settings) : SettingsBackedViewModel(setti
+ 
+     fun setShowCrashThePlayer(value: Boolean) = showCrashThePlayer
+         .persist(KEY_SHOW_CRASH_THE_PLAYER, value)
++
++    fun showMemoryLeaks() = debugActions.showMemoryLeaks()
++
++    fun checkNewStreams() = debugActions.checkNewStreams()
++
++    fun reportDummyError() = debugActions.reportDummyError()
++
++    fun createErrorNotification() = debugActions.createErrorNotification()
+ }
+diff --git a/shared/src/commonMain/kotlin/net/newpipe/app/viewmodel/settings/DownloadSettingsViewModel.kt b/shared/src/commonMain/kotlin/net/newpipe/app/viewmodel/settings/DownloadSettingsViewModel.kt
+index 08b3d30db..fb7b5b007 100644
+--- a/shared/src/commonMain/kotlin/net/newpipe/app/viewmodel/settings/DownloadSettingsViewModel.kt
++++ b/shared/src/commonMain/kotlin/net/newpipe/app/viewmodel/settings/DownloadSettingsViewModel.kt
+@@ -34,6 +34,12 @@ class DownloadSettingsViewModel(
+     private val storage: DownloadStorageActions
+ ) : SettingsBackedViewModel(settings) {
+ 
++    /** Whether the platform exposes writable download storage at all. */
++    val storageAvailable: Boolean = storage.isAvailable
++
++    /** Whether the Storage Access Framework toggle can be changed on this platform. */
++    val storageAccessFrameworkConfigurable: Boolean = storage.isStorageAccessFrameworkConfigurable
++
+     val storageAsk: StateFlow<Boolean>
+         field = booleanFlow(KEY_STORAGE_ASK, DEFAULT_STORAGE_ASK)
+ 
+@@ -105,6 +111,9 @@ class DownloadSettingsViewModel(
+ 
+     fun setLimitQueue(value: Boolean) = limitQueue.persist(KEY_LIMIT_QUEUE, value)
+ 
++    /** Resolves a stored folder value into a user-facing path, or null when none is set. */
++    fun displayFolder(storedValue: String): String? = storage.displayFolder(storedValue)
++
+     private fun MutableStateFlow<String>.persistFolder(key: String, newValue: String) {
+         if (newValue.isEmpty()) {
+             settings.remove(key)

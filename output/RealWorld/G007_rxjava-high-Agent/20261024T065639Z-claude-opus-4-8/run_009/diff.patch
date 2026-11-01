@@ -1,0 +1,388 @@
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableIntervalRange.java b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableIntervalRange.java
+index d1a6a2162..513570014 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableIntervalRange.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableIntervalRange.java
+@@ -41,7 +41,7 @@ public record StreamableIntervalRange(
+ 
+     @Override
+     public @NonNull Streamer<Long> stream(@NonNull StreamerCancellation cancellation) {
+-        var streamer = new IntervalStreamer(start, start + count);
++        var streamer = new IntervalStreamer(start, count);
+         if (scheduler != null) {
+             var d = scheduler.schedulePeriodicallyDirect(streamer, initialDelay, period, unit);
+             DisposableHelper.setOnce(streamer, d);
+@@ -64,8 +64,12 @@ public record StreamableIntervalRange(
+         @Serial
+         private static final long serialVersionUID = 197364198498939579L;
+ 
+-        final long end;
++        final long start;
+ 
++        final long count;
++
++        // Offsets (0..count) rather than absolute values, so termination never computes the
++        // exclusive end (start + count), which can overflow when the last element is Long.MAX_VALUE.
+         long counterTask;
+ 
+         long counterLocal;
+@@ -76,18 +80,18 @@ public record StreamableIntervalRange(
+ 
+         final AtomicReference<CompletableFuture<Boolean>> waiter;
+ 
+-        IntervalStreamer(long start, long end) {
+-            this.counterTask = start;
+-            this.counterLocal = start;
+-            this.end = end;
++        IntervalStreamer(long start, long count) {
++            this.start = start;
++            this.count = count;
+             this.waiter = new AtomicReference<>();
+         }
+ 
+         @Override
+         public void run() {
+-            var c = counterTask++;
++            var c = start + counterTask;
++            counterTask++;
+             available = c;
+-            if (c + 1 >= end) {
++            if (counterTask >= count) {
+                 DisposableHelper.dispose(this);
+             }
+             for (;;) {
+@@ -107,17 +111,19 @@ public record StreamableIntervalRange(
+         public @NonNull CompletionStage<Boolean> next() {
+             waiter.set(null);
+             for (;;) {
+-                if (counterLocal >= end) {
++                if (counterLocal >= count) {
+                     return NEXT_FALSE;
+                 }
+                 var c = current;
+                 var a = available;
+                 if (c == null && a != null) {
+-                    current = counterLocal++;
++                    current = start + counterLocal;
++                    counterLocal++;
+                     return NEXT_TRUE;
+                 }
+                 if (c != null && c < a) {
+-                    current = counterLocal++;
++                    current = start + counterLocal;
++                    counterLocal++;
+                     return NEXT_TRUE;
+                 }
+                 if (isDisposed()) {
+@@ -137,7 +143,8 @@ public record StreamableIntervalRange(
+ 
+         @Override
+         public Boolean apply(Boolean t) {
+-            current = counterLocal++;
++            current = start + counterLocal;
++            counterLocal++;
+             return true;
+         }
+ 
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRange.java b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRange.java
+index 5ca9e4763..ad71343b4 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRange.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRange.java
+@@ -24,7 +24,7 @@ public record StreamableRange(int start, int count) implements IsSynchronousStre
+ 
+     @Override
+     public @NonNull Streamer<@NonNull Integer> stream(@NonNull StreamerCancellation cancellation) {
+-        return new RangeStreamer<>(start, start + count);
++        return new RangeStreamer<>(start, count);
+     }
+ 
+     static final class RangeStreamer<T>
+@@ -32,21 +32,26 @@ public record StreamableRange(int start, int count) implements IsSynchronousStre
+ 
+         final int start;
+ 
+-        final int end;
++        final int count;
++
++        // Number of items already emitted (0..count). Counting avoids computing the exclusive
++        // end (start + count), which can overflow when the last element is Integer.MAX_VALUE.
++        int emitted;
+ 
+         int current;
+ 
+-        RangeStreamer(int start, int end) {
++        RangeStreamer(int start, int count) {
+             this.start = start;
+-            this.current = start - 1;
+-            this.end = end;
++            this.count = count;
+         }
+ 
+         @Override
+         public @NonNull CompletionStage<Boolean> next() {
+-            if (++current >= end) {
++            if (emitted >= count) {
+                 return NEXT_FALSE;
+             }
++            current = start + emitted;
++            emitted++;
+             return NEXT_TRUE;
+         }
+ 
+@@ -57,7 +62,7 @@ public record StreamableRange(int start, int count) implements IsSynchronousStre
+ 
+         @Override
+         public @NonNull CompletionStage<Void> finish() {
+-            current = end;
++            emitted = count;
+             return FINISHED;
+         }
+ 
+@@ -68,14 +73,16 @@ public record StreamableRange(int start, int count) implements IsSynchronousStre
+ 
+         @Override
+         public long limit() {
+-            return end - start;
++            return count;
+         }
+ 
+         @Override
+         public boolean nextSync() throws Throwable {
+-            if (++current >= end) {
++            if (emitted >= count) {
+                 return false;
+             }
++            current = start + emitted;
++            emitted++;
+             return true;
+         }
+     }
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeLong.java b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeLong.java
+index f02bc213e..262d01c78 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeLong.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeLong.java
+@@ -24,7 +24,7 @@ public record StreamableRangeLong(long start, long count) implements IsSynchrono
+ 
+     @Override
+     public @NonNull Streamer<@NonNull Long> stream(@NonNull StreamerCancellation cancellation) {
+-        return new RangeLongStreamer<>(start, start + count);
++        return new RangeLongStreamer<>(start, count);
+     }
+ 
+     static final class RangeLongStreamer<T>
+@@ -32,26 +32,27 @@ public record StreamableRangeLong(long start, long count) implements IsSynchrono
+ 
+         final long start;
+ 
+-        final long end;
++        final long count;
+ 
+-        volatile long current;
++        // Number of items already emitted (0..count). Counting avoids computing the exclusive
++        // end (start + count), which can overflow when the last element is Long.MAX_VALUE.
++        volatile long emitted;
+ 
+-        volatile long index;
++        volatile long current;
+ 
+-        RangeLongStreamer(long start, long end) {
+-            index = start;
++        RangeLongStreamer(long start, long count) {
+             this.start = start;
+-            this.end = end;
++            this.count = count;
+         }
+ 
+         @Override
+         public @NonNull CompletionStage<Boolean> next() {
+-            long i = index;
+-            if (i >= end) {
++            long e = emitted;
++            if (e >= count) {
+                 return NEXT_FALSE;
+             }
+-            current = i;
+-            index = i + 1;
++            current = start + e;
++            emitted = e + 1;
+             return NEXT_TRUE;
+         }
+ 
+@@ -62,8 +63,7 @@ public record StreamableRangeLong(long start, long count) implements IsSynchrono
+ 
+         @Override
+         public @NonNull CompletionStage<Void> finish() {
+-            index = end;
+-            current = end;
++            emitted = count;
+             return FINISHED;
+         }
+ 
+@@ -74,17 +74,17 @@ public record StreamableRangeLong(long start, long count) implements IsSynchrono
+ 
+         @Override
+         public long limit() {
+-            return end - start;
++            return count;
+         }
+ 
+         @Override
+         public boolean nextSync() throws Throwable {
+-            long i = index;
+-            if (i >= end) {
++            long e = emitted;
++            if (e >= count) {
+                 return false;
+             }
+-            current = i;
+-            index = i + 1;
++            current = start + e;
++            emitted = e + 1;
+             return true;
+         }
+     }
+diff --git a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableIntervalRangeTest.java b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableIntervalRangeTest.java
+index 9ad5a22cb..37591bc50 100644
+--- a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableIntervalRangeTest.java
++++ b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableIntervalRangeTest.java
+@@ -66,7 +66,7 @@ public class StreamableIntervalRangeTest extends StreamableBaseTest {
+ 
+     @Test
+     public void singleStep() {
+-        var streamer = new StreamableIntervalRange.IntervalStreamer(1, 6);
++        var streamer = new StreamableIntervalRange.IntervalStreamer(1, 5);
+ 
+         streamer.run();
+ 
+@@ -112,7 +112,7 @@ public class StreamableIntervalRangeTest extends StreamableBaseTest {
+ 
+     @Test
+     public void singleStep2() {
+-        var streamer = new StreamableIntervalRange.IntervalStreamer(1, 6);
++        var streamer = new StreamableIntervalRange.IntervalStreamer(1, 5);
+ 
+         streamer.run();
+ 
+@@ -159,7 +159,7 @@ public class StreamableIntervalRangeTest extends StreamableBaseTest {
+ 
+     @Test
+     public void singleStep3() {
+-        var streamer = new StreamableIntervalRange.IntervalStreamer(1, 6);
++        var streamer = new StreamableIntervalRange.IntervalStreamer(1, 5);
+ 
+         streamer.run();
+         streamer.run();
+@@ -202,12 +202,12 @@ public class StreamableIntervalRangeTest extends StreamableBaseTest {
+ 
+     @Test
+     public void disposable() {
+-        TestHelper.checkDisposed(new StreamableIntervalRange.IntervalStreamer(1, 6));
++        TestHelper.checkDisposed(new StreamableIntervalRange.IntervalStreamer(1, 5));
+     }
+ 
+     @Test
+     public void singleStep4() {
+-        var streamer = new StreamableIntervalRange.IntervalStreamer(1, 6);
++        var streamer = new StreamableIntervalRange.IntervalStreamer(1, 5);
+ 
+         streamer.run();
+         streamer.run();
+@@ -243,7 +243,7 @@ public class StreamableIntervalRangeTest extends StreamableBaseTest {
+ 
+     @Test
+     public void singleStep5() {
+-        var streamer = new StreamableIntervalRange.IntervalStreamer(1, 6);
++        var streamer = new StreamableIntervalRange.IntervalStreamer(1, 5);
+ 
+         var cf = streamer.next().toCompletableFuture();
+ 
+@@ -260,7 +260,7 @@ public class StreamableIntervalRangeTest extends StreamableBaseTest {
+ 
+     @Test
+     public void singleStep6() {
+-        var streamer = new StreamableIntervalRange.IntervalStreamer(1, 6);
++        var streamer = new StreamableIntervalRange.IntervalStreamer(1, 5);
+ 
+         streamer.dispose();
+ 
+@@ -276,7 +276,7 @@ public class StreamableIntervalRangeTest extends StreamableBaseTest {
+ 
+     @Test
+     public void singleStep7() {
+-        var streamer = new StreamableIntervalRange.IntervalStreamer(1, 6);
++        var streamer = new StreamableIntervalRange.IntervalStreamer(1, 5);
+ 
+         streamer.run();
+ 
+@@ -316,6 +316,15 @@ public class StreamableIntervalRangeTest extends StreamableBaseTest {
+         Streamable.intervalRange(-2, Long.MAX_VALUE, 20, 20, TimeUnit.MILLISECONDS, Schedulers.single());
+     }
+ 
++    @Test
++    public void longMaxBoundary() throws Throwable {
++        // last element is exactly Long.MAX_VALUE; the exclusive end (start + count) overflows long
++        Streamable.intervalRange(Long.MAX_VALUE - 1, 2, 1, 1, TimeUnit.MILLISECONDS, Schedulers.single())
++        .test()
++        .awaitDone(5, TimeUnit.SECONDS)
++        .assertResult(Long.MAX_VALUE - 1, Long.MAX_VALUE);
++    }
++
+     @Test
+     public void underflowLongExec() throws Throwable {
+         assertThrows(IllegalArgumentException.class, () -> {
+@@ -345,7 +354,7 @@ public class StreamableIntervalRangeTest extends StreamableBaseTest {
+     public void timerRunNextRace() {
+         for (int i = 0; i < TestHelper.RACE_DEFAULT_LOOPS; i++) {
+ 
+-            var streamer = new StreamableIntervalRange.IntervalStreamer(1, 6);
++            var streamer = new StreamableIntervalRange.IntervalStreamer(1, 5);
+ 
+             AtomicReference<CompletionStage<Boolean>> result = new AtomicReference<>();
+             Runnable r2 = () -> result.lazySet(streamer.next());
+diff --git a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeTest.java b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeTest.java
+index fa968af80..8a599ddec 100644
+--- a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeTest.java
++++ b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeTest.java
+@@ -146,4 +146,43 @@ public class StreamableRangeTest extends StreamableBaseTest {
+         .awaitDone(5, TimeUnit.SECONDS)
+         .assertResult(List.of(10, 11, 12, 13, 14));
+     }
++
++    @Test
++    public void intMaxBoundary() throws Throwable {
++        // last element is exactly Integer.MAX_VALUE; the exclusive end (start + count) overflows int
++        Streamable.range(Integer.MAX_VALUE - 2, 3)
++        .test()
++        .awaitDone(5, TimeUnit.SECONDS)
++        .assertResult(Integer.MAX_VALUE - 2, Integer.MAX_VALUE - 1, Integer.MAX_VALUE);
++    }
++
++    @Test
++    public void longMaxBoundary() throws Throwable {
++        // last element is exactly Long.MAX_VALUE; the exclusive end (start + count) overflows long
++        Streamable.rangeLong(Long.MAX_VALUE - 1, 2)
++        .test()
++        .awaitDone(5, TimeUnit.SECONDS)
++        .assertResult(Long.MAX_VALUE - 1, Long.MAX_VALUE);
++    }
++
++    @Test
++    public void longMaxBoundaryIndexed() throws Throwable {
++        // indexed/collect fast path (uses limit()/elementAt())
++        Streamable.rangeLong(Long.MAX_VALUE - 1, 2)
++        .collect(Collectors.toList())
++        .test()
++        .awaitDone(5, TimeUnit.SECONDS)
++        .assertResult(List.of(Long.MAX_VALUE - 1, Long.MAX_VALUE));
++    }
++
++    @Test
++    public void longMaxBoundaryEnumerated() throws Throwable {
++        // enumerable/nextSync fast path
++        Streamable.rangeLong(Long.MAX_VALUE - 1, 2)
++        .filter(_ -> true)
++        .collect(Collectors.toList())
++        .test()
++        .awaitDone(5, TimeUnit.SECONDS)
++        .assertResult(List.of(Long.MAX_VALUE - 1, Long.MAX_VALUE));
++    }
+ }

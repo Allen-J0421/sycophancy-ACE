@@ -1,0 +1,247 @@
+diff --git a/application/src/main/java/run/halo/app/core/endpoint/console/PluginEndpoint.java b/application/src/main/java/run/halo/app/core/endpoint/console/PluginEndpoint.java
+index 32b657137..501941980 100644
+--- a/application/src/main/java/run/halo/app/core/endpoint/console/PluginEndpoint.java
++++ b/application/src/main/java/run/halo/app/core/endpoint/console/PluginEndpoint.java
+@@ -37,6 +37,7 @@ import org.springdoc.core.fn.builders.operation.Builder;
+ import org.springdoc.webflux.core.fn.SpringdocRouteBuilder;
+ import org.springframework.beans.factory.InitializingBean;
+ import org.springframework.boot.autoconfigure.web.WebProperties;
++import org.springframework.core.io.Resource;
+ import org.springframework.core.io.buffer.DataBuffer;
+ import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.data.domain.Sort;
+@@ -354,54 +355,50 @@ public class PluginEndpoint implements CustomEndpoint, InitializingBean {
+     }
+ 
+     private Mono<ServerResponse> fetchJsBundle(ServerRequest request) {
+-        var versionOption = request.queryParam("v");
+-        return versionOption
+-                .map(s -> uiPluginBundleService.getJsBundle(s).flatMap(jsRes -> {
+-                    var bodyBuilder = ServerResponse.ok()
+-                            .cacheControl(bundleCacheControl)
+-                            .contentType(MediaType.valueOf("text/javascript"));
+-                    if (useLastModified) {
+-                        try {
+-                            var lastModified = Instant.ofEpochMilli(jsRes.lastModified());
+-                            bodyBuilder = bodyBuilder.lastModified(lastModified);
+-                        } catch (IOException e) {
+-                            if (e instanceof FileNotFoundException) {
+-                                return Mono.error(new NoResourceFoundException(request.uri(), "bundle.js"));
+-                            }
+-                            return Mono.error(e);
+-                        }
+-                    }
+-                    return bodyBuilder.body(BodyInserters.fromResource(jsRes));
+-                }))
+-                .orElseGet(() -> uiPluginBundleService
+-                        .generateBundleVersion()
+-                        .flatMap(version -> ServerResponse.temporaryRedirect(buildJsBundleUri("js", version))
+-                                .cacheControl(CacheControl.noStore())
+-                                .build()));
++        return fetchBundle(request, "js", "text/javascript", uiPluginBundleService::getJsBundle);
+     }
+ 
+     private Mono<ServerResponse> fetchCssBundle(ServerRequest request) {
++        return fetchBundle(request, "css", "text/css", uiPluginBundleService::getCssBundle);
++    }
++
++    /**
++     * Serves a plugin UI bundle (JS or CSS). When a version is supplied via the {@code v} query parameter the
++     * corresponding resource is returned (optionally with a {@code Last-Modified} header); otherwise the request is
++     * redirected to the current versioned bundle URI.
++     *
++     * @param request the incoming request
++     * @param bundleType the bundle type, used for the redirect URI and not-found resource name (e.g. {@code js} or
++     *     {@code css})
++     * @param mediaType the content type to serve the resource with
++     * @param bundleSupplier resolves the bundle resource for a given version
++     */
++    private Mono<ServerResponse> fetchBundle(
++            ServerRequest request,
++            String bundleType,
++            String mediaType,
++            Function<String, Mono<Resource>> bundleSupplier) {
+         return request.queryParam("v")
+-                .map(s -> uiPluginBundleService.getCssBundle(s).flatMap(cssRes -> {
++                .map(version -> bundleSupplier.apply(version).flatMap(resource -> {
+                     var bodyBuilder = ServerResponse.ok()
+                             .cacheControl(bundleCacheControl)
+-                            .contentType(MediaType.valueOf("text/css"));
++                            .contentType(MediaType.valueOf(mediaType));
+                     if (useLastModified) {
+                         try {
+-                            var lastModified = Instant.ofEpochMilli(cssRes.lastModified());
++                            var lastModified = Instant.ofEpochMilli(resource.lastModified());
+                             bodyBuilder = bodyBuilder.lastModified(lastModified);
+                         } catch (IOException e) {
+                             if (e instanceof FileNotFoundException) {
+-                                return Mono.error(new NoResourceFoundException(request.uri(), "bundle.css"));
++                                return Mono.error(new NoResourceFoundException(request.uri(), "bundle." + bundleType));
+                             }
+                             return Mono.error(e);
+                         }
+                     }
+-                    return bodyBuilder.body(BodyInserters.fromResource(cssRes));
++                    return bodyBuilder.body(BodyInserters.fromResource(resource));
+                 }))
+                 .orElseGet(() -> uiPluginBundleService
+                         .generateBundleVersion()
+-                        .flatMap(version -> ServerResponse.temporaryRedirect(buildJsBundleUri("css", version))
++                        .flatMap(version -> ServerResponse.temporaryRedirect(buildJsBundleUri(bundleType, version))
+                                 .cacheControl(CacheControl.noStore())
+                                 .build()));
+     }
+@@ -451,14 +448,6 @@ public class PluginEndpoint implements CustomEndpoint, InitializingBean {
+         return ServerResponse.ok().body(pluginService.reload(name), Plugin.class);
+     }
+ 
+-    private Mono<ServerResponse> fetchPluginConfig(ServerRequest request) {
+-        final var name = request.pathVariable("name");
+-        return client.fetch(Plugin.class, name)
+-                .mapNotNull(plugin -> plugin.getSpec().getConfigMapName())
+-                .flatMap(configMapName -> client.fetch(ConfigMap.class, configMapName))
+-                .flatMap(configMap -> ServerResponse.ok().bodyValue(configMap));
+-    }
+-
+     private Mono<ServerResponse> fetchPluginSetting(ServerRequest request) {
+         final var name = request.pathVariable("name");
+         return client.fetch(Plugin.class, name)
+@@ -467,44 +456,6 @@ public class PluginEndpoint implements CustomEndpoint, InitializingBean {
+                 .flatMap(setting -> ServerResponse.ok().bodyValue(setting));
+     }
+ 
+-    private Mono<ServerResponse> updatePluginConfig(ServerRequest request) {
+-        final var pluginName = request.pathVariable("name");
+-        return client.fetch(Plugin.class, pluginName)
+-                .doOnNext(plugin -> {
+-                    String configMapName = plugin.getSpec().getConfigMapName();
+-                    if (!StringUtils.hasText(configMapName)) {
+-                        throw new ServerWebInputException(
+-                                "Unable to complete the request because the plugin configMapName is blank");
+-                    }
+-                })
+-                .flatMap(plugin -> {
+-                    final String configMapName = plugin.getSpec().getConfigMapName();
+-                    return request.bodyToMono(ConfigMap.class)
+-                            .doOnNext(configMapToUpdate -> {
+-                                var configMapNameToUpdate =
+-                                        configMapToUpdate.getMetadata().getName();
+-                                if (!configMapName.equals(configMapNameToUpdate)) {
+-                                    throw new ServerWebInputException(
+-                                            "The name from the request body does not match the plugin "
+-                                                    + "configMapName name.");
+-                                }
+-                            })
+-                            .flatMap(configMapToUpdate -> client.fetch(ConfigMap.class, configMapName)
+-                                    .map(persisted -> {
+-                                        configMapToUpdate
+-                                                .getMetadata()
+-                                                .setVersion(
+-                                                        persisted.getMetadata().getVersion());
+-                                        return configMapToUpdate;
+-                                    })
+-                                    .switchIfEmpty(client.create(configMapToUpdate)))
+-                            .flatMap(client::update)
+-                            .retryWhen(Retry.backoff(5, Duration.ofMillis(300))
+-                                    .filter(OptimisticLockingFailureException.class::isInstance));
+-                })
+-                .flatMap(configMap -> ServerResponse.ok().bodyValue(configMap));
+-    }
+-
+     private Mono<ServerResponse> resetSettingConfig(ServerRequest request) {
+         String name = request.pathVariable("name");
+         return client.fetch(Plugin.class, name)
+diff --git a/application/src/main/java/run/halo/app/core/reconciler/ReplyReconciler.java b/application/src/main/java/run/halo/app/core/reconciler/ReplyReconciler.java
+index 1142f32ff..e0d1d5853 100644
+--- a/application/src/main/java/run/halo/app/core/reconciler/ReplyReconciler.java
++++ b/application/src/main/java/run/halo/app/core/reconciler/ReplyReconciler.java
+@@ -2,6 +2,8 @@ package run.halo.app.core.reconciler;
+ 
+ import static org.apache.commons.lang3.ObjectUtils.defaultIfNull;
+ import static run.halo.app.extension.ExtensionUtil.addFinalizers;
++import static run.halo.app.extension.ExtensionUtil.isDeleted;
++import static run.halo.app.extension.ExtensionUtil.removeFinalizers;
+ import static run.halo.app.extension.index.query.Queries.equal;
+ 
+ import java.util.Set;
+@@ -38,7 +40,7 @@ public class ReplyReconciler implements Reconciler<Reconciler.Request> {
+     @Override
+     public Result reconcile(Request request) {
+         client.fetch(Reply.class, request.name()).ifPresent(reply -> {
+-            if (reply.getMetadata().getDeletionTimestamp() != null) {
++            if (isDeleted(reply)) {
+                 cleanUpResourcesAndRemoveFinalizer(request.name());
+                 return;
+             }
+@@ -68,9 +70,7 @@ public class ReplyReconciler implements Reconciler<Reconciler.Request> {
+ 
+     private void cleanUpResourcesAndRemoveFinalizer(String replyName) {
+         client.fetch(Reply.class, replyName).ifPresent(reply -> {
+-            if (reply.getMetadata().getFinalizers() != null) {
+-                reply.getMetadata().getFinalizers().remove(FINALIZER_NAME);
+-            }
++            removeFinalizers(reply.getMetadata(), Set.of(FINALIZER_NAME));
+             client.update(reply);
+ 
+             // on reply removing
+diff --git a/application/src/main/java/run/halo/app/core/reconciler/ReverseProxyReconciler.java b/application/src/main/java/run/halo/app/core/reconciler/ReverseProxyReconciler.java
+index 89d8a9be1..ab5ea7218 100644
+--- a/application/src/main/java/run/halo/app/core/reconciler/ReverseProxyReconciler.java
++++ b/application/src/main/java/run/halo/app/core/reconciler/ReverseProxyReconciler.java
+@@ -1,12 +1,12 @@
+ package run.halo.app.core.reconciler;
+ 
+-import java.util.HashSet;
+ import java.util.Map;
+ import java.util.Objects;
+ import java.util.Set;
+ import org.springframework.stereotype.Component;
+ import run.halo.app.core.extension.ReverseProxy;
+ import run.halo.app.extension.ExtensionClient;
++import run.halo.app.extension.ExtensionUtil;
+ import run.halo.app.extension.controller.Controller;
+ import run.halo.app.extension.controller.ControllerBuilder;
+ import run.halo.app.extension.controller.Reconciler;
+@@ -34,7 +34,7 @@ public class ReverseProxyReconciler implements Reconciler<Reconciler.Request> {
+     public Result reconcile(Request request) {
+         return client.fetch(ReverseProxy.class, request.name())
+                 .map(reverseProxy -> {
+-                    if (isDeleted(reverseProxy)) {
++                    if (ExtensionUtil.isDeleted(reverseProxy)) {
+                         cleanUpResourcesAndRemoveFinalizer(request.name());
+                         return new Result(false, null);
+                     }
+@@ -67,30 +67,20 @@ public class ReverseProxyReconciler implements Reconciler<Reconciler.Request> {
+         }
+         client.fetch(ReverseProxy.class, oldReverseProxy.getMetadata().getName())
+                 .ifPresent(reverseProxy -> {
+-                    Set<String> newFinalizers = reverseProxy.getMetadata().getFinalizers();
+-                    if (newFinalizers == null) {
+-                        newFinalizers = new HashSet<>();
+-                        reverseProxy.getMetadata().setFinalizers(newFinalizers);
++                    if (ExtensionUtil.addFinalizers(reverseProxy.getMetadata(), Set.of(FINALIZER_NAME))) {
++                        client.update(reverseProxy);
+                     }
+-                    newFinalizers.add(FINALIZER_NAME);
+-                    client.update(reverseProxy);
+                 });
+     }
+ 
+     private void cleanUpResourcesAndRemoveFinalizer(String name) {
+         client.fetch(ReverseProxy.class, name).ifPresent(reverseProxy -> {
+             cleanUpResources(reverseProxy);
+-            if (reverseProxy.getMetadata().getFinalizers() != null) {
+-                reverseProxy.getMetadata().getFinalizers().remove(FINALIZER_NAME);
+-            }
++            ExtensionUtil.removeFinalizers(reverseProxy.getMetadata(), Set.of(FINALIZER_NAME));
+             client.update(reverseProxy);
+         });
+     }
+ 
+-    private boolean isDeleted(ReverseProxy reverseProxy) {
+-        return reverseProxy.getMetadata().getDeletionTimestamp() != null;
+-    }
+-
+     private String getPluginId(ReverseProxy reverseProxy) {
+         Map<String, String> labels = reverseProxy.getMetadata().getLabels();
+         if (labels == null) {

@@ -1,0 +1,278 @@
+diff --git a/library/src/main/java/com/bumptech/glide/load/engine/DecodeJob.java b/library/src/main/java/com/bumptech/glide/load/engine/DecodeJob.java
+index 7ae4261cc..de3b31679 100644
+--- a/library/src/main/java/com/bumptech/glide/load/engine/DecodeJob.java
++++ b/library/src/main/java/com/bumptech/glide/load/engine/DecodeJob.java
+@@ -229,10 +229,7 @@ class DecodeJob<R>
+   @Override
+   public int compareTo(@NonNull DecodeJob<?> other) {
+     int result = priority.compareTo(other.priority);
+-    if (result == 0) {
+-      result = order - other.order;
+-    }
+-    return result;
++    return result != 0 ? result : order - other.order;
+   }
+ 
+   public void cancel() {
+@@ -282,9 +279,6 @@ class DecodeJob<R>
+         throwables.add(t);
+         notifyFailed();
+       }
+-      if (!isCancelled) {
+-        throw t;
+-      }
+       throw t;
+     } finally {
+       // Keeping track of the fetcher here and calling cleanup is excessively paranoid, we call
+@@ -761,13 +755,10 @@ class DecodeJob<R>
+    */
+   private <Z> boolean shouldBypassSoftwareTransformation(
+       Resource<Z> decoded, Transformation<Z> transformation) {
+-    Boolean bypassOption = options.get(Downsampler.BYPASS_TRANSFORMATIONS_FOR_HARDWARE_BITMAPS);
+-    if (bypassOption == null || !bypassOption) {
++    if (!Boolean.TRUE.equals(options.get(Downsampler.BYPASS_TRANSFORMATIONS_FOR_HARDWARE_BITMAPS))) {
+       return false;
+     }
+-
+-    Boolean allowHardware = options.get(Downsampler.ALLOW_HARDWARE_CONFIG);
+-    if (allowHardware == null || !allowHardware) {
++    if (!Boolean.TRUE.equals(options.get(Downsampler.ALLOW_HARDWARE_CONFIG))) {
+       return false;
+     }
+ 
+diff --git a/library/src/main/java/com/bumptech/glide/load/engine/Engine.java b/library/src/main/java/com/bumptech/glide/load/engine/Engine.java
+index 67ae0e72c..e47d62e84 100644
+--- a/library/src/main/java/com/bumptech/glide/load/engine/Engine.java
++++ b/library/src/main/java/com/bumptech/glide/load/engine/Engine.java
+@@ -414,22 +414,19 @@ public final class Engine
+   private EngineResource<?> getEngineResourceFromCache(Key key) {
+     Resource<?> cached = cache.remove(key);
+ 
+-    final EngineResource<?> result;
+     if (cached == null) {
+-      result = null;
+-    } else if (cached instanceof EngineResource) {
++      return null;
++    }
++    if (cached instanceof EngineResource) {
+       // Save an object allocation if we've cached an EngineResource (the typical case).
+-      result = (EngineResource<?>) cached;
+-    } else {
+-      result =
+-          new EngineResource<>(
+-              cached,
+-              /* isMemoryCacheable= */ true,
+-              /* isRecyclable= */ true,
+-              key,
+-              /* listener= */ this);
+-    }
+-    return result;
++      return (EngineResource<?>) cached;
++    }
++    return new EngineResource<>(
++        cached,
++        /* isMemoryCacheable= */ true,
++        /* isRecyclable= */ true,
++        key,
++        /* listener= */ this);
+   }
+ 
+   public void release(Resource<?> resource) {
+@@ -550,13 +547,7 @@ public final class Engine
+     @Synthetic
+     final Pools.Pool<DecodeJob<?>> pool =
+         FactoryPools.threadSafe(
+-            JOB_POOL_SIZE,
+-            new FactoryPools.Factory<DecodeJob<?>>() {
+-              @Override
+-              public DecodeJob<?> create() {
+-                return new DecodeJob<>(diskCacheProvider, pool);
+-              }
+-            });
++            JOB_POOL_SIZE, () -> new DecodeJob<>(diskCacheProvider, pool));
+ 
+     private int creationOrder;
+ 
+@@ -617,19 +608,15 @@ public final class Engine
+     final Pools.Pool<EngineJob<?>> pool =
+         FactoryPools.threadSafe(
+             JOB_POOL_SIZE,
+-            new FactoryPools.Factory<EngineJob<?>>() {
+-              @Override
+-              public EngineJob<?> create() {
+-                return new EngineJob<>(
++            () ->
++                new EngineJob<>(
+                     diskCacheExecutor,
+                     sourceExecutor,
+                     sourceUnlimitedExecutor,
+                     animationExecutor,
+                     engineJobListener,
+                     resourceListener,
+-                    pool);
+-              }
+-            });
++                    pool));
+ 
+     EngineJobFactory(
+         GlideExecutor diskCacheExecutor,
+diff --git a/library/src/main/java/com/bumptech/glide/load/engine/bitmap_recycle/LruArrayPool.java b/library/src/main/java/com/bumptech/glide/load/engine/bitmap_recycle/LruArrayPool.java
+index d1db9776d..2216085e6 100644
+--- a/library/src/main/java/com/bumptech/glide/load/engine/bitmap_recycle/LruArrayPool.java
++++ b/library/src/main/java/com/bumptech/glide/load/engine/bitmap_recycle/LruArrayPool.java
+@@ -84,12 +84,9 @@ public final class LruArrayPool implements ArrayPool {
+   @Override
+   public synchronized <T> T get(int size, Class<T> arrayClass) {
+     Integer possibleSize = getSizesForAdapter(arrayClass).ceilingKey(size);
+-    final Key key;
+-    if (mayFillRequest(size, possibleSize)) {
+-      key = keyPool.get(possibleSize, arrayClass);
+-    } else {
+-      key = keyPool.get(size, arrayClass);
+-    }
++    Key key = mayFillRequest(size, possibleSize)
++        ? keyPool.get(possibleSize, arrayClass)
++        : keyPool.get(size, arrayClass);
+     return getForKey(key, arrayClass);
+   }
+ 
+diff --git a/library/src/main/java/com/bumptech/glide/load/resource/gif/GifFrameLoader.java b/library/src/main/java/com/bumptech/glide/load/resource/gif/GifFrameLoader.java
+index 2d680d629..1b53e98e2 100644
+--- a/library/src/main/java/com/bumptech/glide/load/resource/gif/GifFrameLoader.java
++++ b/library/src/main/java/com/bumptech/glide/load/resource/gif/GifFrameLoader.java
+@@ -303,12 +303,12 @@ class GifFrameLoader {
+ 
+     @Override
+     public boolean handleMessage(Message msg) {
++      GifFrameLoader.DelayTarget target = (DelayTarget) msg.obj;
+       if (msg.what == MSG_DELAY) {
+-        GifFrameLoader.DelayTarget target = (DelayTarget) msg.obj;
+         onFrameReady(target);
+         return true;
+-      } else if (msg.what == MSG_CLEAR) {
+-        GifFrameLoader.DelayTarget target = (DelayTarget) msg.obj;
++      }
++      if (msg.what == MSG_CLEAR) {
+         requestManager.clear(target);
+       }
+       return false;
+diff --git a/library/src/main/java/com/bumptech/glide/manager/RequestManagerRetriever.java b/library/src/main/java/com/bumptech/glide/manager/RequestManagerRetriever.java
+index 284705b6e..9cf4425ea 100644
+--- a/library/src/main/java/com/bumptech/glide/manager/RequestManagerRetriever.java
++++ b/library/src/main/java/com/bumptech/glide/manager/RequestManagerRetriever.java
+@@ -224,11 +224,11 @@ public class RequestManagerRetriever implements Handler.Callback {
+   private static Activity findActivity(@NonNull Context context) {
+     if (context instanceof Activity) {
+       return (Activity) context;
+-    } else if (context instanceof ContextWrapper) {
++    }
++    if (context instanceof ContextWrapper) {
+       return findActivity(((ContextWrapper) context).getBaseContext());
+-    } else {
+-      return null;
+     }
++    return null;
+   }
+ 
+   @TargetApi(Build.VERSION_CODES.JELLY_BEAN_MR1)
+@@ -282,15 +282,6 @@ public class RequestManagerRetriever implements Handler.Callback {
+   }
+ 
+   private static final RequestManagerFactory DEFAULT_FACTORY =
+-      new RequestManagerFactory() {
+-        @NonNull
+-        @Override
+-        public RequestManager build(
+-            @NonNull Glide glide,
+-            @NonNull Lifecycle lifecycle,
+-            @NonNull RequestManagerTreeNode requestManagerTreeNode,
+-            @NonNull Context context) {
+-          return new RequestManager(glide, lifecycle, requestManagerTreeNode, context);
+-        }
+-      };
++      (glide, lifecycle, requestManagerTreeNode, context) ->
++          new RequestManager(glide, lifecycle, requestManagerTreeNode, context);
+ }
+diff --git a/library/src/main/java/com/bumptech/glide/module/ManifestParser.java b/library/src/main/java/com/bumptech/glide/module/ManifestParser.java
+index 35fce96e5..bec1cb2fb 100644
+--- a/library/src/main/java/com/bumptech/glide/module/ManifestParser.java
++++ b/library/src/main/java/com/bumptech/glide/module/ManifestParser.java
+@@ -84,14 +84,10 @@ public final class ManifestParser {
+     Object module = null;
+     try {
+       module = clazz.getDeclaredConstructor().newInstance();
+-      // These can't be combined until API minimum is 19.
+-    } catch (InstantiationException e) {
+-      throwInstantiateGlideModuleException(clazz, e);
+-    } catch (IllegalAccessException e) {
+-      throwInstantiateGlideModuleException(clazz, e);
+-    } catch (NoSuchMethodException e) {
+-      throwInstantiateGlideModuleException(clazz, e);
+-    } catch (InvocationTargetException e) {
++    } catch (InstantiationException
++        | IllegalAccessException
++        | NoSuchMethodException
++        | InvocationTargetException e) {
+       throwInstantiateGlideModuleException(clazz, e);
+     }
+ 
+diff --git a/library/src/main/java/com/bumptech/glide/util/MarkEnforcingInputStream.java b/library/src/main/java/com/bumptech/glide/util/MarkEnforcingInputStream.java
+index 9bbb19a7f..f03c30621 100644
+--- a/library/src/main/java/com/bumptech/glide/util/MarkEnforcingInputStream.java
++++ b/library/src/main/java/com/bumptech/glide/util/MarkEnforcingInputStream.java
+@@ -76,11 +76,11 @@ public class MarkEnforcingInputStream extends FilterInputStream {
+   private long getBytesToRead(long targetByteCount) {
+     if (availableBytes == 0) {
+       return END_OF_STREAM;
+-    } else if (availableBytes != UNSET && targetByteCount > availableBytes) {
++    }
++    if (availableBytes != UNSET && targetByteCount > availableBytes) {
+       return availableBytes;
+-    } else {
+-      return targetByteCount;
+     }
++    return targetByteCount;
+   }
+ 
+   private void updateAvailableBytesAfterRead(long bytesRead) {
+diff --git a/library/src/main/java/com/bumptech/glide/util/pool/FactoryPools.java b/library/src/main/java/com/bumptech/glide/util/pool/FactoryPools.java
+index d3b1a26c7..9a8ef8c9c 100644
+--- a/library/src/main/java/com/bumptech/glide/util/pool/FactoryPools.java
++++ b/library/src/main/java/com/bumptech/glide/util/pool/FactoryPools.java
+@@ -16,13 +16,7 @@ import java.util.List;
+ public final class FactoryPools {
+   private static final String TAG = "FactoryPools";
+   private static final int DEFAULT_POOL_SIZE = 20;
+-  private static final Resetter<Object> EMPTY_RESETTER =
+-      new Resetter<Object>() {
+-        @Override
+-        public void reset(@NonNull Object object) {
+-          // Do nothing.
+-        }
+-      };
++  private static final Resetter<Object> EMPTY_RESETTER = object -> {};
+ 
+   private FactoryPools() {}
+ 
+@@ -98,19 +92,8 @@ public final class FactoryPools {
+   public static <T> Pool<List<T>> threadSafeList(int size) {
+     return build(
+         new SynchronizedPool<List<T>>(size),
+-        new Factory<List<T>>() {
+-          @NonNull
+-          @Override
+-          public List<T> create() {
+-            return new ArrayList<>();
+-          }
+-        },
+-        new Resetter<List<T>>() {
+-          @Override
+-          public void reset(@NonNull List<T> object) {
+-            object.clear();
+-          }
+-        });
++        ArrayList::new,
++        object -> object.clear());
+   }
+ 
+   @NonNull

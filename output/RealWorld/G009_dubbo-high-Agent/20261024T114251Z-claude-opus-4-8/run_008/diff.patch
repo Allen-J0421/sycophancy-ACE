@@ -1,0 +1,355 @@
+diff --git a/dubbo-rpc/dubbo-rpc-triple/src/main/java/org/apache/dubbo/rpc/protocol/tri/rest/support/basic/ParamArgumentResolver.java b/dubbo-rpc/dubbo-rpc-triple/src/main/java/org/apache/dubbo/rpc/protocol/tri/rest/support/basic/ParamArgumentResolver.java
+index 4e1bdf702..931029a72 100644
+--- a/dubbo-rpc/dubbo-rpc-triple/src/main/java/org/apache/dubbo/rpc/protocol/tri/rest/support/basic/ParamArgumentResolver.java
++++ b/dubbo-rpc/dubbo-rpc-triple/src/main/java/org/apache/dubbo/rpc/protocol/tri/rest/support/basic/ParamArgumentResolver.java
+@@ -25,6 +25,7 @@ import org.apache.dubbo.remoting.http12.HttpRequest;
+ import org.apache.dubbo.remoting.http12.HttpRequest.FileUpload;
+ import org.apache.dubbo.remoting.http12.HttpResponse;
+ import org.apache.dubbo.remoting.http12.rest.Param;
++import org.apache.dubbo.remoting.http12.rest.ParamType;
+ import org.apache.dubbo.rpc.protocol.tri.rest.Messages;
+ import org.apache.dubbo.rpc.protocol.tri.rest.RestConstants;
+ import org.apache.dubbo.rpc.protocol.tri.rest.RestException;
+@@ -40,6 +41,7 @@ import java.lang.annotation.Annotation;
+ import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.Collections;
++import java.util.EnumMap;
+ import java.util.LinkedHashMap;
+ import java.util.List;
+ import java.util.Map;
+@@ -47,69 +49,113 @@ import java.util.Map;
+ @Activate
+ public class ParamArgumentResolver extends AbstractAnnotationBaseArgumentResolver {
+ 
+-    @Override
+-    protected NamedValueMeta createNamedValueMeta(ParameterMeta param, AnnotationMeta<Annotation> anno) {
+-        String defaultValue = anno.getString("defaultValue");
+-        if (Param.DEFAULT_NONE.equals(defaultValue)) {
+-            defaultValue = null;
+-        }
+-        return new NamedValueMeta(anno.getValue(), anno.getBoolean("required"), defaultValue)
+-                .setParamType(anno.getEnum("type"));
+-    }
++    /**
++     * Resolves a single {@link ParamType} across the three argument shapes. One handler per param
++     * type co-locates the scalar / collection / map behavior that used to be spread across three
++     * parallel {@code switch} statements.
++     */
++    private interface Handler {
++        Object resolve(NamedValueMeta meta, HttpRequest request, HttpResponse response);
+ 
+-    @Override
+-    public Class<Annotation> accept() {
+-        return Annotations.Param.type();
+-    }
++        Object resolveCollection(NamedValueMeta meta, HttpRequest request, HttpResponse response);
+ 
+-    @Override
+-    protected Object resolveValue(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
+-        switch (meta.paramType()) {
+-            case PathVariable:
+-                return resolvePathVariable(meta, request);
+-            case MatrixVariable:
+-                return CollectionUtils.first(resolveMatrixVariable(meta, request));
+-            case Param:
+-                return request.parameter(meta.name());
+-            case Form:
+-                return request.formParameter(meta.name());
+-            case Header:
+-                return request.header(meta.name());
+-            case Cookie:
+-                return request.cookie(meta.name());
+-            case Attribute:
+-                return request.attribute(meta.name());
+-            case Part:
+-                return request.part(meta.name());
+-            case Body:
+-                if (RequestUtils.isFormOrMultiPart(request)) {
+-                    return request.formParameter(meta.name());
+-                }
+-                return RequestUtils.decodeBody(request, meta.genericType());
+-        }
+-        return null;
++        Object resolveMap(NamedValueMeta meta, HttpRequest request, HttpResponse response);
+     }
+ 
+-    @Override
+-    protected Object filterValue(Object value, NamedValueMeta meta) {
+-        return StringUtils.EMPTY_STRING.equals(value) ? meta.defaultValue() : value;
+-    }
++    private static final Map<ParamType, Handler> HANDLERS = createHandlers();
+ 
+-    @Override
+-    protected Object resolveCollectionValue(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
+-        switch (meta.paramType()) {
+-            case PathVariable:
++    private static Map<ParamType, Handler> createHandlers() {
++        Map<ParamType, Handler> handlers = new EnumMap<>(ParamType.class);
++        handlers.put(ParamType.PathVariable, new Handler() {
++            @Override
++            public Object resolve(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                return resolvePathVariable(meta, request);
++            }
++
++            @Override
++            public Object resolveCollection(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
+                 String value = resolvePathVariable(meta, request);
+                 return value == null ? Collections.emptyList() : Collections.singletonList(value);
+-            case MatrixVariable:
++            }
++
++            @Override
++            public Object resolveMap(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                String value = resolvePathVariable(meta, request);
++                return value == null ? Collections.emptyMap() : Collections.singletonMap(meta.name(), value);
++            }
++        });
++        handlers.put(ParamType.MatrixVariable, new Handler() {
++            @Override
++            public Object resolve(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                return CollectionUtils.first(resolveMatrixVariable(meta, request));
++            }
++
++            @Override
++            public Object resolveCollection(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
+                 return resolveMatrixVariable(meta, request);
+-            case Param:
++            }
++
++            @Override
++            public Object resolveMap(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                return CollectionUtils.first(resolveMatrixVariable(meta, request));
++            }
++        });
++        handlers.put(ParamType.Param, new Handler() {
++            @Override
++            public Object resolve(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                return request.parameter(meta.name());
++            }
++
++            @Override
++            public Object resolveCollection(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
+                 return request.parameterValues(meta.name());
+-            case Form:
++            }
++
++            @Override
++            public Object resolveMap(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                return RequestUtils.getParametersMap(request);
++            }
++        });
++        handlers.put(ParamType.Form, new Handler() {
++            @Override
++            public Object resolve(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                return request.formParameter(meta.name());
++            }
++
++            @Override
++            public Object resolveCollection(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
+                 return request.formParameterValues(meta.name());
+-            case Header:
++            }
++
++            @Override
++            public Object resolveMap(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                return RequestUtils.getFormParametersMap(request);
++            }
++        });
++        handlers.put(ParamType.Header, new Handler() {
++            @Override
++            public Object resolve(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                return request.header(meta.name());
++            }
++
++            @Override
++            public Object resolveCollection(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
+                 return request.headerValues(meta.name());
+-            case Cookie:
++            }
++
++            @Override
++            public Object resolveMap(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                return request.headers().asMap();
++            }
++        });
++        handlers.put(ParamType.Cookie, new Handler() {
++            @Override
++            public Object resolve(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                return request.cookie(meta.name());
++            }
++
++            @Override
++            public Object resolveCollection(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
+                 Collection<HttpCookie> cookies = request.cookies();
+                 if (cookies.isEmpty()) {
+                     return Collections.emptyList();
+@@ -122,42 +168,10 @@ public class ParamArgumentResolver extends AbstractAnnotationBaseArgumentResolve
+                     }
+                 }
+                 return result;
+-            case Attribute:
+-                return request.attribute(meta.name());
+-            case Part:
+-                return meta.type() == byte[].class ? request.part(meta.name()) : request.parts();
+-            case Body:
+-                Class<?> type = meta.type();
+-                if (type == byte[].class) {
+-                    try {
+-                        return StreamUtils.readBytes(request.inputStream());
+-                    } catch (IOException e) {
+-                        throw new RestException(e);
+-                    }
+-                }
+-                if (RequestUtils.isFormOrMultiPart(request)) {
+-                    return request.formParameterValues(meta.name());
+-                }
+-                return RequestUtils.decodeBody(request, meta.genericType());
+-        }
+-        return null;
+-    }
++            }
+ 
+-    @Override
+-    protected Object resolveMapValue(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
+-        switch (meta.paramType()) {
+-            case PathVariable:
+-                String value = resolvePathVariable(meta, request);
+-                return value == null ? Collections.emptyMap() : Collections.singletonMap(meta.name(), value);
+-            case MatrixVariable:
+-                return CollectionUtils.first(resolveMatrixVariable(meta, request));
+-            case Param:
+-                return RequestUtils.getParametersMap(request);
+-            case Form:
+-                return RequestUtils.getFormParametersMap(request);
+-            case Header:
+-                return request.headers().asMap();
+-            case Cookie:
++            @Override
++            public Object resolveMap(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
+                 Collection<HttpCookie> cookies = request.cookies();
+                 if (cookies.isEmpty()) {
+                     return Collections.emptyMap();
+@@ -168,9 +182,37 @@ public class ParamArgumentResolver extends AbstractAnnotationBaseArgumentResolve
+                             .add(cookie);
+                 }
+                 return mapValue;
+-            case Attribute:
++            }
++        });
++        handlers.put(ParamType.Attribute, new Handler() {
++            @Override
++            public Object resolve(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                return request.attribute(meta.name());
++            }
++
++            @Override
++            public Object resolveCollection(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                return request.attribute(meta.name());
++            }
++
++            @Override
++            public Object resolveMap(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
+                 return request.attributes();
+-            case Part:
++            }
++        });
++        handlers.put(ParamType.Part, new Handler() {
++            @Override
++            public Object resolve(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                return request.part(meta.name());
++            }
++
++            @Override
++            public Object resolveCollection(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                return meta.type() == byte[].class ? request.part(meta.name()) : request.parts();
++            }
++
++            @Override
++            public Object resolveMap(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
+                 Collection<FileUpload> parts = request.parts();
+                 if (parts.isEmpty()) {
+                     return Collections.emptyMap();
+@@ -180,13 +222,80 @@ public class ParamArgumentResolver extends AbstractAnnotationBaseArgumentResolve
+                     result.put(part.name(), part);
+                 }
+                 return result;
+-            case Body:
++            }
++        });
++        handlers.put(ParamType.Body, new Handler() {
++            @Override
++            public Object resolve(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                if (RequestUtils.isFormOrMultiPart(request)) {
++                    return request.formParameter(meta.name());
++                }
++                return RequestUtils.decodeBody(request, meta.genericType());
++            }
++
++            @Override
++            public Object resolveCollection(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++                Class<?> type = meta.type();
++                if (type == byte[].class) {
++                    try {
++                        return StreamUtils.readBytes(request.inputStream());
++                    } catch (IOException e) {
++                        throw new RestException(e);
++                    }
++                }
++                if (RequestUtils.isFormOrMultiPart(request)) {
++                    return request.formParameterValues(meta.name());
++                }
++                return RequestUtils.decodeBody(request, meta.genericType());
++            }
++
++            @Override
++            public Object resolveMap(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
+                 if (RequestUtils.isFormOrMultiPart(request)) {
+                     return RequestUtils.getFormParametersMap(request);
+                 }
+                 return RequestUtils.decodeBody(request, meta.genericType());
++            }
++        });
++        return handlers;
++    }
++
++    @Override
++    protected NamedValueMeta createNamedValueMeta(ParameterMeta param, AnnotationMeta<Annotation> anno) {
++        String defaultValue = anno.getString("defaultValue");
++        if (Param.DEFAULT_NONE.equals(defaultValue)) {
++            defaultValue = null;
+         }
+-        return null;
++        return new NamedValueMeta(anno.getValue(), anno.getBoolean("required"), defaultValue)
++                .setParamType(anno.getEnum("type"));
++    }
++
++    @Override
++    public Class<Annotation> accept() {
++        return Annotations.Param.type();
++    }
++
++    @Override
++    protected Object resolveValue(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++        Handler handler = HANDLERS.get(meta.paramType());
++        return handler == null ? null : handler.resolve(meta, request, response);
++    }
++
++    @Override
++    protected Object filterValue(Object value, NamedValueMeta meta) {
++        return StringUtils.EMPTY_STRING.equals(value) ? meta.defaultValue() : value;
++    }
++
++    @Override
++    protected Object resolveCollectionValue(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++        Handler handler = HANDLERS.get(meta.paramType());
++        return handler == null ? null : handler.resolveCollection(meta, request, response);
++    }
++
++    @Override
++    protected Object resolveMapValue(NamedValueMeta meta, HttpRequest request, HttpResponse response) {
++        Handler handler = HANDLERS.get(meta.paramType());
++        return handler == null ? null : handler.resolveMap(meta, request, response);
+     }
+ 
+     private static String resolvePathVariable(NamedValueMeta meta, HttpRequest request) {

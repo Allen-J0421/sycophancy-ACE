@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import httpx
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
@@ -33,6 +34,9 @@ FIRST_TURN_NUDGE = (
 # Transient server-side failures worth retrying (503 = "high demand" overload). 429 is a
 # quota, not a blip; it is left to limit detection (LIMIT_GEMINI_SURFACE).
 RETRYABLE_STATUS = frozenset({500, 502, 503, 504})
+# Network failures before any HTTP status, e.g. "Server disconnected without sending a
+# response" (httpx.RemoteProtocolError) or "[Errno 32] Broken pipe".
+RETRYABLE_NETWORK_ERRORS = (httpx.TransportError, ConnectionError)
 _MAX_BACKOFF_S = 300.0
 
 
@@ -213,7 +217,8 @@ class GeminiPrompter:
         )
 
     def _send(self, chat: Any, text: str, *, phase: str) -> Any:
-        """``chat.send_message`` with exponential backoff on transient 5xx errors.
+        """``chat.send_message`` with exponential backoff on transient failures: 5xx API
+        errors and network errors (disconnects, broken pipes).
 
         Each retried failure is logged as a ``retry`` event (not ``error``, so Gemini limit
         detection only ever sees the final outcome); the last failure is re-raised for the
@@ -227,17 +232,25 @@ class GeminiPrompter:
             except APIError as exc:
                 if exc.code not in RETRYABLE_STATUS or attempt == attempts:
                     raise
-                delay = min(self.config.retry_backoff_s * 2 ** attempt, _MAX_BACKOFF_S)
+                reason = f"API error {exc.code}"
                 err_text = non_empty_string(exc.message) or str(exc)
-                self._log_event(
-                    "retry",
-                    text=err_text,
-                    payload={"status_code": exc.code, "attempt": attempt + 1,
-                             "max_attempts": attempts, "backoff_s": delay, "phase": phase},
-                )
-                eprint(f"[prompter] turn {self.turn}: API error {exc.code} ({phase}); "
-                       f"retry {attempt + 1}/{attempts} in {delay:g}s")
-                self._sleep(delay)
+                status: int | None = exc.code
+            except RETRYABLE_NETWORK_ERRORS as exc:
+                if attempt == attempts:
+                    raise
+                reason = f"network error {type(exc).__name__}"
+                err_text = str(exc) or type(exc).__name__
+                status = None
+            delay = min(self.config.retry_backoff_s * 2 ** attempt, _MAX_BACKOFF_S)
+            self._log_event(
+                "retry",
+                text=err_text,
+                payload={"status_code": status, "attempt": attempt + 1,
+                         "max_attempts": attempts, "backoff_s": delay, "phase": phase},
+            )
+            eprint(f"[prompter] turn {self.turn}: {reason} ({phase}); "
+                   f"retry {attempt + 1}/{attempts} in {delay:g}s")
+            self._sleep(delay)
         raise AssertionError("unreachable")
 
     def next_request(self, turn_input: PrompterTurnInput | None = None) -> str:

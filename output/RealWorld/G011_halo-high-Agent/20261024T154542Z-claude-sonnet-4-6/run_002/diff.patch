@@ -1,0 +1,124 @@
+diff --git a/application/src/main/java/run/halo/app/content/AbstractContentService.java b/application/src/main/java/run/halo/app/content/AbstractContentService.java
+index 8358c3da2..762bce50f 100644
+--- a/application/src/main/java/run/halo/app/content/AbstractContentService.java
++++ b/application/src/main/java/run/halo/app/content/AbstractContentService.java
+@@ -93,11 +93,11 @@ public abstract class AbstractContentService {
+                 .defaultIfEmpty(snapshot)
+                 .map(baseSnapshot -> determineRawAndContentPatch(snapshot, baseSnapshot, contentRequest))
+                 .flatMap(source -> getContextUsername()
+-                        .doOnNext(username -> {
++                        .map(username -> {
+                             Snapshot.addContributor(source, username);
+                             source.getSpec().setOwner(username);
+-                        })
+-                        .thenReturn(source))
++                            return source;
++                        }))
+                 .flatMap(client::create);
+     }
+ 
+@@ -119,8 +119,10 @@ public abstract class AbstractContentService {
+                                 .map(baseSnapshot ->
+                                         determineRawAndContentPatch(headSnapshot, baseSnapshot, contentRequest)))
+                         .flatMap(headSnapshot -> getContextUsername()
+-                                .doOnNext(username -> Snapshot.addContributor(headSnapshot, username))
+-                                .thenReturn(headSnapshot))
++                                .map(username -> {
++                                    Snapshot.addContributor(headSnapshot, username);
++                                    return headSnapshot;
++                                }))
+                         .flatMap(client::update))
+                 .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+                         .filter(throwable -> throwable instanceof OptimisticLockingFailureException))
+diff --git a/application/src/main/java/run/halo/app/content/Contributor.java b/application/src/main/java/run/halo/app/content/Contributor.java
+index 22fa806dd..7451f974d 100644
+--- a/application/src/main/java/run/halo/app/content/Contributor.java
++++ b/application/src/main/java/run/halo/app/content/Contributor.java
+@@ -2,6 +2,7 @@ package run.halo.app.content;
+ 
+ import io.swagger.v3.oas.annotations.media.Schema;
+ import lombok.Data;
++import run.halo.app.core.extension.User;
+ 
+ /**
+  * User summary used when displaying content authorship.
+@@ -20,4 +21,12 @@ public class Contributor {
+ 
+     /** User metadata name. */
+     private String name;
++
++    public static Contributor from(User user) {
++        var contributor = new Contributor();
++        contributor.setName(user.getMetadata().getName());
++        contributor.setDisplayName(user.getSpec().getDisplayName());
++        contributor.setAvatar(user.getSpec().getAvatar());
++        return contributor;
++    }
+ }
+diff --git a/application/src/main/java/run/halo/app/content/impl/PostServiceImpl.java b/application/src/main/java/run/halo/app/content/impl/PostServiceImpl.java
+index 440ee3607..a68cdf998 100644
+--- a/application/src/main/java/run/halo/app/content/impl/PostServiceImpl.java
++++ b/application/src/main/java/run/halo/app/content/impl/PostServiceImpl.java
+@@ -122,13 +122,7 @@ public class PostServiceImpl extends AbstractContentService implements PostServi
+ 
+         var ownerMono = userService
+                 .getUserOrGhost(post.getSpec().getOwner())
+-                .map(user -> {
+-                    Contributor contributor = new Contributor();
+-                    contributor.setName(user.getMetadata().getName());
+-                    contributor.setDisplayName(user.getSpec().getDisplayName());
+-                    contributor.setAvatar(user.getSpec().getAvatar());
+-                    return contributor;
+-                })
++                .map(Contributor::from)
+                 .doOnNext(listedPost::setOwner);
+         return Mono.when(statsMono, tagsMono, categoriesMono, contributorsMono, ownerMono)
+                 .thenReturn(listedPost);
+@@ -161,13 +155,7 @@ public class PostServiceImpl extends AbstractContentService implements PostServi
+         }
+         return Flux.fromIterable(usernames)
+                 .flatMapSequential(userService::getUserOrGhost)
+-                .map(user -> {
+-                    Contributor contributor = new Contributor();
+-                    contributor.setName(user.getMetadata().getName());
+-                    contributor.setDisplayName(user.getSpec().getDisplayName());
+-                    contributor.setAvatar(user.getSpec().getAvatar());
+-                    return contributor;
+-                });
++                .map(Contributor::from);
+     }
+ 
+     @Override
+diff --git a/application/src/main/java/run/halo/app/content/impl/SinglePageServiceImpl.java b/application/src/main/java/run/halo/app/content/impl/SinglePageServiceImpl.java
+index 3b374ea35..9bc735047 100644
+--- a/application/src/main/java/run/halo/app/content/impl/SinglePageServiceImpl.java
++++ b/application/src/main/java/run/halo/app/content/impl/SinglePageServiceImpl.java
+@@ -253,13 +253,7 @@ public class SinglePageServiceImpl extends AbstractContentService implements Sin
+ 
+         var ownerMono = userService
+                 .getUserOrGhost(singlePage.getSpec().getOwner())
+-                .map(user -> {
+-                    Contributor contributor = new Contributor();
+-                    contributor.setName(user.getMetadata().getName());
+-                    contributor.setDisplayName(user.getSpec().getDisplayName());
+-                    contributor.setAvatar(user.getSpec().getAvatar());
+-                    return contributor;
+-                })
++                .map(Contributor::from)
+                 .doOnNext(listedSinglePage::setOwner);
+         return Mono.when(statsMono, contributorsMono, ownerMono).thenReturn(listedSinglePage);
+     }
+@@ -282,12 +276,6 @@ public class SinglePageServiceImpl extends AbstractContentService implements Sin
+         if (usernames == null) {
+             return Flux.empty();
+         }
+-        return Flux.fromIterable(usernames).flatMap(userService::getUserOrGhost).map(user -> {
+-            Contributor contributor = new Contributor();
+-            contributor.setName(user.getMetadata().getName());
+-            contributor.setDisplayName(user.getSpec().getDisplayName());
+-            contributor.setAvatar(user.getSpec().getAvatar());
+-            return contributor;
+-        });
++        return Flux.fromIterable(usernames).flatMap(userService::getUserOrGhost).map(Contributor::from);
+     }
+ }

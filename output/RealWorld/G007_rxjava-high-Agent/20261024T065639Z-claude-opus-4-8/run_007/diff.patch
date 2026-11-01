@@ -1,0 +1,130 @@
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableGroupBy.java b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableGroupBy.java
+index eb58ed2bc..cc9a10a86 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableGroupBy.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableGroupBy.java
+@@ -113,15 +113,15 @@ implements Streamable<GroupedStreamable<K, T>>, HasUpstreamStreamableSource<T> {
+         @Override
+         public void accept(Object t, Throwable u) {
+             if (done) {
+-                upstream.finish().whenComplete((v, e) -> {
+-                    currentNext = null;
+-                    currentGroup = null;
+-                    if (e != null) {
+-                        onFinish.completeExceptionally(e);
+-                    } else {
+-                        onFinish.complete(v);
+-                    }
+-                });
++                // upstream.finish() was already invoked by drain(); use its delivered
++                // result here instead of calling it a second time.
++                currentNext = null;
++                currentGroup = null;
++                if (u != null) {
++                    onFinish.completeExceptionally(u);
++                } else {
++                    onFinish.complete(null);
++                }
+             } else {
+                 if (u != null) {
+                     done = true;
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableTakeUntil.java b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableTakeUntil.java
+index f61ee9bf4..87328a23c 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableTakeUntil.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableTakeUntil.java
+@@ -93,8 +93,11 @@ public record StreamableTakeUntil<T, U>(
+         @Override
+         public @NonNull CompletionStage<Void> finish() {
+             otherCancellation.dispose();
++            // mainNext is only set by next(); if finish() is called before the first next()
++            // there is no pending main stage to await, so use an already-completed placeholder.
++            var main = mainNext != null ? mainNext : Streamer.NEXT_FALSE;
+             return andThenSupply(
+-                    whenBoth(mainNext, otherNext),
++                    whenBoth(main, otherNext),
+                     () -> whenBoth(upstream.finish(), otherStreamer.finish())
+                    );
+         }
+diff --git a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableGroupByTest.java b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableGroupByTest.java
+index c5111b14f..c580a441d 100644
+--- a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableGroupByTest.java
++++ b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableGroupByTest.java
+@@ -17,13 +17,13 @@ import static org.junit.jupiter.api.Assertions.*;
+ 
+ import java.util.List;
+ import java.util.concurrent.*;
+-import java.util.concurrent.atomic.AtomicReference;
++import java.util.concurrent.atomic.*;
+ 
+ import org.junit.jupiter.api.*;
+ 
+ import io.reactivex.rxjava4.core.*;
+ import io.reactivex.rxjava4.core.config.StandardConcurrentConfig;
+-import io.reactivex.rxjava4.disposables.Disposable;
++import io.reactivex.rxjava4.disposables.*;
+ import io.reactivex.rxjava4.exceptions.*;
+ import io.reactivex.rxjava4.processors.PublishProcessor;
+ 
+@@ -294,4 +294,36 @@ public class StreamableGroupByTest extends StreamableBaseTest {
+             .assertFailure(TestException.class);
+         });
+     }
++
++    @Test
++    public void finishCallsUpstreamFinishOnce() throws Throwable {
++        var finishCalls = new AtomicInteger();
++        Streamable<Integer> source = new Streamable<Integer>() {
++            @Override
++            public Streamer<Integer> stream(StreamerCancellation cancellation) {
++                return new Streamer<Integer>() {
++                    @Override
++                    public CompletionStage<Boolean> next() {
++                        return Streamer.NEXT_FALSE;
++                    }
++
++                    @Override
++                    public Integer current() {
++                        return 0;
++                    }
++
++                    @Override
++                    public CompletionStage<Void> finish() {
++                        finishCalls.incrementAndGet();
++                        return Streamer.FINISHED;
++                    }
++                };
++            }
++        };
++
++        var streamer = source.groupBy(v -> v).stream(new CompositeDisposable());
++        streamer.finish().toCompletableFuture().join();
++
++        assertEquals(1, finishCalls.get(), "upstream.finish() should be invoked exactly once");
++    }
+ }
+diff --git a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableTakeUntilTest.java b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableTakeUntilTest.java
+index bf97c8aa8..3299d7d6a 100644
+--- a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableTakeUntilTest.java
++++ b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableTakeUntilTest.java
+@@ -18,6 +18,7 @@ import java.util.concurrent.TimeUnit;
+ import org.junit.jupiter.api.Test;
+ 
+ import io.reactivex.rxjava4.core.Streamable;
++import io.reactivex.rxjava4.disposables.CompositeDisposable;
+ import io.reactivex.rxjava4.exceptions.TestException;
+ import io.reactivex.rxjava4.schedulers.Schedulers;
+ 
+@@ -110,4 +111,14 @@ public class StreamableTakeUntilTest extends StreamableBaseTest {
+         .awaitDone(5, TimeUnit.SECONDS)
+         .assertResult(1, 2, 3, 4, 5);
+     }
++
++    @Test
++    public void finishBeforeNext() {
++        // finish() must not NPE when called before the first next() (mainNext still null)
++        var streamer = Streamable.just(1)
++                .takeUntil(Streamable.empty())
++                .stream(new CompositeDisposable());
++
++        streamer.finish().toCompletableFuture().join();
++    }
+ }

@@ -1,0 +1,251 @@
+diff --git a/retrofit-mock/src/test/java/retrofit2/mock/BehaviorDelegateTest.java b/retrofit-mock/src/test/java/retrofit2/mock/BehaviorDelegateTest.java
+index d695766ce..4a9e9595b 100644
+--- a/retrofit-mock/src/test/java/retrofit2/mock/BehaviorDelegateTest.java
++++ b/retrofit-mock/src/test/java/retrofit2/mock/BehaviorDelegateTest.java
+@@ -44,6 +44,7 @@ public final class BehaviorDelegateTest {
+ 
+   private final IOException mockFailure = new IOException("Timeout!");
+   private final NetworkBehavior behavior = NetworkBehavior.create(new Random(2847));
++  private BehaviorDelegate<DoWorkService> delegate;
+   private DoWorkService service;
+ 
+   @Before
+@@ -51,7 +52,7 @@ public final class BehaviorDelegateTest {
+     Retrofit retrofit = new Retrofit.Builder().baseUrl("http://example.com").build();
+     MockRetrofit mockRetrofit =
+         new MockRetrofit.Builder(retrofit).networkBehavior(behavior).build();
+-    final BehaviorDelegate<DoWorkService> delegate = mockRetrofit.create(DoWorkService.class);
++    delegate = mockRetrofit.create(DoWorkService.class);
+ 
+     service =
+         new DoWorkService() {
+@@ -69,6 +70,25 @@ public final class BehaviorDelegateTest {
+         };
+   }
+ 
++  /**
++   * Returns a mock {@link Call} that applies the configured network delay and counts down {@code
++   * taskStarted} the moment the background task begins running (immediately before it enters the
++   * delay). This lets a test deterministically wait until the call is in-flight before canceling
++   * it, rather than guessing with a fixed {@link Thread#sleep}.
++   *
++   * <p>Callers must force the "response" branch of {@link NetworkBehavior} (zero failure and error
++   * percentages) so that the delegate is actually enqueued and the signal fires.
++   */
++  private Call<String> delayedResponseSignaling(CountDownLatch taskStarted) {
++    Call<String> response =
++        Calls.defer(
++            () -> {
++              taskStarted.countDown();
++              return Calls.response("Response!");
++            });
++    return delegate.returning(response).response();
++  }
++
+   @Test
+   public void syncFailureThrowsAfterDelay() {
+     behavior.setDelay(100, MILLISECONDS);
+@@ -220,22 +240,28 @@ public final class BehaviorDelegateTest {
+   }
+ 
+   @Test
+-  public void syncCanBeCanceled() throws IOException {
++  public void syncCanBeCanceled() throws Exception {
+     behavior.setDelay(10, SECONDS);
+     behavior.setVariancePercent(0);
+     behavior.setFailurePercent(0);
++    behavior.setErrorPercent(0);
+ 
+-    final Call<String> call = service.response();
++    final CountDownLatch taskStarted = new CountDownLatch(1);
++    final Call<String> call = delayedResponseSignaling(taskStarted);
+ 
+-    new Thread(
++    Thread canceler =
++        new Thread(
+             () -> {
+               try {
+-                Thread.sleep(100);
++                // Cancel only once the task is actually in-flight, so cancellation reliably
++                // interrupts the running task rather than racing its start.
++                assertTrue(taskStarted.await(10, SECONDS));
+                 call.cancel();
+-              } catch (InterruptedException ignored) {
++              } catch (InterruptedException e) {
++                throw new AssertionError(e);
+               }
+-            })
+-        .start();
++            });
++    canceler.start();
+ 
+     try {
+       call.execute();
+@@ -244,6 +270,8 @@ public final class BehaviorDelegateTest {
+       // Exact instance check as opposed to isInstanceOf's subtype checking.
+       assertThat(e.getClass()).isEqualTo(IOException.class);
+       assertThat(e).hasMessageThat().isEqualTo("canceled");
++    } finally {
++      canceler.join();
+     }
+   }
+ 
+@@ -252,8 +280,10 @@ public final class BehaviorDelegateTest {
+     behavior.setDelay(10, SECONDS);
+     behavior.setVariancePercent(0);
+     behavior.setFailurePercent(0);
++    behavior.setErrorPercent(0);
+ 
+-    final Call<String> call = service.response();
++    final CountDownLatch taskStarted = new CountDownLatch(1);
++    final Call<String> call = delayedResponseSignaling(taskStarted);
+ 
+     final AtomicReference<Throwable> failureRef = new AtomicReference<>();
+     final CountDownLatch latch = new CountDownLatch(1);
+@@ -271,8 +301,9 @@ public final class BehaviorDelegateTest {
+           }
+         });
+ 
+-    // TODO we shouldn't need to sleep
+-    Thread.sleep(100); // Ensure the task has started.
++    // Wait until the task is actually in-flight before canceling, rather than guessing with a
++    // fixed sleep.
++    assertTrue(taskStarted.await(10, SECONDS));
+     call.cancel();
+ 
+     assertTrue(latch.await(1, SECONDS));
+diff --git a/retrofit/java-test/src/test/java/retrofit2/RequestFactoryBuilderTest.java b/retrofit/java-test/src/test/java/retrofit2/RequestFactoryBuilderTest.java
+index 665823add..4650a6a43 100644
+--- a/retrofit/java-test/src/test/java/retrofit2/RequestFactoryBuilderTest.java
++++ b/retrofit/java-test/src/test/java/retrofit2/RequestFactoryBuilderTest.java
+@@ -5,7 +5,7 @@
+  * you may not use this file except in compliance with the License.
+  * You may obtain a copy of the License at
+  *
+- *      http://www.apache.org/licenses/LICENSE-2.0
++ * http://www.apache.org/licenses/LICENSE-2.0
+  *
+  * Unless required by applicable law or agreed to in writing, software
+  * distributed under the License is distributed on an "AS IS" BASIS,
+@@ -16,34 +16,99 @@
+ package retrofit2;
+ 
+ import static com.google.common.truth.Truth.assertThat;
++import static retrofit2.TestingUtils.buildRequest;
+ 
+-import java.util.Set;
++import okhttp3.Request;
++import okhttp3.ResponseBody;
+ import org.junit.Test;
++import retrofit2.http.GET;
++import retrofit2.http.Path;
+ 
+-// TODO this test is far too white box, migrate to black box.
++/**
++ * Tests how {@code {name}} placeholders in a relative URL are parsed into path parameters. Rather
++ * than calling the internal path-parameter parser directly, each case drives a service method
++ * through the public request-building pipeline and asserts the resulting URL, so the tests exercise
++ * the behavior a caller actually observes.
++ */
++@SuppressWarnings({"UnusedParameters", "unused"}) // Service methods are inspected reflectively.
+ public final class RequestFactoryBuilderTest {
+   @Test
+-  public void pathParameterParsing() throws Exception {
+-    expectParams("/");
+-    expectParams("/foo");
+-    expectParams("/foo/bar");
+-    expectParams("/foo/bar/{}");
+-    expectParams("/foo/bar/{taco}", "taco");
+-    expectParams("/foo/bar/{t}", "t");
+-    expectParams("/foo/bar/{!!!}/"); // Invalid parameter.
+-    expectParams("/foo/bar/{}/{taco}", "taco");
+-    expectParams("/foo/bar/{taco}/or/{burrito}", "taco", "burrito");
+-    expectParams("/foo/bar/{taco}/or/{taco}", "taco");
+-    expectParams("/foo/bar/{taco-shell}", "taco-shell");
+-    expectParams("/foo/bar/{taco_shell}", "taco_shell");
+-    expectParams("/foo/bar/{sha256}", "sha256");
+-    expectParams("/foo/bar/{TACO}", "TACO");
+-    expectParams("/foo/bar/{taco}/{tAco}/{taCo}", "taco", "tAco", "taCo");
+-    expectParams("/foo/bar/{1}"); // Invalid parameter, name cannot start with digit.
++  public void namedParameterIsSubstituted() {
++    class Example {
++      @GET("/foo/bar/{taco}/")
++      Call<ResponseBody> method(@Path("taco") String taco) {
++        return null;
++      }
++    }
++    Request request = buildRequest(Example.class, "value");
++    assertThat(request.url().toString()).isEqualTo("http://example.com/foo/bar/value/");
++  }
++
++  @Test
++  public void multipleNamedParametersAreSubstituted() {
++    class Example {
++      @GET("/foo/bar/{taco}/or/{burrito}")
++      Call<ResponseBody> method(@Path("taco") String taco, @Path("burrito") String burrito) {
++        return null;
++      }
++    }
++    Request request = buildRequest(Example.class, "one", "two");
++    assertThat(request.url().toString()).isEqualTo("http://example.com/foo/bar/one/or/two");
++  }
++
++  @Test
++  public void repeatedParameterNameIsSubstitutedEverywhere() {
++    // A name used twice is recognized as a single parameter, so one @Path argument fills both.
++    class Example {
++      @GET("/foo/bar/{taco}/or/{taco}")
++      Call<ResponseBody> method(@Path("taco") String taco) {
++        return null;
++      }
++    }
++    Request request = buildRequest(Example.class, "value");
++    assertThat(request.url().toString()).isEqualTo("http://example.com/foo/bar/value/or/value");
+   }
+ 
+-  private static void expectParams(String path, String... expected) {
+-    Set<String> calculated = RequestFactory.Builder.parsePathParameters(path);
+-    assertThat(calculated).containsExactlyElementsIn(expected);
++  @Test
++  public void parameterNamesAreCaseSensitive() {
++    // Three names that differ only in case are three distinct parameters; mismatched casing would
++    // fail to build.
++    class Example {
++      @GET("/{taco}/{tAco}/{taCo}")
++      Call<ResponseBody> method(
++          @Path("taco") String a, @Path("tAco") String b, @Path("taCo") String c) {
++        return null;
++      }
++    }
++    Request request = buildRequest(Example.class, "1", "2", "3");
++    assertThat(request.url().toString()).isEqualTo("http://example.com/1/2/3");
++  }
++
++  @Test
++  public void parameterNamesAllowLettersDigitsHyphensAndUnderscores() {
++    class Example {
++      @GET("/{taco-shell}/{taco_shell}/{sha256}")
++      Call<ResponseBody> method(
++          @Path("taco-shell") String a, @Path("taco_shell") String b, @Path("sha256") String c) {
++        return null;
++      }
++    }
++    Request request = buildRequest(Example.class, "1", "2", "3");
++    assertThat(request.url().toString()).isEqualTo("http://example.com/1/2/3");
++  }
++
++  @Test
++  public void invalidPlaceholdersAreTreatedAsLiterals() {
++    // Empty braces, punctuation, and a digit-leading name are not valid parameter names, so they
++    // are left in the URL untouched and need no @Path argument.
++    class Example {
++      @GET("/foo/{}/{!!!}/{1}/")
++      Call<ResponseBody> method() {
++        return null;
++      }
++    }
++    Request request = buildRequest(Example.class);
++    assertThat(request.url().toString())
++        .isEqualTo("http://example.com/foo/%7B%7D/%7B!!!%7D/%7B1%7D/");
+   }
+ }

@@ -1,0 +1,600 @@
+diff --git a/ui/console-src/composables/__tests__/use-batch-action.spec.ts b/ui/console-src/composables/__tests__/use-batch-action.spec.ts
+new file mode 100644
+index 000000000..c95031f29
+--- /dev/null
++++ b/ui/console-src/composables/__tests__/use-batch-action.spec.ts
+@@ -0,0 +1,88 @@
++import { beforeEach, expect, it, vi } from "vite-plus/test";
++
++const toastSuccess = vi.hoisted(() => vi.fn());
++vi.mock("@halo-dev/components", () => ({
++  Toast: { success: toastSuccess },
++}));
++
++import { useBatchAction } from "../use-batch-action";
++
++beforeEach(() => {
++  toastSuccess.mockClear();
++});
++
++it("runs the action for every item", async () => {
++  const seen: number[] = [];
++  const { runBatch } = useBatchAction();
++
++  await runBatch({
++    items: [1, 2, 3, 4, 5, 6, 7],
++    action: async (n) => {
++      seen.push(n);
++    },
++    concurrency: 2,
++  });
++
++  expect([...seen].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7]);
++});
++
++it("processes chunks sequentially and in-chunk concurrently", async () => {
++  const running: number[] = [];
++  let maxConcurrent = 0;
++  const { runBatch } = useBatchAction();
++
++  await runBatch({
++    items: [1, 2, 3, 4, 5],
++    concurrency: 2,
++    action: async (n) => {
++      running.push(n);
++      maxConcurrent = Math.max(maxConcurrent, running.length);
++      await Promise.resolve();
++      running.splice(running.indexOf(n), 1);
++    },
++  });
++
++  // With chunk size 2, no more than 2 actions are ever in flight at once.
++  expect(maxConcurrent).toBeLessThanOrEqual(2);
++});
++
++it("awaits onSuccess before showing the success toast", async () => {
++  const order: string[] = [];
++  const { runBatch } = useBatchAction();
++
++  await runBatch({
++    items: ["a"],
++    action: async () => {
++      order.push("action");
++    },
++    successMessage: "done",
++    onSuccess: async () => {
++      order.push("onSuccess");
++    },
++  });
++
++  expect(order).toEqual(["action", "onSuccess"]);
++  expect(toastSuccess).toHaveBeenCalledOnce();
++  expect(toastSuccess).toHaveBeenCalledWith("done");
++});
++
++it("does not show a toast when no successMessage is given", async () => {
++  const { runBatch } = useBatchAction();
++
++  await runBatch({
++    items: ["a"],
++    action: async () => {},
++  });
++
++  expect(toastSuccess).not.toHaveBeenCalled();
++});
++
++it("handles an empty item list without running the action or toasting", async () => {
++  const action = vi.fn();
++  const { runBatch } = useBatchAction();
++
++  await runBatch({ items: [], action, successMessage: "done" });
++
++  expect(action).not.toHaveBeenCalled();
++  expect(toastSuccess).toHaveBeenCalledWith("done");
++});
+diff --git a/ui/console-src/composables/__tests__/use-list-query.spec.ts b/ui/console-src/composables/__tests__/use-list-query.spec.ts
+new file mode 100644
+index 000000000..c654635a3
+--- /dev/null
++++ b/ui/console-src/composables/__tests__/use-list-query.spec.ts
+@@ -0,0 +1,93 @@
++import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
++import { flushPromises, mount } from "@vue/test-utils";
++import { expect, it, vi } from "vite-plus/test";
++import { defineComponent, h, ref } from "vue";
++import { useListQuery, type PagedList } from "../use-list-query";
++
++// Replace the route-backed refs with plain refs so the composable can be exercised without a router.
++vi.mock("@vueuse/router", async () => {
++  const { ref: vueRef } = await import("vue");
++  return {
++    useRouteQuery: (_key: string, defaultValue: unknown) => vueRef(defaultValue),
++  };
++});
++
++interface Item {
++  id: number;
++}
++
++function page(items: Item[], extra: Partial<PagedList<Item>> = {}): PagedList<Item> {
++  return {
++    items,
++    total: items.length,
++    page: 1,
++    size: 20,
++    hasNext: false,
++    hasPrevious: false,
++    totalPages: 1,
++    first: true,
++    last: true,
++    ...extra,
++  };
++}
++
++function mountWithQuery(fetchFn: (params: { page: number; size: number }) => Promise<PagedList<Item>>) {
++  const client = new QueryClient();
++  const wrapper = mount(
++    defineComponent({
++      setup() {
++        const filter = ref("a");
++        const api = useListQuery<Item>({
++          queryKey: [filter],
++          filters: [filter],
++          fetchFn,
++        });
++        return () =>
++          h("div", [
++            h("span", { class: "count" }, String(api.items.value.length)),
++            h("span", { class: "total" }, String(api.total.value)),
++            h("span", { class: "has-next" }, String(api.hasNext.value)),
++            h("span", { class: "page" }, String(api.page.value)),
++            h("button", { class: "to-page-2", onClick: () => (api.page.value = 2) }),
++            h("button", { class: "change-filter", onClick: () => (filter.value = "b") }),
++          ]);
++      },
++    }),
++    { global: { plugins: [[VueQueryPlugin, { queryClient: client }]] } }
++  );
++  return { wrapper, client };
++}
++
++it("derives items and pagination from the fetch response", async () => {
++  const fetchFn = vi.fn(async () => page([{ id: 1 }, { id: 2 }], { total: 5, hasNext: true }));
++  const { wrapper, client } = mountWithQuery(fetchFn);
++  try {
++    await flushPromises();
++    expect(wrapper.find(".count").text()).toBe("2");
++    expect(wrapper.find(".total").text()).toBe("5");
++    expect(wrapper.find(".has-next").text()).toBe("true");
++    expect(fetchFn).toHaveBeenCalledWith({ page: 1, size: 20 });
++  } finally {
++    wrapper.unmount();
++    client.clear();
++  }
++});
++
++it("resets page to 1 when a filter changes", async () => {
++  const fetchFn = vi.fn(async () => page([{ id: 1 }]));
++  const { wrapper, client } = mountWithQuery(fetchFn);
++  try {
++    await flushPromises();
++
++    await wrapper.find(".to-page-2").trigger("click");
++    await flushPromises();
++    expect(wrapper.find(".page").text()).toBe("2");
++
++    await wrapper.find(".change-filter").trigger("click");
++    await flushPromises();
++    expect(wrapper.find(".page").text()).toBe("1");
++  } finally {
++    wrapper.unmount();
++    client.clear();
++  }
++});
+diff --git a/ui/console-src/composables/use-batch-action.ts b/ui/console-src/composables/use-batch-action.ts
+new file mode 100644
+index 000000000..d8dc8ee58
+--- /dev/null
++++ b/ui/console-src/composables/use-batch-action.ts
+@@ -0,0 +1,48 @@
++import { Toast } from "@halo-dev/components";
++import { chunk } from "es-toolkit";
++
++export interface BatchActionOptions<T> {
++  /** Items to run the action against (typically selected resource names). */
++  items: T[];
++  /** Action to run for a single item. */
++  action: (item: T) => Promise<unknown>;
++  /** Number of actions to run concurrently per chunk. Defaults to 5. */
++  concurrency?: number;
++  /** Message shown via {@link Toast.success} once every action has completed. */
++  successMessage?: string;
++  /**
++   * Called after all actions have completed and before the success toast, e.g. to refetch the list and clear the
++   * current selection.
++   */
++  onSuccess?: () => void | Promise<void>;
++}
++
++/**
++ * Encapsulates the batch-operation plumbing repeated across list views: run an async action against a list of items
++ * in bounded-concurrency chunks, then optionally refetch, clear selection, and show a success toast.
++ *
++ * <p>The surrounding confirmation dialog (and its wording) stays in the caller, since it varies per operation.
++ */
++export function useBatchAction() {
++  async function runBatch<T>(options: BatchActionOptions<T>): Promise<void> {
++    const {
++      items,
++      action,
++      concurrency = 5,
++      successMessage,
++      onSuccess,
++    } = options;
++
++    for (const batch of chunk(items, concurrency)) {
++      await Promise.all(batch.map((item) => action(item)));
++    }
++
++    await onSuccess?.();
++
++    if (successMessage) {
++      Toast.success(successMessage);
++    }
++  }
++
++  return { runBatch };
++}
+diff --git a/ui/console-src/composables/use-list-query.ts b/ui/console-src/composables/use-list-query.ts
+new file mode 100644
+index 000000000..ab23d0b29
+--- /dev/null
++++ b/ui/console-src/composables/use-list-query.ts
+@@ -0,0 +1,87 @@
++import { useQuery } from "@tanstack/vue-query";
++import { useRouteQuery } from "@vueuse/router";
++import { computed, watch, type WatchSource } from "vue";
++
++/**
++ * The pagination envelope shared by every generated `*List` response (e.g. `ListedPostList`). Declared structurally
++ * so any of those response types is assignable to it.
++ */
++export interface PagedList<T> {
++  items: T[];
++  total: number;
++  page: number;
++  size: number;
++  hasNext: boolean;
++  hasPrevious: boolean;
++  totalPages: number;
++  first: boolean;
++  last: boolean;
++}
++
++export interface UseListQueryOptions<T> {
++  /**
++   * Reactive query-key parts, typically the filter refs. `page` and `size` are appended automatically, so they must
++   * not be included here.
++   */
++  queryKey: unknown[];
++  /** Fetches a single page of results. Receives the current `page` and `size`. */
++  fetchFn: (params: { page: number; size: number }) => Promise<PagedList<T>>;
++  /** Filter sources that reset `page` back to 1 whenever any of them changes. */
++  filters?: WatchSource[];
++  /** Default page size, bound to the `size` route query. Defaults to 20. */
++  defaultSize?: number;
++  /**
++   * Polling interval, mirroring vue-query's `refetchInterval` but receiving the current items for convenience.
++   * Return `false` to stop polling.
++   */
++  refetchInterval?: (items: T[] | undefined) => number | false | undefined;
++}
++
++/**
++ * Encapsulates the list/pagination plumbing repeated across console list views:
++ *
++ * <ul>
++ *   <li>the `page`/`size` route-query refs and the "reset to page 1 when a filter changes" watch;</li>
++ *   <li>a vue-query query whose `page`/`size` are part of the key;</li>
++ *   <li>`total`/`hasNext`/`hasPrevious`/`totalPages` derived reactively from the response, instead of being written
++ *       as a side effect inside `queryFn`.</li>
++ * </ul>
++ *
++ * The returned object spreads the underlying vue-query result (`data`, `isLoading`, `isFetching`, `refetch`, ...) and
++ * adds `page`, `size`, `items`, and the pagination computeds.
++ */
++export function useListQuery<T>(options: UseListQueryOptions<T>) {
++  const page = useRouteQuery<number>("page", 1, { transform: Number });
++  const size = useRouteQuery<number>("size", options.defaultSize ?? 20, {
++    transform: Number,
++  });
++
++  if (options.filters && options.filters.length > 0) {
++    watch(options.filters, () => {
++      page.value = 1;
++    });
++  }
++
++  const query = useQuery<PagedList<T>>({
++    queryKey: [...options.queryKey, page, size],
++    queryFn: () => options.fetchFn({ page: page.value, size: size.value }),
++    refetchInterval: (data) => options.refetchInterval?.(data?.items) ?? false,
++  });
++
++  const items = computed<T[]>(() => query.data.value?.items ?? []);
++  const total = computed(() => query.data.value?.total ?? 0);
++  const hasNext = computed(() => query.data.value?.hasNext ?? false);
++  const hasPrevious = computed(() => query.data.value?.hasPrevious ?? false);
++  const totalPages = computed(() => query.data.value?.totalPages ?? 0);
++
++  return {
++    ...query,
++    page,
++    size,
++    items,
++    total,
++    hasNext,
++    hasPrevious,
++    totalPages,
++  };
++}
+diff --git a/ui/console-src/modules/contents/posts/PostList.vue b/ui/console-src/modules/contents/posts/PostList.vue
+index 1df4cedf7..2f897bd9d 100644
+--- a/ui/console-src/modules/contents/posts/PostList.vue
++++ b/ui/console-src/modules/contents/posts/PostList.vue
+@@ -8,7 +8,6 @@ import {
+   IconArrowRight,
+   IconBookRead,
+   IconRefreshLine,
+-  Toast,
+   VButton,
+   VCard,
+   VEmpty,
+@@ -18,12 +17,12 @@ import {
+   VPagination,
+   VSpace,
+ } from "@halo-dev/components";
+-import { useQuery } from "@tanstack/vue-query";
+ import { useRouteQuery } from "@vueuse/router";
+-import { chunk } from "es-toolkit";
+ import type { Ref } from "vue";
+ import { computed, provide, ref, watch } from "vue";
+ import { useI18n } from "vue-i18n";
++import { useBatchAction } from "@console/composables/use-batch-action";
++import { useListQuery } from "@console/composables/use-list-query";
+ import CategoryFilterDropdown from "@/components/filter/CategoryFilterDropdown.vue";
+ import TagFilterDropdown from "@/components/filter/TagFilterDropdown.vue";
+ import UserFilterDropdown from "@/components/filter/UserFilterDropdown.vue";
+@@ -33,6 +32,7 @@ import PostListItem from "./components/PostListItem.vue";
+ import PostSettingModal from "./components/PostSettingModal.vue";
+ 
+ const { t } = useI18n();
++const { runBatch } = useBatchAction();
+ 
+ const settingModal = ref(false);
+ const selectedPost = ref<Post>();
+@@ -42,12 +42,6 @@ const selectedPostNames = ref<string[]>([]);
+ provide<Ref<string[]>>("selectedPostNames", selectedPostNames);
+ 
+ // Filters
+-const page = useRouteQuery<number>("page", 1, {
+-  transform: Number,
+-});
+-const size = useRouteQuery<number>("size", 20, {
+-  transform: Number,
+-});
+ const selectedVisible = useRouteQuery<
+   "PUBLIC" | "INTERNAL" | "PRIVATE" | undefined
+ >("visible");
+@@ -57,24 +51,6 @@ const selectedCategory = useRouteQuery<string | undefined>("category");
+ const selectedTag = useRouteQuery<string | undefined>("tag");
+ const selectedContributor = useRouteQuery<string | undefined>("contributor");
+ const keyword = useRouteQuery<string>("keyword", "");
+-const total = ref(0);
+-const hasPrevious = ref(false);
+-const hasNext = ref(false);
+-
+-watch(
+-  () => [
+-    selectedVisible.value,
+-    selectedPublishStatus.value,
+-    selectedSort.value,
+-    selectedCategory.value,
+-    selectedTag.value,
+-    selectedContributor.value,
+-    keyword.value,
+-  ],
+-  () => {
+-    page.value = 1;
+-  }
+-);
+ 
+ function handleClearFilters() {
+   selectedVisible.value = undefined;
+@@ -97,15 +73,18 @@ const hasFilters = computed(() => {
+ });
+ 
+ const {
+-  data: posts,
++  items: posts,
+   isLoading,
+   isFetching,
+   refetch,
+-} = useQuery<ListedPost[]>({
++  page,
++  size,
++  total,
++  hasNext,
++  hasPrevious,
++} = useListQuery<ListedPost>({
+   queryKey: [
+     "posts",
+-    page,
+-    size,
+     selectedCategory,
+     selectedTag,
+     selectedContributor,
+@@ -114,7 +93,16 @@ const {
+     selectedSort,
+     keyword,
+   ],
+-  queryFn: async () => {
++  filters: [
++    selectedVisible,
++    selectedPublishStatus,
++    selectedSort,
++    selectedCategory,
++    selectedTag,
++    selectedContributor,
++    keyword,
++  ],
++  fetchFn: async ({ page, size }) => {
+     const labelSelector: string[] = ["content.halo.run/deleted=false"];
+     const fieldSelector: string[] = [];
+ 
+@@ -141,26 +129,22 @@ const {
+     const { data } = await consoleApiClient.content.post.listPosts({
+       labelSelector,
+       fieldSelector,
+-      page: page.value,
+-      size: size.value,
++      page,
++      size,
+       sort: [selectedSort.value].filter(Boolean) as string[],
+       keyword: keyword.value,
+     });
+ 
+-    total.value = data.total;
+-    hasNext.value = data.hasNext;
+-    hasPrevious.value = data.hasPrevious;
+-
+-    return data.items;
++    return data;
+   },
+-  refetchInterval: (data) => {
+-    const hasDeletingPost = data?.some((post) => post.post.spec.deleted);
++  refetchInterval: (posts) => {
++    const hasDeletingPost = posts?.some((post) => post.post.spec.deleted);
+ 
+     if (hasDeletingPost) {
+       return 1000;
+     }
+ 
+-    const hasPublishingPost = data?.some((post) => {
++    const hasPublishingPost = posts?.some((post) => {
+       const { spec, metadata } = post.post;
+       return (
+         metadata.labels?.[postLabels.PUBLISHED] !== spec.publish + "" &&
+@@ -172,7 +156,7 @@ const {
+       return 1000;
+     }
+ 
+-    const hasCancelingPublishPost = data?.some((post) => {
++    const hasCancelingPublishPost = posts?.some((post) => {
+       const { spec, metadata } = post.post;
+       return (
+         !spec.publish &&
+@@ -260,6 +244,11 @@ const handleCheckAllChange = (e: Event) => {
+   }
+ };
+ 
++async function clearSelectionAndRefetch() {
++  await refetch();
++  selectedPostNames.value = [];
++}
++
+ const handleDeleteInBatch = async () => {
+   Dialog.warning({
+     title: t("core.post.operations.delete_in_batch.title"),
+@@ -267,24 +256,13 @@ const handleDeleteInBatch = async () => {
+     confirmType: "danger",
+     confirmText: t("core.common.buttons.confirm"),
+     cancelText: t("core.common.buttons.cancel"),
+-    onConfirm: async () => {
+-      const chunks = chunk(selectedPostNames.value, 5);
+-
+-      for (const chunk of chunks) {
+-        await Promise.all(
+-          chunk.map((name) => {
+-            return consoleApiClient.content.post.recyclePost({
+-              name,
+-            });
+-          })
+-        );
+-      }
+-
+-      await refetch();
+-      selectedPostNames.value = [];
+-
+-      Toast.success(t("core.common.toast.delete_success"));
+-    },
++    onConfirm: () =>
++      runBatch({
++        items: selectedPostNames.value,
++        action: (name) => consoleApiClient.content.post.recyclePost({ name }),
++        onSuccess: clearSelectionAndRefetch,
++        successMessage: t("core.common.toast.delete_success"),
++      }),
+   });
+ };
+ 
+@@ -294,22 +272,13 @@ const handlePublishInBatch = async () => {
+     description: t("core.post.operations.publish_in_batch.description"),
+     confirmText: t("core.common.buttons.confirm"),
+     cancelText: t("core.common.buttons.cancel"),
+-    onConfirm: async () => {
+-      const chunks = chunk(selectedPostNames.value, 5);
+-
+-      for (const chunk of chunks) {
+-        await Promise.all(
+-          chunk.map((name) => {
+-            return consoleApiClient.content.post.publishPost({ name });
+-          })
+-        );
+-      }
+-
+-      await refetch();
+-      selectedPostNames.value = [];
+-
+-      Toast.success(t("core.common.toast.publish_success"));
+-    },
++    onConfirm: () =>
++      runBatch({
++        items: selectedPostNames.value,
++        action: (name) => consoleApiClient.content.post.publishPost({ name }),
++        onSuccess: clearSelectionAndRefetch,
++        successMessage: t("core.common.toast.publish_success"),
++      }),
+   });
+ };
+ 
+@@ -319,22 +288,13 @@ const handleCancelPublishInBatch = async () => {
+     description: t("core.post.operations.cancel_publish_in_batch.description"),
+     confirmText: t("core.common.buttons.confirm"),
+     cancelText: t("core.common.buttons.cancel"),
+-    onConfirm: async () => {
+-      const chunks = chunk(selectedPostNames.value, 5);
+-
+-      for (const chunk of chunks) {
+-        await Promise.all(
+-          chunk.map((name) => {
+-            return consoleApiClient.content.post.unpublishPost({ name });
+-          })
+-        );
+-      }
+-
+-      await refetch();
+-      selectedPostNames.value = [];
+-
+-      Toast.success(t("core.common.toast.cancel_publish_success"));
+-    },
++    onConfirm: () =>
++      runBatch({
++        items: selectedPostNames.value,
++        action: (name) => consoleApiClient.content.post.unpublishPost({ name }),
++        onSuccess: clearSelectionAndRefetch,
++        successMessage: t("core.common.toast.cancel_publish_success"),
++      }),
+   });
+ };
+ 

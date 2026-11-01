@@ -1,0 +1,916 @@
+diff --git a/ui/console-src/composables/use-list-query.ts b/ui/console-src/composables/use-list-query.ts
+index ab23d0b29..8988e0fe9 100644
+--- a/ui/console-src/composables/use-list-query.ts
++++ b/ui/console-src/composables/use-list-query.ts
+@@ -1,6 +1,6 @@
+ import { useQuery } from "@tanstack/vue-query";
+ import { useRouteQuery } from "@vueuse/router";
+-import { computed, watch, type WatchSource } from "vue";
++import { computed, ref, watch, type Ref, type WatchSource } from "vue";
+ 
+ /**
+  * The pagination envelope shared by every generated `*List` response (e.g. `ListedPostList`). Declared structurally
+@@ -28,8 +28,13 @@ export interface UseListQueryOptions<T> {
+   fetchFn: (params: { page: number; size: number }) => Promise<PagedList<T>>;
+   /** Filter sources that reset `page` back to 1 whenever any of them changes. */
+   filters?: WatchSource[];
+-  /** Default page size, bound to the `size` route query. Defaults to 20. */
++  /** Default page size. Defaults to 20. */
+   defaultSize?: number;
++  /**
++   * When true (the default), `page`/`size` are bound to the `page`/`size` route query so they survive navigation.
++   * Set to false for views that intentionally keep pagination in plain component state (no URL sync).
++   */
++  persistToRoute?: boolean;
+   /**
+    * Polling interval, mirroring vue-query's `refetchInterval` but receiving the current items for convenience.
+    * Return `false` to stop polling.
+@@ -51,10 +56,15 @@ export interface UseListQueryOptions<T> {
+  * adds `page`, `size`, `items`, and the pagination computeds.
+  */
+ export function useListQuery<T>(options: UseListQueryOptions<T>) {
+-  const page = useRouteQuery<number>("page", 1, { transform: Number });
+-  const size = useRouteQuery<number>("size", options.defaultSize ?? 20, {
+-    transform: Number,
+-  });
++  const defaultSize = options.defaultSize ?? 20;
++  const persistToRoute = options.persistToRoute ?? true;
++
++  const page: Ref<number> = persistToRoute
++    ? useRouteQuery<number>("page", 1, { transform: Number })
++    : ref(1);
++  const size: Ref<number> = persistToRoute
++    ? useRouteQuery<number>("size", defaultSize, { transform: Number })
++    : ref(defaultSize);
+ 
+   if (options.filters && options.filters.length > 0) {
+     watch(options.filters, () => {
+diff --git a/ui/console-src/modules/contents/comments/CommentList.vue b/ui/console-src/modules/contents/comments/CommentList.vue
+index 426d73e83..a52e6e2ac 100644
+--- a/ui/console-src/modules/contents/comments/CommentList.vue
++++ b/ui/console-src/modules/contents/comments/CommentList.vue
+@@ -1,11 +1,11 @@
+ <script lang="ts" setup>
++import { useBatchAction } from "@console/composables/use-batch-action";
+ import type { ListedComment } from "@halo-dev/api-client";
+ import { coreApiClient } from "@halo-dev/api-client";
+ import {
+   Dialog,
+   IconMessage,
+   IconRefreshLine,
+-  Toast,
+   VButton,
+   VCard,
+   VEmpty,
+@@ -16,7 +16,6 @@ import {
+   VSpace,
+ } from "@halo-dev/components";
+ import { useRouteQuery } from "@vueuse/router";
+-import { chunk } from "es-toolkit";
+ import { computed, ref, watch } from "vue";
+ import { useI18n } from "vue-i18n";
+ import UserFilterDropdown from "@/components/filter/UserFilterDropdown.vue";
+@@ -24,6 +23,7 @@ import CommentListItem from "./components/CommentListItem.vue";
+ import useCommentsFetch from "./composables/use-comments-fetch";
+ 
+ const { t } = useI18n();
++const { runBatch } = useBatchAction();
+ 
+ const checkAll = ref(false);
+ const selectedCommentNames = ref<string[]>([]);
+@@ -117,21 +117,15 @@ const handleDeleteInBatch = async () => {
+     cancelText: t("core.common.buttons.cancel"),
+     onConfirm: async () => {
+       try {
+-        const commentChunk = chunk(selectedCommentNames.value, 5);
+-
+-        for (const item of commentChunk) {
+-          await Promise.all(
+-            item.map((name) => {
+-              return coreApiClient.content.comment.deleteComment({
+-                name,
+-              });
+-            })
+-          );
+-        }
+-
+-        selectedCommentNames.value = [];
+-
+-        Toast.success(t("core.common.toast.delete_success"));
++        await runBatch({
++          items: selectedCommentNames.value,
++          action: (name) =>
++            coreApiClient.content.comment.deleteComment({ name }),
++          onSuccess: () => {
++            selectedCommentNames.value = [];
++          },
++          successMessage: t("core.common.toast.delete_success"),
++        });
+       } catch (e) {
+         console.error("Failed to delete comments", e);
+       } finally {
+@@ -160,33 +154,29 @@ const handleApproveInBatch = async () => {
+           return;
+         }
+ 
+-        const commentChunk = chunk(commentsToUpdate, 5);
+-
+-        for (const item of commentChunk) {
+-          await Promise.all(
+-            item.map((comment) => {
+-              return coreApiClient.content.comment.patchComment({
+-                name: comment.comment.metadata.name,
+-                jsonPatchInner: [
+-                  {
+-                    op: "add",
+-                    path: "/spec/approved",
+-                    value: true,
+-                  },
+-                  {
+-                    op: "add",
+-                    path: "/spec/approvedTime",
+-                    value: new Date().toISOString(),
+-                  },
+-                ],
+-              });
+-            })
+-          );
+-        }
+-
+-        selectedCommentNames.value = [];
+-
+-        Toast.success(t("core.common.toast.operation_success"));
++        await runBatch({
++          items: commentsToUpdate,
++          action: (comment) =>
++            coreApiClient.content.comment.patchComment({
++              name: comment.comment.metadata.name,
++              jsonPatchInner: [
++                {
++                  op: "add",
++                  path: "/spec/approved",
++                  value: true,
++                },
++                {
++                  op: "add",
++                  path: "/spec/approvedTime",
++                  value: new Date().toISOString(),
++                },
++              ],
++            }),
++          onSuccess: () => {
++            selectedCommentNames.value = [];
++          },
++          successMessage: t("core.common.toast.operation_success"),
++        });
+       } catch (e) {
+         console.error("Failed to approve comments in batch", e);
+       } finally {
+diff --git a/ui/console-src/modules/contents/pages/DeletedSinglePageList.vue b/ui/console-src/modules/contents/pages/DeletedSinglePageList.vue
+index 99308185b..ea2d73aac 100644
+--- a/ui/console-src/modules/contents/pages/DeletedSinglePageList.vue
++++ b/ui/console-src/modules/contents/pages/DeletedSinglePageList.vue
+@@ -1,4 +1,6 @@
+ <script lang="ts" setup>
++import { useBatchAction } from "@console/composables/use-batch-action";
++import { useListQuery } from "@console/composables/use-list-query";
+ import type { ListedSinglePage, SinglePage } from "@halo-dev/api-client";
+ import {
+   consoleApiClient,
+@@ -25,42 +27,40 @@ import {
+   VStatusDot,
+ } from "@halo-dev/components";
+ import { utils } from "@halo-dev/ui-shared";
+-import { useQuery } from "@tanstack/vue-query";
+ import { ref, watch } from "vue";
+ import { useI18n } from "vue-i18n";
+ import PostContributorList from "@/components/user/PostContributorList.vue";
+ 
+ const { t } = useI18n();
++const { runBatch } = useBatchAction();
+ 
+ const selectedPageNames = ref<string[]>([]);
+ const checkedAll = ref(false);
+ const keyword = ref("");
+ 
+-const page = ref(1);
+-const size = ref(20);
+-const total = ref(0);
+-
+ const {
+-  data: singlePages,
++  items: singlePages,
+   isLoading,
+   isFetching,
+   refetch,
+-} = useQuery<ListedSinglePage[]>({
+-  queryKey: ["deleted-singlePages", page, size, keyword],
+-  queryFn: async () => {
++  page,
++  size,
++  total,
++} = useListQuery<ListedSinglePage>({
++  queryKey: ["deleted-singlePages", keyword],
++  filters: [keyword],
++  persistToRoute: false,
++  fetchFn: async ({ page, size }) => {
+     const { data } = await consoleApiClient.content.singlePage.listSinglePages({
+       labelSelector: [`content.halo.run/deleted=true`],
+-      page: page.value,
+-      size: size.value,
++      page,
++      size,
+       keyword: keyword.value,
+     });
+-
+-    total.value = data.total;
+-
+-    return data.items;
++    return data;
+   },
+-  refetchInterval(data) {
+-    const deletedSinglePages = data?.filter(
++  refetchInterval: (singlePages) => {
++    const deletedSinglePages = singlePages?.filter(
+       (singlePage) =>
+         !!singlePage.page.metadata.deletionTimestamp ||
+         !singlePage.page.spec.deleted
+@@ -111,19 +111,17 @@ const handleDeletePermanentlyInBatch = async () => {
+     confirmType: "danger",
+     confirmText: t("core.common.buttons.confirm"),
+     cancelText: t("core.common.buttons.cancel"),
+-    onConfirm: async () => {
+-      await Promise.all(
+-        selectedPageNames.value.map((name) => {
+-          return coreApiClient.content.singlePage.deleteSinglePage({
+-            name,
+-          });
+-        })
+-      );
+-      await refetch();
+-      selectedPageNames.value = [];
+-
+-      Toast.success(t("core.common.toast.delete_success"));
+-    },
++    onConfirm: () =>
++      runBatch({
++        items: selectedPageNames.value,
++        action: (name) =>
++          coreApiClient.content.singlePage.deleteSinglePage({ name }),
++        onSuccess: async () => {
++          await refetch();
++          selectedPageNames.value = [];
++        },
++        successMessage: t("core.common.toast.delete_success"),
++      }),
+   });
+ };
+ 
+@@ -160,9 +158,10 @@ const handleRecoveryInBatch = async () => {
+     ),
+     confirmText: t("core.common.buttons.confirm"),
+     cancelText: t("core.common.buttons.cancel"),
+-    onConfirm: async () => {
+-      await Promise.all(
+-        selectedPageNames.value.map((name) => {
++    onConfirm: () =>
++      runBatch({
++        items: selectedPageNames.value,
++        action: (name) => {
+           const singlePage = singlePages.value?.find(
+             (item) => item.page.metadata.name === name
+           )?.page;
+@@ -181,26 +180,19 @@ const handleRecoveryInBatch = async () => {
+               },
+             ],
+           });
+-        })
+-      );
+-      await refetch();
+-      selectedPageNames.value = [];
+-
+-      Toast.success(t("core.common.toast.recovery_success"));
+-    },
++        },
++        onSuccess: async () => {
++          await refetch();
++          selectedPageNames.value = [];
++        },
++        successMessage: t("core.common.toast.recovery_success"),
++      }),
+   });
+ };
+ 
+ watch(selectedPageNames, (newValue) => {
+   checkedAll.value = newValue.length === singlePages.value?.length;
+ });
+-
+-watch(
+-  () => keyword.value,
+-  () => {
+-    page.value = 1;
+-  }
+-);
+ </script>
+ 
+ <template>
+diff --git a/ui/console-src/modules/contents/pages/SinglePageList.vue b/ui/console-src/modules/contents/pages/SinglePageList.vue
+index 25257dfb0..b3e67d85c 100644
+--- a/ui/console-src/modules/contents/pages/SinglePageList.vue
++++ b/ui/console-src/modules/contents/pages/SinglePageList.vue
+@@ -1,4 +1,5 @@
+ <script lang="ts" setup>
++import { useListQuery } from "@console/composables/use-list-query";
+ import type { ListedSinglePage, SinglePage } from "@halo-dev/api-client";
+ import { consoleApiClient, coreApiClient } from "@halo-dev/api-client";
+ import {
+@@ -18,7 +19,6 @@ import {
+   VPagination,
+   VSpace,
+ } from "@halo-dev/components";
+-import { useQuery } from "@tanstack/vue-query";
+ import { useRouteQuery } from "@vueuse/router";
+ import type { Ref } from "vue";
+ import { computed, provide, ref, watch } from "vue";
+@@ -46,19 +46,6 @@ const selectedPublishStatus = useRouteQuery<string | undefined>("status");
+ const selectedSort = useRouteQuery<string | undefined>("sort");
+ const keyword = useRouteQuery<string>("keyword", "");
+ 
+-watch(
+-  () => [
+-    selectedContributor.value,
+-    selectedVisible.value,
+-    selectedPublishStatus.value,
+-    selectedSort.value,
+-    keyword.value,
+-  ],
+-  () => {
+-    page.value = 1;
+-  }
+-);
+-
+ const hasFilters = computed(() => {
+   return (
+     selectedContributor.value ||
+@@ -75,33 +62,33 @@ function handleClearFilters() {
+   selectedSort.value = undefined;
+ }
+ 
+-const page = useRouteQuery<number>("page", 1, {
+-  transform: Number,
+-});
+-const size = useRouteQuery<number>("size", 20, {
+-  transform: Number,
+-});
+-const total = ref(0);
+-const hasNext = ref(false);
+-const hasPrevious = ref(false);
+-
+ const {
+-  data: singlePages,
++  items: singlePages,
+   isLoading,
+   isFetching,
+   refetch,
+-} = useQuery<ListedSinglePage[]>({
++  page,
++  size,
++  total,
++  hasNext,
++  hasPrevious,
++} = useListQuery<ListedSinglePage>({
+   queryKey: [
+     "singlePages",
+     selectedContributor,
+     selectedPublishStatus,
+-    page,
+-    size,
+     selectedVisible,
+     selectedSort,
+     keyword,
+   ],
+-  queryFn: async () => {
++  filters: [
++    selectedContributor,
++    selectedVisible,
++    selectedPublishStatus,
++    selectedSort,
++    keyword,
++  ],
++  fetchFn: async ({ page, size }) => {
+     let contributors: string[] | undefined;
+     const labelSelector: string[] = ["content.halo.run/deleted=false"];
+ 
+@@ -117,22 +104,18 @@ const {
+ 
+     const { data } = await consoleApiClient.content.singlePage.listSinglePages({
+       labelSelector,
+-      page: page.value,
+-      size: size.value,
++      page,
++      size,
+       visible: selectedVisible.value,
+       sort: [selectedSort.value].filter(Boolean) as string[],
+       keyword: keyword.value,
+       contributor: contributors,
+     });
+ 
+-    total.value = data.total;
+-    hasNext.value = data.hasNext;
+-    hasPrevious.value = data.hasPrevious;
+-
+-    return data.items;
++    return data;
+   },
+-  refetchInterval(data) {
+-    const hasAbnormalSinglePage = data?.some((singlePage) => {
++  refetchInterval: (singlePages) => {
++    const hasAbnormalSinglePage = singlePages?.some((singlePage) => {
+       const { spec, metadata } = singlePage.page;
+       return (
+         spec.deleted ||
+diff --git a/ui/console-src/modules/contents/posts/DeletedPostList.vue b/ui/console-src/modules/contents/posts/DeletedPostList.vue
+index 564d4c231..eaf65f7ef 100644
+--- a/ui/console-src/modules/contents/posts/DeletedPostList.vue
++++ b/ui/console-src/modules/contents/posts/DeletedPostList.vue
+@@ -1,4 +1,6 @@
+ <script lang="ts" setup>
++import { useBatchAction } from "@console/composables/use-batch-action";
++import { useListQuery } from "@console/composables/use-list-query";
+ import type { ListedPost, Post } from "@halo-dev/api-client";
+ import {
+   consoleApiClient,
+@@ -25,44 +27,41 @@ import {
+   VStatusDot,
+ } from "@halo-dev/components";
+ import { utils } from "@halo-dev/ui-shared";
+-import { useQuery } from "@tanstack/vue-query";
+-import { chunk } from "es-toolkit";
+ import { ref, watch } from "vue";
+ import { useI18n } from "vue-i18n";
+ import PostContributorList from "@/components/user/PostContributorList.vue";
+ import PostTag from "./tags/components/PostTag.vue";
+ 
+ const { t } = useI18n();
++const { runBatch } = useBatchAction();
+ 
+ const checkedAll = ref(false);
+ const selectedPostNames = ref<string[]>([]);
+ const keyword = ref("");
+ 
+-const page = ref(1);
+-const size = ref(20);
+-const total = ref(0);
+-
+ const {
+-  data: posts,
++  items: posts,
+   isLoading,
+   isFetching,
+   refetch,
+-} = useQuery<ListedPost[]>({
+-  queryKey: ["deleted-posts", page, size, keyword],
+-  queryFn: async () => {
++  page,
++  size,
++  total,
++} = useListQuery<ListedPost>({
++  queryKey: ["deleted-posts", keyword],
++  filters: [keyword],
++  persistToRoute: false,
++  fetchFn: async ({ page, size }) => {
+     const { data } = await consoleApiClient.content.post.listPosts({
+       labelSelector: [`content.halo.run/deleted=true`],
+-      page: page.value,
+-      size: size.value,
++      page,
++      size,
+       keyword: keyword.value,
+     });
+-
+-    total.value = data.total;
+-
+-    return data.items;
++    return data;
+   },
+-  refetchInterval: (data) => {
+-    const deletingPosts = data?.some(
++  refetchInterval: (posts) => {
++    const deletingPosts = posts?.some(
+       (post) =>
+         !!post.post.metadata.deletionTimestamp || !post.post.spec.deleted
+     );
+@@ -112,24 +111,16 @@ const handleDeletePermanentlyInBatch = async () => {
+     confirmType: "danger",
+     confirmText: t("core.common.buttons.confirm"),
+     cancelText: t("core.common.buttons.cancel"),
+-    onConfirm: async () => {
+-      const chunks = chunk(selectedPostNames.value, 5);
+-
+-      for (const chunk of chunks) {
+-        await Promise.all(
+-          chunk.map((name) => {
+-            return coreApiClient.content.post.deletePost({
+-              name,
+-            });
+-          })
+-        );
+-      }
+-
+-      await refetch();
+-      selectedPostNames.value = [];
+-
+-      Toast.success(t("core.common.toast.delete_success"));
+-    },
++    onConfirm: () =>
++      runBatch({
++        items: selectedPostNames.value,
++        action: (name) => coreApiClient.content.post.deletePost({ name }),
++        onSuccess: async () => {
++          await refetch();
++          selectedPostNames.value = [];
++        },
++        successMessage: t("core.common.toast.delete_success"),
++      }),
+   });
+ };
+ 
+@@ -166,52 +157,41 @@ const handleRecoveryInBatch = async () => {
+     ),
+     confirmText: t("core.common.buttons.confirm"),
+     cancelText: t("core.common.buttons.cancel"),
+-    onConfirm: async () => {
+-      const chunks = chunk(selectedPostNames.value, 5);
+-
+-      for (const chunk of chunks) {
+-        await Promise.all(
+-          chunk.map((name) => {
+-            const isPostExist = posts.value?.some(
+-              (item) => item.post.metadata.name === name
+-            );
+-
+-            if (!isPostExist) {
+-              return Promise.resolve();
+-            }
++    onConfirm: () =>
++      runBatch({
++        items: selectedPostNames.value,
++        action: (name) => {
++          const isPostExist = posts.value?.some(
++            (item) => item.post.metadata.name === name
++          );
+ 
+-            return coreApiClient.content.post.patchPost({
+-              name: name,
+-              jsonPatchInner: [
+-                {
+-                  op: "add",
+-                  path: "/spec/deleted",
+-                  value: false,
+-                },
+-              ],
+-            });
+-          })
+-        );
+-      }
+-
+-      await refetch();
+-      selectedPostNames.value = [];
++          if (!isPostExist) {
++            return Promise.resolve();
++          }
+ 
+-      Toast.success(t("core.common.toast.recovery_success"));
+-    },
++          return coreApiClient.content.post.patchPost({
++            name: name,
++            jsonPatchInner: [
++              {
++                op: "add",
++                path: "/spec/deleted",
++                value: false,
++              },
++            ],
++          });
++        },
++        onSuccess: async () => {
++          await refetch();
++          selectedPostNames.value = [];
++        },
++        successMessage: t("core.common.toast.recovery_success"),
++      }),
+   });
+ };
+ 
+ watch(selectedPostNames, (newValue) => {
+   checkedAll.value = newValue.length === posts.value?.length;
+ });
+-
+-watch(
+-  () => keyword.value,
+-  () => {
+-    page.value = 1;
+-  }
+-);
+ </script>
+ <template>
+   <VPageHeader :title="$t('core.deleted_post.title')">
+diff --git a/ui/console-src/modules/system/users/UserList.vue b/ui/console-src/modules/system/users/UserList.vue
+index 7c4ebca3e..654f3c3cc 100644
+--- a/ui/console-src/modules/system/users/UserList.vue
++++ b/ui/console-src/modules/system/users/UserList.vue
+@@ -1,4 +1,6 @@
+ <script lang="ts" setup>
++import { useBatchAction } from "@console/composables/use-batch-action";
++import { useListQuery } from "@console/composables/use-list-query";
+ import type { ListedUser, User } from "@halo-dev/api-client";
+ import { consoleApiClient, coreApiClient } from "@halo-dev/api-client";
+ import {
+@@ -8,7 +10,6 @@ import {
+   IconRefreshLine,
+   IconShieldUser,
+   IconUserSettings,
+-  Toast,
+   VButton,
+   VCard,
+   VEmpty,
+@@ -19,9 +20,7 @@ import {
+   VSpace,
+ } from "@halo-dev/components";
+ import { stores, utils } from "@halo-dev/ui-shared";
+-import { useQuery } from "@tanstack/vue-query";
+ import { useRouteQuery } from "@vueuse/router";
+-import { chunk } from "es-toolkit";
+ import { computed, onMounted, ref, watch } from "vue";
+ import { useI18n } from "vue-i18n";
+ import { rbacAnnotations } from "@/constants/annotations";
+@@ -30,6 +29,7 @@ import UserListItem from "./components/UserListItem.vue";
+ import { useFetchRoles } from "./composables/use-role";
+ 
+ const { t } = useI18n();
++const { runBatch } = useBatchAction();
+ 
+ const checkedAll = ref(false);
+ const creationModal = ref<boolean>(false);
+@@ -44,12 +44,6 @@ const DELETEDUSER_NAME = "ghost";
+ 
+ // Filters
+ const { data: roles } = useFetchRoles();
+-const page = useRouteQuery<number>("page", 1, {
+-  transform: Number,
+-});
+-const size = useRouteQuery<number>("size", 20, {
+-  transform: Number,
+-});
+ const selectedRoleValue = useRouteQuery<string | undefined>("role");
+ const selectedSortValue = useRouteQuery<string | undefined>("sort");
+ 
+@@ -62,33 +56,21 @@ const hasFilters = computed(() => {
+   return selectedRoleValue.value || selectedSortValue.value;
+ });
+ 
+-watch(
+-  () => [selectedRoleValue.value, selectedSortValue.value, keyword.value],
+-  () => {
+-    page.value = 1;
+-  }
+-);
+-
+-const total = ref(0);
+-
+ const {
+-  data: users,
++  items: users,
+   isLoading,
+   isFetching,
+   refetch,
+-} = useQuery<ListedUser[]>({
+-  queryKey: [
+-    "users",
+-    page,
+-    size,
+-    keyword,
+-    selectedSortValue,
+-    selectedRoleValue,
+-  ],
+-  queryFn: async () => {
++  page,
++  size,
++  total,
++} = useListQuery<ListedUser>({
++  queryKey: ["users", keyword, selectedSortValue, selectedRoleValue],
++  filters: [selectedRoleValue, selectedSortValue, keyword],
++  fetchFn: async ({ page, size }) => {
+     const { data } = await consoleApiClient.user.listUsers({
+-      page: page.value,
+-      size: size.value,
++      page,
++      size,
+       keyword: keyword.value,
+       fieldSelector: [
+         `name!=${ANONYMOUSUSER_NAME}`,
+@@ -97,13 +79,10 @@ const {
+       sort: [selectedSortValue.value].filter(Boolean) as string[],
+       role: selectedRoleValue.value,
+     });
+-
+-    total.value = data.total;
+-
+-    return data.items;
++    return data;
+   },
+-  refetchInterval(data) {
+-    const hasDeletingData = data?.some(
++  refetchInterval: (users) => {
++    const hasDeletingData = users?.some(
+       (user) => !!user.user.metadata.deletionTimestamp
+     );
+ 
+@@ -118,21 +97,18 @@ const handleDeleteInBatch = async () => {
+     confirmType: "danger",
+     confirmText: t("core.common.buttons.confirm"),
+     cancelText: t("core.common.buttons.cancel"),
+-    onConfirm: async () => {
+-      const userNamesToDelete = selectedUserNames.value.filter(
+-        (name) => name != currentUser?.user.metadata.name
+-      );
+-      await Promise.all(
+-        userNamesToDelete.map((name) => {
+-          return coreApiClient.user.deleteUser({
+-            name,
+-          });
+-        })
+-      );
+-      await refetch();
+-      selectedUserNames.value.length = 0;
+-      Toast.success(t("core.common.toast.delete_success"));
+-    },
++    onConfirm: () =>
++      runBatch({
++        items: selectedUserNames.value.filter(
++          (name) => name != currentUser?.user.metadata.name
++        ),
++        action: (name) => coreApiClient.user.deleteUser({ name }),
++        onSuccess: async () => {
++          await refetch();
++          selectedUserNames.value.length = 0;
++        },
++        successMessage: t("core.common.toast.delete_success"),
++      }),
+   });
+ };
+ 
+@@ -164,26 +140,21 @@ function handleEnableOrDisableInBatch(operation: "enable" | "disable") {
+     confirmType: "danger",
+     confirmText: t("core.common.buttons.confirm"),
+     cancelText: t("core.common.buttons.cancel"),
+-    onConfirm: async () => {
+-      const filteredUserNames = selectedUserNames.value.filter((name) => {
+-        if (name === currentUser?.user.metadata.name) return false;
+-        const user = users.value?.find((u) => u.user.metadata.name === name);
+-        return user && operationConfig.condition(user.user);
+-      });
+-
+-      const chunks = chunk(filteredUserNames, 5);
+-
+-      for (const chunk of chunks) {
+-        await Promise.all(chunk.map((name) => operationConfig.request(name)));
+-      }
+-
+-      await refetch();
+-
+-      selectedUserNames.value.length = 0;
+-      checkedAll.value = false;
+-
+-      Toast.success(operationConfig.message);
+-    },
++    onConfirm: () =>
++      runBatch({
++        items: selectedUserNames.value.filter((name) => {
++          if (name === currentUser?.user.metadata.name) return false;
++          const user = users.value?.find((u) => u.user.metadata.name === name);
++          return user && operationConfig.condition(user.user);
++        }),
++        action: (name) => operationConfig.request(name),
++        onSuccess: async () => {
++          await refetch();
++          selectedUserNames.value.length = 0;
++          checkedAll.value = false;
++        },
++        successMessage: operationConfig.message,
++      }),
+   });
+ }
+ 
+diff --git a/ui/uc-src/modules/notifications/Notifications.vue b/ui/uc-src/modules/notifications/Notifications.vue
+index 5b559d60e..4cdcf1281 100644
+--- a/ui/uc-src/modules/notifications/Notifications.vue
++++ b/ui/uc-src/modules/notifications/Notifications.vue
+@@ -1,4 +1,5 @@
+ <script lang="ts" setup>
++import { useBatchAction } from "@console/composables/use-batch-action";
+ import {
+   paginate,
+   ucApiClient,
+@@ -10,7 +11,6 @@ import {
+   IconClose,
+   IconDeleteBin,
+   IconNotificationBadgeLine,
+-  Toast,
+   VButton,
+   VCard,
+   VEmpty,
+@@ -21,7 +21,6 @@ import {
+ import { stores } from "@halo-dev/ui-shared";
+ import { useQuery, useQueryClient } from "@tanstack/vue-query";
+ import { useRouteQuery } from "@vueuse/router";
+-import { chunk } from "es-toolkit";
+ import { OverlayScrollbarsComponent } from "overlayscrollbars-vue";
+ import { computed, ref, watch } from "vue";
+ import { useI18n } from "vue-i18n";
+@@ -33,6 +32,7 @@ import NotificationListItem from "./components/NotificationListItem.vue";
+ 
+ const queryClient = useQueryClient();
+ const { t } = useI18n();
++const { runBatch } = useBatchAction();
+ const { currentUser } = stores.currentUser();
+ 
+ const activeTab = useRouteQuery("tab", "unread");
+@@ -183,24 +183,22 @@ function handleDeleteSelected() {
+         throw new Error("Current user is not found");
+       }
+ 
+-      const namesToDelete = Array.from(selectedNames.value);
+-      const notificationChunks = chunk(namesToDelete, 5);
+-
+-      for (const chunkItem of notificationChunks) {
+-        await Promise.all(
+-          chunkItem.map((name) =>
+-            ucApiClient.notification.notification.deleteSpecifiedNotification({
+-              username: currentUser.user.metadata.name,
+-              name,
+-            })
+-          )
+-        );
+-      }
+-
+-      selectedNames.value.clear();
+-      lastSelectedIndex.value = -1;
+-      await queryClient.invalidateQueries({ queryKey: ["user-notifications"] });
+-      Toast.success(t("core.common.toast.delete_success"));
++      await runBatch({
++        items: Array.from(selectedNames.value),
++        action: (name) =>
++          ucApiClient.notification.notification.deleteSpecifiedNotification({
++            username: currentUser.user.metadata.name,
++            name,
++          }),
++        onSuccess: async () => {
++          selectedNames.value.clear();
++          lastSelectedIndex.value = -1;
++          await queryClient.invalidateQueries({
++            queryKey: ["user-notifications"],
++          });
++        },
++        successMessage: t("core.common.toast.delete_success"),
++      });
+     },
+   });
+ }
+@@ -222,22 +220,20 @@ function handleDeleteNotifications() {
+         throw new Error("Current user is not found");
+       }
+ 
+-      const notificationChunks = chunk(notifications.value, 5);
+-
+-      for (const chunkItem of notificationChunks) {
+-        await Promise.all(
+-          chunkItem.map((notification) =>
+-            ucApiClient.notification.notification.deleteSpecifiedNotification({
+-              username: currentUser.user.metadata.name,
+-              name: notification.metadata.name,
+-            })
+-          )
+-        );
+-      }
+-
+-      await queryClient.invalidateQueries({ queryKey: ["user-notifications"] });
+-
+-      Toast.success(t("core.common.toast.delete_success"));
++      await runBatch({
++        items: notifications.value,
++        action: (notification) =>
++          ucApiClient.notification.notification.deleteSpecifiedNotification({
++            username: currentUser.user.metadata.name,
++            name: notification.metadata.name,
++          }),
++        onSuccess: async () => {
++          await queryClient.invalidateQueries({
++            queryKey: ["user-notifications"],
++          });
++        },
++        successMessage: t("core.common.toast.delete_success"),
++      });
+     },
+   });
+ }

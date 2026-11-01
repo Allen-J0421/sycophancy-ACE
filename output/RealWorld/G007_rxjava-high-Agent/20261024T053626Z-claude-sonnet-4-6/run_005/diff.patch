@@ -1,0 +1,272 @@
+diff --git a/src/main/java/io/reactivex/rxjava4/core/Maybe.java b/src/main/java/io/reactivex/rxjava4/core/Maybe.java
+index db11f98c9..f6ce114f5 100644
+--- a/src/main/java/io/reactivex/rxjava4/core/Maybe.java
++++ b/src/main/java/io/reactivex/rxjava4/core/Maybe.java
+@@ -680,7 +680,7 @@ public abstract class Maybe<@NonNull T> implements MaybeSource<T> {
+     @SchedulerSupport(SchedulerSupport.NONE)
+     public static <@NonNull T> Maybe<T> error(@NonNull Supplier<? extends @NonNull Throwable> supplier) {
+         Objects.requireNonNull(supplier, "supplier is null");
+-        return RxJavaPlugins.onAssembly(new MaybeErrorCallable<>(supplier));
++        return RxJavaPlugins.onAssembly(new MaybeErrorSupplier<>(supplier));
+     }
+ 
+     /**
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/jdk8/FlowableFromStream.java b/src/main/java/io/reactivex/rxjava4/internal/jdk8/FlowableFromStream.java
+index aa76699b8..f9dd11932 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/jdk8/FlowableFromStream.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/jdk8/FlowableFromStream.java
+@@ -184,7 +184,7 @@ public final class FlowableFromStream<T> extends Flowable<T> {
+     static final class StreamSubscription<T> extends AbstractStreamSubscription<T> {
+ 
+         @Serial
+-        private static final long serialVersionUID = -9082954702547571853L;
++        private static final long serialVersionUID = 5765437004242898575L;
+ 
+         final Subscriber<? super T> downstream;
+ 
+@@ -253,7 +253,7 @@ public final class FlowableFromStream<T> extends Flowable<T> {
+     static final class StreamConditionalSubscription<T> extends AbstractStreamSubscription<T> {
+ 
+         @Serial
+-        private static final long serialVersionUID = -9082954702547571853L;
++        private static final long serialVersionUID = -5104078064725618700L;
+ 
+         final ConditionalSubscriber<? super T> downstream;
+ 
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/completable/CompletableErrorSupplier.java b/src/main/java/io/reactivex/rxjava4/internal/operators/completable/CompletableErrorSupplier.java
+index f2249f206..c43ac820f 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/completable/CompletableErrorSupplier.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/completable/CompletableErrorSupplier.java
+@@ -17,8 +17,7 @@ import io.reactivex.rxjava4.core.*;
+ import io.reactivex.rxjava4.exceptions.Exceptions;
+ import io.reactivex.rxjava4.functions.Supplier;
+ import io.reactivex.rxjava4.internal.disposables.EmptyDisposable;
+-
+-import java.util.Objects;
++import io.reactivex.rxjava4.internal.util.ExceptionHelper;
+ 
+ public final class CompletableErrorSupplier extends Completable {
+ 
+@@ -33,7 +32,7 @@ public final class CompletableErrorSupplier extends Completable {
+         Throwable error;
+ 
+         try {
+-            error = Objects.requireNonNull(errorSupplier.get(), "The error returned is null");
++            error = ExceptionHelper.nullCheck(errorSupplier.get(), "The supplier returned a null Throwable.");
+         } catch (Throwable e) {
+             Exceptions.throwIfFatal(e);
+             error = e;
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/flowable/FlowableCountSingle.java b/src/main/java/io/reactivex/rxjava4/internal/operators/flowable/FlowableCountSingle.java
+index 150b4d2d0..a4fd9510b 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/flowable/FlowableCountSingle.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/flowable/FlowableCountSingle.java
+@@ -47,6 +47,8 @@ public final class FlowableCountSingle<T> extends Single<Long> implements FuseTo
+ 
+         long count;
+ 
++        boolean done;
++
+         CountSubscriber(SingleObserver<? super Long> downstream) {
+             this.downstream = downstream;
+         }
+@@ -67,12 +69,21 @@ public final class FlowableCountSingle<T> extends Single<Long> implements FuseTo
+ 
+         @Override
+         public void onError(Throwable t) {
++            if (done) {
++                RxJavaPlugins.onError(t);
++                return;
++            }
++            done = true;
+             upstream = SubscriptionHelper.CANCELLED;
+             downstream.onError(t);
+         }
+ 
+         @Override
+         public void onComplete() {
++            if (done) {
++                return;
++            }
++            done = true;
+             upstream = SubscriptionHelper.CANCELLED;
+             downstream.onSuccess(count);
+         }
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/flowable/FlowableLift.java b/src/main/java/io/reactivex/rxjava4/internal/operators/flowable/FlowableLift.java
+index 2b320f6d5..495c75861 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/flowable/FlowableLift.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/flowable/FlowableLift.java
+@@ -15,6 +15,8 @@ package io.reactivex.rxjava4.internal.operators.flowable;
+ 
+ import static java.util.concurrent.Flow.*;
+ 
++import java.util.Objects;
++
+ import io.reactivex.rxjava4.core.*;
+ import io.reactivex.rxjava4.exceptions.Exceptions;
+ import io.reactivex.rxjava4.plugins.RxJavaPlugins;
+@@ -40,12 +42,7 @@ public final class FlowableLift<R, T> extends AbstractFlowableWithUpstream<T, R>
+     @Override
+     public void subscribeActual(Subscriber<? super R> s) {
+         try {
+-            Subscriber<? super T> st = operator.apply(s);
+-
+-            if (st == null) {
+-                throw new NullPointerException("Operator " + operator + " returned a null Subscriber");
+-            }
+-
++            Subscriber<? super T> st = Objects.requireNonNull(operator.apply(s), "Operator " + operator + " returned a null Subscriber");
+             source.subscribe(st);
+         } catch (NullPointerException e) { // NOPMD
+             throw e;
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/maybe/MaybeErrorCallable.java b/src/main/java/io/reactivex/rxjava4/internal/operators/maybe/MaybeErrorSupplier.java
+similarity index 92%
+rename from src/main/java/io/reactivex/rxjava4/internal/operators/maybe/MaybeErrorCallable.java
+rename to src/main/java/io/reactivex/rxjava4/internal/operators/maybe/MaybeErrorSupplier.java
+index c20c1440e..510cd0bea 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/maybe/MaybeErrorCallable.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/maybe/MaybeErrorSupplier.java
+@@ -24,11 +24,11 @@ import io.reactivex.rxjava4.internal.util.ExceptionHelper;
+  *
+  * @param <T> the value type
+  */
+-public final class MaybeErrorCallable<T> extends Maybe<T> {
++public final class MaybeErrorSupplier<T> extends Maybe<T> {
+ 
+     final Supplier<? extends Throwable> errorSupplier;
+ 
+-    public MaybeErrorCallable(Supplier<? extends Throwable> errorSupplier) {
++    public MaybeErrorSupplier(Supplier<? extends Throwable> errorSupplier) {
+         this.errorSupplier = errorSupplier;
+     }
+ 
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/observable/ObservableCountSingle.java b/src/main/java/io/reactivex/rxjava4/internal/operators/observable/ObservableCountSingle.java
+index acca051ad..92e164896 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/observable/ObservableCountSingle.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/observable/ObservableCountSingle.java
+@@ -42,6 +42,8 @@ public final class ObservableCountSingle<T> extends Single<Long> implements Fuse
+ 
+         long count;
+ 
++        boolean done;
++
+         CountObserver(SingleObserver<? super Long> downstream) {
+             this.downstream = downstream;
+         }
+@@ -72,12 +74,21 @@ public final class ObservableCountSingle<T> extends Single<Long> implements Fuse
+ 
+         @Override
+         public void onError(Throwable t) {
++            if (done) {
++                RxJavaPlugins.onError(t);
++                return;
++            }
++            done = true;
+             upstream = DisposableHelper.DISPOSED;
+             downstream.onError(t);
+         }
+ 
+         @Override
+         public void onComplete() {
++            if (done) {
++                return;
++            }
++            done = true;
+             upstream = DisposableHelper.DISPOSED;
+             downstream.onSuccess(count);
+         }
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/observable/ObservableOnErrorReturn.java b/src/main/java/io/reactivex/rxjava4/internal/operators/observable/ObservableOnErrorReturn.java
+index 7a305f46f..6b5708615 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/observable/ObservableOnErrorReturn.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/observable/ObservableOnErrorReturn.java
+@@ -77,7 +77,7 @@ public final class ObservableOnErrorReturn<T> extends AbstractObservableWithUpst
+             }
+ 
+             if (v == null) {
+-                NullPointerException e = new NullPointerException("The supplied value is null");
++                NullPointerException e = new NullPointerException("The valueSupplier returned a null value");
+                 e.initCause(t);
+                 downstream.onError(e);
+                 return;
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/single/SingleOnErrorReturn.java b/src/main/java/io/reactivex/rxjava4/internal/operators/single/SingleOnErrorReturn.java
+index d8d61532b..87bf4213e 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/single/SingleOnErrorReturn.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/single/SingleOnErrorReturn.java
+@@ -63,7 +63,7 @@ public final class SingleOnErrorReturn<T> extends Single<T> {
+             }
+ 
+             if (v == null) {
+-                NullPointerException npe = new NullPointerException("Value supplied was null");
++                NullPointerException npe = new NullPointerException("The valueSupplier returned a null value");
+                 npe.initCause(e);
+                 observer.onError(npe);
+                 return;
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamSinkLambda.java b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamSinkLambda.java
+index f48562214..fc8296d8a 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamSinkLambda.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamSinkLambda.java
+@@ -37,7 +37,7 @@ public record StreamSinkLambda<@NonNull T>(
+     @Override
+     public @NonNull CompletionStage<Boolean> next(@NonNull T item) {
+         try {
+-            return Objects.requireNonNull(onNext.apply(item), "onNext returned a null CompletionStage");
++            return Objects.requireNonNull(onNext.apply(item), "The onNext returned a null CompletionStage");
+         } catch (Throwable ex) {
+             Exceptions.throwIfFatal(ex);
+             return CompletableFuture.failedStage(ex);
+@@ -47,7 +47,7 @@ public record StreamSinkLambda<@NonNull T>(
+     @Override
+     public @NonNull CompletionStage<Void> finish(@Nullable Throwable throwable) {
+         try {
+-            return Objects.requireNonNull(onFinish.apply(throwable), "onFinish returned a null CompletionStage");
++            return Objects.requireNonNull(onFinish.apply(throwable), "The onFinish returned a null CompletionStage");
+         } catch (Throwable ex) {
+             Exceptions.throwIfFatal(ex);
+             if (throwable != null) {
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableIntercept.java b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableIntercept.java
+index d437e904a..58e9a2197 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableIntercept.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableIntercept.java
+@@ -36,7 +36,7 @@ public record StreamableIntercept<T>(
+     public @NonNull Streamer<@NonNull T> stream(@NonNull StreamerCancellation cancellation) {
+         Streamer<? extends T> streamer;
+         try {
+-            streamer = Objects.requireNonNull(onStream.apply(cancellation, source.stream(cancellation)), "onStream returned a null Streaner");
++            streamer = Objects.requireNonNull(onStream.apply(cancellation, source.stream(cancellation)), "The onStream returned a null Streamer");
+         } catch (Throwable ex) {
+             Exceptions.throwIfFatal(ex);
+             return StreamableError.createFailed(ex);
+@@ -88,7 +88,7 @@ public record StreamableIntercept<T>(
+         public @NonNull CompletionStage<Void> finish() {
+             CompletionStage<Void> result;
+             try {
+-                result = Objects.requireNonNull(onFinish.apply(cancellation.get(), upstream.finish()), "onFinish returned a null CompletionStage");
++                result = Objects.requireNonNull(onFinish.apply(cancellation.get(), upstream.finish()), "The onFinish returned a null CompletionStage");
+             } catch (Throwable ex) {
+                 Exceptions.throwIfFatal(ex);
+                 result = CompletableFuture.failedStage(ex);
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableLift.java b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableLift.java
+index 53484d568..5080da3da 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableLift.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableLift.java
+@@ -32,7 +32,7 @@ public record StreamableLift<T, R>(
+         var upstream = source.stream(cancellation);
+         try {
+             return (Streamer<R>)Objects.requireNonNull(lifter.apply(cancellation, upstream),
+-                    "lifter returned a null Streaner");
++                    "The lifter returned a null Streamer");
+         } catch (Throwable ex) {
+             Exceptions.throwIfFatal(ex);
+             return StreamableError.createFailed(ex);
+diff --git a/src/main/java/io/reactivex/rxjava4/subscribers/SafeSubscriber.java b/src/main/java/io/reactivex/rxjava4/subscribers/SafeSubscriber.java
+index b6a8b87a9..c9937a8f4 100644
+--- a/src/main/java/io/reactivex/rxjava4/subscribers/SafeSubscriber.java
++++ b/src/main/java/io/reactivex/rxjava4/subscribers/SafeSubscriber.java
+@@ -77,7 +77,7 @@ public final class SafeSubscriber<@NonNull T> implements FlowableSubscriber<T>,
+         }
+ 
+         if (t == null) {
+-            Throwable ex = ExceptionHelper.createNullPointerException("onNext called with a null Throwable.");
++            Throwable ex = ExceptionHelper.createNullPointerException("onNext called with a null value.");
+             try {
+                 upstream.cancel();
+             } catch (Throwable e1) {

@@ -16,6 +16,18 @@ CSV_COLUMNS = (
 )
 CODEX_AUTO_FLAGS = ("--full-auto", "--skip-git-repo-check")
 CLAUDE_AUTO_FLAGS = ("--verbose", "--permission-mode", "bypassPermissions")
+# Environment for every `claude -p` turn. Each run must see only the baseline code and the
+# prompter's messages:
+#   - auto-memory is keyed by git root, so all dataset worktrees share one memory folder and
+#     its MEMORY.md index is loaded into every session (notes leaked across runs and models);
+#   - background tasks let one `claude -p` call keep waking itself up after it "finishes",
+#     so work lands in the wrong turn;
+#   - a mid-batch auto-update changes the agent under test.
+CLAUDE_ENV = {
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+    "DISABLE_AUTOUPDATER": "1",
+}
 DEFAULT_TIMEOUT = 18000  # 5 hours
 PROMPTER_SUFFIX = "-Agent"
 

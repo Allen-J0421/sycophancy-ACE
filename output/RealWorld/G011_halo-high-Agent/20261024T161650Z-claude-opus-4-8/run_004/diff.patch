@@ -1,0 +1,1083 @@
+diff --git a/application/src/main/java/run/halo/app/content/AbstractContentService.java b/application/src/main/java/run/halo/app/content/AbstractContentService.java
+index 8358c3da2..c74dd71ea 100644
+--- a/application/src/main/java/run/halo/app/content/AbstractContentService.java
++++ b/application/src/main/java/run/halo/app/content/AbstractContentService.java
+@@ -1,21 +1,18 @@
+ package run.halo.app.content;
+ 
+ import java.security.Principal;
+-import java.time.Duration;
+ import java.time.Instant;
+ import java.util.UUID;
+ import lombok.AllArgsConstructor;
+ import lombok.extern.slf4j.Slf4j;
+ import org.apache.commons.lang3.StringUtils;
+ import org.jspecify.annotations.Nullable;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.data.domain.Sort;
+ import org.springframework.security.core.context.ReactiveSecurityContextHolder;
+ import org.springframework.security.core.context.SecurityContext;
+ import org.springframework.util.Assert;
+ import reactor.core.publisher.Flux;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.extension.content.Snapshot;
+ import run.halo.app.extension.ListOptions;
+ import run.halo.app.extension.MetadataUtil;
+@@ -23,6 +20,7 @@ import run.halo.app.extension.ReactiveExtensionClient;
+ import run.halo.app.extension.Ref;
+ import run.halo.app.extension.index.query.Queries;
+ import run.halo.app.extension.router.selector.FieldSelector;
++import run.halo.app.infra.MoreRetries;
+ 
+ /**
+  * Abstract Service for {@link Snapshot}.
+@@ -122,8 +120,7 @@ public abstract class AbstractContentService {
+                                 .doOnNext(username -> Snapshot.addContributor(headSnapshot, username))
+                                 .thenReturn(headSnapshot))
+                         .flatMap(client::update))
+-                .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+-                        .filter(throwable -> throwable instanceof OptimisticLockingFailureException))
++                .retryWhen(MoreRetries.optimisticLock(5))
+                 .flatMap(head -> restoredContent(baseSnapshotName, head));
+     }
+ 
+diff --git a/application/src/main/java/run/halo/app/content/comment/CommentServiceImpl.java b/application/src/main/java/run/halo/app/content/comment/CommentServiceImpl.java
+index 82fc65f26..cd46db352 100644
+--- a/application/src/main/java/run/halo/app/content/comment/CommentServiceImpl.java
++++ b/application/src/main/java/run/halo/app/content/comment/CommentServiceImpl.java
+@@ -2,7 +2,6 @@ package run.halo.app.content.comment;
+ 
+ import static run.halo.app.extension.index.query.Queries.*;
+ 
+-import java.time.Duration;
+ import java.time.Instant;
+ import java.util.function.Function;
+ import org.apache.commons.lang3.BooleanUtils;
+@@ -13,13 +12,13 @@ import org.springframework.util.Assert;
+ import org.springframework.web.server.ServerWebInputException;
+ import reactor.core.publisher.Flux;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.counter.CounterService;
+ import run.halo.app.core.extension.content.Comment;
+ import run.halo.app.core.user.service.RoleService;
+ import run.halo.app.core.user.service.UserService;
+ import run.halo.app.extension.*;
+ import run.halo.app.extension.router.selector.FieldSelector;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.SystemConfigFetcher;
+ import run.halo.app.infra.exception.AccessDeniedException;
+ import run.halo.app.plugin.extensionpoint.ExtensionGetter;
+@@ -165,8 +164,7 @@ public class CommentServiceImpl extends AbstractCommentService implements Commen
+ 
+     private Mono<Comment> attemptToDelete(String name) {
+         return Mono.defer(() -> client.fetch(Comment.class, name).flatMap(client::delete))
+-                .retryWhen(Retry.backoff(8, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance));
++                .retryWhen(MoreRetries.optimisticLock(8));
+     }
+ 
+     Mono<ListResult<Comment>> listCommentsByRef(Ref subjectRef, PageRequest pageRequest) {
+diff --git a/application/src/main/java/run/halo/app/content/comment/ReplyServiceImpl.java b/application/src/main/java/run/halo/app/content/comment/ReplyServiceImpl.java
+index 5543a0711..0cc019d3e 100644
+--- a/application/src/main/java/run/halo/app/content/comment/ReplyServiceImpl.java
++++ b/application/src/main/java/run/halo/app/content/comment/ReplyServiceImpl.java
+@@ -3,7 +3,6 @@ package run.halo.app.content.comment;
+ import static org.apache.commons.lang3.BooleanUtils.isTrue;
+ import static run.halo.app.extension.index.query.Queries.*;
+ 
+-import java.time.Duration;
+ import java.time.Instant;
+ import java.util.ArrayList;
+ import java.util.function.Function;
+@@ -18,7 +17,6 @@ import org.springframework.util.Assert;
+ import org.springframework.web.server.ServerWebInputException;
+ import reactor.core.publisher.Flux;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.counter.CounterService;
+ import run.halo.app.core.extension.content.Comment;
+ import run.halo.app.core.extension.content.Reply;
+@@ -26,6 +24,7 @@ import run.halo.app.core.user.service.RoleService;
+ import run.halo.app.core.user.service.UserService;
+ import run.halo.app.extension.*;
+ import run.halo.app.extension.router.selector.FieldSelector;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.exception.RequestRestrictedException;
+ 
+ /**
+@@ -125,14 +124,12 @@ public class ReplyServiceImpl extends AbstractCommentService implements ReplySer
+                     reply.getSpec().setApprovedTime(Instant.now());
+                     return client.update(reply);
+                 }))
+-                .retryWhen(Retry.backoff(8, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance));
++                .retryWhen(MoreRetries.optimisticLock(8));
+     }
+ 
+     private Mono<Comment> updateCommentWithRetry(String name, UnaryOperator<Comment> updateFunc) {
+         return Mono.defer(() -> client.get(Comment.class, name).map(updateFunc).flatMap(client::update))
+-                .retryWhen(Retry.backoff(8, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance));
++                .retryWhen(MoreRetries.optimisticLock(8));
+     }
+ 
+     private Mono<Reply> prepareReply(Comment comment, Reply reply) {
+@@ -218,8 +215,7 @@ public class ReplyServiceImpl extends AbstractCommentService implements ReplySer
+ 
+     private Mono<Reply> attemptToDelete(String name) {
+         return Mono.defer(() -> client.fetch(Reply.class, name).flatMap(client::delete))
+-                .retryWhen(Retry.backoff(8, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance));
++                .retryWhen(MoreRetries.optimisticLock(8));
+     }
+ 
+     Mono<ListResult<Reply>> listRepliesByComment(String commentName, PageRequest pageRequest) {
+diff --git a/application/src/main/java/run/halo/app/content/impl/PostServiceImpl.java b/application/src/main/java/run/halo/app/content/impl/PostServiceImpl.java
+index 440ee3607..7fe145a94 100644
+--- a/application/src/main/java/run/halo/app/content/impl/PostServiceImpl.java
++++ b/application/src/main/java/run/halo/app/content/impl/PostServiceImpl.java
+@@ -2,7 +2,6 @@ package run.halo.app.content.impl;
+ 
+ import static run.halo.app.extension.index.query.Queries.in;
+ 
+-import java.time.Duration;
+ import java.time.Instant;
+ import java.util.Comparator;
+ import java.util.List;
+@@ -20,7 +19,6 @@ import org.springframework.util.CollectionUtils;
+ import org.springframework.web.server.ServerWebInputException;
+ import reactor.core.publisher.Flux;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.content.*;
+ import run.halo.app.core.counter.CounterService;
+ import run.halo.app.core.counter.MeterUtils;
+@@ -33,6 +31,7 @@ import run.halo.app.extension.*;
+ import run.halo.app.extension.router.selector.FieldSelector;
+ import run.halo.app.infra.Condition;
+ import run.halo.app.infra.ConditionStatus;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.exception.UnsatisfiedAttributeValueException;
+ 
+ /**
+@@ -199,8 +198,7 @@ public class PostServiceImpl extends AbstractContentService implements PostServi
+                             .flatMap(contentWrapper -> waitForPostToDraftConcludingWork(
+                                     post.getMetadata().getName(), contentWrapper));
+                 })
+-                .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance));
++                .retryWhen(MoreRetries.optimisticLock(5));
+     }
+ 
+     private Mono<Post> waitForPostToDraftConcludingWork(String postName, ContentWrapper contentWrapper) {
+@@ -222,8 +220,7 @@ public class PostServiceImpl extends AbstractContentService implements PostServi
+                     status.getConditionsOrDefault().addAndEvictFIFO(condition);
+                     return client.update(post);
+                 }))
+-                .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance));
++                .retryWhen(MoreRetries.optimisticLock(5));
+     }
+ 
+     @Override
+@@ -377,8 +374,7 @@ public class PostServiceImpl extends AbstractContentService implements PostServi
+                                                 Post.class, post.getMetadata().getName())
+                                         .map(func)
+                                         .flatMap(client::update))
+-                                .retryWhen(Retry.backoff(8, Duration.ofMillis(100))
+-                                        .filter(OptimisticLockingFailureException.class::isInstance)));
++                                .retryWhen(MoreRetries.optimisticLock(8)));
+     }
+ 
+     Mono<Post> publishPostWithRetry(Post post) {
+@@ -388,7 +384,6 @@ public class PostServiceImpl extends AbstractContentService implements PostServi
+                         e -> Mono.defer(() -> client.get(
+                                                 Post.class, post.getMetadata().getName())
+                                         .flatMap(this::publish))
+-                                .retryWhen(Retry.backoff(8, Duration.ofMillis(100))
+-                                        .filter(OptimisticLockingFailureException.class::isInstance)));
++                                .retryWhen(MoreRetries.optimisticLock(8)));
+     }
+ }
+diff --git a/application/src/main/java/run/halo/app/content/impl/SinglePageServiceImpl.java b/application/src/main/java/run/halo/app/content/impl/SinglePageServiceImpl.java
+index 3b374ea35..e914fbab5 100644
+--- a/application/src/main/java/run/halo/app/content/impl/SinglePageServiceImpl.java
++++ b/application/src/main/java/run/halo/app/content/impl/SinglePageServiceImpl.java
+@@ -1,6 +1,5 @@
+ package run.halo.app.content.impl;
+ 
+-import java.time.Duration;
+ import java.time.Instant;
+ import java.util.List;
+ import java.util.Objects;
+@@ -14,7 +13,6 @@ import org.springframework.util.Assert;
+ import org.springframework.web.server.ServerWebInputException;
+ import reactor.core.publisher.Flux;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.content.*;
+ import run.halo.app.core.counter.CounterService;
+ import run.halo.app.core.counter.MeterUtils;
+@@ -27,6 +25,7 @@ import run.halo.app.extension.ReactiveExtensionClient;
+ import run.halo.app.extension.Ref;
+ import run.halo.app.infra.Condition;
+ import run.halo.app.infra.ConditionStatus;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.exception.UnsatisfiedAttributeValueException;
+ 
+ /**
+@@ -126,8 +125,7 @@ public class SinglePageServiceImpl extends AbstractContentService implements Sin
+                     status.setPhase(Post.PostPhase.DRAFT.name());
+                     return client.update(page);
+                 }))
+-                .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance));
++                .retryWhen(MoreRetries.optimisticLock(5));
+     }
+ 
+     @Override
+@@ -215,8 +213,7 @@ public class SinglePageServiceImpl extends AbstractContentService implements Sin
+                                                 page.getMetadata().getName())
+                                         .map(func)
+                                         .flatMap(client::update))
+-                                .retryWhen(Retry.backoff(8, Duration.ofMillis(100))
+-                                        .filter(OptimisticLockingFailureException.class::isInstance)));
++                                .retryWhen(MoreRetries.optimisticLock(8)));
+     }
+ 
+     private Mono<SinglePage> publish(SinglePage singlePage) {
+@@ -237,8 +234,7 @@ public class SinglePageServiceImpl extends AbstractContentService implements Sin
+                                                 SinglePage.class,
+                                                 page.getMetadata().getName())
+                                         .flatMap(this::publish))
+-                                .retryWhen(Retry.backoff(8, Duration.ofMillis(100))
+-                                        .filter(OptimisticLockingFailureException.class::isInstance)));
++                                .retryWhen(MoreRetries.optimisticLock(8)));
+     }
+ 
+     private Mono<ListedSinglePage> getListedSinglePage(SinglePage singlePage) {
+diff --git a/application/src/main/java/run/halo/app/core/endpoint/console/CategoryConsoleService.java b/application/src/main/java/run/halo/app/core/endpoint/console/CategoryConsoleService.java
+index e4e6cf713..7f7afe00f 100644
+--- a/application/src/main/java/run/halo/app/core/endpoint/console/CategoryConsoleService.java
++++ b/application/src/main/java/run/halo/app/core/endpoint/console/CategoryConsoleService.java
+@@ -1,6 +1,5 @@
+ package run.halo.app.core.endpoint.console;
+ 
+-import java.time.Duration;
+ import java.time.Instant;
+ import java.util.ArrayList;
+ import java.util.Collection;
+@@ -14,7 +13,6 @@ import java.util.Optional;
+ import java.util.Set;
+ import java.util.function.Function;
+ import java.util.stream.Collectors;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.data.domain.Sort;
+ import org.springframework.http.HttpStatus;
+ import org.springframework.stereotype.Component;
+@@ -22,11 +20,11 @@ import org.springframework.web.server.ResponseStatusException;
+ import reactor.core.Exceptions;
+ import reactor.core.publisher.Flux;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.extension.content.Category;
+ import run.halo.app.extension.ListOptions;
+ import run.halo.app.extension.MetadataOperator;
+ import run.halo.app.extension.ReactiveExtensionClient;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.exception.NotFoundException;
+ import run.halo.app.infra.exception.UnsatisfiedAttributeValueException;
+ 
+@@ -45,8 +43,7 @@ public class CategoryConsoleService {
+ 
+     Mono<List<CategoryTreeNode>> updatePosition(String name, CategoryPositionRequest request) {
+         return Mono.defer(() -> move(name, normalize(request.parentName()), normalize(request.beforeName())))
+-                .retryWhen(Retry.backoff(1, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance))
++                .retryWhen(MoreRetries.optimisticLock(1))
+                 .onErrorMap(
+                         Exceptions::isRetryExhausted,
+                         error -> new ResponseStatusException(HttpStatus.CONFLICT, "problemDetail.conflict", error));
+diff --git a/application/src/main/java/run/halo/app/core/endpoint/console/MenuItemConsoleService.java b/application/src/main/java/run/halo/app/core/endpoint/console/MenuItemConsoleService.java
+index d54694eba..65d6915ac 100644
+--- a/application/src/main/java/run/halo/app/core/endpoint/console/MenuItemConsoleService.java
++++ b/application/src/main/java/run/halo/app/core/endpoint/console/MenuItemConsoleService.java
+@@ -2,7 +2,6 @@ package run.halo.app.core.endpoint.console;
+ 
+ import static run.halo.app.extension.index.query.Queries.equal;
+ 
+-import java.time.Duration;
+ import java.time.Instant;
+ import java.util.ArrayList;
+ import java.util.Collection;
+@@ -16,7 +15,6 @@ import java.util.Optional;
+ import java.util.Set;
+ import java.util.function.Function;
+ import java.util.stream.Collectors;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.data.domain.Sort;
+ import org.springframework.http.HttpStatus;
+ import org.springframework.stereotype.Component;
+@@ -25,11 +23,11 @@ import org.springframework.web.server.ServerWebInputException;
+ import reactor.core.Exceptions;
+ import reactor.core.publisher.Flux;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.extension.MenuItem;
+ import run.halo.app.extension.ListOptions;
+ import run.halo.app.extension.MetadataOperator;
+ import run.halo.app.extension.ReactiveExtensionClient;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.exception.NotFoundException;
+ import run.halo.app.infra.exception.UnsatisfiedAttributeValueException;
+ 
+@@ -49,8 +47,7 @@ public class MenuItemConsoleService {
+     Mono<List<MenuItemTreeNode>> updatePosition(String name, MenuItemPositionRequest request) {
+         var menuName = normalizeRequired(request.menuName(), "menuName is required.");
+         return Mono.defer(() -> move(name, menuName, normalize(request.parentName()), normalize(request.beforeName())))
+-                .retryWhen(Retry.backoff(1, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance))
++                .retryWhen(MoreRetries.optimisticLock(1))
+                 .onErrorMap(
+                         Exceptions::isRetryExhausted,
+                         error -> new ResponseStatusException(HttpStatus.CONFLICT, "problemDetail.conflict", error));
+diff --git a/application/src/main/java/run/halo/app/core/endpoint/console/PostEndpoint.java b/application/src/main/java/run/halo/app/core/endpoint/console/PostEndpoint.java
+index 1853a15d4..65b27efd2 100644
+--- a/application/src/main/java/run/halo/app/core/endpoint/console/PostEndpoint.java
++++ b/application/src/main/java/run/halo/app/core/endpoint/console/PostEndpoint.java
+@@ -16,7 +16,6 @@ import lombok.extern.slf4j.Slf4j;
+ import org.apache.commons.lang3.BooleanUtils;
+ import org.springdoc.core.fn.builders.schema.Builder;
+ import org.springdoc.webflux.core.fn.SpringdocRouteBuilder;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.http.MediaType;
+ import org.springframework.stereotype.Component;
+ import org.springframework.web.reactive.function.server.RouterFunction;
+@@ -33,6 +32,7 @@ import run.halo.app.core.extension.endpoint.CustomEndpoint;
+ import run.halo.app.extension.ListResult;
+ import run.halo.app.extension.MetadataUtil;
+ import run.halo.app.extension.ReactiveExtensionClient;
++import run.halo.app.infra.MoreRetries;
+ 
+ /**
+  * Console endpoint for managing posts and their content snapshots.
+@@ -332,8 +332,7 @@ public class PostEndpoint implements CustomEndpoint {
+                                     PostRequest postRequest = new PostRequest(post, content);
+                                     return postService.updatePost(postRequest);
+                                 }))
+-                        .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+-                                .filter(throwable -> throwable instanceof OptimisticLockingFailureException)))
++                        .retryWhen(MoreRetries.optimisticLock(5)))
+                 .flatMap(post -> ServerResponse.ok().bodyValue(post));
+     }
+ 
+@@ -359,8 +358,7 @@ public class PostEndpoint implements CustomEndpoint {
+                             spec.setReleaseSnapshot(spec.getHeadSnapshot());
+                         })
+                         .flatMap(client::update))
+-                .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+-                        .filter(t -> t instanceof OptimisticLockingFailureException))
++                .retryWhen(MoreRetries.optimisticLock(5))
+                 .filter(post -> asyncPublish)
+                 .switchIfEmpty(Mono.defer(() -> awaitPostPublished(name)))
+                 .onErrorMap(
+@@ -396,8 +394,7 @@ public class PostEndpoint implements CustomEndpoint {
+                             spec.setPublish(false);
+                         })
+                         .flatMap(client::update))
+-                .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+-                        .filter(t -> t instanceof OptimisticLockingFailureException))
++                .retryWhen(MoreRetries.optimisticLock(3))
+                 .flatMap(post -> ServerResponse.ok().bodyValue(post));
+     }
+ 
+@@ -409,8 +406,7 @@ public class PostEndpoint implements CustomEndpoint {
+                             spec.setDeleted(true);
+                         })
+                         .flatMap(client::update))
+-                .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+-                        .filter(t -> t instanceof OptimisticLockingFailureException))
++                .retryWhen(MoreRetries.optimisticLock(3))
+                 .flatMap(post -> ServerResponse.ok().bodyValue(post));
+     }
+ 
+diff --git a/application/src/main/java/run/halo/app/core/endpoint/console/SinglePageEndpoint.java b/application/src/main/java/run/halo/app/core/endpoint/console/SinglePageEndpoint.java
+index 6ad8ea193..e9827bd26 100644
+--- a/application/src/main/java/run/halo/app/core/endpoint/console/SinglePageEndpoint.java
++++ b/application/src/main/java/run/halo/app/core/endpoint/console/SinglePageEndpoint.java
+@@ -12,7 +12,6 @@ import lombok.AllArgsConstructor;
+ import lombok.extern.slf4j.Slf4j;
+ import org.springdoc.core.fn.builders.schema.Builder;
+ import org.springdoc.webflux.core.fn.SpringdocRouteBuilder;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.http.MediaType;
+ import org.springframework.stereotype.Component;
+ import org.springframework.web.reactive.function.server.RouterFunction;
+@@ -29,6 +28,7 @@ import run.halo.app.core.extension.endpoint.CustomEndpoint;
+ import run.halo.app.extension.ListResult;
+ import run.halo.app.extension.MetadataUtil;
+ import run.halo.app.extension.ReactiveExtensionClient;
++import run.halo.app.infra.MoreRetries;
+ 
+ /**
+  * Console endpoint for managing {@link SinglePage} content and snapshots.
+@@ -299,8 +299,7 @@ public class SinglePageEndpoint implements CustomEndpoint {
+                                     SinglePageRequest pageRequest = new SinglePageRequest(page, content);
+                                     return singlePageService.update(pageRequest);
+                                 }))
+-                        .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+-                                .filter(throwable -> throwable instanceof OptimisticLockingFailureException)))
++                        .retryWhen(MoreRetries.optimisticLock(5)))
+                 .flatMap(post -> ServerResponse.ok().bodyValue(post));
+     }
+ 
+@@ -323,8 +322,7 @@ public class SinglePageEndpoint implements CustomEndpoint {
+                     spec.setReleaseSnapshot(spec.getHeadSnapshot());
+                     return client.update(singlePage);
+                 }))
+-                .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+-                        .filter(t -> t instanceof OptimisticLockingFailureException))
++                .retryWhen(MoreRetries.optimisticLock(5))
+                 .flatMap(post -> {
+                     if (asyncPublish) {
+                         return Mono.just(post);
+diff --git a/application/src/main/java/run/halo/app/core/endpoint/console/SystemConfigEndpoint.java b/application/src/main/java/run/halo/app/core/endpoint/console/SystemConfigEndpoint.java
+index 7b5400cb7..f098d2b6e 100644
+--- a/application/src/main/java/run/halo/app/core/endpoint/console/SystemConfigEndpoint.java
++++ b/application/src/main/java/run/halo/app/core/endpoint/console/SystemConfigEndpoint.java
+@@ -6,11 +6,9 @@ import static org.springdoc.core.fn.builders.parameter.Builder.parameterBuilder;
+ import static org.springdoc.core.fn.builders.requestbody.Builder.requestBodyBuilder;
+ 
+ import io.swagger.v3.oas.annotations.enums.ParameterIn;
+-import java.time.Duration;
+ import java.util.HashMap;
+ import lombok.RequiredArgsConstructor;
+ import org.springdoc.webflux.core.fn.SpringdocRouteBuilder;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.http.HttpStatus;
+ import org.springframework.http.MediaType;
+ import org.springframework.stereotype.Component;
+@@ -18,10 +16,10 @@ import org.springframework.web.reactive.function.server.RouterFunction;
+ import org.springframework.web.reactive.function.server.ServerRequest;
+ import org.springframework.web.reactive.function.server.ServerResponse;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.extension.endpoint.CustomEndpoint;
+ import run.halo.app.extension.GroupVersion;
+ import run.halo.app.extension.ReactiveExtensionClient;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.SystemConfigFetcher;
+ import tools.jackson.databind.json.JsonMapper;
+ import tools.jackson.databind.node.ObjectNode;
+@@ -80,8 +78,7 @@ public class SystemConfigEndpoint implements CustomEndpoint {
+                             cm.getData().put(group, objectNode.toString());
+                             return client.update(cm);
+                         }))
+-                .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance))
++                .retryWhen(MoreRetries.optimisticLock(5))
+                 .then(ServerResponse.noContent().build());
+     }
+ 
+diff --git a/application/src/main/java/run/halo/app/core/endpoint/console/UserConsoleService.java b/application/src/main/java/run/halo/app/core/endpoint/console/UserConsoleService.java
+index 85aad586b..a28f9726d 100644
+--- a/application/src/main/java/run/halo/app/core/endpoint/console/UserConsoleService.java
++++ b/application/src/main/java/run/halo/app/core/endpoint/console/UserConsoleService.java
+@@ -9,7 +9,6 @@ import io.github.resilience4j.ratelimiter.RateLimiterRegistry;
+ import io.github.resilience4j.ratelimiter.RequestNotPermitted;
+ import io.github.resilience4j.reactor.ratelimiter.operator.RateLimiterOperator;
+ import java.security.Principal;
+-import java.time.Duration;
+ import java.util.Arrays;
+ import java.util.Collection;
+ import java.util.HashMap;
+@@ -27,7 +26,6 @@ import java.util.stream.Collectors;
+ import lombok.RequiredArgsConstructor;
+ import org.apache.commons.lang3.StringUtils;
+ import org.springframework.core.io.buffer.DataBuffer;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.http.MediaType;
+ import org.springframework.http.codec.multipart.FilePart;
+ import org.springframework.security.access.AccessDeniedException;
+@@ -46,7 +44,6 @@ import org.springframework.web.reactive.function.server.ServerResponse;
+ import org.springframework.web.server.ServerWebInputException;
+ import reactor.core.publisher.Flux;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.endpoint.console.UserEndpoint.AvatarUploadRequest;
+ import run.halo.app.core.endpoint.console.UserEndpoint.ChangeOwnPasswordRequest;
+ import run.halo.app.core.endpoint.console.UserEndpoint.ChangePasswordRequest;
+@@ -71,6 +68,7 @@ import run.halo.app.extension.ListResult;
+ import run.halo.app.extension.MetadataUtil;
+ import run.halo.app.extension.PageRequestImpl;
+ import run.halo.app.extension.ReactiveExtensionClient;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.SystemConfigFetcher;
+ import run.halo.app.infra.SystemSetting;
+ import run.halo.app.infra.SystemSetting.Attachment.UploadOptions;
+@@ -218,8 +216,7 @@ public class UserConsoleService {
+                                             attachment.getMetadata().getName());
+                             return client.update(user);
+                         })
+-                        .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+-                                .filter(OptimisticLockingFailureException.class::isInstance)))
++                        .retryWhen(MoreRetries.optimisticLock(5)))
+                 .flatMap(user -> ServerResponse.ok().bodyValue(user));
+     }
+ 
+diff --git a/application/src/main/java/run/halo/app/core/extension/migration/MenuItemHierarchyMigration.java b/application/src/main/java/run/halo/app/core/extension/migration/MenuItemHierarchyMigration.java
+index 887a583c3..5cbb51764 100644
+--- a/application/src/main/java/run/halo/app/core/extension/migration/MenuItemHierarchyMigration.java
++++ b/application/src/main/java/run/halo/app/core/extension/migration/MenuItemHierarchyMigration.java
+@@ -2,7 +2,6 @@ package run.halo.app.core.extension.migration;
+ 
+ import static org.springframework.util.StringUtils.hasText;
+ 
+-import java.time.Duration;
+ import java.time.Instant;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+@@ -20,12 +19,10 @@ import org.jspecify.annotations.Nullable;
+ import org.springframework.context.event.EventListener;
+ import org.springframework.core.Ordered;
+ import org.springframework.core.annotation.Order;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.data.domain.Sort;
+ import org.springframework.stereotype.Component;
+ import reactor.core.publisher.Flux;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.extension.Menu;
+ import run.halo.app.core.extension.MenuItem;
+ import run.halo.app.extension.ListOptions;
+@@ -33,6 +30,7 @@ import run.halo.app.extension.Metadata;
+ import run.halo.app.extension.MetadataOperator;
+ import run.halo.app.extension.ReactiveExtensionClient;
+ import run.halo.app.infra.ExtensionInitializedEvent;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.utils.JsonUtils;
+ 
+ @Slf4j
+@@ -164,8 +162,7 @@ class MenuItemHierarchyMigration {
+ 
+         var clone = cloneMenuItem(original, path);
+         return client.create(clone)
+-                .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance))
++                .retryWhen(MoreRetries.optimisticLock(3))
+                 .doOnNext(created -> {
+                     context.addItem(created);
+                     context.recordCloneCreated();
+@@ -211,8 +208,7 @@ class MenuItemHierarchyMigration {
+                             }
+                             return client.update(latest).doOnNext(updated -> context.recordUpdated());
+                         }))
+-                .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance))
++                .retryWhen(MoreRetries.optimisticLock(3))
+                 .doOnNext(context::addItem)
+                 .onErrorResume(t -> {
+                     var name = item.getMetadata().getName();
+diff --git a/application/src/main/java/run/halo/app/core/user/service/impl/EmailPasswordRecoveryServiceImpl.java b/application/src/main/java/run/halo/app/core/user/service/impl/EmailPasswordRecoveryServiceImpl.java
+index 4e4b11de5..b42e39f89 100644
+--- a/application/src/main/java/run/halo/app/core/user/service/impl/EmailPasswordRecoveryServiceImpl.java
++++ b/application/src/main/java/run/halo/app/core/user/service/impl/EmailPasswordRecoveryServiceImpl.java
+@@ -5,13 +5,11 @@ import java.time.Duration;
+ import lombok.RequiredArgsConstructor;
+ import org.apache.commons.lang3.RandomStringUtils;
+ import org.apache.commons.lang3.StringUtils;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.security.core.token.Sha512DigestUtils;
+ import org.springframework.stereotype.Component;
+ import org.springframework.util.Assert;
+ import org.springframework.web.util.UriComponentsBuilder;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.extension.User;
+ import run.halo.app.core.extension.notification.Reason;
+ import run.halo.app.core.extension.notification.Subscription;
+@@ -19,6 +17,7 @@ import run.halo.app.core.user.service.*;
+ import run.halo.app.extension.GroupVersion;
+ import run.halo.app.extension.ReactiveExtensionClient;
+ import run.halo.app.infra.ExternalLinkProcessor;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.notification.NotificationCenter;
+ import run.halo.app.notification.NotificationReasonEmitter;
+ import run.halo.app.notification.UserIdentity;
+@@ -103,8 +102,7 @@ public class EmailPasswordRecoveryServiceImpl implements EmailPasswordRecoverySe
+         subscriber.setName(UserIdentity.anonymousWithEmail(email).name());
+         return notificationCenter
+                 .unsubscribe(subscriber, createInterestReason(email))
+-                .retryWhen(Retry.backoff(8, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance));
++                .retryWhen(MoreRetries.optimisticLock(8));
+     }
+ 
+     private Mono<Void> sendResetPasswordNotification(String username, String email) {
+diff --git a/application/src/main/java/run/halo/app/core/user/service/impl/EmailVerificationServiceImpl.java b/application/src/main/java/run/halo/app/core/user/service/impl/EmailVerificationServiceImpl.java
+index 3a55b59fe..9f45a4c6e 100644
+--- a/application/src/main/java/run/halo/app/core/user/service/impl/EmailVerificationServiceImpl.java
++++ b/application/src/main/java/run/halo/app/core/user/service/impl/EmailVerificationServiceImpl.java
+@@ -11,18 +11,17 @@ import lombok.experimental.Accessors;
+ import lombok.extern.slf4j.Slf4j;
+ import org.apache.commons.lang3.RandomStringUtils;
+ import org.apache.commons.lang3.StringUtils;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.stereotype.Component;
+ import org.springframework.util.Assert;
+ import reactor.core.publisher.Mono;
+ import reactor.core.scheduler.Schedulers;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.extension.User;
+ import run.halo.app.core.extension.notification.Reason;
+ import run.halo.app.core.extension.notification.Subscription;
+ import run.halo.app.core.user.service.EmailVerificationService;
+ import run.halo.app.extension.*;
+ import run.halo.app.extension.index.query.Queries;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.exception.EmailVerificationFailed;
+ import run.halo.app.infra.exception.UnsatisfiedAttributeValueException;
+ import run.halo.app.notification.NotificationCenter;
+@@ -69,8 +68,7 @@ public class EmailVerificationServiceImpl implements EmailVerificationService {
+                     emailVerificationManager.removeCode(username, oldEmailToVerify);
+                     return Mono.when(unsubMono, updateUserAnnoMono).thenReturn(user);
+                 }))
+-                .retryWhen(Retry.backoff(8, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance))
++                .retryWhen(MoreRetries.optimisticLock(8))
+                 .flatMap(user -> sendVerificationNotification(username, email));
+     }
+ 
+@@ -79,8 +77,7 @@ public class EmailVerificationServiceImpl implements EmailVerificationService {
+         Assert.state(StringUtils.isNotBlank(username), "Username must not be blank");
+         Assert.state(StringUtils.isNotBlank(code), "Code must not be blank");
+         return Mono.defer(() -> client.get(User.class, username).flatMap(user -> verifyUserEmail(user, code)))
+-                .retryWhen(Retry.backoff(8, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance));
++                .retryWhen(MoreRetries.optimisticLock(8));
+     }
+ 
+     private Mono<Void> verifyUserEmail(User user, String code) {
+diff --git a/application/src/main/java/run/halo/app/core/user/service/impl/SettingConfigServiceImpl.java b/application/src/main/java/run/halo/app/core/user/service/impl/SettingConfigServiceImpl.java
+index bccdd365a..8f7844e6c 100644
+--- a/application/src/main/java/run/halo/app/core/user/service/impl/SettingConfigServiceImpl.java
++++ b/application/src/main/java/run/halo/app/core/user/service/impl/SettingConfigServiceImpl.java
+@@ -1,17 +1,15 @@
+ package run.halo.app.core.user.service.impl;
+ 
+-import java.time.Duration;
+ import lombok.RequiredArgsConstructor;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.stereotype.Component;
+ import org.springframework.util.Assert;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.extension.Setting;
+ import run.halo.app.core.user.service.SettingConfigService;
+ import run.halo.app.extension.ConfigMap;
+ import run.halo.app.extension.Metadata;
+ import run.halo.app.extension.ReactiveExtensionClient;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.utils.SettingUtils;
+ import tools.jackson.databind.node.ObjectNode;
+ 
+@@ -36,8 +34,7 @@ class SettingConfigServiceImpl implements SettingConfigService {
+                     persisted.setData(data);
+                     return client.update(persisted);
+                 }))
+-                .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance))
++                .retryWhen(MoreRetries.optimisticLock(5))
+                 .switchIfEmpty(Mono.defer(() -> {
+                     var configMap = new ConfigMap();
+                     configMap.setMetadata(new Metadata());
+diff --git a/application/src/main/java/run/halo/app/core/user/service/impl/UserServiceImpl.java b/application/src/main/java/run/halo/app/core/user/service/impl/UserServiceImpl.java
+index 6a579bb47..515b2bdc1 100644
+--- a/application/src/main/java/run/halo/app/core/user/service/impl/UserServiceImpl.java
++++ b/application/src/main/java/run/halo/app/core/user/service/impl/UserServiceImpl.java
+@@ -4,7 +4,6 @@ import static run.halo.app.extension.ExtensionUtil.defaultSort;
+ import static run.halo.app.extension.index.query.Queries.equal;
+ 
+ import java.time.Clock;
+-import java.time.Duration;
+ import java.util.Arrays;
+ import java.util.Collection;
+ import java.util.HashMap;
+@@ -16,7 +15,6 @@ import java.util.stream.Collectors;
+ import lombok.RequiredArgsConstructor;
+ import lombok.extern.slf4j.Slf4j;
+ import org.springframework.context.ApplicationEventPublisher;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.security.core.context.ReactiveSecurityContextHolder;
+ import org.springframework.security.core.context.SecurityContext;
+ import org.springframework.security.core.session.ReactiveSessionRegistry;
+@@ -30,7 +28,6 @@ import org.springframework.util.StringUtils;
+ import org.springframework.web.server.ServerWebInputException;
+ import reactor.core.publisher.Flux;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.extension.Role;
+ import run.halo.app.core.extension.RoleBinding;
+ import run.halo.app.core.extension.User;
+@@ -47,6 +44,7 @@ import run.halo.app.extension.ReactiveExtensionClient;
+ import run.halo.app.extension.exception.ExtensionNotFoundException;
+ import run.halo.app.extension.index.query.Queries;
+ import run.halo.app.extension.router.selector.FieldSelector;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.SystemConfigFetcher;
+ import run.halo.app.infra.SystemSetting;
+ import run.halo.app.infra.ValidationUtils;
+@@ -240,8 +238,7 @@ public class UserServiceImpl implements UserService {
+                                         User.REQUEST_TO_UPDATE, clock.instant().toString());
+                             })
+                             .flatMap(client::update)
+-                            .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+-                                    .filter(OptimisticLockingFailureException.class::isInstance));
++                            .retryWhen(MoreRetries.optimisticLock(5));
+                     return invalidateSessions.then(updateUser);
+                 }));
+     }
+diff --git a/application/src/main/java/run/halo/app/infra/MoreRetries.java b/application/src/main/java/run/halo/app/infra/MoreRetries.java
+new file mode 100644
+index 000000000..8080a370d
+--- /dev/null
++++ b/application/src/main/java/run/halo/app/infra/MoreRetries.java
+@@ -0,0 +1,30 @@
++package run.halo.app.infra;
++
++import java.time.Duration;
++import org.springframework.dao.OptimisticLockingFailureException;
++import reactor.util.retry.Retry;
++import reactor.util.retry.RetryBackoffSpec;
++
++/** Factory methods for commonly reused reactive {@link Retry} specifications. */
++public final class MoreRetries {
++
++    private static final Duration OPTIMISTIC_LOCK_MIN_BACKOFF = Duration.ofMillis(100);
++
++    private MoreRetries() {}
++
++    /**
++     * A retry spec that retries only on {@link OptimisticLockingFailureException} using exponential backoff with a
++     * 100ms minimum backoff.
++     *
++     * <p>This is the canonical policy for the common "fetch, mutate, update, retry on version conflict" flow. Call
++     * sites that deliberately use a different strategy (for example a fixed delay or a different minimum backoff)
++     * should keep their explicit {@link Retry} configuration so the difference stays visible.
++     *
++     * @param maxAttempts the maximum number of retry attempts
++     * @return a configured retry spec
++     */
++    public static RetryBackoffSpec optimisticLock(long maxAttempts) {
++        return Retry.backoff(maxAttempts, OPTIMISTIC_LOCK_MIN_BACKOFF)
++                .filter(OptimisticLockingFailureException.class::isInstance);
++    }
++}
+diff --git a/application/src/main/java/run/halo/app/infra/ReactiveExtensionPaginatedOperatorImpl.java b/application/src/main/java/run/halo/app/infra/ReactiveExtensionPaginatedOperatorImpl.java
+index 9fa09469f..5280fca72 100644
+--- a/application/src/main/java/run/halo/app/infra/ReactiveExtensionPaginatedOperatorImpl.java
++++ b/application/src/main/java/run/halo/app/infra/ReactiveExtensionPaginatedOperatorImpl.java
+@@ -2,7 +2,6 @@ package run.halo.app.infra;
+ 
+ import static run.halo.app.extension.index.query.Queries.isNull;
+ 
+-import java.time.Duration;
+ import java.time.Instant;
+ import lombok.RequiredArgsConstructor;
+ import org.springframework.dao.OptimisticLockingFailureException;
+@@ -10,7 +9,6 @@ import org.springframework.data.domain.Sort;
+ import org.springframework.stereotype.Component;
+ import reactor.core.publisher.Flux;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.extension.*;
+ 
+ @Component
+@@ -65,8 +63,7 @@ public class ReactiveExtensionPaginatedOperatorImpl implements ReactiveExtension
+ 
+     private <E extends Extension> Mono<E> attemptToDelete(Class<E> type, String name) {
+         return Mono.defer(() -> client.fetch(type, name).flatMap(client::delete))
+-                .retryWhen(Retry.backoff(8, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance));
++                .retryWhen(MoreRetries.optimisticLock(8));
+     }
+ 
+     @Override
+diff --git a/application/src/main/java/run/halo/app/infra/SystemState.java b/application/src/main/java/run/halo/app/infra/SystemState.java
+index 5b8fdc4e3..4a77b4f50 100644
+--- a/application/src/main/java/run/halo/app/infra/SystemState.java
++++ b/application/src/main/java/run/halo/app/infra/SystemState.java
+@@ -3,15 +3,12 @@ package run.halo.app.infra;
+ import com.fasterxml.jackson.databind.JsonNode;
+ import com.github.fge.jsonpatch.JsonPatchException;
+ import com.github.fge.jsonpatch.mergepatch.JsonMergePatch;
+-import java.time.Duration;
+ import java.util.HashMap;
+ import java.util.LinkedHashMap;
+ import java.util.Map;
+ import java.util.function.Consumer;
+ import lombok.Data;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.extension.ConfigMap;
+ import run.halo.app.extension.Metadata;
+ import run.halo.app.extension.ReactiveExtensionClient;
+@@ -91,8 +88,7 @@ public class SystemState {
+                             update(systemState, configMap);
+                             return client.update(configMap);
+                         }))
+-                .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance))
++                .retryWhen(MoreRetries.optimisticLock(5))
+                 .then();
+     }
+ 
+diff --git a/application/src/main/java/run/halo/app/notification/SubscriptionServiceImpl.java b/application/src/main/java/run/halo/app/notification/SubscriptionServiceImpl.java
+index 49ca7e26a..538908295 100644
+--- a/application/src/main/java/run/halo/app/notification/SubscriptionServiceImpl.java
++++ b/application/src/main/java/run/halo/app/notification/SubscriptionServiceImpl.java
+@@ -2,7 +2,6 @@ package run.halo.app.notification;
+ 
+ import static run.halo.app.extension.index.query.Queries.*;
+ 
+-import java.time.Duration;
+ import lombok.RequiredArgsConstructor;
+ import org.apache.commons.lang3.StringUtils;
+ import org.springframework.dao.OptimisticLockingFailureException;
+@@ -10,13 +9,13 @@ import org.springframework.stereotype.Component;
+ import org.springframework.util.Assert;
+ import reactor.core.publisher.Flux;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.extension.notification.Reason;
+ import run.halo.app.core.extension.notification.Subscription;
+ import run.halo.app.extension.ListOptions;
+ import run.halo.app.extension.ReactiveExtensionClient;
+ import run.halo.app.extension.index.query.Condition;
+ import run.halo.app.extension.router.selector.FieldSelector;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.ReactiveExtensionPaginatedOperator;
+ 
+ @Component
+@@ -101,8 +100,7 @@ public class SubscriptionServiceImpl implements SubscriptionService {
+     private Mono<Subscription> attemptToDelete(String subscriptionName) {
+         return Mono.defer(
+                         () -> client.fetch(Subscription.class, subscriptionName).flatMap(client::delete))
+-                .retryWhen(Retry.backoff(8, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance));
++                .retryWhen(MoreRetries.optimisticLock(8));
+     }
+ 
+     Condition reasonSubjectMatch(Subscription.ReasonSubject reasonSubject) {
+diff --git a/application/src/main/java/run/halo/app/plugin/PluginBeforeStopSyncListener.java b/application/src/main/java/run/halo/app/plugin/PluginBeforeStopSyncListener.java
+index 8e40b69c8..fe789a00d 100644
+--- a/application/src/main/java/run/halo/app/plugin/PluginBeforeStopSyncListener.java
++++ b/application/src/main/java/run/halo/app/plugin/PluginBeforeStopSyncListener.java
+@@ -3,7 +3,6 @@ package run.halo.app.plugin;
+ import java.time.Duration;
+ import lombok.extern.slf4j.Slf4j;
+ import org.springframework.context.event.EventListener;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.stereotype.Component;
+ import reactor.core.publisher.Flux;
+ import reactor.core.publisher.Mono;
+@@ -12,6 +11,7 @@ import run.halo.app.extension.ExtensionUtil;
+ import run.halo.app.extension.GroupVersionKind;
+ import run.halo.app.extension.ReactiveExtensionClient;
+ import run.halo.app.extension.exception.SchemeNotFoundException;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.plugin.event.HaloPluginBeforeStopEvent;
+ 
+ /**
+@@ -54,8 +54,7 @@ class PluginBeforeStopSyncListener {
+                                 .onErrorComplete(SchemeNotFoundException.class)
+                                 .filter(e -> !ExtensionUtil.hasDoNotOverwriteLabel(e))
+                                 .flatMap(client::delete)
+-                                .retryWhen(Retry.backoff(10, Duration.ofMillis(100))
+-                                        .filter(OptimisticLockingFailureException.class::isInstance)))
++                                .retryWhen(MoreRetries.optimisticLock(10)))
+                         .flatMap(e -> waitForDeleted(
+                                 e.groupVersionKind(), e.getMetadata().getName())))
+                 .then();
+diff --git a/application/src/main/java/run/halo/app/plugin/PluginDevelopmentInitializer.java b/application/src/main/java/run/halo/app/plugin/PluginDevelopmentInitializer.java
+index 4b7fca13c..4423da4aa 100644
+--- a/application/src/main/java/run/halo/app/plugin/PluginDevelopmentInitializer.java
++++ b/application/src/main/java/run/halo/app/plugin/PluginDevelopmentInitializer.java
+@@ -8,12 +8,11 @@ import lombok.extern.slf4j.Slf4j;
+ import org.pf4j.PluginManager;
+ import org.springframework.boot.context.event.ApplicationReadyEvent;
+ import org.springframework.context.ApplicationListener;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.stereotype.Component;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.extension.Plugin;
+ import run.halo.app.extension.ReactiveExtensionClient;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.utils.ReactiveUtils;
+ 
+ /**
+@@ -61,8 +60,7 @@ public class PluginDevelopmentInitializer implements ApplicationListener<Applica
+                         nullSafeAnnotations(plugin).put(PluginConst.RUNTIME_MODE_ANNO, "dev");
+                         return extensionClient.create(plugin);
+                     }))
+-                    .retryWhen(Retry.backoff(10, Duration.ofMillis(100))
+-                            .filter(t -> t instanceof OptimisticLockingFailureException))
++                    .retryWhen(MoreRetries.optimisticLock(10))
+                     .block(BLOCKING_TIMEOUT);
+         }
+     }
+diff --git a/application/src/main/java/run/halo/app/plugin/PluginServiceImpl.java b/application/src/main/java/run/halo/app/plugin/PluginServiceImpl.java
+index eecebe4f3..8652fe441 100644
+--- a/application/src/main/java/run/halo/app/plugin/PluginServiceImpl.java
++++ b/application/src/main/java/run/halo/app/plugin/PluginServiceImpl.java
+@@ -57,6 +57,7 @@ import reactor.core.scheduler.Schedulers;
+ import reactor.util.retry.Retry;
+ import run.halo.app.core.extension.Plugin;
+ import run.halo.app.extension.ReactiveExtensionClient;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.SystemVersionSupplier;
+ import run.halo.app.infra.exception.PluginAlreadyExistsException;
+ import run.halo.app.infra.exception.PluginDependenciesNotEnabledException;
+@@ -143,8 +144,7 @@ public class PluginServiceImpl implements PluginService, InitializingBean, Dispo
+                     plugin.getSpec().setEnabled(true);
+                     return client.update(plugin);
+                 }))
+-                .retryWhen(Retry.backoff(8, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance));
++                .retryWhen(MoreRetries.optimisticLock(8));
+     }
+ 
+     @Override
+diff --git a/application/src/main/java/run/halo/app/security/AuthProviderServiceImpl.java b/application/src/main/java/run/halo/app/security/AuthProviderServiceImpl.java
+index 754111cde..829f660b6 100644
+--- a/application/src/main/java/run/halo/app/security/AuthProviderServiceImpl.java
++++ b/application/src/main/java/run/halo/app/security/AuthProviderServiceImpl.java
+@@ -1,6 +1,5 @@
+ package run.halo.app.security;
+ 
+-import java.time.Duration;
+ import java.util.*;
+ import java.util.function.Function;
+ import java.util.stream.Collectors;
+@@ -10,16 +9,15 @@ import lombok.experimental.Accessors;
+ import org.apache.commons.lang3.BooleanUtils;
+ import org.apache.commons.lang3.StringUtils;
+ import org.springframework.beans.factory.ObjectProvider;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.security.core.context.ReactiveSecurityContextHolder;
+ import org.springframework.stereotype.Component;
+ import reactor.core.publisher.Flux;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.extension.AuthProvider;
+ import run.halo.app.core.extension.UserConnection;
+ import run.halo.app.extension.*;
+ import run.halo.app.extension.index.query.Queries;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.SystemConfigFetcher;
+ import run.halo.app.infra.SystemSetting;
+ import run.halo.app.infra.utils.JsonUtils;
+@@ -213,8 +211,7 @@ public class AuthProviderServiceImpl implements AuthProviderService {
+ 
+                     return client.update(configMap);
+                 }))
+-                .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance));
++                .retryWhen(MoreRetries.optimisticLock(5));
+     }
+ 
+     private Mono<ConfigMap> getSystemConfigMap() {
+diff --git a/application/src/main/java/run/halo/app/security/device/DeviceServiceImpl.java b/application/src/main/java/run/halo/app/security/device/DeviceServiceImpl.java
+index bce1d65b9..8831b305f 100644
+--- a/application/src/main/java/run/halo/app/security/device/DeviceServiceImpl.java
++++ b/application/src/main/java/run/halo/app/security/device/DeviceServiceImpl.java
+@@ -5,7 +5,6 @@ import static run.halo.app.infra.utils.IpAddressUtils.getClientIp;
+ import static run.halo.app.security.authentication.rememberme.PersistentTokenBasedRememberMeServices.REMEMBER_ME_SERIES_REQUEST_NAME;
+ 
+ import java.security.Principal;
+-import java.time.Duration;
+ import java.time.Instant;
+ import java.util.Objects;
+ import java.util.Optional;
+@@ -19,7 +18,6 @@ import lombok.extern.slf4j.Slf4j;
+ import org.apache.commons.lang3.StringUtils;
+ import org.jspecify.annotations.Nullable;
+ import org.springframework.context.ApplicationEventPublisher;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.http.HttpHeaders;
+ import org.springframework.security.authentication.AuthenticationTrustResolver;
+ import org.springframework.security.authentication.AuthenticationTrustResolverImpl;
+@@ -31,13 +29,13 @@ import org.springframework.stereotype.Component;
+ import org.springframework.util.Assert;
+ import org.springframework.web.server.ServerWebExchange;
+ import reactor.core.publisher.Mono;
+-import reactor.util.retry.Retry;
+ import run.halo.app.core.extension.Device;
+ import run.halo.app.extension.ExtensionUtil;
+ import run.halo.app.extension.ListOptions;
+ import run.halo.app.extension.Metadata;
+ import run.halo.app.extension.ReactiveExtensionClient;
+ import run.halo.app.extension.index.query.Queries;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.utils.UserAgentUtils;
+ import run.halo.app.security.authentication.rememberme.PersistentRememberMeTokenRepository;
+ import ua_parser.UserAgent;
+@@ -112,8 +110,7 @@ class DeviceServiceImpl implements DeviceService {
+                     }
+                     return updateFunction.apply(device).flatMap(client::update);
+                 }))
+-                .retryWhen(Retry.backoff(8, Duration.ofMillis(100))
+-                        .filter(OptimisticLockingFailureException.class::isInstance));
++                .retryWhen(MoreRetries.optimisticLock(8));
+     }
+ 
+     private Mono<Device> updateExistingDevice(ServerWebExchange exchange, Authentication authentication) {
+diff --git a/application/src/main/java/run/halo/app/security/preauth/SystemSetupEndpoint.java b/application/src/main/java/run/halo/app/security/preauth/SystemSetupEndpoint.java
+index 0af548492..b07b21d9d 100644
+--- a/application/src/main/java/run/halo/app/security/preauth/SystemSetupEndpoint.java
++++ b/application/src/main/java/run/halo/app/security/preauth/SystemSetupEndpoint.java
+@@ -19,7 +19,6 @@ import jakarta.validation.constraints.Pattern;
+ import jakarta.validation.constraints.Size;
+ import java.net.URI;
+ import java.nio.charset.StandardCharsets;
+-import java.time.Duration;
+ import java.time.Instant;
+ import java.util.LinkedHashMap;
+ import java.util.Map;
+@@ -38,7 +37,6 @@ import org.springframework.context.annotation.Bean;
+ import org.springframework.core.Ordered;
+ import org.springframework.core.annotation.Order;
+ import org.springframework.core.io.ClassPathResource;
+-import org.springframework.dao.OptimisticLockingFailureException;
+ import org.springframework.http.HttpStatus;
+ import org.springframework.http.MediaType;
+ import org.springframework.security.util.InMemoryResource;
+@@ -54,13 +52,13 @@ import org.springframework.web.reactive.function.server.ServerResponse;
+ import reactor.core.publisher.Flux;
+ import reactor.core.publisher.Mono;
+ import reactor.core.scheduler.Schedulers;
+-import reactor.util.retry.Retry;
+ import run.halo.app.extension.ConfigMap;
+ import run.halo.app.extension.ReactiveExtensionClient;
+ import run.halo.app.extension.Unstructured;
+ import run.halo.app.infra.ExternalUrlChangedEvent;
+ import run.halo.app.infra.ExternalUrlSupplier;
+ import run.halo.app.infra.InitializationStateGetter;
++import run.halo.app.infra.MoreRetries;
+ import run.halo.app.infra.SystemConfigFetcher;
+ import run.halo.app.infra.SystemSetting;
+ import run.halo.app.infra.SystemState;
+@@ -181,8 +179,7 @@ public class SystemSetupEndpoint {
+                             mergeToBasicConfig(body, configMap);
+                             return client.update(configMap);
+                         }))
+-                .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+-                        .filter(t -> t instanceof OptimisticLockingFailureException))
++                .retryWhen(MoreRetries.optimisticLock(5))
+                 .subscribeOn(Schedulers.boundedElastic())
+                 .then(Mono.fromCallable(() -> {
+                     eventPublisher.publishEvent(new ExternalUrlChangedEvent(

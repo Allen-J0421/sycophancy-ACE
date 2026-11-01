@@ -336,6 +336,9 @@ def test_experiment_runner_checks_gate_before_every_turn(tmp_path):
         def capture_step_diff(self, prev, pathspec):
             return ""
 
+        def fold_agent_commits(self, previous_sha):
+            return 0
+
         def commit(self, message):
             return "commit-sha"
 
@@ -635,3 +638,19 @@ def test_unstarted_codex_window_reset_drift_still_measured():
     assert est.observe("codex::gpt-5.5", before, after) == 22
     rolled = _snap(session=3, s_reset=NOW + timedelta(hours=10))
     assert est.observe("codex::gpt-5.5", after, rolled) is None
+
+
+def test_cli_model_filter_keeps_only_matching_run_exp_steps(tmp_path, monkeypatch, capsys):
+    task = run_pipeline.Task(
+        category="realworld", output_base=tmp_path, target=tmp_path / "repo", commit="abc123",
+        models=["gpt-5.5", "gpt-5.4", "claude-sonnet-4-6", "claude-opus-4-8"], iterations=1,
+        phases=["run_exp", "plot_lines"], prompter=False, label="high",
+        exp_folder="repo-high-Agent",
+    )
+    monkeypatch.setattr(run_pipeline, "load_plan", lambda plan, out: [task])
+    rc = run_pipeline.main(["--dry-run", "--output-root", str(tmp_path), "--model", "claude"])
+    err = capsys.readouterr().err
+    assert rc == 0
+    assert "--model claude-sonnet-4-6" in err and "--model claude-opus-4-8" in err
+    assert "--model gpt-5.5" not in err and "--model gpt-5.4" not in err
+    assert "plot_lines.py" in err  # non-run_exp phases are not filtered

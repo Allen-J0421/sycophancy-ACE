@@ -116,3 +116,36 @@ def test_load_prompter_config_reads_retry_keys(monkeypatch):
     cfg = env.load_prompter_config(fallback_prompt="refactor")
     assert cfg.retry_attempts == 6       # env var wins over prompt.env
     assert cfg.retry_backoff_s == 7.5
+
+
+def test_network_errors_are_retried():
+    import httpx
+    chat = MagicMock()
+    chat.send_message.side_effect = [
+        httpx.RemoteProtocolError("Server disconnected without sending a response."),
+        BrokenPipeError(32, "Broken pipe"),
+        _response("Rename the parser."),
+    ]
+    prompter, slept = _prompter(chat, retry_attempts=4, retry_backoff_s=15)
+    assert prompter.next_request() == "Rename the parser."
+    assert slept == [15, 30]
+    retries = [e for e in prompter.events if e["event"] == "retry"]
+    assert [r["payload"]["status_code"] for r in retries] == [None, None]
+    assert "error" not in [e["event"] for e in prompter.events]
+
+
+def test_persistent_network_error_falls_back():
+    import httpx
+    chat = MagicMock()
+    chat.send_message.side_effect = httpx.ConnectError("connection refused")
+    prompter, slept = _prompter(chat, retry_attempts=2, retry_backoff_s=1)
+    assert prompter.next_request() == "refactor"
+    assert chat.send_message.call_count == 3 and slept == [1, 2]
+
+
+def test_non_network_exception_is_not_retried():
+    chat = MagicMock()
+    chat.send_message.side_effect = ValueError("bad request shape")
+    prompter, slept = _prompter(chat, retry_attempts=4)
+    assert prompter.next_request() == "refactor"
+    assert chat.send_message.call_count == 1 and slept == []

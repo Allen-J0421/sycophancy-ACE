@@ -1,0 +1,401 @@
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableCollector.java b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableCollector.java
+index 4f6a61730..83ce3083d 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableCollector.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableCollector.java
+@@ -95,17 +95,20 @@ public record StreamableCollector<T, A, R>(
+                             return CompletableFuture.failedFuture(new CancellationException());
+                         }
+ 
+-                        T value;
+-
+                         try {
+-                            value = (T)isrc.elementAt(index);
++                            var value = (T)isrc.elementAt(index);
++                            accumulator.accept(storage, value);
+                         } catch (Throwable ex) {
+                             Exceptions.throwIfFatal(ex);
+                             return CompletableFuture.failedFuture(ex);
+                         }
+-                        accumulator.accept(storage, value);
+                     }
+-                    current = finisher.apply(storage);
++                    try {
++                        current = finisher.apply(storage);
++                    } catch (Throwable ex) {
++                        Exceptions.throwIfFatal(ex);
++                        return CompletableFuture.failedFuture(ex);
++                    }
+                     return NEXT_TRUE;
+                 } else
+                 if (upstream instanceof DeferredEnumerableSource<?> dsrc) {
+@@ -124,7 +127,12 @@ public record StreamableCollector<T, A, R>(
+                         Exceptions.throwIfFatal(ex);
+                         return CompletableFuture.failedFuture(ex);
+                     }
+-                    current = finisher.apply(storage);
++                    try {
++                        current = finisher.apply(storage);
++                    } catch (Throwable ex) {
++                        Exceptions.throwIfFatal(ex);
++                        return CompletableFuture.failedFuture(ex);
++                    }
+                     return NEXT_TRUE;
+                 }
+                 drain();
+@@ -156,7 +164,13 @@ public record StreamableCollector<T, A, R>(
+                     return;
+                 }
+             }
+-            current = finisher.apply(storage);
++            try {
++                current = finisher.apply(storage);
++            } catch (Throwable ex) {
++                Exceptions.throwIfFatal(ex);
++                nextReady.completeExceptionally(ex);
++                return;
++            }
+             nextReady.complete(true);
+         }
+ 
+@@ -191,9 +205,21 @@ public record StreamableCollector<T, A, R>(
+ 
+                     if (state == State.SUCCESS) {
+                         if (upstreamNext.getNow((false))) {
+-                            accumulator.accept(storage, upstream.current());
++                            try {
++                                accumulator.accept(storage, upstream.current());
++                            } catch (Throwable ex) {
++                                Exceptions.throwIfFatal(ex);
++                                nextReady.completeExceptionally(ex);
++                                return;
++                            }
+                         } else {
+-                            current = finisher.apply(storage);
++                            try {
++                                current = finisher.apply(storage);
++                            } catch (Throwable ex) {
++                                Exceptions.throwIfFatal(ex);
++                                nextReady.completeExceptionally(ex);
++                                return;
++                            }
+                             nextReady.complete(true);
+                             return;
+                         }
+@@ -219,10 +245,22 @@ public record StreamableCollector<T, A, R>(
+                         nextReady.completeExceptionally(u);
+                     } else
+                     if ((Boolean)t) {
+-                        accumulator.accept(storage, upstream.current());
++                        try {
++                            accumulator.accept(storage, upstream.current());
++                        } catch (Throwable ex) {
++                            Exceptions.throwIfFatal(ex);
++                            nextReady.completeExceptionally(ex);
++                            return;
++                        }
+                         drain();
+                     } else {
+-                        current = finisher.apply(storage);
++                        try {
++                            current = finisher.apply(storage);
++                        } catch (Throwable ex) {
++                            Exceptions.throwIfFatal(ex);
++                            nextReady.completeExceptionally(ex);
++                            return;
++                        }
+                         nextReady.complete(true);
+                     }
+                 }
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableDelay.java b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableDelay.java
+index fcc340c13..eaa1b445f 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableDelay.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableDelay.java
+@@ -98,7 +98,7 @@ public record StreamableDelay<T>(
+             cancellation.delete(worker);
+             nextReady = null;
+             onDisposed = null;
+-            return FINISHED;
++            return upstream.finish();
+         }
+     }
+ }
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableFromMaybe.java b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableFromMaybe.java
+index ad35641e9..b6791bbc9 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableFromMaybe.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableFromMaybe.java
+@@ -90,6 +90,7 @@ implements Streamable<T>, HasUpstreamMaybeSource<T> {
+         @Override
+         public @NonNull CompletionStage<Void> finish() {
+             current = null;
++            DisposableHelper.dispose(this);
+             cancellation.delete(this);
+             return FINISHED;
+         }
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeLong.java b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeLong.java
+index 1f58bb32a..f02bc213e 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeLong.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeLong.java
+@@ -79,9 +79,12 @@ public record StreamableRangeLong(long start, long count) implements IsSynchrono
+ 
+         @Override
+         public boolean nextSync() throws Throwable {
+-            if (++current >= end) {
++            long i = index;
++            if (i >= end) {
+                 return false;
+             }
++            current = i;
++            index = i + 1;
+             return true;
+         }
+     }
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableSingleFlattenAs.java b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableSingleFlattenAs.java
+index 720921d74..ec1848994 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableSingleFlattenAs.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableSingleFlattenAs.java
+@@ -75,6 +75,9 @@ public record StreamableSingleFlattenAs<T, U>(
+         public @NonNull CompletionStage<Boolean> next() {
+             var it = currentIterator;
+             if (it == null) {
++                // The first item is delivered when iteratorReady completes (onSuccess pulled it),
++                // so account for it here to avoid re-emitting it via the !deferredOnce branch below.
++                deferredOnce = true;
+                 return iteratorReady;
+             }
+             if (!deferredOnce) {
+diff --git a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableCollectorTest.java b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableCollectorTest.java
+index 9d22035ba..b18326d95 100644
+--- a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableCollectorTest.java
++++ b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableCollectorTest.java
+@@ -17,6 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
+ 
+ import java.util.*;
+ import java.util.concurrent.*;
++import java.util.stream.Collector;
+ import java.util.stream.Collectors;
+ 
+ import org.junit.jupiter.api.Test;
+@@ -151,4 +152,80 @@ public class StreamableCollectorTest extends StreamableBaseTest {
+             .assertFailure(TestException.class);
+         });
+     }
++
++    static <T> Collector<T, List<T>, List<T>> throwingAccumulator() {
++        return Collector.of(ArrayList::new,
++                (a, t) -> { throw new TestException(); },
++                (a, b) -> a,
++                a -> a);
++    }
++
++    static <T> Collector<T, List<T>, List<T>> throwingFinisher() {
++        return Collector.of(ArrayList::new,
++                List::add,
++                (a, b) -> a,
++                a -> { throw new TestException(); });
++    }
++
++    @Test
++    public void accumulatorCrashOptimized() throws Throwable {
++        // indexable (optimized) path
++        Streamable.range(1, 5)
++        .collect(throwingAccumulator())
++        .test()
++        .awaitDone(5, TimeUnit.SECONDS)
++        .assertFailure(TestException.class);
++    }
++
++    @Test
++    public void accumulatorCrashHide() throws Throwable {
++        // synchronous drain path
++        Streamable.range(1, 5)
++        .hide()
++        .collect(throwingAccumulator())
++        .test()
++        .awaitDone(5, TimeUnit.SECONDS)
++        .assertFailure(TestException.class);
++    }
++
++    @Test
++    public void accumulatorCrashAsync() throws Throwable {
++        // asynchronous (whenComplete callback) path; without the guard this hangs
++        Streamable.range(1, 5)
++        .delay(1, TimeUnit.MILLISECONDS, Schedulers.single())
++        .collect(throwingAccumulator())
++        .test()
++        .awaitDone(5, TimeUnit.SECONDS)
++        .assertFailure(TestException.class);
++    }
++
++    @Test
++    public void finisherCrashOptimized() throws Throwable {
++        Streamable.range(1, 5)
++        .collect(throwingFinisher())
++        .test()
++        .awaitDone(5, TimeUnit.SECONDS)
++        .assertFailure(TestException.class);
++    }
++
++    @Test
++    public void finisherCrashHide() throws Throwable {
++        Streamable.range(1, 5)
++        .hide()
++        .collect(throwingFinisher())
++        .test()
++        .awaitDone(5, TimeUnit.SECONDS)
++        .assertFailure(TestException.class);
++    }
++
++    @Test
++    public void finisherCrashAsync() throws Throwable {
++        // asynchronous (whenComplete callback) path; without the guard this hangs
++        Streamable.range(1, 5)
++        .delay(1, TimeUnit.MILLISECONDS, Schedulers.single())
++        .collect(throwingFinisher())
++        .test()
++        .awaitDone(5, TimeUnit.SECONDS)
++        .assertFailure(TestException.class);
++    }
+ }
+diff --git a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableDelayTest.java b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableDelayTest.java
+index 197ea819d..984e6292f 100644
+--- a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableDelayTest.java
++++ b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableDelayTest.java
+@@ -13,11 +13,15 @@
+ 
+ package io.reactivex.rxjava4.internal.operators.streamable;
+ 
++import static org.junit.jupiter.api.Assertions.assertEquals;
++
+ import java.util.concurrent.*;
++import java.util.concurrent.atomic.AtomicInteger;
+ 
+ import org.junit.jupiter.api.Test;
+ 
+-import io.reactivex.rxjava4.core.Streamable;
++import io.reactivex.rxjava4.core.*;
++import io.reactivex.rxjava4.disposables.*;
+ import io.reactivex.rxjava4.exceptions.TestException;
+ import io.reactivex.rxjava4.schedulers.Schedulers;
+ 
+@@ -50,4 +54,40 @@ public class StreamableDelayTest extends StreamableBaseTest {
+         .awaitDone(5, TimeUnit.SECONDS)
+         .assertFailure(TimeoutException.class);
+     }
++
++    @Test
++    public void finishForwardedToUpstream() {
++        var finishCalls = new AtomicInteger();
++        Streamable<Integer> source = new Streamable<Integer>() {
++            @Override
++            public Streamer<Integer> stream(StreamerCancellation cancellation) {
++                return new Streamer<Integer>() {
++                    int count;
++
++                    @Override
++                    public CompletionStage<Boolean> next() {
++                        return count++ == 0 ? Streamer.NEXT_TRUE : Streamer.NEXT_FALSE;
++                    }
++
++                    @Override
++                    public Integer current() {
++                        return 1;
++                    }
++
++                    @Override
++                    public CompletionStage<Void> finish() {
++                        finishCalls.incrementAndGet();
++                        return Streamer.FINISHED;
++                    }
++                };
++            }
++        };
++
++        var streamer = source.delay(1, TimeUnit.MILLISECONDS, Schedulers.single())
++                .stream(new CompositeDisposable());
++
++        streamer.finish().toCompletableFuture().join();
++
++        assertEquals(1, finishCalls.get(), "Delay.finish() did not forward to upstream.finish()");
++    }
+ }
+diff --git a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableFromMaybeTest.java b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableFromMaybeTest.java
+index 16125fe7d..b625e96cd 100644
+--- a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableFromMaybeTest.java
++++ b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableFromMaybeTest.java
+@@ -78,4 +78,18 @@ public class StreamableFromMaybeTest extends StreamableBaseTest {
+         assertFalse(cs.hasObservers(), "has observers?");
+         assertTrue((ts instanceof Disposable d) && d.isDisposed(), "Not Disposed?");
+     }
++
++    @Test
++    public void finishDisposesUpstream() {
++        var cs = MaybeSubject.create();
++
++        var cd = new CompositeDisposable();
++        var ts = cs.toStreamable().stream(cd);
++
++        assertTrue(cs.hasObservers(), "has no observers?");
++
++        ts.finish().toCompletableFuture().join();
++
++        assertFalse(cs.hasObservers(), "finish() did not dispose the upstream subscription");
++    }
+ }
+diff --git a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeTest.java b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeTest.java
+index 0b55626c1..fa968af80 100644
+--- a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeTest.java
++++ b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableRangeTest.java
+@@ -124,4 +124,26 @@ public class StreamableRangeTest extends StreamableBaseTest {
+         .awaitDone(5, TimeUnit.SECONDS)
+         .assertResult(List.of(1L, 2L, 3L));
+     }
++
++    @Test
++    public void longEnumeratedOffset() throws Throwable {
++        // The synchronous (nextSync) path must honour a non-1 start just like the
++        // async next() path and the indexed path do.
++        Streamable.rangeLong(10, 5)
++        .filter(_ -> true)
++        .collect(Collectors.toList())
++        .test()
++        .awaitDone(5, TimeUnit.SECONDS)
++        .assertResult(List.of(10L, 11L, 12L, 13L, 14L));
++    }
++
++    @Test
++    public void intEnumeratedOffset() throws Throwable {
++        Streamable.range(10, 5)
++        .filter(_ -> true)
++        .collect(Collectors.toList())
++        .test()
++        .awaitDone(5, TimeUnit.SECONDS)
++        .assertResult(List.of(10, 11, 12, 13, 14));
++    }
+ }
+diff --git a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableSingleFlattenAsTest.java b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableSingleFlattenAsTest.java
+index a39bdc376..e0965df9d 100644
+--- a/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableSingleFlattenAsTest.java
++++ b/src/test/java/io/reactivex/rxjava4/internal/operators/streamable/StreamableSingleFlattenAsTest.java
+@@ -106,4 +106,22 @@ public class StreamableSingleFlattenAsTest extends StreamableBaseTest {
+         .awaitDone(5, TimeUnit.SECONDS)
+         .assertResult(List.of(1, 2, 3, 4, 5));
+     }
++
++    @Test
++    public void asyncNoDuplicateFirstItem() throws Throwable {
++        // Source completes asynchronously (after subscription), exercising the plain
++        // next()/current() protocol where the first item arrives via iteratorReady.
++        var ss = SingleSubject.<Integer>create();
++
++        var to = ss.flattenAsStreamable(v -> List.of(v * 10, v * 20, v * 30))
++        .test();
++
++        to.awaitOnSubscribe(1, TimeUnit.SECONDS);
++        awaitCondition(true, () -> ss.hasObservers(), 1000);
++
++        ss.onSuccess(1);
++
++        to.awaitDone(5, TimeUnit.SECONDS)
++        .assertResult(10, 20, 30);
++    }
+ }

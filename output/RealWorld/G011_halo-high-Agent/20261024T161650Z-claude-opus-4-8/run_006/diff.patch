@@ -1,0 +1,158 @@
+diff --git a/ui/packages/console-shared/src/composables/use-content-editor-upload.ts b/ui/packages/console-shared/src/composables/use-content-editor-upload.ts
+new file mode 100644
+index 000000000..63e2d1853
+--- /dev/null
++++ b/ui/packages/console-shared/src/composables/use-content-editor-upload.ts
+@@ -0,0 +1,76 @@
++import type { Attachment } from "@halo-dev/api-client";
++import { utils } from "@halo-dev/ui-shared";
++import type { AxiosRequestConfig } from "axios";
++import { computed } from "vue";
++
++export interface AttachmentPermalinkMatch {
++  url: string;
++  matched: boolean;
++}
++
++export interface UseContentEditorUploadOptions {
++  /** Permissions required to upload/match attachments (e.g. `["system:attachments:manage"]`). */
++  permissions: string[];
++  /** Uploads a file or remote URL, returning the created attachment. */
++  uploadAttachment: (
++    body: { file: File } | { url: string },
++    options?: AxiosRequestConfig
++  ) => Promise<{ data: Attachment }>;
++  /** Resolves which of the given URLs already have a matching attachment permalink. */
++  matchAttachmentPermalinks: (urls: string[]) => Promise<{
++    data: { items?: Array<{ url?: string; matched?: boolean }> };
++  }>;
++}
++
++/**
++ * Attachment-upload handlers shared by the console and user-center content editors. The two differ only in the
++ * API-client methods and the required permission, so those are injected; the permission gating, the legacy
++ * image-upload alias, and the permalink-match mapping are identical and handled here.
++ */
++export function useContentEditorUpload(options: UseContentEditorUploadOptions) {
++  const canManageAttachments = computed(() =>
++    utils.permission.has(options.permissions)
++  );
++
++  async function handleUpload(
++    fileOrUrl: File | string,
++    config?: AxiosRequestConfig
++  ): Promise<Attachment | undefined> {
++    if (!canManageAttachments.value) {
++      return;
++    }
++
++    const { data } = await options.uploadAttachment(
++      typeof fileOrUrl === "string" ? { url: fileOrUrl } : { file: fileOrUrl },
++      config
++    );
++    return data;
++  }
++
++  // Kept for third-party editor providers that still consume the legacy prop.
++  function handleUploadImage(file: File, config?: AxiosRequestConfig) {
++    return handleUpload(file, config);
++  }
++
++  async function handleMatchAttachmentPermalinks(
++    urls: string[]
++  ): Promise<AttachmentPermalinkMatch[]> {
++    if (!canManageAttachments.value) {
++      return [];
++    }
++
++    const { data } = await options.matchAttachmentPermalinks(urls);
++
++    return (data.items || []).map((item) => ({
++      url: item.url || "",
++      matched: item.matched || false,
++    }));
++  }
++
++  return {
++    canManageAttachments,
++    handleUpload,
++    handleUploadImage,
++    handleMatchAttachmentPermalinks,
++  };
++}
+diff --git a/ui/packages/console-shared/src/composables/use-editor-provider-selection.ts b/ui/packages/console-shared/src/composables/use-editor-provider-selection.ts
+new file mode 100644
+index 000000000..f8adfe6ae
+--- /dev/null
++++ b/ui/packages/console-shared/src/composables/use-editor-provider-selection.ts
+@@ -0,0 +1,62 @@
++import type { EditorProvider } from "@halo-dev/ui-shared";
++import { useLocalStorage } from "@vueuse/core";
++import { shallowRef } from "vue";
++
++const DEFAULT_STORAGE_KEY = "editor-provider-name";
++
++/**
++ * Resolves which editor provider to use for a piece of content: the one whose name matches the content's preferred
++ * editor if present, otherwise the first provider whose raw type matches the content's raw type.
++ *
++ * <p>This is the resolution logic duplicated in each content editor's `handleFetchContent`.
++ */
++export function resolveEditorProvider(
++  providers: EditorProvider[],
++  options: { preferredName?: string; rawType?: string }
++): EditorProvider | undefined {
++  const { preferredName, rawType } = options;
++
++  const preferred = preferredName
++    ? providers.find((provider) => provider.name === preferredName)
++    : undefined;
++  if (preferred) {
++    return preferred;
++  }
++
++  if (rawType) {
++    const lowerRawType = rawType.toLowerCase();
++    return providers.find(
++      (provider) => provider.rawType.toLowerCase() === lowerRawType
++    );
++  }
++
++  return undefined;
++}
++
++export interface UseEditorProviderSelectionOptions {
++  /** Local-storage key for the last-used provider name. Defaults to `"editor-provider-name"`. */
++  storageKey?: string;
++}
++
++/**
++ * Shared state for editor-provider selection across content editors: the currently active provider and the
++ * last-used provider name persisted to local storage.
++ *
++ * <p>Writing the provider onto the (structurally different) form state and persisting changes stays in the caller;
++ * this composable owns only the state that is identical across editors. Use {@link resolveEditorProvider} for the
++ * shared "preferred-then-raw-type" resolution.
++ */
++export function useEditorProviderSelection(
++  options: UseEditorProviderSelectionOptions = {}
++) {
++  const currentEditorProvider = shallowRef<EditorProvider>();
++  const storedEditorProviderName = useLocalStorage(
++    options.storageKey ?? DEFAULT_STORAGE_KEY,
++    ""
++  );
++
++  return {
++    currentEditorProvider,
++    storedEditorProviderName,
++  };
++}
+diff --git a/ui/packages/console-shared/src/index.ts b/ui/packages/console-shared/src/index.ts
+new file mode 100644
+index 000000000..de9f9f8e8
+--- /dev/null
++++ b/ui/packages/console-shared/src/index.ts
+@@ -0,0 +1,2 @@
++export * from "./composables/use-content-editor-upload";
++export * from "./composables/use-editor-provider-selection";

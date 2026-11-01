@@ -1,0 +1,123 @@
+diff --git a/application/src/main/java/run/halo/app/core/endpoint/console/PostEndpoint.java b/application/src/main/java/run/halo/app/core/endpoint/console/PostEndpoint.java
+index dabe9b510..5ab3a332c 100644
+--- a/application/src/main/java/run/halo/app/core/endpoint/console/PostEndpoint.java
++++ b/application/src/main/java/run/halo/app/core/endpoint/console/PostEndpoint.java
+@@ -349,7 +349,7 @@ public class PostEndpoint implements CustomEndpoint {
+                 request.queryParam("async").map(Boolean::parseBoolean).orElse(false);
+ 
+         return Mono.defer(() -> client.get(Post.class, name)
+-                        .doOnNext(post -> {
++                        .map(post -> {
+                             var spec = post.getSpec();
+                             request.queryParam("headSnapshot").ifPresent(spec::setHeadSnapshot);
+                             spec.setPublish(true);
+@@ -357,6 +357,7 @@ public class PostEndpoint implements CustomEndpoint {
+                                 spec.setHeadSnapshot(spec.getBaseSnapshot());
+                             }
+                             spec.setReleaseSnapshot(spec.getHeadSnapshot());
++                            return post;
+                         })
+                         .flatMap(client::update))
+                 .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+@@ -391,9 +392,9 @@ public class PostEndpoint implements CustomEndpoint {
+     private Mono<ServerResponse> unpublishPost(ServerRequest request) {
+         var name = request.pathVariable("name");
+         return Mono.defer(() -> client.get(Post.class, name)
+-                        .doOnNext(post -> {
+-                            var spec = post.getSpec();
+-                            spec.setPublish(false);
++                        .map(post -> {
++                            post.getSpec().setPublish(false);
++                            return post;
+                         })
+                         .flatMap(client::update))
+                 .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+@@ -404,9 +405,9 @@ public class PostEndpoint implements CustomEndpoint {
+     private Mono<ServerResponse> recyclePost(ServerRequest request) {
+         var name = request.pathVariable("name");
+         return Mono.defer(() -> client.get(Post.class, name)
+-                        .doOnNext(post -> {
+-                            var spec = post.getSpec();
+-                            spec.setDeleted(true);
++                        .map(post -> {
++                            post.getSpec().setDeleted(true);
++                            return post;
+                         })
+                         .flatMap(client::update))
+                 .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+diff --git a/application/src/main/java/run/halo/app/core/endpoint/uc/UcPostEndpoint.java b/application/src/main/java/run/halo/app/core/endpoint/uc/UcPostEndpoint.java
+index 3ef62961f..a3fd3e6e0 100644
+--- a/application/src/main/java/run/halo/app/core/endpoint/uc/UcPostEndpoint.java
++++ b/application/src/main/java/run/halo/app/core/endpoint/uc/UcPostEndpoint.java
+@@ -268,7 +268,10 @@ public class UcPostEndpoint implements CustomEndpoint {
+                 .then();
+ 
+         var setContributor = getCurrentUser()
+-                .flatMap(username -> snapshotMono.doOnNext(snapshot -> Snapshot.addContributor(snapshot, username)));
++                .flatMap(username -> snapshotMono.map(snapshot -> {
++                    Snapshot.addContributor(snapshot, username);
++                    return snapshot;
++                }));
+ 
+         var getBaseSnapshot =
+                 postMono.map(post -> post.getSpec().getBaseSnapshot()).flatMap(snapshotService::getBy);
+@@ -314,12 +317,12 @@ public class UcPostEndpoint implements CustomEndpoint {
+         var name = request.pathVariable("name");
+ 
+         var postBody = request.bodyToMono(Post.class)
+-                .doOnNext(post -> {
++                .map(post -> {
+                     var annotations = post.getMetadata().getAnnotations();
+                     if (annotations != null) {
+-                        // we don't support updating content while updating post.
+                         annotations.remove(CONTENT_JSON_ANNO);
+                     }
++                    return post;
+                 })
+                 .switchIfEmpty(Mono.error(() -> new ServerWebInputException("Request body required.")));
+ 
+@@ -341,7 +344,7 @@ public class UcPostEndpoint implements CustomEndpoint {
+                 .switchIfEmpty(Mono.error(() -> new ServerWebInputException("Request body required.")));
+ 
+         var createdPost = getCurrentUser()
+-                .flatMap(username -> postFromRequest.doOnNext(post -> {
++                .flatMap(username -> postFromRequest.map(post -> {
+                     var spec = new Post.PostSpec();
+                     if (post.getSpec() != null) {
+                         copyEditableSpec(post.getSpec(), spec);
+@@ -360,6 +363,7 @@ public class UcPostEndpoint implements CustomEndpoint {
+                     metadata.setGenerateName(submittedMetadata.getGenerateName());
+                     metadata.setAnnotations(editableAnnotations(submittedMetadata.getAnnotations(), null));
+                     post.setMetadata(metadata);
++                    return post;
+                 }))
+                 .map(post -> new PostRequest(post, ContentUpdateParam.from(getContent(post))))
+                 .flatMap(postService::draftPost);
+diff --git a/application/src/main/java/run/halo/app/core/user/service/impl/PatServiceImpl.java b/application/src/main/java/run/halo/app/core/user/service/impl/PatServiceImpl.java
+index 9335de454..6bf67d66b 100644
+--- a/application/src/main/java/run/halo/app/core/user/service/impl/PatServiceImpl.java
++++ b/application/src/main/java/run/halo/app/core/user/service/impl/PatServiceImpl.java
+@@ -149,9 +149,10 @@ class PatServiceImpl implements PatService {
+                 .filter(pat -> !pat.getSpec().isRevoked())
+                 .switchIfEmpty(
+                         Mono.error(() -> new UnsatisfiedAttributeValueException("problemDetail.pat.alreadyRevoked")))
+-                .doOnNext(pat -> {
++                .map(pat -> {
+                     pat.getSpec().setRevoked(true);
+                     pat.getSpec().setRevokesAt(clock.instant());
++                    return pat;
+                 })
+                 .flatMap(client::update);
+     }
+@@ -161,9 +162,10 @@ class PatServiceImpl implements PatService {
+         return get(patName, username)
+                 .filter(pat -> pat.getSpec().isRevoked())
+                 .switchIfEmpty(Mono.error(() -> new UnsatisfiedAttributeValueException("problemDetail.pat.notRevoked")))
+-                .doOnNext(pat -> {
++                .map(pat -> {
+                     pat.getSpec().setRevoked(false);
+                     pat.getSpec().setRevokesAt(null);
++                    return pat;
+                 })
+                 .flatMap(client::update);
+     }

@@ -1,0 +1,189 @@
+diff --git a/dubbo-rpc/dubbo-rpc-triple/src/test/java/org/apache/dubbo/rpc/protocol/tri/rest/support/basic/ParamArgumentResolverCharacterizationTest.java b/dubbo-rpc/dubbo-rpc-triple/src/test/java/org/apache/dubbo/rpc/protocol/tri/rest/support/basic/ParamArgumentResolverCharacterizationTest.java
+new file mode 100644
+index 000000000..f0627b304
+--- /dev/null
++++ b/dubbo-rpc/dubbo-rpc-triple/src/test/java/org/apache/dubbo/rpc/protocol/tri/rest/support/basic/ParamArgumentResolverCharacterizationTest.java
+@@ -0,0 +1,183 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.dubbo.rpc.protocol.tri.rest.support.basic;
++
++import org.apache.dubbo.remoting.http12.HttpCookie;
++import org.apache.dubbo.remoting.http12.HttpHeaders;
++import org.apache.dubbo.remoting.http12.HttpRequest;
++import org.apache.dubbo.remoting.http12.HttpRequest.FileUpload;
++import org.apache.dubbo.remoting.http12.HttpResponse;
++import org.apache.dubbo.remoting.http12.message.MediaType;
++import org.apache.dubbo.remoting.http12.rest.ParamType;
++import org.apache.dubbo.rpc.protocol.tri.rest.RestConstants;
++import org.apache.dubbo.rpc.protocol.tri.rest.mapping.meta.NamedValueMeta;
++
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.List;
++import java.util.Map;
++
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNull;
++import static org.junit.jupiter.api.Assertions.assertSame;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.mockito.Mockito.doReturn;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++
++/**
++ * Characterization tests that pin the current observable routing of {@link ParamArgumentResolver}
++ * for every {@link ParamType} across the three resolve shapes (scalar / collection / map), before
++ * consolidating the three parallel {@code switch} blocks into per-type handlers.
++ *
++ * <p>These assert behavior as it exists today (including quirks such as the map-shape
++ * {@code MatrixVariable} returning a scalar and {@code Body} returning {@code null} when no body
++ * decoder is configured); they form the safety net for a behavior-preserving refactor.
++ */
++class ParamArgumentResolverCharacterizationTest {
++
++    private final ParamArgumentResolver resolver = new ParamArgumentResolver();
++    private final HttpRequest request = mock(HttpRequest.class);
++    private final HttpResponse response = mock(HttpResponse.class);
++
++    private static NamedValueMeta meta(ParamType type, String name) {
++        return new NamedValueMeta(name, false, null).setParamType(type).setType(String.class);
++    }
++
++    private Object scalar(ParamType type, String name) {
++        return resolver.resolveValue(meta(type, name), request, response);
++    }
++
++    private Object collection(ParamType type, String name) {
++        return resolver.resolveCollectionValue(meta(type, name), request, response);
++    }
++
++    private Object map(ParamType type, String name) {
++        return resolver.resolveMapValue(meta(type, name), request, response);
++    }
++
++    @Test
++    void pathVariable() {
++        doReturn(Collections.singletonMap("id", "42"))
++                .when(request)
++                .attribute(RestConstants.URI_TEMPLATE_VARIABLES_ATTRIBUTE);
++        assertEquals("42", scalar(ParamType.PathVariable, "id"));
++        assertEquals(Collections.singletonList("42"), collection(ParamType.PathVariable, "id"));
++        assertEquals(Collections.singletonMap("id", "42"), map(ParamType.PathVariable, "id"));
++    }
++
++    @Test
++    void matrixVariableWithoutVariablesYieldsEmpty() {
++        assertNull(scalar(ParamType.MatrixVariable, "x"));
++        assertEquals(Collections.emptyList(), collection(ParamType.MatrixVariable, "x"));
++        assertNull(map(ParamType.MatrixVariable, "x"));
++    }
++
++    @Test
++    void param() {
++        when(request.parameter("p")).thenReturn("v");
++        when(request.parameterValues("p")).thenReturn(Arrays.asList("v1", "v2"));
++        when(request.parameterNames()).thenReturn(Collections.singletonList("p"));
++        assertEquals("v", scalar(ParamType.Param, "p"));
++        assertEquals(Arrays.asList("v1", "v2"), collection(ParamType.Param, "p"));
++        assertEquals(Collections.singletonMap("p", Arrays.asList("v1", "v2")), map(ParamType.Param, "p"));
++    }
++
++    @Test
++    void form() {
++        when(request.formParameter("f")).thenReturn("fv");
++        when(request.formParameterValues("f")).thenReturn(Collections.singletonList("fv"));
++        when(request.formParameterNames()).thenReturn(Collections.singletonList("f"));
++        assertEquals("fv", scalar(ParamType.Form, "f"));
++        assertEquals(Collections.singletonList("fv"), collection(ParamType.Form, "f"));
++        assertEquals(Collections.singletonMap("f", Collections.singletonList("fv")), map(ParamType.Form, "f"));
++    }
++
++    @Test
++    void header() {
++        when(request.header("h")).thenReturn("hv");
++        when(request.headerValues("h")).thenReturn(Collections.singletonList("hv"));
++        HttpHeaders headers = mock(HttpHeaders.class);
++        Map<String, List<String>> asMap = Collections.singletonMap("h", Collections.singletonList("hv"));
++        when(request.headers()).thenReturn(headers);
++        when(headers.asMap()).thenReturn(asMap);
++        assertEquals("hv", scalar(ParamType.Header, "h"));
++        assertEquals(Collections.singletonList("hv"), collection(ParamType.Header, "h"));
++        assertSame(asMap, map(ParamType.Header, "h"));
++    }
++
++    @Test
++    void cookie() {
++        HttpCookie wanted = new HttpCookie("c", "cv");
++        HttpCookie other = new HttpCookie("x", "xv");
++        when(request.cookie("c")).thenReturn(wanted);
++        when(request.cookies()).thenReturn(Arrays.asList(wanted, other));
++
++        assertSame(wanted, scalar(ParamType.Cookie, "c"));
++
++        List<?> list = (List<?>) collection(ParamType.Cookie, "c");
++        assertEquals(1, list.size());
++        assertEquals("c", ((HttpCookie) list.get(0)).name());
++
++        // The map shape groups ALL cookies by name (it does not filter by meta.name()).
++        Map<?, ?> cookieMap = (Map<?, ?>) map(ParamType.Cookie, "c");
++        assertEquals(2, cookieMap.size());
++        assertTrue(cookieMap.containsKey("c"));
++        assertTrue(cookieMap.containsKey("x"));
++    }
++
++    @Test
++    void attribute() {
++        when(request.attribute("a")).thenReturn("av");
++        Map<String, Object> attrs = Collections.singletonMap("a", "av");
++        when(request.attributes()).thenReturn(attrs);
++        assertEquals("av", scalar(ParamType.Attribute, "a"));
++        assertEquals("av", collection(ParamType.Attribute, "a"));
++        assertSame(attrs, map(ParamType.Attribute, "a"));
++    }
++
++    @Test
++    void part() {
++        FileUpload part = mock(FileUpload.class);
++        when(part.name()).thenReturn("pt");
++        when(request.part("pt")).thenReturn(part);
++        when(request.parts()).thenReturn(Collections.singletonList(part));
++
++        assertSame(part, scalar(ParamType.Part, "pt"));
++        assertEquals(Collections.singletonList(part), collection(ParamType.Part, "pt"));
++        assertEquals(Collections.singletonMap("pt", part), map(ParamType.Part, "pt"));
++    }
++
++    @Test
++    void bodyWithoutDecoderYieldsNull() {
++        // No body decoder attribute and no form content type -> decodeBody returns null.
++        assertNull(scalar(ParamType.Body, "b"));
++        assertNull(collection(ParamType.Body, "b"));
++        assertNull(map(ParamType.Body, "b"));
++    }
++
++    @Test
++    void bodyFormContentTypeRoutesToFormParameter() {
++        when(request.contentType()).thenReturn(MediaType.APPLICATION_FROM_URLENCODED.getName());
++        when(request.formParameter("b")).thenReturn("bf");
++        when(request.formParameterValues("b")).thenReturn(Collections.singletonList("bf"));
++        assertEquals("bf", scalar(ParamType.Body, "b"));
++        assertEquals(Collections.singletonList("bf"), collection(ParamType.Body, "b"));
++    }
++}

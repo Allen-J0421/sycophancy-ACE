@@ -156,7 +156,7 @@ Algorithms/<exp>::run_exp::<model>
 Algorithms/<exp>::refdiff
 ```
 
-Each value is `{"status": "done" | "failed" | "blocked", ...}`. On restart, `done` steps are skipped; a `failed` step is recorded and the batch continues, so one bad codebase/model never halts the rest. For `run_exp`, exit `1` (partial — CSV still written) counts as `done`; exit `3` (provider limit) becomes `blocked` — **not** `done`, so it is re-attempted rather than silently skipped (see [Provider-limit auto-pause](#provider-limit-auto-pause--corrupted-branch-cleanup)); exit `2` and other nonzero codes are `failed`. Use `--dry-run` to see which steps would run vs. skip. Per-step logs are written under `output/<Category>/<exp>/pipeline-logs/`.
+Each value is `{"status": "done" | "failed" | "blocked", ...}`. On restart, `done` steps are skipped; a `failed` step is recorded and the batch continues, so one bad codebase/model never halts the rest. For `run_exp`, only exit `0` counts as `done`; exit `1` (one or more failed iterations — CSV still written) counts as `failed`, including runs where all iterations failed. Exit `3` (provider limit) becomes `blocked` — **not** `done`, so it is re-attempted rather than silently skipped (see [Provider-limit auto-pause](#provider-limit-auto-pause--corrupted-branch-cleanup)); exit `2` and other nonzero codes are `failed`. Use `--dry-run` to see which steps would run vs. skip. Per-step logs are written under `output/<Category>/<exp>/pipeline-logs/`.
 
 ### Flags
 
@@ -243,7 +243,12 @@ python run_experiment.py <target> <commit> <iterations> --model <model> [--label
 
 **CSV columns:** `run, files_changed, lines_added, lines_deleted, lines_total, duration_s, exit_code, timed_out, commit_sha, commit_message, model, git_branch`
 
-**Exit codes:** `0` all iterations succeeded · `1` at least one failed/timed out (CSV still written) · `2` setup error (bad paths, missing prompt, etc.) · `3` a provider usage/session limit was hit mid-run (a `.limit_block.json` marker is written; the batch pipeline pauses until reset and re-runs). See [Provider-limit auto-pause](#provider-limit-auto-pause--corrupted-branch-cleanup).
+**Turn isolation.** Each run must see only the baseline code and the prompter's messages, and each iteration must be one commit:
+- Every `claude -p` turn runs with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and `DISABLE_AUTOUPDATER=1` (`CLAUDE_ENV` in `experiment_runner/constants.py`). Auto-memory is keyed by git root, so all dataset worktrees share one memory folder whose index is loaded into every session — notes leaked across runs and models. Background tasks let one call keep waking itself up, putting unrequested work into later turns (now flagged in the log as `WARNING: agent emitted N result events`).
+- If the agent runs `git commit` or switches branches, the harness folds that into the iteration commit (`git reset --soft <previous iteration>` on the experiment branch) so RefDiff, which compares each iteration commit with its parent, sees the whole turn.
+- A run refuses to start on a dirty worktree (`setup_branch`), so an interrupted run's leftovers can't leak into the next baseline.
+
+**Exit codes:** `0` all iterations succeeded · `1` at least one failed/timed out (CSV still written) · `2` setup error (bad paths, missing prompt, dirty worktree, etc.) · `3` a provider usage/session limit was hit mid-run (a `.limit_block.json` marker is written; the batch pipeline pauses until reset and re-runs). See [Provider-limit auto-pause](#provider-limit-auto-pause--corrupted-branch-cleanup).
 
 #### Gemini prompter mode (`--prompter`)
 

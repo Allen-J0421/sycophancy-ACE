@@ -1,0 +1,411 @@
+diff --git a/lottie/src/main/java/com/airbnb/lottie/LottieComposition.java b/lottie/src/main/java/com/airbnb/lottie/LottieComposition.java
+index ac5cd737a..41add0bf9 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/LottieComposition.java
++++ b/lottie/src/main/java/com/airbnb/lottie/LottieComposition.java
+@@ -25,7 +25,6 @@ import org.json.JSONObject;
+ 
+ import java.io.InputStream;
+ import java.util.ArrayList;
+-import java.util.Arrays;
+ import java.util.HashSet;
+ import java.util.List;
+ import java.util.Map;
+@@ -129,7 +128,7 @@ public class LottieComposition {
+   }
+ 
+   public ArrayList<String> getWarnings() {
+-    return new ArrayList<>(Arrays.asList(warnings.toArray(new String[warnings.size()])));
++    return new ArrayList<>(warnings);
+   }
+ 
+   @SuppressWarnings("WeakerAccess") public void setPerformanceTrackingEnabled(boolean enabled) {
+diff --git a/lottie/src/main/java/com/airbnb/lottie/LottieCompositionFactory.java b/lottie/src/main/java/com/airbnb/lottie/LottieCompositionFactory.java
+index 4f1b35339..6c0cc0f40 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/LottieCompositionFactory.java
++++ b/lottie/src/main/java/com/airbnb/lottie/LottieCompositionFactory.java
+@@ -668,15 +668,13 @@ public class LottieCompositionFactory {
+           }
+ 
+           File tempFile = new File(context.getCacheDir(), fileName);
+-          try (FileOutputStream fos = new FileOutputStream(tempFile)) {
+-            try (OutputStream output = new FileOutputStream(tempFile)) {
+-              byte[] buffer = new byte[4 * 1024];
+-              int read;
+-              while ((read = inputStream.read(buffer)) != -1) {
+-                output.write(buffer, 0, read);
+-              }
+-              output.flush();
++          try (OutputStream output = new FileOutputStream(tempFile)) {
++            byte[] buffer = new byte[4 * 1024];
++            int read;
++            while ((read = inputStream.read(buffer)) != -1) {
++              output.write(buffer, 0, read);
+             }
++            output.flush();
+           } catch (Throwable e) {
+             Logger.warning("Unable to save font " + fontFamily + " to the temporary file: " + fileName + ". ", e);
+           }
+@@ -758,18 +756,18 @@ public class LottieCompositionFactory {
+   /**
+    * Check if a given InputStream points to a .zip compressed file
+    */
+-  private static Boolean isZipCompressed(BufferedSource inputSource) {
++  private static boolean isZipCompressed(BufferedSource inputSource) {
+     return matchesMagicBytes(inputSource, ZIP_MAGIC);
+   }
+ 
+   /**
+    * Check if a given InputStream points to a .gzip compressed file
+    */
+-  private static Boolean isGzipCompressed(BufferedSource inputSource) {
++  private static boolean isGzipCompressed(BufferedSource inputSource) {
+     return matchesMagicBytes(inputSource, GZIP_MAGIC);
+   }
+ 
+-  private static Boolean matchesMagicBytes(BufferedSource inputSource, byte[] magic) {
++  private static boolean matchesMagicBytes(BufferedSource inputSource, byte[] magic) {
+     try {
+       BufferedSource peek = inputSource.peek();
+       for (byte b : magic) {
+@@ -828,20 +826,15 @@ public class LottieCompositionFactory {
+     task = new LottieTask<>(uiLooper, callable);
+     if (cacheKey != null) {
+       AtomicBoolean resultAlreadyCalled = new AtomicBoolean(false);
+-      task.addListener(result -> {
++      Runnable onTaskComplete = () -> {
+         taskCache.remove(cacheKey);
+         resultAlreadyCalled.set(true);
+         if (taskCache.size() == 0) {
+           notifyTaskCacheIdleListeners(true);
+         }
+-      });
+-      task.addFailureListener(result -> {
+-        taskCache.remove(cacheKey);
+-        resultAlreadyCalled.set(true);
+-        if (taskCache.size() == 0) {
+-          notifyTaskCacheIdleListeners(true);
+-        }
+-      });
++      };
++      task.addListener(result -> onTaskComplete.run());
++      task.addFailureListener(result -> onTaskComplete.run());
+       // It is technically possible for the task to finish and for the listeners to get called
+       // before this code runs. If this happens, the task will be put in taskCache but never removed.
+       // This would require this thread to be sleeping at exactly this point in the code
+diff --git a/lottie/src/main/java/com/airbnb/lottie/animation/content/BaseStrokeContent.java b/lottie/src/main/java/com/airbnb/lottie/animation/content/BaseStrokeContent.java
+index 183e33d0e..141b416bb 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/animation/content/BaseStrokeContent.java
++++ b/lottie/src/main/java/com/airbnb/lottie/animation/content/BaseStrokeContent.java
+@@ -79,15 +79,15 @@ public abstract class BaseStrokeContent
+     dashPatternAnimations = new ArrayList<>(dashPattern.size());
+     dashPatternValues = new float[dashPattern.size()];
+ 
+-    for (int i = 0; i < dashPattern.size(); i++) {
+-      dashPatternAnimations.add(dashPattern.get(i).createAnimation());
++    for (AnimatableFloatValue dashValue : dashPattern) {
++      BaseKeyframeAnimation<?, Float> anim = dashValue.createAnimation();
++      dashPatternAnimations.add(anim);
++      layer.addAnimation(anim);
++      anim.addUpdateListener(this);
+     }
+ 
+     layer.addAnimation(opacityAnimation);
+     layer.addAnimation(widthAnimation);
+-    for (int i = 0; i < dashPatternAnimations.size(); i++) {
+-      layer.addAnimation(dashPatternAnimations.get(i));
+-    }
+     if (dashPatternOffsetAnimation != null) {
+       layer.addAnimation(dashPatternOffsetAnimation);
+     }
+@@ -95,9 +95,6 @@ public abstract class BaseStrokeContent
+     opacityAnimation.addUpdateListener(this);
+     widthAnimation.addUpdateListener(this);
+ 
+-    for (int i = 0; i < dashPattern.size(); i++) {
+-      dashPatternAnimations.get(i).addUpdateListener(this);
+-    }
+     if (dashPatternOffsetAnimation != null) {
+       dashPatternOffsetAnimation.addUpdateListener(this);
+     }
+diff --git a/lottie/src/main/java/com/airbnb/lottie/animation/content/ContentGroup.java b/lottie/src/main/java/com/airbnb/lottie/animation/content/ContentGroup.java
+index 951c242ef..ed858ebf3 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/animation/content/ContentGroup.java
++++ b/lottie/src/main/java/com/airbnb/lottie/animation/content/ContentGroup.java
+@@ -34,8 +34,8 @@ public class ContentGroup implements DrawingContent, PathContent,
+   private static List<Content> contentsFromModels(LottieDrawable drawable, LottieComposition composition, BaseLayer layer,
+       List<ContentModel> contentModels) {
+     List<Content> contents = new ArrayList<>(contentModels.size());
+-    for (int i = 0; i < contentModels.size(); i++) {
+-      Content content = contentModels.get(i).toContent(drawable, composition, layer);
++    for (ContentModel model : contentModels) {
++      Content content = model.toContent(drawable, composition, layer);
+       if (content != null) {
+         contents.add(content);
+       }
+@@ -44,8 +44,7 @@ public class ContentGroup implements DrawingContent, PathContent,
+   }
+ 
+   @Nullable static AnimatableTransform findTransform(List<ContentModel> contentModels) {
+-    for (int i = 0; i < contentModels.size(); i++) {
+-      ContentModel contentModel = contentModels.get(i);
++    for (ContentModel contentModel : contentModels) {
+       if (contentModel instanceof AnimatableTransform) {
+         return (AnimatableTransform) contentModel;
+       }
+diff --git a/lottie/src/main/java/com/airbnb/lottie/animation/content/EllipseContent.java b/lottie/src/main/java/com/airbnb/lottie/animation/content/EllipseContent.java
+index 031d8d53c..9cb5dfd5b 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/animation/content/EllipseContent.java
++++ b/lottie/src/main/java/com/airbnb/lottie/animation/content/EllipseContent.java
+@@ -90,7 +90,6 @@ public class EllipseContent
+     float cpW = halfWidth * ELLIPSE_CONTROL_POINT_PERCENTAGE;
+     float cpH = halfHeight * ELLIPSE_CONTROL_POINT_PERCENTAGE;
+ 
+-    path.reset();
+     if (circleShape.isReversed()) {
+       path.moveTo(0, -halfHeight);
+       path.cubicTo(0 - cpW, -halfHeight, -halfWidth, 0 - cpH, -halfWidth, 0);
+diff --git a/lottie/src/main/java/com/airbnb/lottie/animation/keyframe/GradientColorKeyframeAnimation.java b/lottie/src/main/java/com/airbnb/lottie/animation/keyframe/GradientColorKeyframeAnimation.java
+index 2ce54d8d0..80eecc4e4 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/animation/keyframe/GradientColorKeyframeAnimation.java
++++ b/lottie/src/main/java/com/airbnb/lottie/animation/keyframe/GradientColorKeyframeAnimation.java
+@@ -15,10 +15,9 @@ public class GradientColorKeyframeAnimation extends KeyframeAnimation<GradientCo
+     // for some keyframes but not others to ensure that it is interpolatable.
+     // Ensure that there is enough space for the largest keyframe.
+     int size = 0;
+-    for (int i = 0; i < keyframes.size(); i++) {
+-      GradientColor startValue = keyframes.get(i).startValue;
+-      if (startValue != null) {
+-        size = Math.max(size, startValue.getSize());
++    for (Keyframe<GradientColor> keyframe : keyframes) {
++      if (keyframe.startValue != null) {
++        size = Math.max(size, keyframe.startValue.getSize());
+       }
+     }
+     gradientColor = new GradientColor(new float[size], new int[size]);
+diff --git a/lottie/src/main/java/com/airbnb/lottie/model/layer/BaseLayer.java b/lottie/src/main/java/com/airbnb/lottie/model/layer/BaseLayer.java
+index c472babf4..6aa76c42d 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/model/layer/BaseLayer.java
++++ b/lottie/src/main/java/com/airbnb/lottie/model/layer/BaseLayer.java
+@@ -453,18 +453,12 @@ public abstract class BaseLayer
+           if (i == 0) {
+             maskBoundsRect.set(tempMaskBoundsRect);
+           } else {
+-            maskBoundsRect.set(
+-                Math.min(maskBoundsRect.left, tempMaskBoundsRect.left),
+-                Math.min(maskBoundsRect.top, tempMaskBoundsRect.top),
+-                Math.max(maskBoundsRect.right, tempMaskBoundsRect.right),
+-                Math.max(maskBoundsRect.bottom, tempMaskBoundsRect.bottom)
+-            );
++            maskBoundsRect.union(tempMaskBoundsRect);
+           }
+       }
+     }
+ 
+-    boolean intersects = rect.intersect(maskBoundsRect);
+-    if (!intersects) {
++    if (!rect.intersect(maskBoundsRect)) {
+       rect.set(0f, 0f, 0f, 0f);
+     }
+   }
+@@ -481,8 +475,7 @@ public abstract class BaseLayer
+     }
+     matteBoundsRect.set(0f, 0f, 0f, 0f);
+     matteLayer.getBounds(matteBoundsRect, matrix, true);
+-    boolean intersects = rect.intersect(matteBoundsRect);
+-    if (!intersects) {
++    if (!rect.intersect(matteBoundsRect)) {
+       rect.set(0f, 0f, 0f, 0f);
+     }
+   }
+@@ -558,8 +551,8 @@ public abstract class BaseLayer
+     if (mask.getMaskAnimations().isEmpty()) {
+       return false;
+     }
+-    for (int i = 0; i < mask.getMasks().size(); i++) {
+-      if (mask.getMasks().get(i).getMaskMode() != Mask.MaskMode.MASK_MODE_NONE) {
++    for (Mask m : mask.getMasks()) {
++      if (m.getMaskMode() != Mask.MaskMode.MASK_MODE_NONE) {
+         return false;
+       }
+     }
+@@ -654,8 +647,8 @@ public abstract class BaseLayer
+       if (L.isTraceEnabled()) {
+         L.beginSection("BaseLayer#setProgress.mask");
+       }
+-      for (int i = 0; i < mask.getMaskAnimations().size(); i++) {
+-        mask.getMaskAnimations().get(i).setProgress(progress);
++      for (BaseKeyframeAnimation<?, ?> maskAnimation : mask.getMaskAnimations()) {
++        maskAnimation.setProgress(progress);
+       }
+       if (L.isTraceEnabled()) {
+         L.endSection("BaseLayer#setProgress.mask");
+diff --git a/lottie/src/main/java/com/airbnb/lottie/model/layer/TextLayer.java b/lottie/src/main/java/com/airbnb/lottie/model/layer/TextLayer.java
+index 7116f812b..bb1b2d54a 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/model/layer/TextLayer.java
++++ b/lottie/src/main/java/com/airbnb/lottie/model/layer/TextLayer.java
+@@ -24,6 +24,8 @@ import com.airbnb.lottie.model.DocumentData;
+ import com.airbnb.lottie.model.Font;
+ import com.airbnb.lottie.model.FontCharacter;
+ import com.airbnb.lottie.model.animatable.AnimatableTextProperties;
++import com.airbnb.lottie.model.animatable.AnimatableTextRangeSelector;
++import com.airbnb.lottie.model.animatable.AnimatableTextStyle;
+ import com.airbnb.lottie.model.content.ShapeGroup;
+ import com.airbnb.lottie.model.content.TextRangeUnits;
+ import com.airbnb.lottie.utils.DropShadow;
+@@ -103,56 +105,54 @@ public class TextLayer extends BaseLayer {
+     addAnimation(textAnimation);
+ 
+     AnimatableTextProperties textProperties = layerModel.getTextProperties();
+-    if (textProperties != null && textProperties.textStyle != null && textProperties.textStyle.color != null) {
+-      colorAnimation = textProperties.textStyle.color.createAnimation();
+-      colorAnimation.addUpdateListener(this);
+-      addAnimation(colorAnimation);
+-    }
+-
+-    if (textProperties != null && textProperties.textStyle != null && textProperties.textStyle.stroke != null) {
+-      strokeColorAnimation = textProperties.textStyle.stroke.createAnimation();
+-      strokeColorAnimation.addUpdateListener(this);
+-      addAnimation(strokeColorAnimation);
+-    }
+-
+-    if (textProperties != null && textProperties.textStyle != null && textProperties.textStyle.strokeWidth != null) {
+-      strokeWidthAnimation = textProperties.textStyle.strokeWidth.createAnimation();
+-      strokeWidthAnimation.addUpdateListener(this);
+-      addAnimation(strokeWidthAnimation);
+-    }
+-
+-    if (textProperties != null && textProperties.textStyle != null && textProperties.textStyle.tracking != null) {
+-      trackingAnimation = textProperties.textStyle.tracking.createAnimation();
+-      trackingAnimation.addUpdateListener(this);
+-      addAnimation(trackingAnimation);
+-    }
+-
+-    if (textProperties != null && textProperties.textStyle != null && textProperties.textStyle.opacity != null) {
+-      opacityAnimation = textProperties.textStyle.opacity.createAnimation();
+-      opacityAnimation.addUpdateListener(this);
+-      addAnimation(opacityAnimation);
+-    }
+-
+-    if (textProperties != null && textProperties.rangeSelector != null && textProperties.rangeSelector.start != null) {
+-      textRangeStartAnimation = textProperties.rangeSelector.start.createAnimation();
+-      textRangeStartAnimation.addUpdateListener(this);
+-      addAnimation(textRangeStartAnimation);
+-    }
+-
+-    if (textProperties != null && textProperties.rangeSelector != null && textProperties.rangeSelector.end != null) {
+-      textRangeEndAnimation = textProperties.rangeSelector.end.createAnimation();
+-      textRangeEndAnimation.addUpdateListener(this);
+-      addAnimation(textRangeEndAnimation);
+-    }
+-
+-    if (textProperties != null && textProperties.rangeSelector != null && textProperties.rangeSelector.offset != null) {
+-      textRangeOffsetAnimation = textProperties.rangeSelector.offset.createAnimation();
+-      textRangeOffsetAnimation.addUpdateListener(this);
+-      addAnimation(textRangeOffsetAnimation);
+-    }
+-
+-    if (textProperties != null && textProperties.rangeSelector != null) {
+-      textRangeUnits = textProperties.rangeSelector.units;
++    if (textProperties != null) {
++      AnimatableTextStyle textStyle = textProperties.textStyle;
++      if (textStyle != null) {
++        if (textStyle.color != null) {
++          colorAnimation = textStyle.color.createAnimation();
++          colorAnimation.addUpdateListener(this);
++          addAnimation(colorAnimation);
++        }
++        if (textStyle.stroke != null) {
++          strokeColorAnimation = textStyle.stroke.createAnimation();
++          strokeColorAnimation.addUpdateListener(this);
++          addAnimation(strokeColorAnimation);
++        }
++        if (textStyle.strokeWidth != null) {
++          strokeWidthAnimation = textStyle.strokeWidth.createAnimation();
++          strokeWidthAnimation.addUpdateListener(this);
++          addAnimation(strokeWidthAnimation);
++        }
++        if (textStyle.tracking != null) {
++          trackingAnimation = textStyle.tracking.createAnimation();
++          trackingAnimation.addUpdateListener(this);
++          addAnimation(trackingAnimation);
++        }
++        if (textStyle.opacity != null) {
++          opacityAnimation = textStyle.opacity.createAnimation();
++          opacityAnimation.addUpdateListener(this);
++          addAnimation(opacityAnimation);
++        }
++      }
++      AnimatableTextRangeSelector rangeSelector = textProperties.rangeSelector;
++      if (rangeSelector != null) {
++        if (rangeSelector.start != null) {
++          textRangeStartAnimation = rangeSelector.start.createAnimation();
++          textRangeStartAnimation.addUpdateListener(this);
++          addAnimation(textRangeStartAnimation);
++        }
++        if (rangeSelector.end != null) {
++          textRangeEndAnimation = rangeSelector.end.createAnimation();
++          textRangeEndAnimation.addUpdateListener(this);
++          addAnimation(textRangeEndAnimation);
++        }
++        if (rangeSelector.offset != null) {
++          textRangeOffsetAnimation = rangeSelector.offset.createAnimation();
++          textRangeOffsetAnimation.addUpdateListener(this);
++          addAnimation(textRangeOffsetAnimation);
++        }
++        textRangeUnits = rangeSelector.units;
++      }
+     }
+   }
+ 
+@@ -698,12 +698,13 @@ public class TextLayer extends BaseLayer {
+   }
+ 
+   private boolean isModifier(int codePoint) {
+-    return Character.getType(codePoint) == Character.FORMAT ||
+-        Character.getType(codePoint) == Character.MODIFIER_SYMBOL ||
+-        Character.getType(codePoint) == Character.NON_SPACING_MARK ||
+-        Character.getType(codePoint) == Character.OTHER_SYMBOL ||
+-        Character.getType(codePoint) == Character.DIRECTIONALITY_NONSPACING_MARK ||
+-        Character.getType(codePoint) == Character.SURROGATE;
++    int type = Character.getType(codePoint);
++    return type == Character.FORMAT ||
++        type == Character.MODIFIER_SYMBOL ||
++        type == Character.NON_SPACING_MARK ||
++        type == Character.OTHER_SYMBOL ||
++        type == Character.DIRECTIONALITY_NONSPACING_MARK ||
++        type == Character.SURROGATE;
+   }
+ 
+   /**
+diff --git a/lottie/src/main/java/com/airbnb/lottie/utils/OffscreenLayer.java b/lottie/src/main/java/com/airbnb/lottie/utils/OffscreenLayer.java
+index a08840cba..004104a1c 100644
+--- a/lottie/src/main/java/com/airbnb/lottie/utils/OffscreenLayer.java
++++ b/lottie/src/main/java/com/airbnb/lottie/utils/OffscreenLayer.java
+@@ -307,7 +307,6 @@ public class OffscreenLayer {
+ 
+         // The render node needs some data in advance
+         if (op.hasBlendMode() || op.hasColorFilter()) {
+-          if (composePaint == null) composePaint = new LPaint();
+           composePaint.reset();
+           PaintCompat.setBlendMode(composePaint, op.blendMode);
+           composePaint.setColorFilter(op.colorFilter);
+@@ -353,9 +352,6 @@ public class OffscreenLayer {
+ 
+     switch (currentStrategy) {
+       case DIRECT:
+-        parentCanvas.restore();
+-        break;
+-
+       case SAVE_LAYER:
+         parentCanvas.restore();
+         break;
+@@ -534,7 +530,8 @@ public class OffscreenLayer {
+     }
+ 
+     RectF rectIncludingShadow = calculateRectIncludingShadow(targetRect, shadow);
+-    RectF scaledRectIncludingShadow = new RectF(
++    if (scaledRectIncludingShadow == null) scaledRectIncludingShadow = new RectF();
++    scaledRectIncludingShadow.set(
+         rectIncludingShadow.left * pixelScaleX,
+         rectIncludingShadow.top * pixelScaleY,
+         rectIncludingShadow.right * pixelScaleX,

@@ -453,14 +453,14 @@ def run_step(step: Step, *, dry_run: bool) -> tuple[str, str]:
 
     rc = proc.returncode
     detail = f"exit={rc} log={log_path.name}"
-    # run_experiment.py: 0 ok, 1 partial (CSV still written), 2 setup error,
+    # run_experiment.py: 0 ok, 1 failed iteration(s) (CSV still written), 2 setup error,
     # 3 provider-limit-blocked (a usage/session limit was hit; a .limit_block.json marker
-    # was written). Treat 0/1 as done; 3 as "blocked" (not done → re-attempted, never
-    # silently skipped); 2 and other nonzero as failed.
+    # was written). Only 0 is done: exit 1 can mean every iteration failed, so
+    # treating it as complete silently skips dead runs on restart.
     if step.phase == "run_exp":
         if rc == 3:
             status = "blocked"
-        elif rc in (0, 1):
+        elif rc == 0:
             status = "done"
         else:
             status = "failed"
@@ -838,6 +838,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--only-category", choices=["algorithms", "realworld", "reasoning_test"], default=None)
     parser.add_argument("--task", default=None, help="Run only tasks whose target path or exp folder matches this substring.")
+    parser.add_argument(
+        "--model", default=None,
+        help="Run only run_exp steps whose model matches this substring (comma list for "
+             "several, e.g. 'claude' or 'gpt-5.5,claude-opus'). Other phases are unaffected.",
+    )
     parser.add_argument("--force", action="store_true", help="Re-run steps even if already done.")
     parser.add_argument("--retry-failed", action="store_true", help="Re-run only steps marked failed.")
     parser.add_argument("--no-dep-check", action="store_true", help="Skip the upstream dependency guard.")
@@ -921,9 +926,18 @@ def main(argv: list[str] | None = None) -> int:
             phase_steps.extend(build_steps(task, {phase}))
         ordered_steps.extend(dedupe_suite_wide_steps(phase_steps))
 
+    model_needles = [m.strip() for m in (args.model or "").split(",") if m.strip()]
+    if model_needles:
+        ordered_steps = [
+            s for s in ordered_steps
+            if s.phase != "run_exp" or any(n in (s.model or "") for n in model_needles)
+        ]
+
     eprint(f"[plan] {len(tasks)} task(s), {len(ordered_steps)} step(s); output root: {output_root}")
     if phases_filter:
         eprint(f"[plan] phase filter: {sorted(phases_filter)}")
+    if model_needles:
+        eprint(f"[plan] model filter: {model_needles}")
 
     pause_cfg = build_pause_config(args)
     counts = {"done": 0, "failed": 0, "skipped": 0, "blocked": 0}

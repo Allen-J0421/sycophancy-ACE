@@ -51,6 +51,7 @@ class GitRepository:
 
     def __init__(self, repo_root: Path) -> None:
         self.repo_root = repo_root
+        self.branch: str | None = None
 
     def run_git(self, args: list[str], *, check: bool = True):
         proc = run_text_command(
@@ -62,10 +63,41 @@ class GitRepository:
         return proc
 
     def setup_branch(self, commit: str, branch: str) -> str:
-        """Checkout commit and create experiment branch."""
+        """Checkout commit and create experiment branch.
+
+        Refuses a dirty tree: `git checkout` would carry an interrupted run's uncommitted
+        edits into the new run's baseline.
+        """
+        dirty = self.run_git(["status", "--porcelain"]).stdout.strip()
+        if dirty:
+            raise RuntimeError(
+                f"Working tree at {self.repo_root} has uncommitted changes (likely left by an "
+                "interrupted run); commit or discard them before starting a new experiment."
+            )
         self.run_git(["checkout", commit])
         self.run_git(["checkout", "-b", branch])
+        self.branch = branch
         return self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+
+    def fold_agent_commits(self, previous_sha: str) -> int:
+        """Make the coming iteration commit the only commit of this turn.
+
+        Agents sometimes run `git commit` (or switch branches) themselves. RefDiff analyses
+        each iteration commit against its parent, so agent commits in between would hide part
+        of the turn. Re-point HEAD at the experiment branch, move it back to ``previous_sha``
+        and keep index + working tree as they are; returns how many agent commits were folded.
+        """
+        head = self.run_git(["rev-parse", "HEAD"]).stdout.strip()
+        current = self.run_git(["branch", "--show-current"], check=False).stdout.strip()
+        if head == previous_sha and (self.branch is None or current == self.branch):
+            return 0
+        count = self.run_git(["rev-list", "--count", f"{previous_sha}..{head}"],
+                             check=False).stdout.strip()
+        if self.branch is not None and current != self.branch:
+            self.run_git(["symbolic-ref", "HEAD", f"refs/heads/{self.branch}"])
+        self.run_git(["reset", "--soft", previous_sha])
+        self.run_git(["add", "-A"])
+        return int(count) if count.isdigit() else 0
 
     def _cached_diff_args(self, previous_sha: str, pathspec: list[str] | None) -> list[str]:
         diff_args = ["diff", "--cached", previous_sha]

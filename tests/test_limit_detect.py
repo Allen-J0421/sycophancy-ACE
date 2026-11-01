@@ -18,6 +18,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 import run_pipeline  # noqa: E402
 from experiment_runner.limit_detect import (  # noqa: E402
+    NETWORK,
     OVERLOAD,
     QUOTA,
     SESSION_LIMIT,
@@ -104,6 +105,23 @@ def test_claude_text_match_without_429():
                                 result="You've hit your usage limit")
     hit = detect_limit(provider="claude", jsonl_text=jsonl, cfg=DEFAULT, now=NOW)
     assert hit is not None and hit.reset_dt is None
+
+
+def test_claude_network_unreachable_positive():
+    # Real captured result from a run with the machine offline (exit 1, empty diff).
+    jsonl = _claude_result_line(
+        is_error=True, api_error_status=None,
+        result="API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)",
+    )
+    hit = detect_limit(provider="claude", jsonl_text=jsonl, cfg=DEFAULT, now=NOW)
+    assert hit is not None
+    assert hit.provider == "claude" and hit.kind == NETWORK and hit.reset_dt is None
+
+
+def test_claude_network_text_without_error_negative():
+    # The agent merely discussing ENOTFOUND in a successful turn is not an outage.
+    jsonl = _claude_result_line(is_error=False, result="Handled the ENOTFOUND case in DnsResolver.")
+    assert detect_limit(provider="claude", jsonl_text=jsonl, cfg=DEFAULT, now=NOW) is None
 
 
 def test_claude_skips_malformed_lines():
@@ -316,18 +334,20 @@ def test_clean_dead_run_respects_disable(tmp_path):
     assert csv.exists()
 
 
-def test_run_step_maps_exit_3_to_blocked(tmp_path, monkeypatch):
+@pytest.mark.parametrize("exit_code,expected", [(0, "done"), (1, "failed"),
+                                                 (2, "failed"), (3, "blocked")])
+def test_run_step_classifies_experiment_exit(tmp_path, monkeypatch, exit_code, expected):
     task = _make_task(tmp_path, model="claude-sonnet-4-6")
     step = run_pipeline.Step("repo-high-Agent::run_exp::claude-sonnet-4-6", task, "run_exp",
                              "claude-sonnet-4-6")
 
     class _Proc:
-        returncode = 3
+        returncode = exit_code
 
     monkeypatch.setattr(run_pipeline.subprocess, "run", lambda *a, **k: _Proc())
     status, detail = run_pipeline.run_step(step, dry_run=False)
-    assert status == "blocked"
-    assert "exit=3" in detail
+    assert status == expected
+    assert f"exit={exit_code}" in detail
 
 
 def test_schedule_skips_ahead_and_retries(tmp_path, monkeypatch):
@@ -407,6 +427,9 @@ def test_experiment_runner_aborts_on_session_limit(tmp_path):
 
         def capture_step_diff(self, prev, pathspec):
             return ""
+
+        def fold_agent_commits(self, previous_sha):
+            return 0
 
         def commit(self, message):
             return "commit-sha"

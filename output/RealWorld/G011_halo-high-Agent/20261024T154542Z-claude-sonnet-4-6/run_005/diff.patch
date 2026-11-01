@@ -1,0 +1,172 @@
+diff --git a/application/src/main/java/run/halo/app/content/comment/CommentServiceImpl.java b/application/src/main/java/run/halo/app/content/comment/CommentServiceImpl.java
+index 82fc65f26..b328d75a9 100644
+--- a/application/src/main/java/run/halo/app/content/comment/CommentServiceImpl.java
++++ b/application/src/main/java/run/halo/app/content/comment/CommentServiceImpl.java
+@@ -121,9 +121,10 @@ public class CommentServiceImpl extends AbstractCommentService implements Commen
+     private Mono<Void> populateApproveState(Comment comment) {
+         return hasCommentManagePermission()
+                 .filter(Boolean::booleanValue)
+-                .doOnNext(hasPermission -> {
++                .map(hasPermission -> {
+                     comment.getSpec().setApproved(true);
+                     comment.getSpec().setApprovedTime(Instant.now());
++                    return hasPermission;
+                 })
+                 .then();
+     }
+@@ -134,8 +135,11 @@ public class CommentServiceImpl extends AbstractCommentService implements Commen
+         }
+         return fetchCurrentUser()
+                 .switchIfEmpty(Mono.error(new IllegalStateException("The owner must not be null.")))
+-                .map(this::toCommentOwner)
+-                .doOnNext(owner -> comment.getSpec().setOwner(owner))
++                .map(user -> {
++                    var owner = toCommentOwner(user);
++                    comment.getSpec().setOwner(owner);
++                    return owner;
++                })
+                 .then();
+     }
+ 
+diff --git a/application/src/main/java/run/halo/app/content/comment/ReplyServiceImpl.java b/application/src/main/java/run/halo/app/content/comment/ReplyServiceImpl.java
+index 5543a0711..1ffa7c0fe 100644
+--- a/application/src/main/java/run/halo/app/content/comment/ReplyServiceImpl.java
++++ b/application/src/main/java/run/halo/app/content/comment/ReplyServiceImpl.java
+@@ -159,15 +159,19 @@ public class ReplyServiceImpl extends AbstractCommentService implements ReplySer
+         var steps = new ArrayList<Publisher<?>>();
+         var approveItMono = hasCommentManagePermission()
+                 .filter(Boolean::booleanValue)
+-                .doOnNext(hasPermission -> {
++                .map(hasPermission -> {
+                     reply.getSpec().setApproved(true);
+                     reply.getSpec().setApprovedTime(Instant.now());
++                    return hasPermission;
+                 });
+         steps.add(approveItMono);
+ 
+         var populateOwnerMono = fetchCurrentUser()
+                 .switchIfEmpty(Mono.error(new IllegalArgumentException("Reply owner must not be null.")))
+-                .doOnNext(user -> reply.getSpec().setOwner(toCommentOwner(user)));
++                .map(user -> {
++                    reply.getSpec().setOwner(toCommentOwner(user));
++                    return user;
++                });
+         if (reply.getSpec().getOwner() == null) {
+             steps.add(populateOwnerMono);
+         }
+diff --git a/application/src/main/java/run/halo/app/content/impl/SnapshotServiceImpl.java b/application/src/main/java/run/halo/app/content/impl/SnapshotServiceImpl.java
+index 6b1aa33b6..3bcee5401 100644
+--- a/application/src/main/java/run/halo/app/content/impl/SnapshotServiceImpl.java
++++ b/application/src/main/java/run/halo/app/content/impl/SnapshotServiceImpl.java
+@@ -74,14 +74,20 @@ public class SnapshotServiceImpl implements SnapshotService {
+     @Override
+     public Mono<Snapshot> patchAndCreate(Snapshot snapshot, @Nullable Snapshot baseSnapshot, Content content) {
+         return Mono.just(snapshot)
+-                .doOnNext(s -> this.patch(s, baseSnapshot, content))
++                .map(s -> {
++                    this.patch(s, baseSnapshot, content);
++                    return s;
++                })
+                 .flatMap(client::create);
+     }
+ 
+     @Override
+     public Mono<Snapshot> patchAndUpdate(Snapshot snapshot, Snapshot baseSnapshot, Content content) {
+         return Mono.just(snapshot)
+-                .doOnNext(s -> this.patch(s, baseSnapshot, content))
++                .map(s -> {
++                    this.patch(s, baseSnapshot, content);
++                    return s;
++                })
+                 .flatMap(client::update);
+     }
+ 
+diff --git a/application/src/main/java/run/halo/app/core/user/service/impl/UserServiceImpl.java b/application/src/main/java/run/halo/app/core/user/service/impl/UserServiceImpl.java
+index 6a579bb47..edac62159 100644
+--- a/application/src/main/java/run/halo/app/core/user/service/impl/UserServiceImpl.java
++++ b/application/src/main/java/run/halo/app/core/user/service/impl/UserServiceImpl.java
+@@ -230,7 +230,7 @@ public class UserServiceImpl implements UserService {
+                             })
+                             .then();
+                     var updateUser = client.get(User.class, username)
+-                            .doOnNext(u -> {
++                            .map(u -> {
+                                 var annotations = u.getMetadata().getAnnotations();
+                                 if (annotations == null) {
+                                     annotations = new HashMap<>();
+@@ -238,6 +238,7 @@ public class UserServiceImpl implements UserService {
+                                 }
+                                 annotations.put(
+                                         User.REQUEST_TO_UPDATE, clock.instant().toString());
++                                return u;
+                             })
+                             .flatMap(client::update)
+                             .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+@@ -314,7 +315,10 @@ public class UserServiceImpl implements UserService {
+                                 .filter(has -> !has)
+                                 .switchIfEmpty(
+                                         Mono.error(() -> new EmailAlreadyTakenException("Email is already taken")))
+-                                .doOnNext(v -> spec.setEmailVerified(true))
++                                .map(v -> {
++                                    spec.setEmailVerified(true);
++                                    return v;
++                                })
+                                 .then();
+                     }
+                     return verifyEmail.then(Mono.defer(() -> {
+@@ -399,7 +403,10 @@ public class UserServiceImpl implements UserService {
+         return client.fetch(User.class, username)
+                 .filter(user -> !Boolean.TRUE.equals(user.getSpec().getDisabled()))
+                 .flatMap(user -> deviceService.revoke(username).thenReturn(user))
+-                .doOnNext(user -> user.getSpec().setDisabled(true))
++                .map(user -> {
++                    user.getSpec().setDisabled(true);
++                    return user;
++                })
+                 .flatMap(client::update)
+                 .as(tx::transactional);
+     }
+@@ -408,7 +415,10 @@ public class UserServiceImpl implements UserService {
+     public Mono<User> enable(String username) {
+         return client.fetch(User.class, username)
+                 .filter(user -> Boolean.TRUE.equals(user.getSpec().getDisabled()))
+-                .doOnNext(user -> user.getSpec().setDisabled(false))
++                .map(user -> {
++                    user.getSpec().setDisabled(false);
++                    return user;
++                })
+                 .flatMap(client::update);
+     }
+ 
+diff --git a/application/src/main/java/run/halo/app/security/authentication/token/PatAuthenticationManager.java b/application/src/main/java/run/halo/app/security/authentication/token/PatAuthenticationManager.java
+index c055584b2..345cc3076 100644
+--- a/application/src/main/java/run/halo/app/security/authentication/token/PatAuthenticationManager.java
++++ b/application/src/main/java/run/halo/app/security/authentication/token/PatAuthenticationManager.java
+@@ -244,7 +244,10 @@ public class PatAuthenticationManager implements ReactiveAuthenticationManager {
+                                     var diff = Duration.between(lastUsed, now);
+                                     return !diff.minus(MIN_UPDATE_GAP).isNegative();
+                                 })
+-                                .doOnNext(pat -> pat.getSpec().setLastUsed(now))
++                                .map(pat -> {
++                                    pat.getSpec().setLastUsed(now);
++                                    return pat;
++                                })
+                                 .flatMap(client::update))
+                 .retryWhen(Retry.backoff(3, Duration.ofMillis(50))
+                         .filter(OptimisticLockingFailureException.class::isInstance))
+diff --git a/application/src/main/java/run/halo/app/security/authentication/twofactor/TwoFactorAuthEndpoint.java b/application/src/main/java/run/halo/app/security/authentication/twofactor/TwoFactorAuthEndpoint.java
+index 35bdcb931..139a60001 100644
+--- a/application/src/main/java/run/halo/app/security/authentication/twofactor/TwoFactorAuthEndpoint.java
++++ b/application/src/main/java/run/halo/app/security/authentication/twofactor/TwoFactorAuthEndpoint.java
+@@ -189,7 +189,10 @@ public class TwoFactorAuthEndpoint implements CustomEndpoint {
+                         .switchIfEmpty(Mono.error(
+                                 () -> new UnsatisfiedAttributeValueException("problemDetail.user.password.notMatch")))
+                         .delayUntil(user -> validateTotpCode(user, passwordRequest.getTotpCode()))
+-                        .doOnNext(user -> user.getSpec().setTwoFactorAuthEnabled(enabled))
++                        .map(user -> {
++                            user.getSpec().setTwoFactorAuthEnabled(enabled);
++                            return user;
++                        })
+                         .flatMap(client::update)
+                         .map(TwoFactorUtils::getTwoFactorAuthSettings))
+                 .flatMap(twoFactorAuthSettings -> ServerResponse.ok().bodyValue(twoFactorAuthSettings));

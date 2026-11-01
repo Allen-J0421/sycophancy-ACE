@@ -1,0 +1,304 @@
+diff --git a/app/src/main/java/org/schabi/newpipe/error/ErrorActivity.kt b/app/src/main/java/org/schabi/newpipe/error/ErrorActivity.kt
+index d596b8597..b9f2547c3 100644
+--- a/app/src/main/java/org/schabi/newpipe/error/ErrorActivity.kt
++++ b/app/src/main/java/org/schabi/newpipe/error/ErrorActivity.kt
+@@ -67,7 +67,7 @@ class ErrorActivity : AppCompatActivity() {
+         ThemeHelper.setTheme(this)
+ 
+         binding = ActivityErrorBinding.inflate(layoutInflater)
+-        setContentView(binding.getRoot())
++        setContentView(binding.root)
+ 
+         setSupportActionBar(binding.toolbarLayout.toolbar)
+         supportActionBar?.apply {
+diff --git a/app/src/main/java/org/schabi/newpipe/local/feed/service/FeedLoadManager.kt b/app/src/main/java/org/schabi/newpipe/local/feed/service/FeedLoadManager.kt
+index 49a033f82..c1c79543d 100644
+--- a/app/src/main/java/org/schabi/newpipe/local/feed/service/FeedLoadManager.kt
++++ b/app/src/main/java/org/schabi/newpipe/local/feed/service/FeedLoadManager.kt
+@@ -9,7 +9,6 @@ import io.reactivex.rxjava3.core.Completable
+ import io.reactivex.rxjava3.core.Flowable
+ import io.reactivex.rxjava3.core.Notification
+ import io.reactivex.rxjava3.core.Single
+-import io.reactivex.rxjava3.functions.Consumer
+ import io.reactivex.rxjava3.processors.PublishProcessor
+ import io.reactivex.rxjava3.schedulers.Schedulers
+ import java.time.OffsetDateTime
+@@ -140,7 +139,46 @@ class FeedLoadManager(private val context: Context) {
+             }
+             .observeOn(Schedulers.io())
+             .buffer(BUFFER_COUNT_BEFORE_INSERT)
+-            .doOnNext(DatabaseConsumer())
++            .doOnNext { list ->
++                runBlocking {
++                    feedDatabaseManager.database().withWriteTransaction {
++                        for (notification in list) {
++                            when {
++                                notification.isOnNext -> {
++                                    val info = notification.value!!
++
++                                    notification.value!!.newStreams = filterNewStreams(info.streams)
++
++                                    feedDatabaseManager.upsertAll(info.uid, info.streams)
++                                    subscriptionManager.updateFromInfo(info)
++
++                                    if (info.errors.isNotEmpty()) {
++                                        feedResultsHolder.addErrors(
++                                            info.errors.map {
++                                                FeedLoadService.RequestException(
++                                                    info.uid,
++                                                    "${info.serviceId}:${info.url}",
++                                                    it
++                                                )
++                                            }
++                                        )
++                                        feedDatabaseManager.markAsOutdated(info.uid)
++                                    }
++                                }
++
++                                notification.isOnError -> {
++                                    val error = notification.error
++                                    feedResultsHolder.addError(error!!)
++
++                                    if (error is FeedLoadService.RequestException) {
++                                        feedDatabaseManager.markAsOutdated(error.subscriptionId)
++                                    }
++                                }
++                            }
++                        }
++                    }
++                }
++            }
+             .subscribeOn(Schedulers.io())
+             .toList()
+             .flatMap { x -> postProcessFeed().toSingleDefault(x.flatten()) }
+@@ -278,60 +316,16 @@ class FeedLoadManager(private val context: Context) {
+         FeedEventManager.postEvent(FeedEventManager.Event.ProgressEvent(R.string.feed_processing_message))
+     }.subscribeOn(Schedulers.io())
+ 
+-    private inner class DatabaseConsumer : Consumer<List<Notification<FeedUpdateInfo>>> {
+-
+-        override fun accept(list: List<Notification<FeedUpdateInfo>>) {
+-            runBlocking {
+-                feedDatabaseManager.database().withWriteTransaction {
+-                    for (notification in list) {
+-                        when {
+-                            notification.isOnNext -> {
+-                                val info = notification.value!!
+-
+-                                notification.value!!.newStreams = filterNewStreams(info.streams)
+-
+-                                feedDatabaseManager.upsertAll(info.uid, info.streams)
+-                                subscriptionManager.updateFromInfo(info)
+-
+-                                if (info.errors.isNotEmpty()) {
+-                                    feedResultsHolder.addErrors(
+-                                        info.errors.map {
+-                                            FeedLoadService.RequestException(
+-                                                info.uid,
+-                                                "${info.serviceId}:${info.url}",
+-                                                it
+-                                            )
+-                                        }
+-                                    )
+-                                    feedDatabaseManager.markAsOutdated(info.uid)
+-                                }
+-                            }
+-
+-                            notification.isOnError -> {
+-                                val error = notification.error
+-                                feedResultsHolder.addError(error!!)
+-
+-                                if (error is FeedLoadService.RequestException) {
+-                                    feedDatabaseManager.markAsOutdated(error.subscriptionId)
+-                                }
+-                            }
+-                        }
+-                    }
+-                }
+-            }
+-        }
+-
+-        private fun filterNewStreams(list: List<StreamInfoItem>): List<StreamInfoItem> {
+-            return list.filter {
+-                !feedDatabaseManager.doesStreamExist(it) &&
+-                    it.uploadDate != null &&
+-                    // Streams older than this date are automatically removed from the feed.
+-                    // Therefore, streams which are not in the database,
+-                    // but older than this date, are considered old.
+-                    it.uploadDate!!.offsetDateTime().isAfter(
+-                        FeedDatabaseManager.FEED_OLDEST_ALLOWED_DATE
+-                    )
+-            }
++    private fun filterNewStreams(list: List<StreamInfoItem>): List<StreamInfoItem> {
++        return list.filter {
++            !feedDatabaseManager.doesStreamExist(it) &&
++                it.uploadDate != null &&
++                // Streams older than this date are automatically removed from the feed.
++                // Therefore, streams which are not in the database,
++                // but older than this date, are considered old.
++                it.uploadDate!!.offsetDateTime().isAfter(
++                    FeedDatabaseManager.FEED_OLDEST_ALLOWED_DATE
++                )
+         }
+     }
+ 
+diff --git a/app/src/main/java/org/schabi/newpipe/local/subscription/SubscriptionViewModel.kt b/app/src/main/java/org/schabi/newpipe/local/subscription/SubscriptionViewModel.kt
+index e63ceb50a..55dcc6d52 100644
+--- a/app/src/main/java/org/schabi/newpipe/local/subscription/SubscriptionViewModel.kt
++++ b/app/src/main/java/org/schabi/newpipe/local/subscription/SubscriptionViewModel.kt
+@@ -19,8 +19,8 @@ import org.schabi.newpipe.util.DEFAULT_THROTTLE_TIMEOUT
+ import org.schabi.newpipe.util.ThemeHelper.getItemViewMode
+ 
+ class SubscriptionViewModel(application: Application) : AndroidViewModel(application) {
+-    private var feedDatabaseManager: FeedDatabaseManager = FeedDatabaseManager(application)
+-    private var subscriptionManager = SubscriptionManager(application)
++    private val feedDatabaseManager = FeedDatabaseManager(application)
++    private val subscriptionManager = SubscriptionManager(application)
+ 
+     // true -> list view, false -> grid view
+     private val listViewMode = BehaviorProcessor.createDefault(
+@@ -33,7 +33,7 @@ class SubscriptionViewModel(application: Application) : AndroidViewModel(applica
+     val stateLiveData: LiveData<SubscriptionState> = mutableStateLiveData
+     val feedGroupsLiveData: LiveData<Pair<List<Group>, Boolean>> = mutableFeedGroupsLiveData
+ 
+-    private var feedGroupItemsDisposable = Flowable
++    private val feedGroupItemsDisposable = Flowable
+         .combineLatest(
+             feedDatabaseManager.groups(),
+             listViewModeFlowable,
+@@ -41,10 +41,7 @@ class SubscriptionViewModel(application: Application) : AndroidViewModel(applica
+         )
+         .throttleLatest(DEFAULT_THROTTLE_TIMEOUT, TimeUnit.MILLISECONDS)
+         .map { (feedGroups, listViewMode) ->
+-            Pair(
+-                feedGroups.map(if (listViewMode) ::FeedGroupCardItem else ::FeedGroupCardGridItem),
+-                listViewMode
+-            )
++            feedGroups.map(if (listViewMode) ::FeedGroupCardItem else ::FeedGroupCardGridItem) to listViewMode
+         }
+         .subscribeOn(Schedulers.io())
+         .subscribe(
+@@ -52,7 +49,7 @@ class SubscriptionViewModel(application: Application) : AndroidViewModel(applica
+             { mutableStateLiveData.postValue(SubscriptionState.ErrorState(it)) }
+         )
+ 
+-    private var stateItemsDisposable = subscriptionManager.subscriptions()
++    private val stateItemsDisposable = subscriptionManager.subscriptions()
+         .throttleLatest(DEFAULT_THROTTLE_TIMEOUT, TimeUnit.MILLISECONDS)
+         .map { it.map { entity -> ChannelItem(entity.toChannelInfoItem(), entity.uid, ChannelItem.ItemVersion.MINI) } }
+         .subscribeOn(Schedulers.io())
+diff --git a/app/src/main/java/org/schabi/newpipe/local/subscription/dialog/FeedGroupDialogViewModel.kt b/app/src/main/java/org/schabi/newpipe/local/subscription/dialog/FeedGroupDialogViewModel.kt
+index 2c70e2397..eca4cc7d6 100644
+--- a/app/src/main/java/org/schabi/newpipe/local/subscription/dialog/FeedGroupDialogViewModel.kt
++++ b/app/src/main/java/org/schabi/newpipe/local/subscription/dialog/FeedGroupDialogViewModel.kt
+@@ -24,13 +24,13 @@ class FeedGroupDialogViewModel(
+     initialShowOnlyUngrouped: Boolean = false
+ ) : ViewModel() {
+ 
+-    private var feedDatabaseManager: FeedDatabaseManager = FeedDatabaseManager(applicationContext)
+-    private var subscriptionManager = SubscriptionManager(applicationContext)
++    private val feedDatabaseManager = FeedDatabaseManager(applicationContext)
++    private val subscriptionManager = SubscriptionManager(applicationContext)
+ 
+-    private var filterSubscriptions = BehaviorProcessor.create<String>()
+-    private var toggleShowOnlyUngrouped = BehaviorProcessor.create<Boolean>()
++    private val filterSubscriptions = BehaviorProcessor.create<String>()
++    private val toggleShowOnlyUngrouped = BehaviorProcessor.create<Boolean>()
+ 
+-    private var subscriptionsFlowable = Flowable
++    private val subscriptionsFlowable = Flowable
+         .combineLatest(
+             filterSubscriptions.startWithItem(initialQuery),
+             toggleShowOnlyUngrouped.startWithItem(initialShowOnlyUngrouped),
+@@ -50,11 +50,11 @@ class FeedGroupDialogViewModel(
+ 
+     private var actionProcessingDisposable: Disposable? = null
+ 
+-    private var feedGroupDisposable = feedDatabaseManager.getGroup(groupId)
++    private val feedGroupDisposable = feedDatabaseManager.getGroup(groupId)
+         .subscribeOn(Schedulers.io())
+         .subscribe(mutableGroupLiveData::postValue)
+ 
+-    private var subscriptionsDisposable = Flowable
++    private val subscriptionsDisposable = Flowable
+         .combineLatest(
+             subscriptionsFlowable,
+             feedDatabaseManager.subscriptionIdsForGroup(groupId)
+diff --git a/app/src/main/java/org/schabi/newpipe/local/subscription/dialog/FeedGroupReorderDialogViewModel.kt b/app/src/main/java/org/schabi/newpipe/local/subscription/dialog/FeedGroupReorderDialogViewModel.kt
+index a36dabf5a..7fd3dc6e8 100644
+--- a/app/src/main/java/org/schabi/newpipe/local/subscription/dialog/FeedGroupReorderDialogViewModel.kt
++++ b/app/src/main/java/org/schabi/newpipe/local/subscription/dialog/FeedGroupReorderDialogViewModel.kt
+@@ -11,7 +11,7 @@ import org.schabi.newpipe.database.feed.model.FeedGroupEntity
+ import org.schabi.newpipe.local.feed.FeedDatabaseManager
+ 
+ class FeedGroupReorderDialogViewModel(application: Application) : AndroidViewModel(application) {
+-    private var feedDatabaseManager: FeedDatabaseManager = FeedDatabaseManager(application)
++    private val feedDatabaseManager = FeedDatabaseManager(application)
+ 
+     private val mutableGroupsLiveData = MutableLiveData<List<FeedGroupEntity>>()
+     private val mutableDialogEventLiveData = MutableLiveData<DialogEvent>()
+@@ -20,7 +20,7 @@ class FeedGroupReorderDialogViewModel(application: Application) : AndroidViewMod
+ 
+     private var actionProcessingDisposable: Disposable? = null
+ 
+-    private var groupsDisposable = feedDatabaseManager.groups()
++    private val groupsDisposable = feedDatabaseManager.groups()
+         .take(1)
+         .subscribeOn(Schedulers.io())
+         .subscribe(mutableGroupsLiveData::postValue)
+diff --git a/app/src/main/java/org/schabi/newpipe/local/subscription/workers/SubscriptionImportWorker.kt b/app/src/main/java/org/schabi/newpipe/local/subscription/workers/SubscriptionImportWorker.kt
+index 8d40a6fb8..4c45cc149 100644
+--- a/app/src/main/java/org/schabi/newpipe/local/subscription/workers/SubscriptionImportWorker.kt
++++ b/app/src/main/java/org/schabi/newpipe/local/subscription/workers/SubscriptionImportWorker.kt
+@@ -209,17 +209,15 @@ class SubscriptionImportWorker(
+         const val WORK_NAME = "SubscriptionImportWorker"
+ 
+         internal fun getInputStreamContentType(fileHelper: StoredFileHelper): String {
+-            val contentType = fileHelper.getType()
++            val contentType = fileHelper.type
+             if (!contentType.isNullOrEmpty() && contentType != DEFAULT_MIME) {
+                 return contentType
+             }
+ 
+-            val fileName = fileHelper.getName() ?: return DEFAULT_MIME
++            val fileName = fileHelper.name ?: return DEFAULT_MIME
+             val pointIndex = fileName.lastIndexOf('.')
+-            return when {
+-                pointIndex == -1 || pointIndex >= fileName.length - 1 -> DEFAULT_MIME
+-                else -> fileName.substring(pointIndex + 1)
+-            }
++            return if (pointIndex == -1 || pointIndex >= fileName.length - 1) DEFAULT_MIME
++            else fileName.substring(pointIndex + 1)
+         }
+     }
+ }
+diff --git a/app/src/main/java/org/schabi/newpipe/settings/ComposeDownloadStorage.kt b/app/src/main/java/org/schabi/newpipe/settings/ComposeDownloadStorage.kt
+index b9d1ad87f..151c5f71e 100644
+--- a/app/src/main/java/org/schabi/newpipe/settings/ComposeDownloadStorage.kt
++++ b/app/src/main/java/org/schabi/newpipe/settings/ComposeDownloadStorage.kt
+@@ -30,10 +30,8 @@ class ComposeDownloadStorage(private val context: Context) : DownloadStorageHost
+     override fun acquireFolder(folder: Uri): FolderPickResult {
+         if (FilePickerActivityHelper.isOwnFileUri(context, folder)) {
+             val target = Utils.getFileForUri(folder)
+-            return when {
+-                target.canWrite() -> FolderPickResult.Picked(Uri.fromFile(target).toString())
+-                else -> FolderPickResult.Failed(DownloadFolderError.EXTERNAL_STORAGE_UNAVAILABLE)
+-            }
++            return if (target.canWrite()) FolderPickResult.Picked(Uri.fromFile(target).toString())
++            else FolderPickResult.Failed(DownloadFolderError.EXTERNAL_STORAGE_UNAVAILABLE)
+         }
+ 
+         return try {
+diff --git a/app/src/main/java/org/schabi/newpipe/util/potoken/JavaScriptUtil.kt b/app/src/main/java/org/schabi/newpipe/util/potoken/JavaScriptUtil.kt
+index 06740a00e..55f64314d 100644
+--- a/app/src/main/java/org/schabi/newpipe/util/potoken/JavaScriptUtil.kt
++++ b/app/src/main/java/org/schabi/newpipe/util/potoken/JavaScriptUtil.kt
+@@ -96,7 +96,7 @@ private fun base64ToU8(base64: String): String {
+ }
+ 
+ private fun newUint8Array(contents: ByteArray): String {
+-    return "new Uint8Array([" + contents.joinToString(separator = ",") { it.toUByte().toString() } + "])"
++    return "new Uint8Array([${contents.joinToString(separator = ",") { it.toUByte().toString() }}])"
+ }
+ 
+ /**

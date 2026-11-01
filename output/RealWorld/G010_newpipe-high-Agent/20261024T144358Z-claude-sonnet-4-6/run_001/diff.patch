@@ -1,0 +1,610 @@
+diff --git a/app/src/main/java/org/schabi/newpipe/App.kt b/app/src/main/java/org/schabi/newpipe/App.kt
+index 3ca259528..964c69a6c 100644
+--- a/app/src/main/java/org/schabi/newpipe/App.kt
++++ b/app/src/main/java/org/schabi/newpipe/App.kt
+@@ -19,7 +19,6 @@ import io.reactivex.rxjava3.exceptions.CompositeException
+ import io.reactivex.rxjava3.exceptions.MissingBackpressureException
+ import io.reactivex.rxjava3.exceptions.OnErrorNotImplementedException
+ import io.reactivex.rxjava3.exceptions.UndeliverableException
+-import io.reactivex.rxjava3.functions.Consumer
+ import io.reactivex.rxjava3.plugins.RxJavaPlugins
+ import java.io.IOException
+ import java.io.InterruptedIOException
+@@ -149,71 +148,63 @@ open class App :
+     }
+ 
+     private fun configureRxJavaErrorHandler() {
++        fun isThrowableIgnored(throwable: Throwable): Boolean {
++            // Don't crash the application over a simple network problem
++            return throwable.hasAssignableCause( // network api cancellation
++                IOException::class.java,
++                SocketException::class.java, // blocking code disposed
++                InterruptedException::class.java,
++                InterruptedIOException::class.java
++            )
++        }
++
++        fun isThrowableCritical(throwable: Throwable): Boolean {
++            // Though these exceptions cannot be ignored
++            return throwable.hasAssignableCause(
++                // bug in app
++                NullPointerException::class.java,
++                IllegalArgumentException::class.java,
++                OnErrorNotImplementedException::class.java,
++                MissingBackpressureException::class.java,
++                // bug in operator
++                IllegalStateException::class.java
++            )
++        }
++
++        fun reportException(throwable: Throwable) {
++            // Throw uncaught exception that will trigger the report system
++            Thread.currentThread().uncaughtExceptionHandler
++                ?.uncaughtException(Thread.currentThread(), throwable)
++        }
++
+         // https://github.com/ReactiveX/RxJava/wiki/What's-different-in-2.0#error-handling
+-        RxJavaPlugins.setErrorHandler(
+-            object : Consumer<Throwable> {
+-                override fun accept(throwable: Throwable) {
+-                    Log.e(TAG, "RxJavaPlugins.ErrorHandler called with -> : throwable = [${throwable.javaClass.getName()}]")
+-
+-                    // As UndeliverableException is a wrapper,
+-                    // get the cause of it to get the "real" exception
+-                    val actualThrowable = (throwable as? UndeliverableException)?.cause ?: throwable
+-
+-                    val errors = (actualThrowable as? CompositeException)?.exceptions ?: listOf(actualThrowable)
+-
+-                    for (error in errors) {
+-                        if (isThrowableIgnored(error)) {
+-                            return
+-                        }
+-                        if (isThrowableCritical(error)) {
+-                            reportException(error)
+-                            return
+-                        }
+-                    }
+-
+-                    // Out-of-lifecycle exceptions should only be reported if a debug user wishes so,
+-                    // When exception is not reported, log it
+-                    if (isDisposedRxExceptionsReported()) {
+-                        reportException(actualThrowable)
+-                    } else {
+-                        Log.e(TAG, "RxJavaPlugin: Undeliverable Exception received: ", actualThrowable)
+-                    }
+-                }
++        RxJavaPlugins.setErrorHandler { throwable ->
++            Log.e(TAG, "RxJavaPlugins.ErrorHandler called with -> : throwable = [${throwable.javaClass.name}]")
+ 
+-                fun isThrowableIgnored(throwable: Throwable): Boolean {
+-                    // Don't crash the application over a simple network problem
+-                    return throwable // network api cancellation
+-                        .hasAssignableCause(
+-                            IOException::class.java,
+-                            SocketException::class.java, // blocking code disposed
+-                            InterruptedException::class.java,
+-                            InterruptedIOException::class.java
+-                        )
+-                }
++            // As UndeliverableException is a wrapper,
++            // get the cause of it to get the "real" exception
++            val actualThrowable = (throwable as? UndeliverableException)?.cause ?: throwable
+ 
+-                fun isThrowableCritical(throwable: Throwable): Boolean {
+-                    // Though these exceptions cannot be ignored
+-                    return throwable
+-                        .hasAssignableCause(
+-                            // bug in app
+-                            NullPointerException::class.java,
+-                            IllegalArgumentException::class.java,
+-                            OnErrorNotImplementedException::class.java,
+-                            MissingBackpressureException::class.java,
+-                            // bug in operator
+-                            IllegalStateException::class.java
+-                        )
+-                }
++            val errors = (actualThrowable as? CompositeException)?.exceptions ?: listOf(actualThrowable)
+ 
+-                fun reportException(throwable: Throwable) {
+-                    // Throw uncaught exception that will trigger the report system
+-                    Thread
+-                        .currentThread()
+-                        .uncaughtExceptionHandler
+-                        .uncaughtException(Thread.currentThread(), throwable)
++            for (error in errors) {
++                if (isThrowableIgnored(error)) {
++                    return@setErrorHandler
++                }
++                if (isThrowableCritical(error)) {
++                    reportException(error)
++                    return@setErrorHandler
+                 }
+             }
+-        )
++
++            // Out-of-lifecycle exceptions should only be reported if a debug user wishes so,
++            // When exception is not reported, log it
++            if (isDisposedRxExceptionsReported()) {
++                reportException(actualThrowable)
++            } else {
++                Log.e(TAG, "RxJavaPlugin: Undeliverable Exception received: ", actualThrowable)
++            }
++        }
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/schabi/newpipe/NewPipeDatabase.kt b/app/src/main/java/org/schabi/newpipe/NewPipeDatabase.kt
+index b7ab67a2d..e99e8e494 100644
+--- a/app/src/main/java/org/schabi/newpipe/NewPipeDatabase.kt
++++ b/app/src/main/java/org/schabi/newpipe/NewPipeDatabase.kt
+@@ -46,18 +46,9 @@ object NewPipeDatabase {
+ 
+     @JvmStatic
+     fun getInstance(context: Context): AppDatabase {
+-        var result = databaseInstance
+-        if (result == null) {
+-            synchronized(NewPipeDatabase::class.java) {
+-                result = databaseInstance
+-                if (result == null) {
+-                    databaseInstance = getDatabase(context)
+-                    result = databaseInstance
+-                }
+-            }
++        return databaseInstance ?: synchronized(NewPipeDatabase::class.java) {
++            databaseInstance ?: getDatabase(context).also { databaseInstance = it }
+         }
+-
+-        return result!!
+     }
+ 
+     @JvmStatic
+@@ -76,12 +67,10 @@ object NewPipeDatabase {
+ 
+     @JvmStatic
+     fun close() {
+-        if (databaseInstance != null) {
+-            synchronized(NewPipeDatabase::class.java) {
+-                if (databaseInstance != null) {
+-                    databaseInstance!!.close()
+-                    databaseInstance = null
+-                }
++        synchronized(NewPipeDatabase::class.java) {
++            databaseInstance?.let {
++                it.close()
++                databaseInstance = null
+             }
+         }
+     }
+diff --git a/app/src/main/java/org/schabi/newpipe/NewVersionWorker.kt b/app/src/main/java/org/schabi/newpipe/NewVersionWorker.kt
+index 4cdcc6c69..7cd337033 100644
+--- a/app/src/main/java/org/schabi/newpipe/NewVersionWorker.kt
++++ b/app/src/main/java/org/schabi/newpipe/NewVersionWorker.kt
+@@ -56,8 +56,9 @@ class NewVersionWorker(
+         }
+ 
+         // A pending intent to open the apk location url in the browser.
+-        val intent = Intent(Intent.ACTION_VIEW, apkLocationUrl?.toUri())
+-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++        val intent = Intent(Intent.ACTION_VIEW, apkLocationUrl?.toUri()).apply {
++            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++        }
+         val pendingIntent = PendingIntentCompat.getActivity(
+             applicationContext,
+             0,
+diff --git a/app/src/main/java/org/schabi/newpipe/error/ErrorInfo.kt b/app/src/main/java/org/schabi/newpipe/error/ErrorInfo.kt
+index 82f7d84bf..48f2ab185 100644
+--- a/app/src/main/java/org/schabi/newpipe/error/ErrorInfo.kt
++++ b/app/src/main/java/org/schabi/newpipe/error/ErrorInfo.kt
+@@ -219,7 +219,7 @@ class ErrorInfo private constructor(
+                 // content not available exceptions
+                 throwable is AccountTerminatedException ->
+                     throwable.message
+-                        ?.takeIf { reason -> !reason.isEmpty() }
++                        ?.takeIf { reason -> reason.isNotEmpty() }
+                         ?.let { reason ->
+                             ErrorMessage(
+                                 R.string.account_terminated_service_provides_reason,
+diff --git a/app/src/main/java/org/schabi/newpipe/error/ErrorUtil.kt b/app/src/main/java/org/schabi/newpipe/error/ErrorUtil.kt
+index 0fa302623..5215c229d 100644
+--- a/app/src/main/java/org/schabi/newpipe/error/ErrorUtil.kt
++++ b/app/src/main/java/org/schabi/newpipe/error/ErrorUtil.kt
+@@ -28,143 +28,139 @@ import org.schabi.newpipe.R
+  * - Finally use the error activity only as a last resort in case the exception is critical and
+  *      happens in an open activity (since the workflow would be interrupted anyway in that case).
+  */
+-class ErrorUtil {
+-    companion object {
+-        private const val ERROR_REPORT_NOTIFICATION_ID = 5340681
++object ErrorUtil {
++    private const val ERROR_REPORT_NOTIFICATION_ID = 5340681
+ 
+-        /**
+-         * Starts a new error activity allowing the user to report the provided error. Only use this
+-         * method directly as a last resort in case the exception is critical and happens in an open
+-         * activity (since the workflow would be interrupted anyway in that case). So never use this
+-         * for background services.
+-         *
+-         * If the crashed occurred while the app was in the background open a notification instead
+-         *
+-         * @param context the context to use to start the new activity
+-         * @param errorInfo the error info to be reported
+-         */
+-        @JvmStatic
+-        fun openActivity(context: Context, errorInfo: ErrorInfo) {
+-            if (PreferenceManager.getDefaultSharedPreferences(context)
+-                    .getBoolean(MainActivity.KEY_IS_IN_BACKGROUND, true)
+-            ) {
+-                createNotification(context, errorInfo)
+-            } else {
+-                context.startActivity(getErrorActivityIntent(context, errorInfo))
+-            }
++    /**
++     * Starts a new error activity allowing the user to report the provided error. Only use this
++     * method directly as a last resort in case the exception is critical and happens in an open
++     * activity (since the workflow would be interrupted anyway in that case). So never use this
++     * for background services.
++     *
++     * If the crashed occurred while the app was in the background open a notification instead
++     *
++     * @param context the context to use to start the new activity
++     * @param errorInfo the error info to be reported
++     */
++    @JvmStatic
++    fun openActivity(context: Context, errorInfo: ErrorInfo) {
++        if (PreferenceManager.getDefaultSharedPreferences(context)
++                .getBoolean(MainActivity.KEY_IS_IN_BACKGROUND, true)
++        ) {
++            createNotification(context, errorInfo)
++        } else {
++            context.startActivity(getErrorActivityIntent(context, errorInfo))
+         }
++    }
+ 
+-        /**
+-         * Show a bottom snackbar to the user, with a report button that opens the error activity.
+-         * Use this method if the exception is not critical and it happens in a place where a root
+-         * view is available.
+-         *
+-         * @param context will be used to obtain the root view if it is an [Activity]; if no root
+-         *                view can be found an error notification is shown instead
+-         * @param errorInfo the error info to be reported
+-         */
+-        @JvmStatic
+-        fun showSnackbar(context: Context, errorInfo: ErrorInfo) {
+-            val rootView = (context as? Activity)?.findViewById<View>(android.R.id.content)
+-            showSnackbar(context, rootView, errorInfo)
+-        }
++    /**
++     * Show a bottom snackbar to the user, with a report button that opens the error activity.
++     * Use this method if the exception is not critical and it happens in a place where a root
++     * view is available.
++     *
++     * @param context will be used to obtain the root view if it is an [Activity]; if no root
++     *                view can be found an error notification is shown instead
++     * @param errorInfo the error info to be reported
++     */
++    @JvmStatic
++    fun showSnackbar(context: Context, errorInfo: ErrorInfo) {
++        val rootView = (context as? Activity)?.findViewById<View>(android.R.id.content)
++        showSnackbar(context, rootView, errorInfo)
++    }
+ 
+-        /**
+-         * Show a bottom snackbar to the user, with a report button that opens the error activity.
+-         * Use this method if the exception is not critical and it happens in a place where a root
+-         * view is available.
+-         *
+-         * @param fragment will be used to obtain the root view if it has a connected [Activity]; if
+-         *                 no root view can be found an error notification is shown instead
+-         * @param errorInfo the error info to be reported
+-         */
+-        @JvmStatic
+-        fun showSnackbar(fragment: Fragment, errorInfo: ErrorInfo) {
+-            var rootView = fragment.view
+-            if (rootView == null && fragment.activity != null) {
+-                rootView = fragment.requireActivity().findViewById(android.R.id.content)
+-            }
+-            showSnackbar(fragment.requireContext(), rootView, errorInfo)
++    /**
++     * Show a bottom snackbar to the user, with a report button that opens the error activity.
++     * Use this method if the exception is not critical and it happens in a place where a root
++     * view is available.
++     *
++     * @param fragment will be used to obtain the root view if it has a connected [Activity]; if
++     *                 no root view can be found an error notification is shown instead
++     * @param errorInfo the error info to be reported
++     */
++    @JvmStatic
++    fun showSnackbar(fragment: Fragment, errorInfo: ErrorInfo) {
++        var rootView = fragment.view
++        if (rootView == null && fragment.activity != null) {
++            rootView = fragment.requireActivity().findViewById(android.R.id.content)
+         }
++        showSnackbar(fragment.requireContext(), rootView, errorInfo)
++    }
+ 
+-        /**
+-         * Shortcut to calling [showSnackbar] with an [ErrorInfo] of type [UserAction.UI_ERROR]
+-         */
+-        @JvmStatic
+-        fun showUiErrorSnackbar(context: Context, request: String, throwable: Throwable) {
+-            showSnackbar(context, ErrorInfo(throwable, UserAction.UI_ERROR, request))
+-        }
++    /**
++     * Shortcut to calling [showSnackbar] with an [ErrorInfo] of type [UserAction.UI_ERROR]
++     */
++    @JvmStatic
++    fun showUiErrorSnackbar(context: Context, request: String, throwable: Throwable) {
++        showSnackbar(context, ErrorInfo(throwable, UserAction.UI_ERROR, request))
++    }
+ 
+-        /**
+-         * Shortcut to calling [showSnackbar] with an [ErrorInfo] of type [UserAction.UI_ERROR]
+-         */
+-        @JvmStatic
+-        fun showUiErrorSnackbar(fragment: Fragment, request: String, throwable: Throwable) {
+-            showSnackbar(fragment, ErrorInfo(throwable, UserAction.UI_ERROR, request))
+-        }
++    /**
++     * Shortcut to calling [showSnackbar] with an [ErrorInfo] of type [UserAction.UI_ERROR]
++     */
++    @JvmStatic
++    fun showUiErrorSnackbar(fragment: Fragment, request: String, throwable: Throwable) {
++        showSnackbar(fragment, ErrorInfo(throwable, UserAction.UI_ERROR, request))
++    }
+ 
+-        /**
+-         * Create an error notification. Tapping on the notification opens the error activity. Use
+-         * this method if the exception happens inside a background service (player, subscription
+-         * import, ...) or there is no activity/fragment from which to extract a root view.
+-         *
+-         * @param context the context to use to show the notification
+-         * @param errorInfo the error info to be reported; the error message
+-         *                  [ErrorInfo.messageStringId] will be shown in the notification
+-         *                  description
+-         */
+-        @JvmStatic
+-        fun createNotification(context: Context, errorInfo: ErrorInfo) {
+-            val notificationBuilder: NotificationCompat.Builder =
+-                NotificationCompat.Builder(
++    /**
++     * Create an error notification. Tapping on the notification opens the error activity. Use
++     * this method if the exception happens inside a background service (player, subscription
++     * import, ...) or there is no activity/fragment from which to extract a root view.
++     *
++     * @param context the context to use to show the notification
++     * @param errorInfo the error info to be reported; the error message
++     *                  [ErrorInfo.messageStringId] will be shown in the notification
++     *                  description
++     */
++    @JvmStatic
++    fun createNotification(context: Context, errorInfo: ErrorInfo) {
++        val notificationBuilder = NotificationCompat.Builder(
++            context,
++            context.getString(R.string.error_report_channel_id)
++        )
++            .setSmallIcon(R.drawable.ic_bug_report)
++            .setContentTitle(context.getString(R.string.error_report_notification_title))
++            .setContentText(errorInfo.getMessage(context))
++            .setAutoCancel(true)
++            .setContentIntent(
++                PendingIntentCompat.getActivity(
+                     context,
+-                    context.getString(R.string.error_report_channel_id)
++                    0,
++                    getErrorActivityIntent(context, errorInfo),
++                    PendingIntent.FLAG_UPDATE_CURRENT,
++                    false
+                 )
+-                    .setSmallIcon(R.drawable.ic_bug_report)
+-                    .setContentTitle(context.getString(R.string.error_report_notification_title))
+-                    .setContentText(errorInfo.getMessage(context))
+-                    .setAutoCancel(true)
+-                    .setContentIntent(
+-                        PendingIntentCompat.getActivity(
+-                            context,
+-                            0,
+-                            getErrorActivityIntent(context, errorInfo),
+-                            PendingIntent.FLAG_UPDATE_CURRENT,
+-                            false
+-                        )
+-                    )
++            )
+ 
+-            val notificationManager = NotificationManagerCompat.from(context)
+-            if (notificationManager.areNotificationsEnabled()) {
+-                notificationManager
+-                    .notify(ERROR_REPORT_NOTIFICATION_ID, notificationBuilder.build())
+-            }
++        val notificationManager = NotificationManagerCompat.from(context)
++        if (notificationManager.areNotificationsEnabled()) {
++            notificationManager.notify(ERROR_REPORT_NOTIFICATION_ID, notificationBuilder.build())
++        }
+ 
+-            ContextCompat.getMainExecutor(context).execute {
+-                // since the notification is silent, also show a toast, otherwise the user is confused
+-                Toast.makeText(context, R.string.error_report_notification_toast, Toast.LENGTH_SHORT)
+-                    .show()
+-            }
++        ContextCompat.getMainExecutor(context).execute {
++            // since the notification is silent, also show a toast, otherwise the user is confused
++            Toast.makeText(context, R.string.error_report_notification_toast, Toast.LENGTH_SHORT)
++                .show()
+         }
++    }
+ 
+-        private fun getErrorActivityIntent(context: Context, errorInfo: ErrorInfo): Intent {
+-            val intent = Intent(context, ErrorActivity::class.java)
+-            intent.putExtra(ErrorActivity.ERROR_INFO, errorInfo)
+-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+-            return intent
++    private fun getErrorActivityIntent(context: Context, errorInfo: ErrorInfo): Intent {
++        return Intent(context, ErrorActivity::class.java).apply {
++            putExtra(ErrorActivity.ERROR_INFO, errorInfo)
++            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+         }
++    }
+ 
+-        private fun showSnackbar(context: Context, rootView: View?, errorInfo: ErrorInfo) {
+-            if (rootView == null) {
+-                // fallback to showing a notification if no root view is available
+-                createNotification(context, errorInfo)
+-            } else {
+-                Snackbar.make(rootView, errorInfo.getMessage(context), Snackbar.LENGTH_LONG)
+-                    .setActionTextColor(Color.YELLOW)
+-                    .setAction(context.getString(R.string.error_snackbar_action).uppercase()) {
+-                        context.startActivity(getErrorActivityIntent(context, errorInfo))
+-                    }.show()
+-            }
++    private fun showSnackbar(context: Context, rootView: View?, errorInfo: ErrorInfo) {
++        if (rootView == null) {
++            // fallback to showing a notification if no root view is available
++            createNotification(context, errorInfo)
++        } else {
++            Snackbar.make(rootView, errorInfo.getMessage(context), Snackbar.LENGTH_LONG)
++                .setActionTextColor(Color.YELLOW)
++                .setAction(context.getString(R.string.error_snackbar_action).uppercase()) {
++                    context.startActivity(getErrorActivityIntent(context, errorInfo))
++                }.show()
+         }
+     }
+ }
+diff --git a/app/src/main/java/org/schabi/newpipe/ktx/Bundle.kt b/app/src/main/java/org/schabi/newpipe/ktx/Bundle.kt
+index e32376960..59d75f028 100644
+--- a/app/src/main/java/org/schabi/newpipe/ktx/Bundle.kt
++++ b/app/src/main/java/org/schabi/newpipe/ktx/Bundle.kt
+@@ -9,14 +9,13 @@ inline fun <reified T : Parcelable> Bundle.parcelableArrayList(key: String?): Ar
+ }
+ 
+ fun Bundle?.toDebugString(): String {
+-    if (this == null) {
+-        return "null"
++    if (this == null) return "null"
++    return buildString {
++        append("Bundle{")
++        for (key in keySet()) {
++            @Suppress("DEPRECATION") // we want this[key] to return items of any type
++            append(" ").append(key).append(" => ").append(this@toDebugString[key]).append(";")
++        }
++        append(" }")
+     }
+-    val string = StringBuilder("Bundle{")
+-    for (key in this.keySet()) {
+-        @Suppress("DEPRECATION") // we want this[key] to return items of any type
+-        string.append(" ").append(key).append(" => ").append(this[key]).append(";")
+-    }
+-    string.append(" }")
+-    return string.toString()
+ }
+diff --git a/app/src/main/java/org/schabi/newpipe/ktx/TextView.kt b/app/src/main/java/org/schabi/newpipe/ktx/TextView.kt
+index c70af1e7d..f15dc2634 100644
+--- a/app/src/main/java/org/schabi/newpipe/ktx/TextView.kt
++++ b/app/src/main/java/org/schabi/newpipe/ktx/TextView.kt
+@@ -25,8 +25,8 @@ fun TextView.animateTextColor(duration: Long, @ColorInt colorStart: Int, @ColorI
+         Log.d(
+             TAG,
+             "animateTextColor() called with: " +
+-                "view = [" + this + "], duration = [" + duration + "], " +
+-                "colorStart = [" + colorStart + "], colorEnd = [" + colorEnd + "]"
++                "view = [$this], duration = [$duration], " +
++                "colorStart = [$colorStart], colorEnd = [$colorEnd]"
+         )
+     }
+     val viewPropertyAnimator = ValueAnimator.ofObject(ArgbEvaluator(), colorStart, colorEnd)
+diff --git a/app/src/main/java/org/schabi/newpipe/util/PeertubeHelper.kt b/app/src/main/java/org/schabi/newpipe/util/PeertubeHelper.kt
+index 9cf3c1e73..698fe68c1 100644
+--- a/app/src/main/java/org/schabi/newpipe/util/PeertubeHelper.kt
++++ b/app/src/main/java/org/schabi/newpipe/util/PeertubeHelper.kt
+@@ -40,10 +40,10 @@ object PeertubeHelper {
+         val sharedPreferences = PreferenceManager.getDefaultSharedPreferences(context)
+         val selectedInstanceKey = context.getString(R.string.peertube_selected_instance_key)
+ 
+-        val jsonWriter = JsonWriter.string().`object`()
+-        jsonWriter.value("name", instance.name)
+-        jsonWriter.value("url", instance.url)
+-        val jsonToSave = jsonWriter.end().done()
++        val jsonToSave = JsonWriter.string().`object`()
++            .value("name", instance.name)
++            .value("url", instance.url)
++            .end().done()
+ 
+         sharedPreferences.edit { putString(selectedInstanceKey, jsonToSave) }
+         ServiceList.PeerTube.instance = instance
+diff --git a/app/src/main/java/org/schabi/newpipe/util/ServiceHelper.kt b/app/src/main/java/org/schabi/newpipe/util/ServiceHelper.kt
+index 4239f43e0..95788e786 100644
+--- a/app/src/main/java/org/schabi/newpipe/util/ServiceHelper.kt
++++ b/app/src/main/java/org/schabi/newpipe/util/ServiceHelper.kt
+@@ -103,12 +103,10 @@ object ServiceHelper {
+ 
+     @JvmStatic
+     fun getNameOfServiceById(serviceId: Int): String {
+-        return ServiceList.all().stream()
+-            .filter { it.serviceId == serviceId }
+-            .findFirst()
+-            .map(StreamingService::getServiceInfo)
+-            .map(StreamingService.ServiceInfo::getName)
+-            .orElse("<unknown>")
++        return ServiceList.all()
++            .firstOrNull { it.serviceId == serviceId }
++            ?.serviceInfo?.name
++            ?: "<unknown>"
+     }
+ 
+     /**
+@@ -118,7 +116,7 @@ object ServiceHelper {
+      */
+     @JvmStatic
+     fun getServiceById(serviceId: Int): StreamingService {
+-        return ServiceList.all().firstNotNullOf { it.takeIf { it.serviceId == serviceId } }
++        return ServiceList.all().first { it.serviceId == serviceId }
+     }
+ 
+     @JvmStatic
+diff --git a/app/src/main/java/org/schabi/newpipe/util/StreamTypeUtil.kt b/app/src/main/java/org/schabi/newpipe/util/StreamTypeUtil.kt
+index 2401a4f49..fb0285da4 100644
+--- a/app/src/main/java/org/schabi/newpipe/util/StreamTypeUtil.kt
++++ b/app/src/main/java/org/schabi/newpipe/util/StreamTypeUtil.kt
+@@ -12,7 +12,7 @@ import org.schabi.newpipe.extractor.stream.StreamType
+  */
+ object StreamTypeUtil {
+     /**
+-     * Check if the [StreamType] of a stream is a livestream.
++     * Check if the [StreamType] of a stream is an audio stream.
+      *
+      * @param streamType the stream type of the stream
+      * @return whether the stream type is [StreamType.AUDIO_STREAM],
+@@ -20,13 +20,15 @@ object StreamTypeUtil {
+      */
+     @JvmStatic
+     fun isAudio(streamType: StreamType): Boolean {
+-        return streamType == StreamType.AUDIO_STREAM ||
+-            streamType == StreamType.AUDIO_LIVE_STREAM ||
+-            streamType == StreamType.POST_LIVE_AUDIO_STREAM
++        return streamType in setOf(
++            StreamType.AUDIO_STREAM,
++            StreamType.AUDIO_LIVE_STREAM,
++            StreamType.POST_LIVE_AUDIO_STREAM,
++        )
+     }
+ 
+     /**
+-     * Check if the [StreamType] of a stream is a livestream.
++     * Check if the [StreamType] of a stream is a video stream.
+      *
+      * @param streamType the stream type of the stream
+      * @return whether the stream type is [StreamType.VIDEO_STREAM],
+@@ -34,9 +36,11 @@ object StreamTypeUtil {
+      */
+     @JvmStatic
+     fun isVideo(streamType: StreamType): Boolean {
+-        return streamType == StreamType.VIDEO_STREAM ||
+-            streamType == StreamType.LIVE_STREAM ||
+-            streamType == StreamType.POST_LIVE_STREAM
++        return streamType in setOf(
++            StreamType.VIDEO_STREAM,
++            StreamType.LIVE_STREAM,
++            StreamType.POST_LIVE_STREAM,
++        )
+     }
+ 
+     /**

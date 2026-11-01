@@ -1,0 +1,2060 @@
+diff --git a/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/filter/FilterChainBuilder.java b/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/filter/FilterChainBuilder.java
+index 92ab4a584..2daba95c2 100644
+--- a/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/filter/FilterChainBuilder.java
++++ b/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/filter/FilterChainBuilder.java
+@@ -308,36 +308,13 @@ public interface FilterChainBuilder {
+ 
+     @Experimental(
+             "Works for the same purpose as FilterChainNode, replace FilterChainNode with this one when proved stable enough")
+-    class CopyOfFilterChainNode<T, TYPE extends Invoker<T>, FILTER extends BaseFilter> implements Invoker<T> {
++    class CopyOfFilterChainNode<T, TYPE extends Invoker<T>, FILTER extends BaseFilter>
++            extends FilterChainNode<T, TYPE, FILTER> {
+         private static final ErrorTypeAwareLogger LOGGER =
+                 LoggerFactory.getErrorTypeAwareLogger(CopyOfFilterChainNode.class);
+-        TYPE originalInvoker;
+-        Invoker<T> nextNode;
+-        FILTER filter;
+ 
+         public CopyOfFilterChainNode(TYPE originalInvoker, Invoker<T> nextNode, FILTER filter) {
+-            this.originalInvoker = originalInvoker;
+-            this.nextNode = nextNode;
+-            this.filter = filter;
+-        }
+-
+-        public TYPE getOriginalInvoker() {
+-            return originalInvoker;
+-        }
+-
+-        @Override
+-        public Class<T> getInterface() {
+-            return originalInvoker.getInterface();
+-        }
+-
+-        @Override
+-        public URL getUrl() {
+-            return originalInvoker.getUrl();
+-        }
+-
+-        @Override
+-        public boolean isAvailable() {
+-            return originalInvoker.isAvailable();
++            super(originalInvoker, nextNode, filter);
+         }
+ 
+         @Override
+@@ -377,16 +354,6 @@ public interface FilterChainBuilder {
+             }
+             return asyncResult;
+         }
+-
+-        @Override
+-        public void destroy() {
+-            originalInvoker.destroy();
+-        }
+-
+-        @Override
+-        public String toString() {
+-            return originalInvoker.toString();
+-        }
+     }
+ 
+     @Experimental(
+diff --git a/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/loadbalance/AbstractLoadBalance.java b/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/loadbalance/AbstractLoadBalance.java
+index 677d3a9a6..461c4a97d 100644
+--- a/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/loadbalance/AbstractLoadBalance.java
++++ b/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/loadbalance/AbstractLoadBalance.java
+@@ -25,6 +25,7 @@ import org.apache.dubbo.rpc.cluster.LoadBalance;
+ import org.apache.dubbo.rpc.support.RpcUtils;
+ 
+ import java.util.List;
++import java.util.concurrent.ThreadLocalRandom;
+ 
+ import static org.apache.dubbo.common.constants.CommonConstants.TIMESTAMP_KEY;
+ import static org.apache.dubbo.common.constants.RegistryConstants.REGISTRY_SERVICE_REFERENCE_PATH;
+@@ -61,6 +62,34 @@ public abstract class AbstractLoadBalance implements LoadBalance {
+ 
+     protected abstract <T> Invoker<T> doSelect(List<Invoker<T>> invokers, URL url, Invocation invocation);
+ 
++    /**
++     * Pick one invoker from a pre-filtered candidate set using weighted random selection.
++     * Used by load balancers that first narrow the field to a "best" tier (e.g. least-active,
++     * shortest-response) and then apply the same weighted-random tiebreak.
++     */
++    protected static <T> Invoker<T> selectWithWeight(
++            List<Invoker<T>> invokers,
++            int[] candidateIndexes,
++            int candidateCount,
++            int[] weights,
++            boolean sameWeight,
++            int totalWeight) {
++        if (candidateCount == 1) {
++            return invokers.get(candidateIndexes[0]);
++        }
++        if (!sameWeight && totalWeight > 0) {
++            int offsetWeight = ThreadLocalRandom.current().nextInt(totalWeight);
++            for (int i = 0; i < candidateCount; i++) {
++                int idx = candidateIndexes[i];
++                offsetWeight -= weights[idx];
++                if (offsetWeight < 0) {
++                    return invokers.get(idx);
++                }
++            }
++        }
++        return invokers.get(candidateIndexes[ThreadLocalRandom.current().nextInt(candidateCount)]);
++    }
++
+     /**
+      * Get the weight of the invoker's invocation which takes warmup time into account
+      * if the uptime is within the warmup time, the weight will be reduce proportionally
+diff --git a/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/loadbalance/LeastActiveLoadBalance.java b/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/loadbalance/LeastActiveLoadBalance.java
+index 5335e5ccb..bad95b1de 100644
+--- a/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/loadbalance/LeastActiveLoadBalance.java
++++ b/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/loadbalance/LeastActiveLoadBalance.java
+@@ -23,7 +23,6 @@ import org.apache.dubbo.rpc.RpcStatus;
+ import org.apache.dubbo.rpc.support.RpcUtils;
+ 
+ import java.util.List;
+-import java.util.concurrent.ThreadLocalRandom;
+ 
+ /**
+  * LeastActiveLoadBalance
+@@ -93,25 +92,7 @@ public class LeastActiveLoadBalance extends AbstractLoadBalance {
+                 }
+             }
+         }
+-        // Choose an invoker from all the least active invokers
+-        if (leastCount == 1) {
+-            // If we got exactly one invoker having the least active value, return this invoker directly.
+-            return invokers.get(leastIndexes[0]);
+-        }
+-        if (!sameWeight && totalWeight > 0) {
+-            // If (not every invoker has the same weight & at least one invoker's weight>0), select randomly based on
+-            // totalWeight.
+-            int offsetWeight = ThreadLocalRandom.current().nextInt(totalWeight);
+-            // Return a invoker based on the random value.
+-            for (int i = 0; i < leastCount; i++) {
+-                int leastIndex = leastIndexes[i];
+-                offsetWeight -= weights[leastIndex];
+-                if (offsetWeight < 0) {
+-                    return invokers.get(leastIndex);
+-                }
+-            }
+-        }
+-        // If all invokers have the same weight value or totalWeight=0, return evenly.
+-        return invokers.get(leastIndexes[ThreadLocalRandom.current().nextInt(leastCount)]);
++        // Choose an invoker from all the least active invokers using weighted random selection.
++        return selectWithWeight(invokers, leastIndexes, leastCount, weights, sameWeight, totalWeight);
+     }
+ }
+diff --git a/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/loadbalance/ShortestResponseLoadBalance.java b/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/loadbalance/ShortestResponseLoadBalance.java
+index 985822433..f0f184673 100644
+--- a/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/loadbalance/ShortestResponseLoadBalance.java
++++ b/dubbo-cluster/src/main/java/org/apache/dubbo/rpc/cluster/loadbalance/ShortestResponseLoadBalance.java
+@@ -31,7 +31,6 @@ import java.util.List;
+ import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.ConcurrentMap;
+ import java.util.concurrent.ExecutorService;
+-import java.util.concurrent.ThreadLocalRandom;
+ import java.util.concurrent.atomic.AtomicBoolean;
+ 
+ /**
+@@ -159,19 +158,6 @@ public class ShortestResponseLoadBalance extends AbstractLoadBalance implements
+             });
+         }
+ 
+-        if (shortestCount == 1) {
+-            return invokers.get(shortestIndexes[0]);
+-        }
+-        if (!sameWeight && totalWeight > 0) {
+-            int offsetWeight = ThreadLocalRandom.current().nextInt(totalWeight);
+-            for (int i = 0; i < shortestCount; i++) {
+-                int shortestIndex = shortestIndexes[i];
+-                offsetWeight -= weights[shortestIndex];
+-                if (offsetWeight < 0) {
+-                    return invokers.get(shortestIndex);
+-                }
+-            }
+-        }
+-        return invokers.get(shortestIndexes[ThreadLocalRandom.current().nextInt(shortestCount)]);
++        return selectWithWeight(invokers, shortestIndexes, shortestCount, weights, sameWeight, totalWeight);
+     }
+ }
+diff --git a/dubbo-registry/dubbo-registry-api/src/main/java/org/apache/dubbo/registry/client/ServiceDiscoveryRegistryDirectory.java b/dubbo-registry/dubbo-registry-api/src/main/java/org/apache/dubbo/registry/client/ServiceDiscoveryRegistryDirectory.java
+index e8eb5561e..6196d0e51 100644
+--- a/dubbo-registry/dubbo-registry-api/src/main/java/org/apache/dubbo/registry/client/ServiceDiscoveryRegistryDirectory.java
++++ b/dubbo-registry/dubbo-registry-api/src/main/java/org/apache/dubbo/registry/client/ServiceDiscoveryRegistryDirectory.java
+@@ -49,7 +49,6 @@ import org.apache.dubbo.rpc.RpcInvocation;
+ import org.apache.dubbo.rpc.RpcServiceContext;
+ import org.apache.dubbo.rpc.cluster.Configurator;
+ import org.apache.dubbo.rpc.cluster.RouterChain;
+-import org.apache.dubbo.rpc.cluster.directory.StaticDirectory;
+ import org.apache.dubbo.rpc.cluster.router.state.BitList;
+ import org.apache.dubbo.rpc.model.ModuleModel;
+ 
+@@ -580,29 +579,6 @@ public class ServiceDiscoveryRegistryDirectory<T> extends DynamicDirectory<T> {
+         return !oldServiceInfo.equals(newURL.getMetadataInfo().getValidServiceInfo(protocolServiceKey.toString()));
+     }
+ 
+-    private List<Invoker<T>> toMergeInvokerList(List<Invoker<T>> invokers) {
+-        List<Invoker<T>> mergedInvokers = new ArrayList<>();
+-        Map<String, List<Invoker<T>>> groupMap = new HashMap<>();
+-        for (Invoker<T> invoker : invokers) {
+-            String group = invoker.getUrl().getGroup("");
+-            groupMap.computeIfAbsent(group, k -> new ArrayList<>());
+-            groupMap.get(group).add(invoker);
+-        }
+-
+-        if (groupMap.size() == 1) {
+-            mergedInvokers.addAll(groupMap.values().iterator().next());
+-        } else if (groupMap.size() > 1) {
+-            for (List<Invoker<T>> groupList : groupMap.values()) {
+-                StaticDirectory<T> staticDirectory = new StaticDirectory<>(groupList);
+-                staticDirectory.buildRouterChain();
+-                mergedInvokers.add(cluster.join(staticDirectory, false));
+-            }
+-        } else {
+-            mergedInvokers = invokers;
+-        }
+-        return mergedInvokers;
+-    }
+-
+     /**
+      * Close all invokers
+      */
+diff --git a/dubbo-registry/dubbo-registry-api/src/main/java/org/apache/dubbo/registry/integration/DynamicDirectory.java b/dubbo-registry/dubbo-registry-api/src/main/java/org/apache/dubbo/registry/integration/DynamicDirectory.java
+index be8c2e74c..da671338b 100644
+--- a/dubbo-registry/dubbo-registry-api/src/main/java/org/apache/dubbo/registry/integration/DynamicDirectory.java
++++ b/dubbo-registry/dubbo-registry-api/src/main/java/org/apache/dubbo/registry/integration/DynamicDirectory.java
+@@ -41,10 +41,14 @@ import org.apache.dubbo.rpc.cluster.RouterChain;
+ import org.apache.dubbo.rpc.cluster.RouterFactory;
+ import org.apache.dubbo.rpc.cluster.SingleRouterChain;
+ import org.apache.dubbo.rpc.cluster.directory.AbstractDirectory;
++import org.apache.dubbo.rpc.cluster.directory.StaticDirectory;
+ import org.apache.dubbo.rpc.cluster.router.state.BitList;
+ import org.apache.dubbo.rpc.model.ModuleModel;
+ 
++import java.util.ArrayList;
++import java.util.HashMap;
+ import java.util.List;
++import java.util.Map;
+ 
+ import static org.apache.dubbo.common.constants.CommonConstants.ANY_VALUE;
+ import static org.apache.dubbo.common.constants.LoggerCodeConstants.CLUSTER_FAILED_SITE_SELECTION;
+@@ -401,4 +405,27 @@ public abstract class DynamicDirectory<T> extends AbstractDirectory<T> implement
+     protected abstract void destroyAllInvokers();
+ 
+     protected abstract void refreshOverrideAndInvoker(List<URL> urls);
++
++    protected List<Invoker<T>> toMergeInvokerList(List<Invoker<T>> invokers) {
++        List<Invoker<T>> mergedInvokers = new ArrayList<>();
++        Map<String, List<Invoker<T>>> groupMap = new HashMap<>();
++        for (Invoker<T> invoker : invokers) {
++            String group = invoker.getUrl().getGroup("");
++            groupMap.computeIfAbsent(group, k -> new ArrayList<>());
++            groupMap.get(group).add(invoker);
++        }
++
++        if (groupMap.size() == 1) {
++            mergedInvokers.addAll(groupMap.values().iterator().next());
++        } else if (groupMap.size() > 1) {
++            for (List<Invoker<T>> groupList : groupMap.values()) {
++                StaticDirectory<T> staticDirectory = new StaticDirectory<>(groupList);
++                staticDirectory.buildRouterChain();
++                mergedInvokers.add(cluster.join(staticDirectory, false));
++            }
++        } else {
++            mergedInvokers = invokers;
++        }
++        return mergedInvokers;
++    }
+ }
+diff --git a/dubbo-registry/dubbo-registry-api/src/main/java/org/apache/dubbo/registry/integration/RegistryDirectory.java b/dubbo-registry/dubbo-registry-api/src/main/java/org/apache/dubbo/registry/integration/RegistryDirectory.java
+index c034b6caf..57f59f6e5 100644
+--- a/dubbo-registry/dubbo-registry-api/src/main/java/org/apache/dubbo/registry/integration/RegistryDirectory.java
++++ b/dubbo-registry/dubbo-registry-api/src/main/java/org/apache/dubbo/registry/integration/RegistryDirectory.java
+@@ -41,7 +41,6 @@ import org.apache.dubbo.rpc.Protocol;
+ import org.apache.dubbo.rpc.RpcException;
+ import org.apache.dubbo.rpc.cluster.Configurator;
+ import org.apache.dubbo.rpc.cluster.Router;
+-import org.apache.dubbo.rpc.cluster.directory.StaticDirectory;
+ import org.apache.dubbo.rpc.cluster.router.state.BitList;
+ import org.apache.dubbo.rpc.cluster.support.ClusterUtils;
+ import org.apache.dubbo.rpc.model.ApplicationModel;
+@@ -386,29 +385,6 @@ public class RegistryDirectory<T> extends DynamicDirectory<T> {
+                 + joinValidInvokerAddresses());
+     }
+ 
+-    private List<Invoker<T>> toMergeInvokerList(List<Invoker<T>> invokers) {
+-        List<Invoker<T>> mergedInvokers = new ArrayList<>();
+-        Map<String, List<Invoker<T>>> groupMap = new HashMap<>();
+-        for (Invoker<T> invoker : invokers) {
+-            String group = invoker.getUrl().getGroup("");
+-            groupMap.computeIfAbsent(group, k -> new ArrayList<>());
+-            groupMap.get(group).add(invoker);
+-        }
+-
+-        if (groupMap.size() == 1) {
+-            mergedInvokers.addAll(groupMap.values().iterator().next());
+-        } else if (groupMap.size() > 1) {
+-            for (List<Invoker<T>> groupList : groupMap.values()) {
+-                StaticDirectory<T> staticDirectory = new StaticDirectory<>(groupList);
+-                staticDirectory.buildRouterChain();
+-                mergedInvokers.add(cluster.join(staticDirectory, false));
+-            }
+-        } else {
+-            mergedInvokers = invokers;
+-        }
+-        return mergedInvokers;
+-    }
+-
+     /**
+      * @param urls
+      * @return null : no routers ,do nothing
+diff --git a/dubbo-remoting/dubbo-remoting-http3/src/main/java/org/apache/dubbo/remoting/http3/netty4/AbstractHttpHeadersAdapter.java b/dubbo-remoting/dubbo-remoting-http3/src/main/java/org/apache/dubbo/remoting/http3/netty4/AbstractHttpHeadersAdapter.java
+new file mode 100644
+index 000000000..f3708511c
+--- /dev/null
++++ b/dubbo-remoting/dubbo-remoting-http3/src/main/java/org/apache/dubbo/remoting/http3/netty4/AbstractHttpHeadersAdapter.java
+@@ -0,0 +1,295 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.dubbo.remoting.http3.netty4;
++
++import java.util.Iterator;
++import java.util.List;
++import java.util.Map.Entry;
++import java.util.Set;
++import java.util.Spliterator;
++import java.util.function.Consumer;
++
++import io.netty.handler.codec.Headers;
++
++/**
++ * Shared delegation base for {@link Http2HeadersAdapter} and {@link Http3HeadersAdapter}.
++ * Provides all non-fluent methods defined in {@link Headers}; subclasses add the
++ * protocol-specific pseudo-header accessors and fluent mutators.
++ *
++ * @param <H> the wrapped Netty headers type ({@code Http3Headers} or {@code Http2Headers})
++ */
++abstract class AbstractHttpHeadersAdapter<H extends Headers<CharSequence, CharSequence, ?>> {
++
++    protected final H headers;
++
++    protected AbstractHttpHeadersAdapter(H headers) {
++        this.headers = headers;
++    }
++
++    public Iterator<Entry<CharSequence, CharSequence>> iterator() {
++        return headers.iterator();
++    }
++
++    public Iterator<CharSequence> valueIterator(CharSequence name) {
++        return headers.valueIterator(name);
++    }
++
++    public CharSequence get(CharSequence name) {
++        return headers.get(name);
++    }
++
++    public CharSequence get(CharSequence name, CharSequence defaultValue) {
++        return headers.get(name, defaultValue);
++    }
++
++    public CharSequence getAndRemove(CharSequence name) {
++        return headers.getAndRemove(name);
++    }
++
++    public CharSequence getAndRemove(CharSequence name, CharSequence defaultValue) {
++        return headers.getAndRemove(name, defaultValue);
++    }
++
++    public List<CharSequence> getAll(CharSequence name) {
++        return headers.getAll(name);
++    }
++
++    public List<CharSequence> getAllAndRemove(CharSequence name) {
++        return headers.getAllAndRemove(name);
++    }
++
++    public Boolean getBoolean(CharSequence name) {
++        return headers.getBoolean(name);
++    }
++
++    public boolean getBoolean(CharSequence name, boolean defaultValue) {
++        return headers.getBoolean(name, defaultValue);
++    }
++
++    public Byte getByte(CharSequence name) {
++        return headers.getByte(name);
++    }
++
++    public byte getByte(CharSequence name, byte defaultValue) {
++        return headers.getByte(name, defaultValue);
++    }
++
++    public Character getChar(CharSequence name) {
++        return headers.getChar(name);
++    }
++
++    public char getChar(CharSequence name, char defaultValue) {
++        return headers.getChar(name, defaultValue);
++    }
++
++    public Short getShort(CharSequence name) {
++        return headers.getShort(name);
++    }
++
++    public short getShort(CharSequence name, short defaultValue) {
++        return headers.getShort(name, defaultValue);
++    }
++
++    public Integer getInt(CharSequence name) {
++        return headers.getInt(name);
++    }
++
++    public int getInt(CharSequence name, int defaultValue) {
++        return headers.getInt(name, defaultValue);
++    }
++
++    public Long getLong(CharSequence name) {
++        return headers.getLong(name);
++    }
++
++    public long getLong(CharSequence name, long defaultValue) {
++        return headers.getLong(name, defaultValue);
++    }
++
++    public Float getFloat(CharSequence name) {
++        return headers.getFloat(name);
++    }
++
++    public float getFloat(CharSequence name, float defaultValue) {
++        return headers.getFloat(name, defaultValue);
++    }
++
++    public Double getDouble(CharSequence name) {
++        return headers.getDouble(name);
++    }
++
++    public double getDouble(CharSequence name, double defaultValue) {
++        return headers.getDouble(name, defaultValue);
++    }
++
++    public Long getTimeMillis(CharSequence name) {
++        return headers.getTimeMillis(name);
++    }
++
++    public long getTimeMillis(CharSequence name, long defaultValue) {
++        return headers.getTimeMillis(name, defaultValue);
++    }
++
++    public Boolean getBooleanAndRemove(CharSequence name) {
++        return headers.getBooleanAndRemove(name);
++    }
++
++    public boolean getBooleanAndRemove(CharSequence name, boolean defaultValue) {
++        return headers.getBooleanAndRemove(name, defaultValue);
++    }
++
++    public Byte getByteAndRemove(CharSequence name) {
++        return headers.getByteAndRemove(name);
++    }
++
++    public byte getByteAndRemove(CharSequence name, byte defaultValue) {
++        return headers.getByteAndRemove(name, defaultValue);
++    }
++
++    public Character getCharAndRemove(CharSequence name) {
++        return headers.getCharAndRemove(name);
++    }
++
++    public char getCharAndRemove(CharSequence name, char defaultValue) {
++        return headers.getCharAndRemove(name, defaultValue);
++    }
++
++    public Short getShortAndRemove(CharSequence name) {
++        return headers.getShortAndRemove(name);
++    }
++
++    public short getShortAndRemove(CharSequence name, short defaultValue) {
++        return headers.getShortAndRemove(name, defaultValue);
++    }
++
++    public Integer getIntAndRemove(CharSequence name) {
++        return headers.getIntAndRemove(name);
++    }
++
++    public int getIntAndRemove(CharSequence name, int defaultValue) {
++        return headers.getIntAndRemove(name, defaultValue);
++    }
++
++    public Long getLongAndRemove(CharSequence name) {
++        return headers.getLongAndRemove(name);
++    }
++
++    public long getLongAndRemove(CharSequence name, long defaultValue) {
++        return headers.getLongAndRemove(name, defaultValue);
++    }
++
++    public Float getFloatAndRemove(CharSequence name) {
++        return headers.getFloatAndRemove(name);
++    }
++
++    public float getFloatAndRemove(CharSequence name, float defaultValue) {
++        return headers.getFloatAndRemove(name, defaultValue);
++    }
++
++    public Double getDoubleAndRemove(CharSequence name) {
++        return headers.getDoubleAndRemove(name);
++    }
++
++    public double getDoubleAndRemove(CharSequence name, double defaultValue) {
++        return headers.getDoubleAndRemove(name, defaultValue);
++    }
++
++    public Long getTimeMillisAndRemove(CharSequence name) {
++        return headers.getTimeMillisAndRemove(name);
++    }
++
++    public long getTimeMillisAndRemove(CharSequence name, long defaultValue) {
++        return headers.getTimeMillisAndRemove(name, defaultValue);
++    }
++
++    public boolean contains(CharSequence name) {
++        return headers.contains(name);
++    }
++
++    public boolean contains(CharSequence name, CharSequence value) {
++        return headers.contains(name, value);
++    }
++
++    public boolean containsObject(CharSequence name, Object value) {
++        return headers.containsObject(name, value);
++    }
++
++    public boolean containsBoolean(CharSequence name, boolean value) {
++        return headers.containsBoolean(name, value);
++    }
++
++    public boolean containsByte(CharSequence name, byte value) {
++        return headers.containsByte(name, value);
++    }
++
++    public boolean containsChar(CharSequence name, char value) {
++        return headers.containsChar(name, value);
++    }
++
++    public boolean containsShort(CharSequence name, short value) {
++        return headers.containsShort(name, value);
++    }
++
++    public boolean containsInt(CharSequence name, int value) {
++        return headers.containsInt(name, value);
++    }
++
++    public boolean containsLong(CharSequence name, long value) {
++        return headers.containsLong(name, value);
++    }
++
++    public boolean containsFloat(CharSequence name, float value) {
++        return headers.containsFloat(name, value);
++    }
++
++    public boolean containsDouble(CharSequence name, double value) {
++        return headers.containsDouble(name, value);
++    }
++
++    public boolean containsTimeMillis(CharSequence name, long value) {
++        return headers.containsTimeMillis(name, value);
++    }
++
++    public int size() {
++        return headers.size();
++    }
++
++    public boolean isEmpty() {
++        return headers.isEmpty();
++    }
++
++    public Set<CharSequence> names() {
++        return headers.names();
++    }
++
++    public boolean remove(CharSequence name) {
++        return headers.remove(name);
++    }
++
++    public void forEach(Consumer<? super Entry<CharSequence, CharSequence>> action) {
++        headers.forEach(action);
++    }
++
++    public Spliterator<Entry<CharSequence, CharSequence>> spliterator() {
++        return headers.spliterator();
++    }
++
++    @Override
++    public int hashCode() {
++        return headers.hashCode();
++    }
++}
+diff --git a/dubbo-remoting/dubbo-remoting-http3/src/main/java/org/apache/dubbo/remoting/http3/netty4/Http2HeadersAdapter.java b/dubbo-remoting/dubbo-remoting-http3/src/main/java/org/apache/dubbo/remoting/http3/netty4/Http2HeadersAdapter.java
+index 6f1cd70f8..54edc0287 100644
+--- a/dubbo-remoting/dubbo-remoting-http3/src/main/java/org/apache/dubbo/remoting/http3/netty4/Http2HeadersAdapter.java
++++ b/dubbo-remoting/dubbo-remoting-http3/src/main/java/org/apache/dubbo/remoting/http3/netty4/Http2HeadersAdapter.java
+@@ -16,64 +16,17 @@
+  */
+ package org.apache.dubbo.remoting.http3.netty4;
+ 
+-import java.util.Iterator;
+-import java.util.List;
+-import java.util.Map.Entry;
+-import java.util.Set;
+-import java.util.Spliterator;
+-import java.util.function.Consumer;
+-
+ import io.netty.handler.codec.Headers;
+ import io.netty.handler.codec.http2.Http2Headers;
+ import io.netty.handler.codec.http3.Http3Headers;
+ 
+-public final class Http2HeadersAdapter implements Http2Headers {
+-
+-    private final Http3Headers headers;
++public final class Http2HeadersAdapter extends AbstractHttpHeadersAdapter<Http3Headers> implements Http2Headers {
+ 
+     public Http2HeadersAdapter(Http3Headers headers) {
+-        this.headers = headers;
+-    }
+-
+-    @Override
+-    public Iterator<Entry<CharSequence, CharSequence>> iterator() {
+-        return headers.iterator();
+-    }
+-
+-    @Override
+-    public Iterator<CharSequence> valueIterator(CharSequence name) {
+-        return headers.valueIterator(name);
+-    }
+-
+-    @Override
+-    public Http2Headers method(CharSequence value) {
+-        headers.method(value);
+-        return this;
++        super(headers);
+     }
+ 
+-    @Override
+-    public Http2Headers scheme(CharSequence value) {
+-        headers.scheme(value);
+-        return this;
+-    }
+-
+-    @Override
+-    public Http2Headers authority(CharSequence value) {
+-        headers.authority(value);
+-        return this;
+-    }
+-
+-    @Override
+-    public Http2Headers path(CharSequence value) {
+-        headers.path(value);
+-        return this;
+-    }
+-
+-    @Override
+-    public Http2Headers status(CharSequence value) {
+-        headers.status(value);
+-        return this;
+-    }
++    // ---- Http2Headers pseudo-header getters (not in base Headers<K,V,T>) ----
+ 
+     @Override
+     public CharSequence method() {
+@@ -105,492 +58,238 @@ public final class Http2HeadersAdapter implements Http2Headers {
+         return headers.contains(name, value, caseInsensitive);
+     }
+ 
+-    @Override
+-    public CharSequence get(CharSequence charSequence) {
+-        return headers.get(charSequence);
+-    }
+-
+-    @Override
+-    public CharSequence get(CharSequence charSequence, CharSequence charSequence2) {
+-        return headers.get(charSequence, charSequence2);
+-    }
+-
+-    @Override
+-    public CharSequence getAndRemove(CharSequence charSequence) {
+-        return headers.getAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public CharSequence getAndRemove(CharSequence charSequence, CharSequence charSequence2) {
+-        return headers.getAndRemove(charSequence, charSequence2);
+-    }
+-
+-    @Override
+-    public List<CharSequence> getAll(CharSequence charSequence) {
+-        return headers.getAll(charSequence);
+-    }
+-
+-    @Override
+-    public List<CharSequence> getAllAndRemove(CharSequence charSequence) {
+-        return headers.getAllAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public Boolean getBoolean(CharSequence charSequence) {
+-        return headers.getBoolean(charSequence);
+-    }
+-
+-    @Override
+-    public boolean getBoolean(CharSequence charSequence, boolean b) {
+-        return headers.getBoolean(charSequence, b);
+-    }
+-
+-    @Override
+-    public Byte getByte(CharSequence charSequence) {
+-        return headers.getByte(charSequence);
+-    }
+-
+-    @Override
+-    public byte getByte(CharSequence charSequence, byte b) {
+-        return headers.getByte(charSequence, b);
+-    }
+-
+-    @Override
+-    public Character getChar(CharSequence charSequence) {
+-        return headers.getChar(charSequence);
+-    }
++    // ---- Fluent pseudo-header setters ----
+ 
+     @Override
+-    public char getChar(CharSequence charSequence, char c) {
+-        return headers.getChar(charSequence, c);
+-    }
+-
+-    @Override
+-    public Short getShort(CharSequence charSequence) {
+-        return headers.getShort(charSequence);
+-    }
+-
+-    @Override
+-    public short getShort(CharSequence charSequence, short i) {
+-        return headers.getShort(charSequence, i);
+-    }
+-
+-    @Override
+-    public Integer getInt(CharSequence charSequence) {
+-        return headers.getInt(charSequence);
+-    }
+-
+-    @Override
+-    public int getInt(CharSequence charSequence, int i) {
+-        return headers.getInt(charSequence, i);
+-    }
+-
+-    @Override
+-    public Long getLong(CharSequence charSequence) {
+-        return headers.getLong(charSequence);
+-    }
+-
+-    @Override
+-    public long getLong(CharSequence charSequence, long l) {
+-        return headers.getLong(charSequence, l);
+-    }
+-
+-    @Override
+-    public Float getFloat(CharSequence charSequence) {
+-        return headers.getFloat(charSequence);
+-    }
+-
+-    @Override
+-    public float getFloat(CharSequence charSequence, float v) {
+-        return headers.getFloat(charSequence, v);
+-    }
+-
+-    @Override
+-    public Double getDouble(CharSequence charSequence) {
+-        return headers.getDouble(charSequence);
+-    }
+-
+-    @Override
+-    public double getDouble(CharSequence charSequence, double v) {
+-        return headers.getDouble(charSequence, v);
+-    }
+-
+-    @Override
+-    public Long getTimeMillis(CharSequence charSequence) {
+-        return headers.getTimeMillis(charSequence);
+-    }
+-
+-    @Override
+-    public long getTimeMillis(CharSequence charSequence, long l) {
+-        return headers.getTimeMillis(charSequence, l);
+-    }
+-
+-    @Override
+-    public Boolean getBooleanAndRemove(CharSequence charSequence) {
+-        return headers.getBooleanAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public boolean getBooleanAndRemove(CharSequence charSequence, boolean b) {
+-        return headers.getBooleanAndRemove(charSequence, b);
+-    }
+-
+-    @Override
+-    public Byte getByteAndRemove(CharSequence charSequence) {
+-        return headers.getByteAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public byte getByteAndRemove(CharSequence charSequence, byte b) {
+-        return headers.getByteAndRemove(charSequence, b);
+-    }
+-
+-    @Override
+-    public Character getCharAndRemove(CharSequence charSequence) {
+-        return headers.getCharAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public char getCharAndRemove(CharSequence charSequence, char c) {
+-        return headers.getCharAndRemove(charSequence, c);
+-    }
+-
+-    @Override
+-    public Short getShortAndRemove(CharSequence charSequence) {
+-        return headers.getShortAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public short getShortAndRemove(CharSequence charSequence, short i) {
+-        return headers.getShortAndRemove(charSequence, i);
+-    }
+-
+-    @Override
+-    public Integer getIntAndRemove(CharSequence charSequence) {
+-        return headers.getIntAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public int getIntAndRemove(CharSequence charSequence, int i) {
+-        return headers.getIntAndRemove(charSequence, i);
+-    }
+-
+-    @Override
+-    public Long getLongAndRemove(CharSequence charSequence) {
+-        return headers.getLongAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public long getLongAndRemove(CharSequence charSequence, long l) {
+-        return headers.getLongAndRemove(charSequence, l);
+-    }
+-
+-    @Override
+-    public Float getFloatAndRemove(CharSequence charSequence) {
+-        return headers.getFloatAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public float getFloatAndRemove(CharSequence charSequence, float v) {
+-        return headers.getFloatAndRemove(charSequence, v);
+-    }
+-
+-    @Override
+-    public Double getDoubleAndRemove(CharSequence charSequence) {
+-        return headers.getDoubleAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public double getDoubleAndRemove(CharSequence charSequence, double v) {
+-        return headers.getDoubleAndRemove(charSequence, v);
+-    }
+-
+-    @Override
+-    public Long getTimeMillisAndRemove(CharSequence charSequence) {
+-        return headers.getTimeMillisAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public long getTimeMillisAndRemove(CharSequence charSequence, long l) {
+-        return headers.getTimeMillisAndRemove(charSequence, l);
+-    }
+-
+-    @Override
+-    public boolean contains(CharSequence charSequence) {
+-        return headers.contains(charSequence);
+-    }
+-
+-    @Override
+-    public boolean contains(CharSequence charSequence, CharSequence charSequence2) {
+-        return headers.contains(charSequence, charSequence2);
+-    }
+-
+-    @Override
+-    public boolean containsObject(CharSequence charSequence, Object o) {
+-        return headers.containsObject(charSequence, o);
+-    }
+-
+-    @Override
+-    public boolean containsBoolean(CharSequence charSequence, boolean b) {
+-        return headers.containsBoolean(charSequence, b);
+-    }
+-
+-    @Override
+-    public boolean containsByte(CharSequence charSequence, byte b) {
+-        return headers.containsByte(charSequence, b);
+-    }
+-
+-    @Override
+-    public boolean containsChar(CharSequence charSequence, char c) {
+-        return headers.containsChar(charSequence, c);
+-    }
+-
+-    @Override
+-    public boolean containsShort(CharSequence charSequence, short i) {
+-        return headers.containsShort(charSequence, i);
+-    }
+-
+-    @Override
+-    public boolean containsInt(CharSequence charSequence, int i) {
+-        return headers.containsInt(charSequence, i);
+-    }
+-
+-    @Override
+-    public boolean containsLong(CharSequence charSequence, long l) {
+-        return headers.containsLong(charSequence, l);
+-    }
+-
+-    @Override
+-    public boolean containsFloat(CharSequence charSequence, float v) {
+-        return headers.containsFloat(charSequence, v);
++    public Http2Headers method(CharSequence value) {
++        headers.method(value);
++        return this;
+     }
+ 
+     @Override
+-    public boolean containsDouble(CharSequence charSequence, double v) {
+-        return headers.containsDouble(charSequence, v);
++    public Http2Headers scheme(CharSequence value) {
++        headers.scheme(value);
++        return this;
+     }
+ 
+     @Override
+-    public boolean containsTimeMillis(CharSequence charSequence, long l) {
+-        return headers.containsTimeMillis(charSequence, l);
++    public Http2Headers authority(CharSequence value) {
++        headers.authority(value);
++        return this;
+     }
+ 
+     @Override
+-    public int size() {
+-        return headers.size();
++    public Http2Headers path(CharSequence value) {
++        headers.path(value);
++        return this;
+     }
+ 
+     @Override
+-    public boolean isEmpty() {
+-        return headers.isEmpty();
++    public Http2Headers status(CharSequence value) {
++        headers.status(value);
++        return this;
+     }
+ 
+-    @Override
+-    public Set<CharSequence> names() {
+-        return headers.names();
+-    }
++    // ---- Fluent add methods ----
+ 
+     @Override
+-    public Http2Headers add(CharSequence charSequence, CharSequence charSequence2) {
+-        headers.add(charSequence, charSequence2);
++    public Http2Headers add(CharSequence name, CharSequence value) {
++        headers.add(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers add(CharSequence charSequence, Iterable<? extends CharSequence> iterable) {
+-        headers.add(charSequence, iterable);
++    public Http2Headers add(CharSequence name, Iterable<? extends CharSequence> values) {
++        headers.add(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers add(CharSequence charSequence, CharSequence... charSequences) {
+-        headers.add(charSequence, charSequences);
++    public Http2Headers add(CharSequence name, CharSequence... values) {
++        headers.add(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers addObject(CharSequence charSequence, Object o) {
+-        headers.addObject(charSequence, o);
++    public Http2Headers addObject(CharSequence name, Object value) {
++        headers.addObject(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers addObject(CharSequence charSequence, Iterable<?> iterable) {
+-        headers.addObject(charSequence, iterable);
++    public Http2Headers addObject(CharSequence name, Iterable<?> values) {
++        headers.addObject(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers addObject(CharSequence charSequence, Object... objects) {
+-        headers.addObject(charSequence, objects);
++    public Http2Headers addObject(CharSequence name, Object... values) {
++        headers.addObject(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers addBoolean(CharSequence charSequence, boolean b) {
+-        headers.addBoolean(charSequence, b);
++    public Http2Headers addBoolean(CharSequence name, boolean value) {
++        headers.addBoolean(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers addByte(CharSequence charSequence, byte b) {
+-        headers.addByte(charSequence, b);
++    public Http2Headers addByte(CharSequence name, byte value) {
++        headers.addByte(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers addChar(CharSequence charSequence, char c) {
+-        headers.addChar(charSequence, c);
++    public Http2Headers addChar(CharSequence name, char value) {
++        headers.addChar(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers addShort(CharSequence charSequence, short i) {
+-        headers.addShort(charSequence, i);
++    public Http2Headers addShort(CharSequence name, short value) {
++        headers.addShort(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers addInt(CharSequence charSequence, int i) {
+-        headers.addInt(charSequence, i);
++    public Http2Headers addInt(CharSequence name, int value) {
++        headers.addInt(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers addLong(CharSequence charSequence, long l) {
+-        headers.addLong(charSequence, l);
++    public Http2Headers addLong(CharSequence name, long value) {
++        headers.addLong(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers addFloat(CharSequence charSequence, float v) {
+-        headers.addFloat(charSequence, v);
++    public Http2Headers addFloat(CharSequence name, float value) {
++        headers.addFloat(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers addDouble(CharSequence charSequence, double v) {
+-        headers.addDouble(charSequence, v);
++    public Http2Headers addDouble(CharSequence name, double value) {
++        headers.addDouble(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers addTimeMillis(CharSequence charSequence, long l) {
+-        headers.addTimeMillis(charSequence, l);
++    public Http2Headers addTimeMillis(CharSequence name, long value) {
++        headers.addTimeMillis(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers add(Headers<? extends CharSequence, ? extends CharSequence, ?> headers) {
+-        this.headers.add(headers);
++    public Http2Headers add(Headers<? extends CharSequence, ? extends CharSequence, ?> h) {
++        this.headers.add(h);
+         return this;
+     }
+ 
+-    @Override
+-    public Http2Headers set(CharSequence charSequence, CharSequence charSequence2) {
+-        headers.set(charSequence, charSequence2);
+-        return this;
+-    }
++    // ---- Fluent set methods ----
+ 
+     @Override
+-    public Http2Headers set(CharSequence charSequence, Iterable<? extends CharSequence> iterable) {
+-        headers.set(charSequence, iterable);
++    public Http2Headers set(CharSequence name, CharSequence value) {
++        headers.set(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers set(CharSequence charSequence, CharSequence... charSequences) {
+-        headers.set(charSequence, charSequences);
++    public Http2Headers set(CharSequence name, Iterable<? extends CharSequence> values) {
++        headers.set(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers setObject(CharSequence charSequence, Object o) {
+-        headers.setObject(charSequence, o);
++    public Http2Headers set(CharSequence name, CharSequence... values) {
++        headers.set(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers setObject(CharSequence charSequence, Iterable<?> iterable) {
+-        headers.setObject(charSequence, iterable);
++    public Http2Headers setObject(CharSequence name, Object value) {
++        headers.setObject(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers setObject(CharSequence charSequence, Object... objects) {
+-        headers.setObject(charSequence, objects);
++    public Http2Headers setObject(CharSequence name, Iterable<?> values) {
++        headers.setObject(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers setBoolean(CharSequence charSequence, boolean b) {
+-        headers.setBoolean(charSequence, b);
++    public Http2Headers setObject(CharSequence name, Object... values) {
++        headers.setObject(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers setByte(CharSequence charSequence, byte b) {
+-        headers.setByte(charSequence, b);
++    public Http2Headers setBoolean(CharSequence name, boolean value) {
++        headers.setBoolean(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers setChar(CharSequence charSequence, char c) {
+-        headers.setChar(charSequence, c);
++    public Http2Headers setByte(CharSequence name, byte value) {
++        headers.setByte(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers setShort(CharSequence charSequence, short i) {
+-        headers.setShort(charSequence, i);
++    public Http2Headers setChar(CharSequence name, char value) {
++        headers.setChar(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers setInt(CharSequence charSequence, int i) {
+-        headers.setInt(charSequence, i);
++    public Http2Headers setShort(CharSequence name, short value) {
++        headers.setShort(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers setLong(CharSequence charSequence, long l) {
+-        headers.setLong(charSequence, l);
++    public Http2Headers setInt(CharSequence name, int value) {
++        headers.setInt(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers setFloat(CharSequence charSequence, float v) {
+-        headers.setFloat(charSequence, v);
++    public Http2Headers setLong(CharSequence name, long value) {
++        headers.setLong(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers setDouble(CharSequence charSequence, double v) {
+-        headers.setDouble(charSequence, v);
++    public Http2Headers setFloat(CharSequence name, float value) {
++        headers.setFloat(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers setTimeMillis(CharSequence charSequence, long l) {
+-        headers.setTimeMillis(charSequence, l);
++    public Http2Headers setDouble(CharSequence name, double value) {
++        headers.setDouble(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers set(Headers<? extends CharSequence, ? extends CharSequence, ?> headers) {
+-        this.headers.set(headers);
++    public Http2Headers setTimeMillis(CharSequence name, long value) {
++        headers.setTimeMillis(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http2Headers setAll(Headers<? extends CharSequence, ? extends CharSequence, ?> headers) {
+-        this.headers.setAll(headers);
++    public Http2Headers set(Headers<? extends CharSequence, ? extends CharSequence, ?> h) {
++        this.headers.set(h);
+         return this;
+     }
+ 
+     @Override
+-    public boolean remove(CharSequence charSequence) {
+-        return headers.remove(charSequence);
++    public Http2Headers setAll(Headers<? extends CharSequence, ? extends CharSequence, ?> h) {
++        this.headers.setAll(h);
++        return this;
+     }
+ 
+     @Override
+@@ -599,21 +298,6 @@ public final class Http2HeadersAdapter implements Http2Headers {
+         return this;
+     }
+ 
+-    @Override
+-    public void forEach(Consumer<? super Entry<CharSequence, CharSequence>> action) {
+-        headers.forEach(action);
+-    }
+-
+-    @Override
+-    public Spliterator<Entry<CharSequence, CharSequence>> spliterator() {
+-        return headers.spliterator();
+-    }
+-
+-    @Override
+-    public int hashCode() {
+-        return headers.hashCode();
+-    }
+-
+     @Override
+     public boolean equals(Object obj) {
+         return this == obj || obj instanceof Http2Headers && headers.equals(obj);
+diff --git a/dubbo-remoting/dubbo-remoting-http3/src/main/java/org/apache/dubbo/remoting/http3/netty4/Http3HeadersAdapter.java b/dubbo-remoting/dubbo-remoting-http3/src/main/java/org/apache/dubbo/remoting/http3/netty4/Http3HeadersAdapter.java
+index 25b8a5f89..87448bfff 100644
+--- a/dubbo-remoting/dubbo-remoting-http3/src/main/java/org/apache/dubbo/remoting/http3/netty4/Http3HeadersAdapter.java
++++ b/dubbo-remoting/dubbo-remoting-http3/src/main/java/org/apache/dubbo/remoting/http3/netty4/Http3HeadersAdapter.java
+@@ -16,64 +16,17 @@
+  */
+ package org.apache.dubbo.remoting.http3.netty4;
+ 
+-import java.util.Iterator;
+-import java.util.List;
+-import java.util.Map.Entry;
+-import java.util.Set;
+-import java.util.Spliterator;
+-import java.util.function.Consumer;
+-
+ import io.netty.handler.codec.Headers;
+ import io.netty.handler.codec.http2.Http2Headers;
+ import io.netty.handler.codec.http3.Http3Headers;
+ 
+-public final class Http3HeadersAdapter implements Http3Headers {
+-
+-    private final Http2Headers headers;
++public final class Http3HeadersAdapter extends AbstractHttpHeadersAdapter<Http2Headers> implements Http3Headers {
+ 
+     public Http3HeadersAdapter(Http2Headers headers) {
+-        this.headers = headers;
+-    }
+-
+-    @Override
+-    public Iterator<Entry<CharSequence, CharSequence>> iterator() {
+-        return headers.iterator();
+-    }
+-
+-    @Override
+-    public Iterator<CharSequence> valueIterator(CharSequence name) {
+-        return headers.valueIterator(name);
+-    }
+-
+-    @Override
+-    public Http3Headers method(CharSequence value) {
+-        headers.method(value);
+-        return this;
++        super(headers);
+     }
+ 
+-    @Override
+-    public Http3Headers scheme(CharSequence value) {
+-        headers.scheme(value);
+-        return this;
+-    }
+-
+-    @Override
+-    public Http3Headers authority(CharSequence value) {
+-        headers.authority(value);
+-        return this;
+-    }
+-
+-    @Override
+-    public Http3Headers path(CharSequence value) {
+-        headers.path(value);
+-        return this;
+-    }
+-
+-    @Override
+-    public Http3Headers status(CharSequence value) {
+-        headers.status(value);
+-        return this;
+-    }
++    // ---- Http3Headers pseudo-header getters (not in base Headers<K,V,T>) ----
+ 
+     @Override
+     public CharSequence method() {
+@@ -105,492 +58,238 @@ public final class Http3HeadersAdapter implements Http3Headers {
+         return headers.contains(name, value, caseInsensitive);
+     }
+ 
+-    @Override
+-    public CharSequence get(CharSequence charSequence) {
+-        return headers.get(charSequence);
+-    }
+-
+-    @Override
+-    public CharSequence get(CharSequence charSequence, CharSequence charSequence2) {
+-        return headers.get(charSequence, charSequence2);
+-    }
+-
+-    @Override
+-    public CharSequence getAndRemove(CharSequence charSequence) {
+-        return headers.getAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public CharSequence getAndRemove(CharSequence charSequence, CharSequence charSequence2) {
+-        return headers.getAndRemove(charSequence, charSequence2);
+-    }
+-
+-    @Override
+-    public List<CharSequence> getAll(CharSequence charSequence) {
+-        return headers.getAll(charSequence);
+-    }
+-
+-    @Override
+-    public List<CharSequence> getAllAndRemove(CharSequence charSequence) {
+-        return headers.getAllAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public Boolean getBoolean(CharSequence charSequence) {
+-        return headers.getBoolean(charSequence);
+-    }
+-
+-    @Override
+-    public boolean getBoolean(CharSequence charSequence, boolean b) {
+-        return headers.getBoolean(charSequence, b);
+-    }
+-
+-    @Override
+-    public Byte getByte(CharSequence charSequence) {
+-        return headers.getByte(charSequence);
+-    }
+-
+-    @Override
+-    public byte getByte(CharSequence charSequence, byte b) {
+-        return headers.getByte(charSequence, b);
+-    }
+-
+-    @Override
+-    public Character getChar(CharSequence charSequence) {
+-        return headers.getChar(charSequence);
+-    }
++    // ---- Fluent pseudo-header setters ----
+ 
+     @Override
+-    public char getChar(CharSequence charSequence, char c) {
+-        return headers.getChar(charSequence, c);
+-    }
+-
+-    @Override
+-    public Short getShort(CharSequence charSequence) {
+-        return headers.getShort(charSequence);
+-    }
+-
+-    @Override
+-    public short getShort(CharSequence charSequence, short i) {
+-        return headers.getShort(charSequence, i);
+-    }
+-
+-    @Override
+-    public Integer getInt(CharSequence charSequence) {
+-        return headers.getInt(charSequence);
+-    }
+-
+-    @Override
+-    public int getInt(CharSequence charSequence, int i) {
+-        return headers.getInt(charSequence, i);
+-    }
+-
+-    @Override
+-    public Long getLong(CharSequence charSequence) {
+-        return headers.getLong(charSequence);
+-    }
+-
+-    @Override
+-    public long getLong(CharSequence charSequence, long l) {
+-        return headers.getLong(charSequence, l);
+-    }
+-
+-    @Override
+-    public Float getFloat(CharSequence charSequence) {
+-        return headers.getFloat(charSequence);
+-    }
+-
+-    @Override
+-    public float getFloat(CharSequence charSequence, float v) {
+-        return headers.getFloat(charSequence, v);
+-    }
+-
+-    @Override
+-    public Double getDouble(CharSequence charSequence) {
+-        return headers.getDouble(charSequence);
+-    }
+-
+-    @Override
+-    public double getDouble(CharSequence charSequence, double v) {
+-        return headers.getDouble(charSequence, v);
+-    }
+-
+-    @Override
+-    public Long getTimeMillis(CharSequence charSequence) {
+-        return headers.getTimeMillis(charSequence);
+-    }
+-
+-    @Override
+-    public long getTimeMillis(CharSequence charSequence, long l) {
+-        return headers.getTimeMillis(charSequence, l);
+-    }
+-
+-    @Override
+-    public Boolean getBooleanAndRemove(CharSequence charSequence) {
+-        return headers.getBooleanAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public boolean getBooleanAndRemove(CharSequence charSequence, boolean b) {
+-        return headers.getBooleanAndRemove(charSequence, b);
+-    }
+-
+-    @Override
+-    public Byte getByteAndRemove(CharSequence charSequence) {
+-        return headers.getByteAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public byte getByteAndRemove(CharSequence charSequence, byte b) {
+-        return headers.getByteAndRemove(charSequence, b);
+-    }
+-
+-    @Override
+-    public Character getCharAndRemove(CharSequence charSequence) {
+-        return headers.getCharAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public char getCharAndRemove(CharSequence charSequence, char c) {
+-        return headers.getCharAndRemove(charSequence, c);
+-    }
+-
+-    @Override
+-    public Short getShortAndRemove(CharSequence charSequence) {
+-        return headers.getShortAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public short getShortAndRemove(CharSequence charSequence, short i) {
+-        return headers.getShortAndRemove(charSequence, i);
+-    }
+-
+-    @Override
+-    public Integer getIntAndRemove(CharSequence charSequence) {
+-        return headers.getIntAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public int getIntAndRemove(CharSequence charSequence, int i) {
+-        return headers.getIntAndRemove(charSequence, i);
+-    }
+-
+-    @Override
+-    public Long getLongAndRemove(CharSequence charSequence) {
+-        return headers.getLongAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public long getLongAndRemove(CharSequence charSequence, long l) {
+-        return headers.getLongAndRemove(charSequence, l);
+-    }
+-
+-    @Override
+-    public Float getFloatAndRemove(CharSequence charSequence) {
+-        return headers.getFloatAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public float getFloatAndRemove(CharSequence charSequence, float v) {
+-        return headers.getFloatAndRemove(charSequence, v);
+-    }
+-
+-    @Override
+-    public Double getDoubleAndRemove(CharSequence charSequence) {
+-        return headers.getDoubleAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public double getDoubleAndRemove(CharSequence charSequence, double v) {
+-        return headers.getDoubleAndRemove(charSequence, v);
+-    }
+-
+-    @Override
+-    public Long getTimeMillisAndRemove(CharSequence charSequence) {
+-        return headers.getTimeMillisAndRemove(charSequence);
+-    }
+-
+-    @Override
+-    public long getTimeMillisAndRemove(CharSequence charSequence, long l) {
+-        return headers.getTimeMillisAndRemove(charSequence, l);
+-    }
+-
+-    @Override
+-    public boolean contains(CharSequence charSequence) {
+-        return headers.contains(charSequence);
+-    }
+-
+-    @Override
+-    public boolean contains(CharSequence charSequence, CharSequence charSequence2) {
+-        return headers.contains(charSequence, charSequence2);
+-    }
+-
+-    @Override
+-    public boolean containsObject(CharSequence charSequence, Object o) {
+-        return headers.containsObject(charSequence, o);
+-    }
+-
+-    @Override
+-    public boolean containsBoolean(CharSequence charSequence, boolean b) {
+-        return headers.containsBoolean(charSequence, b);
+-    }
+-
+-    @Override
+-    public boolean containsByte(CharSequence charSequence, byte b) {
+-        return headers.containsByte(charSequence, b);
+-    }
+-
+-    @Override
+-    public boolean containsChar(CharSequence charSequence, char c) {
+-        return headers.containsChar(charSequence, c);
+-    }
+-
+-    @Override
+-    public boolean containsShort(CharSequence charSequence, short i) {
+-        return headers.containsShort(charSequence, i);
+-    }
+-
+-    @Override
+-    public boolean containsInt(CharSequence charSequence, int i) {
+-        return headers.containsInt(charSequence, i);
+-    }
+-
+-    @Override
+-    public boolean containsLong(CharSequence charSequence, long l) {
+-        return headers.containsLong(charSequence, l);
+-    }
+-
+-    @Override
+-    public boolean containsFloat(CharSequence charSequence, float v) {
+-        return headers.containsFloat(charSequence, v);
++    public Http3Headers method(CharSequence value) {
++        headers.method(value);
++        return this;
+     }
+ 
+     @Override
+-    public boolean containsDouble(CharSequence charSequence, double v) {
+-        return headers.containsDouble(charSequence, v);
++    public Http3Headers scheme(CharSequence value) {
++        headers.scheme(value);
++        return this;
+     }
+ 
+     @Override
+-    public boolean containsTimeMillis(CharSequence charSequence, long l) {
+-        return headers.containsTimeMillis(charSequence, l);
++    public Http3Headers authority(CharSequence value) {
++        headers.authority(value);
++        return this;
+     }
+ 
+     @Override
+-    public int size() {
+-        return headers.size();
++    public Http3Headers path(CharSequence value) {
++        headers.path(value);
++        return this;
+     }
+ 
+     @Override
+-    public boolean isEmpty() {
+-        return headers.isEmpty();
++    public Http3Headers status(CharSequence value) {
++        headers.status(value);
++        return this;
+     }
+ 
+-    @Override
+-    public Set<CharSequence> names() {
+-        return headers.names();
+-    }
++    // ---- Fluent add methods ----
+ 
+     @Override
+-    public Http3Headers add(CharSequence charSequence, CharSequence charSequence2) {
+-        headers.add(charSequence, charSequence2);
++    public Http3Headers add(CharSequence name, CharSequence value) {
++        headers.add(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers add(CharSequence charSequence, Iterable<? extends CharSequence> iterable) {
+-        headers.add(charSequence, iterable);
++    public Http3Headers add(CharSequence name, Iterable<? extends CharSequence> values) {
++        headers.add(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers add(CharSequence charSequence, CharSequence... charSequences) {
+-        headers.add(charSequence, charSequences);
++    public Http3Headers add(CharSequence name, CharSequence... values) {
++        headers.add(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers addObject(CharSequence charSequence, Object o) {
+-        headers.addObject(charSequence, o);
++    public Http3Headers addObject(CharSequence name, Object value) {
++        headers.addObject(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers addObject(CharSequence charSequence, Iterable<?> iterable) {
+-        headers.addObject(charSequence, iterable);
++    public Http3Headers addObject(CharSequence name, Iterable<?> values) {
++        headers.addObject(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers addObject(CharSequence charSequence, Object... objects) {
+-        headers.addObject(charSequence, objects);
++    public Http3Headers addObject(CharSequence name, Object... values) {
++        headers.addObject(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers addBoolean(CharSequence charSequence, boolean b) {
+-        headers.addBoolean(charSequence, b);
++    public Http3Headers addBoolean(CharSequence name, boolean value) {
++        headers.addBoolean(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers addByte(CharSequence charSequence, byte b) {
+-        headers.addByte(charSequence, b);
++    public Http3Headers addByte(CharSequence name, byte value) {
++        headers.addByte(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers addChar(CharSequence charSequence, char c) {
+-        headers.addChar(charSequence, c);
++    public Http3Headers addChar(CharSequence name, char value) {
++        headers.addChar(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers addShort(CharSequence charSequence, short i) {
+-        headers.addShort(charSequence, i);
++    public Http3Headers addShort(CharSequence name, short value) {
++        headers.addShort(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers addInt(CharSequence charSequence, int i) {
+-        headers.addInt(charSequence, i);
++    public Http3Headers addInt(CharSequence name, int value) {
++        headers.addInt(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers addLong(CharSequence charSequence, long l) {
+-        headers.addLong(charSequence, l);
++    public Http3Headers addLong(CharSequence name, long value) {
++        headers.addLong(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers addFloat(CharSequence charSequence, float v) {
+-        headers.addFloat(charSequence, v);
++    public Http3Headers addFloat(CharSequence name, float value) {
++        headers.addFloat(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers addDouble(CharSequence charSequence, double v) {
+-        headers.addDouble(charSequence, v);
++    public Http3Headers addDouble(CharSequence name, double value) {
++        headers.addDouble(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers addTimeMillis(CharSequence charSequence, long l) {
+-        headers.addTimeMillis(charSequence, l);
++    public Http3Headers addTimeMillis(CharSequence name, long value) {
++        headers.addTimeMillis(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers add(Headers<? extends CharSequence, ? extends CharSequence, ?> headers) {
+-        this.headers.add(headers);
++    public Http3Headers add(Headers<? extends CharSequence, ? extends CharSequence, ?> h) {
++        this.headers.add(h);
+         return this;
+     }
+ 
+-    @Override
+-    public Http3Headers set(CharSequence charSequence, CharSequence charSequence2) {
+-        headers.set(charSequence, charSequence2);
+-        return this;
+-    }
++    // ---- Fluent set methods ----
+ 
+     @Override
+-    public Http3Headers set(CharSequence charSequence, Iterable<? extends CharSequence> iterable) {
+-        headers.set(charSequence, iterable);
++    public Http3Headers set(CharSequence name, CharSequence value) {
++        headers.set(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers set(CharSequence charSequence, CharSequence... charSequences) {
+-        headers.set(charSequence, charSequences);
++    public Http3Headers set(CharSequence name, Iterable<? extends CharSequence> values) {
++        headers.set(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers setObject(CharSequence charSequence, Object o) {
+-        headers.setObject(charSequence, o);
++    public Http3Headers set(CharSequence name, CharSequence... values) {
++        headers.set(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers setObject(CharSequence charSequence, Iterable<?> iterable) {
+-        headers.setObject(charSequence, iterable);
++    public Http3Headers setObject(CharSequence name, Object value) {
++        headers.setObject(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers setObject(CharSequence charSequence, Object... objects) {
+-        headers.setObject(charSequence, objects);
++    public Http3Headers setObject(CharSequence name, Iterable<?> values) {
++        headers.setObject(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers setBoolean(CharSequence charSequence, boolean b) {
+-        headers.setBoolean(charSequence, b);
++    public Http3Headers setObject(CharSequence name, Object... values) {
++        headers.setObject(name, values);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers setByte(CharSequence charSequence, byte b) {
+-        headers.setByte(charSequence, b);
++    public Http3Headers setBoolean(CharSequence name, boolean value) {
++        headers.setBoolean(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers setChar(CharSequence charSequence, char c) {
+-        headers.setChar(charSequence, c);
++    public Http3Headers setByte(CharSequence name, byte value) {
++        headers.setByte(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers setShort(CharSequence charSequence, short i) {
+-        headers.setShort(charSequence, i);
++    public Http3Headers setChar(CharSequence name, char value) {
++        headers.setChar(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers setInt(CharSequence charSequence, int i) {
+-        headers.setInt(charSequence, i);
++    public Http3Headers setShort(CharSequence name, short value) {
++        headers.setShort(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers setLong(CharSequence charSequence, long l) {
+-        headers.setLong(charSequence, l);
++    public Http3Headers setInt(CharSequence name, int value) {
++        headers.setInt(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers setFloat(CharSequence charSequence, float v) {
+-        headers.setFloat(charSequence, v);
++    public Http3Headers setLong(CharSequence name, long value) {
++        headers.setLong(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers setDouble(CharSequence charSequence, double v) {
+-        headers.setDouble(charSequence, v);
++    public Http3Headers setFloat(CharSequence name, float value) {
++        headers.setFloat(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers setTimeMillis(CharSequence charSequence, long l) {
+-        headers.setTimeMillis(charSequence, l);
++    public Http3Headers setDouble(CharSequence name, double value) {
++        headers.setDouble(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers set(Headers<? extends CharSequence, ? extends CharSequence, ?> headers) {
+-        this.headers.set(headers);
++    public Http3Headers setTimeMillis(CharSequence name, long value) {
++        headers.setTimeMillis(name, value);
+         return this;
+     }
+ 
+     @Override
+-    public Http3Headers setAll(Headers<? extends CharSequence, ? extends CharSequence, ?> headers) {
+-        this.headers.setAll(headers);
++    public Http3Headers set(Headers<? extends CharSequence, ? extends CharSequence, ?> h) {
++        this.headers.set(h);
+         return this;
+     }
+ 
+     @Override
+-    public boolean remove(CharSequence charSequence) {
+-        return headers.remove(charSequence);
++    public Http3Headers setAll(Headers<? extends CharSequence, ? extends CharSequence, ?> h) {
++        this.headers.setAll(h);
++        return this;
+     }
+ 
+     @Override
+@@ -599,21 +298,6 @@ public final class Http3HeadersAdapter implements Http3Headers {
+         return this;
+     }
+ 
+-    @Override
+-    public void forEach(Consumer<? super Entry<CharSequence, CharSequence>> action) {
+-        headers.forEach(action);
+-    }
+-
+-    @Override
+-    public Spliterator<Entry<CharSequence, CharSequence>> spliterator() {
+-        return headers.spliterator();
+-    }
+-
+-    @Override
+-    public int hashCode() {
+-        return headers.hashCode();
+-    }
+-
+     @Override
+     public boolean equals(Object obj) {
+         return this == obj || obj instanceof Http3Headers && headers.equals(obj);
+diff --git a/dubbo-rpc/dubbo-rpc-triple/src/main/java/org/apache/dubbo/rpc/protocol/tri/TripleHttp2Protocol.java b/dubbo-rpc/dubbo-rpc-triple/src/main/java/org/apache/dubbo/rpc/protocol/tri/TripleHttp2Protocol.java
+index ff599369d..7c6ff7de3 100644
+--- a/dubbo-rpc/dubbo-rpc-triple/src/main/java/org/apache/dubbo/rpc/protocol/tri/TripleHttp2Protocol.java
++++ b/dubbo-rpc/dubbo-rpc-triple/src/main/java/org/apache/dubbo/rpc/protocol/tri/TripleHttp2Protocol.java
+@@ -103,7 +103,7 @@ public class TripleHttp2Protocol extends AbstractWireProtocol implements ScopeMo
+     @Override
+     public void configClientPipeline(URL url, ChannelOperator operator, ContextOperator contextOperator) {
+         TripleConfig tripleConfig = ConfigManager.getProtocolOrDefault(url).getTripleOrDefault();
+-        Http2Connection connection = createHttp2ClientConnection(tripleConfig);
++        Http2Connection connection = createHttp2Connection(false, tripleConfig);
+         Http2FrameCodec codec = TripleHttp2FrameCodecBuilder.fromConnection(connection)
+                 .gracefulShutdownTimeoutMillis(10000)
+                 .initialSettings(new Http2Settings()
+@@ -125,8 +125,8 @@ public class TripleHttp2Protocol extends AbstractWireProtocol implements ScopeMo
+         operator.configChannelHandler(handlers);
+     }
+ 
+-    private Http2Connection createHttp2ClientConnection(TripleConfig tripleConfig) {
+-        Http2Connection connection = new DefaultHttp2Connection(false);
++    private Http2Connection createHttp2Connection(boolean server, TripleConfig tripleConfig) {
++        Http2Connection connection = new DefaultHttp2Connection(server);
+         float windowUpdateRatio = tripleConfig.getWindowUpdateRatioOrDefault();
+         connection.local().flowController(TripleHttp2LocalFlowController.newController(connection, windowUpdateRatio));
+         connection.remote().flowController(TripleHttp2RemoteFlowController.newController(connection));
+@@ -169,7 +169,7 @@ public class TripleHttp2Protocol extends AbstractWireProtocol implements ScopeMo
+                 protocol -> {
+                     if (AsciiString.contentEquals(Http2CodecUtil.HTTP_UPGRADE_PROTOCOL_NAME, protocol)) {
+                         NettyHttp2SettingsHandler nettyHttp2SettingsHandler = new NettyHttp2SettingsHandler();
+-                        Http2Connection http2ServerConnection = createHttp2ServerConnection(tripleConfig);
++                        Http2Connection http2ServerConnection = createHttp2Connection(true, tripleConfig);
+                         Http2FrameCodec http2FrameCodec = buildHttp2FrameCodec(http2ServerConnection, tripleConfig);
+                         return new Http2ServerUpgradeCodec(
+                                 http2FrameCodec,
+@@ -236,7 +236,7 @@ public class TripleHttp2Protocol extends AbstractWireProtocol implements ScopeMo
+     private void configurerHttp2Handlers(URL url, List<ChannelHandler> handlers) {
+         NettyHttp2SettingsHandler nettyHttp2SettingsHandler = new NettyHttp2SettingsHandler();
+         TripleConfig tripleConfig = ConfigManager.getProtocolOrDefault(url).getTripleOrDefault();
+-        Http2Connection connection = createHttp2ServerConnection(tripleConfig);
++        Http2Connection connection = createHttp2Connection(true, tripleConfig);
+         Http2FrameCodec codec = buildHttp2FrameCodec(connection, tripleConfig);
+         Http2MultiplexHandler handler =
+                 buildHttp2MultiplexHandler(nettyHttp2SettingsHandler, url, tripleConfig, connection);
+@@ -263,13 +263,6 @@ public class TripleHttp2Protocol extends AbstractWireProtocol implements ScopeMo
+                 .build();
+     }
+ 
+-    private Http2Connection createHttp2ServerConnection(TripleConfig tripleConfig) {
+-        Http2Connection connection = new DefaultHttp2Connection(true);
+-        float windowUpdateRatio = tripleConfig.getWindowUpdateRatioOrDefault();
+-        connection.local().flowController(TripleHttp2LocalFlowController.newController(connection, windowUpdateRatio));
+-        connection.remote().flowController(TripleHttp2RemoteFlowController.newController(connection));
+-        return connection;
+-    }
+ 
+     private WebSocketServerProtocolHandler buildWebSocketServerProtocolHandler(TripleConfig tripleConfig) {
+         return new WebSocketServerProtocolHandler(WebSocketServerProtocolConfig.newBuilder()
+diff --git a/dubbo-serialization/dubbo-serialization-fastjson2/src/main/java/org/apache/dubbo/common/serialize/fastjson2/FastJson2ObjectInput.java b/dubbo-serialization/dubbo-serialization-fastjson2/src/main/java/org/apache/dubbo/common/serialize/fastjson2/FastJson2ObjectInput.java
+index 52d486ec6..b1293c9eb 100644
+--- a/dubbo-serialization/dubbo-serialization-fastjson2/src/main/java/org/apache/dubbo/common/serialize/fastjson2/FastJson2ObjectInput.java
++++ b/dubbo-serialization/dubbo-serialization-fastjson2/src/main/java/org/apache/dubbo/common/serialize/fastjson2/FastJson2ObjectInput.java
+@@ -147,41 +147,7 @@ public class FastJson2ObjectInput implements ObjectInput {
+ 
+     @Override
+     public <T> T readObject(Class<T> cls, Type type) throws IOException, ClassNotFoundException {
+-        updateClassLoaderIfNeed();
+-        int length = readLength();
+-        byte[] bytes = new byte[length];
+-        int read = is.read(bytes, 0, length);
+-        if (read != length) {
+-            throw new IllegalArgumentException(
+-                    "deserialize failed. expected read length: " + length + " but actual read: " + read);
+-        }
+-        Fastjson2SecurityManager.Handler securityFilter = fastjson2SecurityManager.getSecurityFilter();
+-        T result;
+-        if (securityFilter.isCheckSerializable()) {
+-            result = JSONB.parseObject(
+-                    bytes,
+-                    cls,
+-                    securityFilter,
+-                    JSONReader.Feature.UseDefaultConstructorAsPossible,
+-                    JSONReader.Feature.ErrorOnNoneSerializable,
+-                    JSONReader.Feature.IgnoreAutoTypeNotMatch,
+-                    JSONReader.Feature.UseNativeObject,
+-                    JSONReader.Feature.FieldBased);
+-        } else {
+-            result = JSONB.parseObject(
+-                    bytes,
+-                    cls,
+-                    securityFilter,
+-                    JSONReader.Feature.UseDefaultConstructorAsPossible,
+-                    JSONReader.Feature.UseNativeObject,
+-                    JSONReader.Feature.IgnoreAutoTypeNotMatch,
+-                    JSONReader.Feature.FieldBased);
+-        }
+-        if (result != null && cls != null && !ClassUtils.isMatch(result.getClass(), cls)) {
+-            throw new IllegalArgumentException(
+-                    "deserialize failed. expected class: " + cls + " but actual class: " + result.getClass());
+-        }
+-        return result;
++        return readObject(cls);
+     }
+ 
+     private void updateClassLoaderIfNeed() {

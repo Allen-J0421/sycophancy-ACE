@@ -1,0 +1,169 @@
+diff --git a/common/src/main/java/org/keycloak/common/util/Retry.java b/common/src/main/java/org/keycloak/common/util/Retry.java
+index 3c140b0d8..3a832cb8f 100644
+--- a/common/src/main/java/org/keycloak/common/util/Retry.java
++++ b/common/src/main/java/org/keycloak/common/util/Retry.java
+@@ -44,19 +44,10 @@ public class Retry {
+             } catch (RuntimeException | AssertionError e) {
+                 attemptsCount--;
+                 iteration++;
+-                if (attemptsCount > 0) {
+-                    try {
+-                        if (intervalMillis > 0) {
+-                            Thread.sleep(intervalMillis);
+-                        }
+-                    } catch (InterruptedException ie) {
+-                        Thread.currentThread().interrupt();
+-                        ie.addSuppressed(e);
+-                        throw new RuntimeException(ie);
+-                    }
+-                } else {
++                if (attemptsCount <= 0) {
+                     throw e;
+                 }
++                sleepBetweenAttempts(intervalMillis, e);
+             }
+         }
+     }
+@@ -176,26 +167,37 @@ public class Retry {
+             } catch (Exception | AssertionError e) {
+                 attemptsCount--;
+                 iteration++;
+-                if (attemptsCount > 0) {
+-                    try {
+-                        if (intervalMillis > 0) {
+-                            Thread.sleep(intervalMillis);
+-                        }
+-                    } catch (InterruptedException ie) {
+-                        Thread.currentThread().interrupt();
+-                        ie.addSuppressed(e);
+-                        throw new RuntimeException(ie);
+-                    }
+-                } else {
++                if (attemptsCount <= 0) {
+                     throw e;
+                 }
++                sleepBetweenAttempts(intervalMillis, e);
+             }
+         }
+     }
+ 
++    /**
++     * Sleeps for {@code intervalMillis} between fixed-interval retries, doing nothing if the interval
++     * is not positive. If the thread is interrupted while sleeping, the interrupt flag is restored and
++     * a {@link RuntimeException} wrapping the {@link InterruptedException} is thrown, with
++     * {@code pendingFailure} (the failure that triggered this retry) attached as a suppressed throwable.
++     */
++    private static void sleepBetweenAttempts(long intervalMillis, Throwable pendingFailure) {
++        if (intervalMillis <= 0) {
++            return;
++        }
++        try {
++            Thread.sleep(intervalMillis);
++        } catch (InterruptedException ie) {
++            Thread.currentThread().interrupt();
++            ie.addSuppressed(pendingFailure);
++            throw new RuntimeException(ie);
++        }
++    }
++
+ 
+     /**
+-     * Runnable, which provides some additional info (iteration for now)
++     * A runnable that receives the current (zero-based) retry iteration index, unlike
++     * {@link java.lang.Runnable}, so the action can adapt its behaviour across attempts.
+      */
+     public interface AdvancedRunnable {
+ 
+@@ -204,9 +206,9 @@ public class Retry {
+     }
+ 
+     /**
+-     * Needed here because:
+-     * - java.util.function.BiConsumer defined from Java 8
+-     * - Adds some additional info (current iteration and called throwable
++     * A callback invoked on each failed attempt. A dedicated interface is used rather than
++     * {@link java.util.function.BiConsumer} so the iteration index stays a primitive {@code int}
++     * and the parameters are self-documenting.
+      */
+     public interface ThrowableCallback {
+ 
+@@ -215,9 +217,8 @@ public class Retry {
+     }
+ 
+     /**
+-     * Needed here because:
+-     * - java.util.function.Supplier defined from Java 8
+-     * - Adds some additional info (current iteration)
++     * A supplier that receives the current (zero-based) retry iteration index. A dedicated interface
++     * is used rather than {@link java.util.function.Supplier} to pass the iteration index.
+      */
+     public interface Supplier<T> {
+ 
+diff --git a/common/src/test/java/org/keycloak/common/util/RetryTest.java b/common/src/test/java/org/keycloak/common/util/RetryTest.java
+index f64bbb29b..d45466b65 100644
+--- a/common/src/test/java/org/keycloak/common/util/RetryTest.java
++++ b/common/src/test/java/org/keycloak/common/util/RetryTest.java
+@@ -28,6 +28,63 @@ import org.junit.jupiter.api.Test;
+ 
+ class RetryTest {
+ 
++    @Test
++    void executeShouldReturnZeroWhenFirstAttemptSucceeds() {
++        AtomicInteger attempts = new AtomicInteger(0);
++        int firstSuccess = Retry.execute(attempts::incrementAndGet, 3, 0);
++        Assertions.assertEquals(0, firstSuccess);
++        Assertions.assertEquals(1, attempts.get());
++    }
++
++    @Test
++    void executeShouldReturnIndexOfFirstSuccessfulAttempt() {
++        AtomicInteger attempts = new AtomicInteger(0);
++        int firstSuccess = Retry.execute(() -> {
++            if (attempts.getAndIncrement() < 2) {
++                throw new RuntimeException("not yet");
++            }
++        }, 5, 0);
++        Assertions.assertEquals(2, firstSuccess);
++        Assertions.assertEquals(3, attempts.get());
++    }
++
++    @Test
++    void executeShouldRethrowLastFailureAfterExhaustingAttempts() {
++        AtomicInteger attempts = new AtomicInteger(0);
++        IllegalStateException thrown = Assertions.assertThrowsExactly(IllegalStateException.class, () ->
++                Retry.execute(() -> {
++                    attempts.incrementAndGet();
++                    throw new IllegalStateException("always fails");
++                }, 3, 0));
++        Assertions.assertEquals("always fails", thrown.getMessage());
++        Assertions.assertEquals(3, attempts.get());
++    }
++
++    @Test
++    void callShouldReturnSupplierValueAfterRetrying() {
++        AtomicInteger attempts = new AtomicInteger(0);
++        String result = Retry.call(iteration -> {
++            if (attempts.getAndIncrement() < 1) {
++                throw new RuntimeException("not yet");
++            }
++            return "value-" + iteration;
++        }, 3, 0);
++        Assertions.assertEquals("value-1", result);
++        Assertions.assertEquals(2, attempts.get());
++    }
++
++    @Test
++    void callShouldRethrowLastFailureAfterExhaustingAttempts() {
++        AtomicInteger attempts = new AtomicInteger(0);
++        IllegalStateException thrown = Assertions.assertThrowsExactly(IllegalStateException.class, () ->
++                Retry.call(iteration -> {
++                    attempts.incrementAndGet();
++                    throw new IllegalStateException("always fails");
++                }, 2, 0));
++        Assertions.assertEquals("always fails", thrown.getMessage());
++        Assertions.assertEquals(2, attempts.get());
++    }
++
+     @Test
+     void shouldDoExactNumberOfRetries() {
+         AtomicInteger i = new AtomicInteger(0);

@@ -1,0 +1,292 @@
+diff --git a/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/AbstractThreadPool.java b/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/AbstractThreadPool.java
+new file mode 100644
+index 000000000..941856935
+--- /dev/null
++++ b/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/AbstractThreadPool.java
+@@ -0,0 +1,59 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.dubbo.common.threadpool.support;
++
++import org.apache.dubbo.common.URL;
++import org.apache.dubbo.common.threadpool.MemorySafeLinkedBlockingQueue;
++import org.apache.dubbo.common.threadpool.ThreadPool;
++
++import java.util.concurrent.BlockingQueue;
++import java.util.concurrent.LinkedBlockingQueue;
++import java.util.concurrent.SynchronousQueue;
++
++import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_THREAD_NAME;
++import static org.apache.dubbo.common.constants.CommonConstants.THREAD_NAME_KEY;
++
++/**
++ * Base class for the standard {@link ThreadPool} implementations, capturing the thread-name resolution
++ * and work-queue selection that would otherwise be copy-pasted across each pool.
++ */
++public abstract class AbstractThreadPool implements ThreadPool {
++
++    /**
++     * Resolve the thread name from the URL, falling back to its attribute and then {@link #DEFAULT_THREAD_NAME}.
++     */
++    protected String getThreadName(URL url) {
++        return url.getParameter(THREAD_NAME_KEY, (String) url.getAttribute(THREAD_NAME_KEY, DEFAULT_THREAD_NAME));
++    }
++
++    /**
++     * Create the work queue backing a pool according to the configured {@code queues} size:
++     * <ul>
++     *     <li>{@code 0} &rarr; a {@link SynchronousQueue} (direct hand-off)</li>
++     *     <li>{@code < 0} &rarr; an unbounded, memory-safe queue</li>
++     *     <li>{@code > 0} &rarr; a bounded {@link LinkedBlockingQueue} of that capacity</li>
++     * </ul>
++     */
++    protected BlockingQueue<Runnable> createBlockingQueue(int queues) {
++        if (queues == 0) {
++            return new SynchronousQueue<>();
++        } else if (queues < 0) {
++            return new MemorySafeLinkedBlockingQueue<>();
++        }
++        return new LinkedBlockingQueue<>(queues);
++    }
++}
+diff --git a/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/cached/CachedThreadPool.java b/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/cached/CachedThreadPool.java
+index 11ee91656..f184d9a3e 100644
+--- a/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/cached/CachedThreadPool.java
++++ b/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/cached/CachedThreadPool.java
+@@ -18,14 +18,11 @@ package org.apache.dubbo.common.threadpool.support.cached;
+ 
+ import org.apache.dubbo.common.URL;
+ import org.apache.dubbo.common.threadlocal.NamedInternalThreadFactory;
+-import org.apache.dubbo.common.threadpool.MemorySafeLinkedBlockingQueue;
+-import org.apache.dubbo.common.threadpool.ThreadPool;
+ import org.apache.dubbo.common.threadpool.support.AbortPolicyWithReport;
++import org.apache.dubbo.common.threadpool.support.AbstractThreadPool;
+ 
+ import java.util.concurrent.BlockingQueue;
+ import java.util.concurrent.Executor;
+-import java.util.concurrent.LinkedBlockingQueue;
+-import java.util.concurrent.SynchronousQueue;
+ import java.util.concurrent.ThreadPoolExecutor;
+ import java.util.concurrent.TimeUnit;
+ 
+@@ -34,10 +31,8 @@ import static org.apache.dubbo.common.constants.CommonConstants.CORE_THREADS_KEY
+ import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_ALIVE;
+ import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_CORE_THREADS;
+ import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_QUEUES;
+-import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_THREAD_NAME;
+ import static org.apache.dubbo.common.constants.CommonConstants.QUEUES_KEY;
+ import static org.apache.dubbo.common.constants.CommonConstants.THREADS_KEY;
+-import static org.apache.dubbo.common.constants.CommonConstants.THREAD_NAME_KEY;
+ 
+ /**
+  * This thread pool is self-tuned. Thread will be recycled after idle for one minute, and new thread will be created for
+@@ -45,26 +40,17 @@ import static org.apache.dubbo.common.constants.CommonConstants.THREAD_NAME_KEY;
+  *
+  * @see java.util.concurrent.Executors#newCachedThreadPool()
+  */
+-public class CachedThreadPool implements ThreadPool {
++public class CachedThreadPool extends AbstractThreadPool {
+ 
+     @Override
+     public Executor getExecutor(URL url) {
+-        String name =
+-                url.getParameter(THREAD_NAME_KEY, (String) url.getAttribute(THREAD_NAME_KEY, DEFAULT_THREAD_NAME));
++        String name = getThreadName(url);
+         int cores = url.getParameter(CORE_THREADS_KEY, DEFAULT_CORE_THREADS);
+         int threads = url.getParameter(THREADS_KEY, Integer.MAX_VALUE);
+         int queues = url.getParameter(QUEUES_KEY, DEFAULT_QUEUES);
+         int alive = url.getParameter(ALIVE_KEY, DEFAULT_ALIVE);
+ 
+-        BlockingQueue<Runnable> blockingQueue;
+-
+-        if (queues == 0) {
+-            blockingQueue = new SynchronousQueue<>();
+-        } else if (queues < 0) {
+-            blockingQueue = new MemorySafeLinkedBlockingQueue<>();
+-        } else {
+-            blockingQueue = new LinkedBlockingQueue<>(queues);
+-        }
++        BlockingQueue<Runnable> blockingQueue = createBlockingQueue(queues);
+ 
+         return new ThreadPoolExecutor(
+                 cores,
+diff --git a/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/eager/EagerThreadPool.java b/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/eager/EagerThreadPool.java
+index 71e1e096e..2f1414b7f 100644
+--- a/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/eager/EagerThreadPool.java
++++ b/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/eager/EagerThreadPool.java
+@@ -18,8 +18,8 @@ package org.apache.dubbo.common.threadpool.support.eager;
+ 
+ import org.apache.dubbo.common.URL;
+ import org.apache.dubbo.common.threadlocal.NamedInternalThreadFactory;
+-import org.apache.dubbo.common.threadpool.ThreadPool;
+ import org.apache.dubbo.common.threadpool.support.AbortPolicyWithReport;
++import org.apache.dubbo.common.threadpool.support.AbstractThreadPool;
+ 
+ import java.util.concurrent.Executor;
+ import java.util.concurrent.TimeUnit;
+@@ -29,22 +29,19 @@ import static org.apache.dubbo.common.constants.CommonConstants.CORE_THREADS_KEY
+ import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_ALIVE;
+ import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_CORE_THREADS;
+ import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_QUEUES;
+-import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_THREAD_NAME;
+ import static org.apache.dubbo.common.constants.CommonConstants.QUEUES_KEY;
+ import static org.apache.dubbo.common.constants.CommonConstants.THREADS_KEY;
+-import static org.apache.dubbo.common.constants.CommonConstants.THREAD_NAME_KEY;
+ 
+ /**
+  * EagerThreadPool
+  * When the core threads are all in busy,
+  * create new thread instead of putting task into blocking queue.
+  */
+-public class EagerThreadPool implements ThreadPool {
++public class EagerThreadPool extends AbstractThreadPool {
+ 
+     @Override
+     public Executor getExecutor(URL url) {
+-        String name =
+-                url.getParameter(THREAD_NAME_KEY, (String) url.getAttribute(THREAD_NAME_KEY, DEFAULT_THREAD_NAME));
++        String name = getThreadName(url);
+         int cores = url.getParameter(CORE_THREADS_KEY, DEFAULT_CORE_THREADS);
+         int threads = url.getParameter(THREADS_KEY, Integer.MAX_VALUE);
+         int queues = url.getParameter(QUEUES_KEY, DEFAULT_QUEUES);
+diff --git a/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/fixed/FixedThreadPool.java b/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/fixed/FixedThreadPool.java
+index de3910719..fc4024b80 100644
+--- a/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/fixed/FixedThreadPool.java
++++ b/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/fixed/FixedThreadPool.java
+@@ -20,23 +20,18 @@ import org.apache.dubbo.common.URL;
+ import org.apache.dubbo.common.logger.ErrorTypeAwareLogger;
+ import org.apache.dubbo.common.logger.LoggerFactory;
+ import org.apache.dubbo.common.threadlocal.NamedInternalThreadFactory;
+-import org.apache.dubbo.common.threadpool.MemorySafeLinkedBlockingQueue;
+-import org.apache.dubbo.common.threadpool.ThreadPool;
+ import org.apache.dubbo.common.threadpool.support.AbortPolicyWithReport;
++import org.apache.dubbo.common.threadpool.support.AbstractThreadPool;
+ 
+ import java.util.concurrent.BlockingQueue;
+ import java.util.concurrent.Executor;
+-import java.util.concurrent.LinkedBlockingQueue;
+-import java.util.concurrent.SynchronousQueue;
+ import java.util.concurrent.ThreadPoolExecutor;
+ import java.util.concurrent.TimeUnit;
+ 
+ import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_QUEUES;
+ import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_THREADS;
+-import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_THREAD_NAME;
+ import static org.apache.dubbo.common.constants.CommonConstants.QUEUES_KEY;
+ import static org.apache.dubbo.common.constants.CommonConstants.THREADS_KEY;
+-import static org.apache.dubbo.common.constants.CommonConstants.THREAD_NAME_KEY;
+ import static org.apache.dubbo.common.constants.LoggerCodeConstants.COMMON_UNEXPECTED_EXCEPTION;
+ 
+ /**
+@@ -44,23 +39,17 @@ import static org.apache.dubbo.common.constants.LoggerCodeConstants.COMMON_UNEXP
+  *
+  * @see java.util.concurrent.Executors#newFixedThreadPool(int)
+  */
+-public class FixedThreadPool implements ThreadPool {
++public class FixedThreadPool extends AbstractThreadPool {
+ 
+     private static final ErrorTypeAwareLogger logger = LoggerFactory.getErrorTypeAwareLogger(FixedThreadPool.class);
+ 
+     @Override
+     public Executor getExecutor(URL url) {
+-        String name =
+-                url.getParameter(THREAD_NAME_KEY, (String) url.getAttribute(THREAD_NAME_KEY, DEFAULT_THREAD_NAME));
++        String name = getThreadName(url);
+         int threads = url.getParameter(THREADS_KEY, DEFAULT_THREADS);
+         int queues = url.getParameter(QUEUES_KEY, DEFAULT_QUEUES);
+ 
+-        BlockingQueue<Runnable> blockingQueue;
+-
+-        if (queues == 0) {
+-            blockingQueue = new SynchronousQueue<>();
+-        } else if (queues < 0) {
+-            blockingQueue = new MemorySafeLinkedBlockingQueue<>();
++        if (queues < 0) {
+             logger.warn(
+                     COMMON_UNEXPECTED_EXCEPTION,
+                     "",
+@@ -68,10 +57,10 @@ public class FixedThreadPool implements ThreadPool {
+                     "FixedThreadPool created with an unbounded queue (queues < 0). "
+                             + "This may lead to OutOfMemoryError under high load. "
+                             + "Consider configuring a positive integer for 'queues'.");
+-        } else {
+-            blockingQueue = new LinkedBlockingQueue<>(queues);
+         }
+ 
++        BlockingQueue<Runnable> blockingQueue = createBlockingQueue(queues);
++
+         return new ThreadPoolExecutor(
+                 threads,
+                 threads,
+diff --git a/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/limited/LimitedThreadPool.java b/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/limited/LimitedThreadPool.java
+index 919056fd2..4fcc6c5c3 100644
+--- a/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/limited/LimitedThreadPool.java
++++ b/dubbo-common/src/main/java/org/apache/dubbo/common/threadpool/support/limited/LimitedThreadPool.java
+@@ -18,14 +18,11 @@ package org.apache.dubbo.common.threadpool.support.limited;
+ 
+ import org.apache.dubbo.common.URL;
+ import org.apache.dubbo.common.threadlocal.NamedInternalThreadFactory;
+-import org.apache.dubbo.common.threadpool.MemorySafeLinkedBlockingQueue;
+-import org.apache.dubbo.common.threadpool.ThreadPool;
+ import org.apache.dubbo.common.threadpool.support.AbortPolicyWithReport;
++import org.apache.dubbo.common.threadpool.support.AbstractThreadPool;
+ 
+ import java.util.concurrent.BlockingQueue;
+ import java.util.concurrent.Executor;
+-import java.util.concurrent.LinkedBlockingQueue;
+-import java.util.concurrent.SynchronousQueue;
+ import java.util.concurrent.ThreadPoolExecutor;
+ import java.util.concurrent.TimeUnit;
+ 
+@@ -33,34 +30,23 @@ import static org.apache.dubbo.common.constants.CommonConstants.CORE_THREADS_KEY
+ import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_CORE_THREADS;
+ import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_QUEUES;
+ import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_THREADS;
+-import static org.apache.dubbo.common.constants.CommonConstants.DEFAULT_THREAD_NAME;
+ import static org.apache.dubbo.common.constants.CommonConstants.QUEUES_KEY;
+ import static org.apache.dubbo.common.constants.CommonConstants.THREADS_KEY;
+-import static org.apache.dubbo.common.constants.CommonConstants.THREAD_NAME_KEY;
+ 
+ /**
+  * Creates a thread pool that creates new threads as needed until limits reaches. This thread pool will not shrink
+  * automatically.
+  */
+-public class LimitedThreadPool implements ThreadPool {
++public class LimitedThreadPool extends AbstractThreadPool {
+ 
+     @Override
+     public Executor getExecutor(URL url) {
+-        String name =
+-                url.getParameter(THREAD_NAME_KEY, (String) url.getAttribute(THREAD_NAME_KEY, DEFAULT_THREAD_NAME));
++        String name = getThreadName(url);
+         int cores = url.getParameter(CORE_THREADS_KEY, DEFAULT_CORE_THREADS);
+         int threads = url.getParameter(THREADS_KEY, DEFAULT_THREADS);
+         int queues = url.getParameter(QUEUES_KEY, DEFAULT_QUEUES);
+ 
+-        BlockingQueue<Runnable> blockingQueue;
+-
+-        if (queues == 0) {
+-            blockingQueue = new SynchronousQueue<>();
+-        } else if (queues < 0) {
+-            blockingQueue = new MemorySafeLinkedBlockingQueue<>();
+-        } else {
+-            blockingQueue = new LinkedBlockingQueue<>(queues);
+-        }
++        BlockingQueue<Runnable> blockingQueue = createBlockingQueue(queues);
+ 
+         return new ThreadPoolExecutor(
+                 cores,

@@ -1,0 +1,197 @@
+diff --git a/dubbo-serialization/dubbo-serialization-fastjson2/src/main/java/org/apache/dubbo/common/serialize/fastjson2/FastJson2ObjectInput.java b/dubbo-serialization/dubbo-serialization-fastjson2/src/main/java/org/apache/dubbo/common/serialize/fastjson2/FastJson2ObjectInput.java
+index 52d486ec6..0a8460516 100644
+--- a/dubbo-serialization/dubbo-serialization-fastjson2/src/main/java/org/apache/dubbo/common/serialize/fastjson2/FastJson2ObjectInput.java
++++ b/dubbo-serialization/dubbo-serialization-fastjson2/src/main/java/org/apache/dubbo/common/serialize/fastjson2/FastJson2ObjectInput.java
+@@ -91,14 +91,7 @@ public class FastJson2ObjectInput implements ObjectInput {
+ 
+     @Override
+     public byte[] readBytes() throws IOException {
+-        int length = readLength();
+-        byte[] bytes = new byte[length];
+-        int read = is.read(bytes, 0, length);
+-        if (read != length) {
+-            throw new IllegalArgumentException(
+-                    "deserialize failed. expected read length: " + length + " but actual read: " + read);
+-        }
+-        return bytes;
++        return readLengthPrefixedBytes();
+     }
+ 
+     @Override
+@@ -109,35 +102,9 @@ public class FastJson2ObjectInput implements ObjectInput {
+     @Override
+     public <T> T readObject(Class<T> cls) throws IOException {
+         updateClassLoaderIfNeed();
+-        int length = readLength();
+-        byte[] bytes = new byte[length];
+-        int read = is.read(bytes, 0, length);
+-        if (read != length) {
+-            throw new IllegalArgumentException(
+-                    "deserialize failed. expected read length: " + length + " but actual read: " + read);
+-        }
++        byte[] bytes = readLengthPrefixedBytes();
+         Fastjson2SecurityManager.Handler securityFilter = fastjson2SecurityManager.getSecurityFilter();
+-        T result;
+-        if (securityFilter.isCheckSerializable()) {
+-            result = JSONB.parseObject(
+-                    bytes,
+-                    cls,
+-                    securityFilter,
+-                    JSONReader.Feature.UseDefaultConstructorAsPossible,
+-                    JSONReader.Feature.ErrorOnNoneSerializable,
+-                    JSONReader.Feature.IgnoreAutoTypeNotMatch,
+-                    JSONReader.Feature.UseNativeObject,
+-                    JSONReader.Feature.FieldBased);
+-        } else {
+-            result = JSONB.parseObject(
+-                    bytes,
+-                    cls,
+-                    securityFilter,
+-                    JSONReader.Feature.UseDefaultConstructorAsPossible,
+-                    JSONReader.Feature.UseNativeObject,
+-                    JSONReader.Feature.IgnoreAutoTypeNotMatch,
+-                    JSONReader.Feature.FieldBased);
+-        }
++        T result = JSONB.parseObject(bytes, cls, securityFilter, readerFeatures(securityFilter));
+         if (result != null && cls != null && !ClassUtils.isMatch(result.getClass(), cls)) {
+             throw new IllegalArgumentException(
+                     "deserialize failed. expected class: " + cls + " but actual class: " + result.getClass());
+@@ -147,7 +114,35 @@ public class FastJson2ObjectInput implements ObjectInput {
+ 
+     @Override
+     public <T> T readObject(Class<T> cls, Type type) throws IOException, ClassNotFoundException {
+-        updateClassLoaderIfNeed();
++        // The declared type is not used by the JSONB binary codec; both overloads behave identically.
++        return readObject(cls);
++    }
++
++    /**
++     * Select the {@link JSONReader.Feature} set based on whether serializable checking is enabled.
++     */
++    private static JSONReader.Feature[] readerFeatures(Fastjson2SecurityManager.Handler securityFilter) {
++        if (securityFilter.isCheckSerializable()) {
++            return new JSONReader.Feature[] {
++                JSONReader.Feature.UseDefaultConstructorAsPossible,
++                JSONReader.Feature.ErrorOnNoneSerializable,
++                JSONReader.Feature.IgnoreAutoTypeNotMatch,
++                JSONReader.Feature.UseNativeObject,
++                JSONReader.Feature.FieldBased
++            };
++        }
++        return new JSONReader.Feature[] {
++            JSONReader.Feature.UseDefaultConstructorAsPossible,
++            JSONReader.Feature.UseNativeObject,
++            JSONReader.Feature.IgnoreAutoTypeNotMatch,
++            JSONReader.Feature.FieldBased
++        };
++    }
++
++    /**
++     * Read a length-prefixed byte block, validating that the full payload was read.
++     */
++    private byte[] readLengthPrefixedBytes() throws IOException {
+         int length = readLength();
+         byte[] bytes = new byte[length];
+         int read = is.read(bytes, 0, length);
+@@ -155,33 +150,7 @@ public class FastJson2ObjectInput implements ObjectInput {
+             throw new IllegalArgumentException(
+                     "deserialize failed. expected read length: " + length + " but actual read: " + read);
+         }
+-        Fastjson2SecurityManager.Handler securityFilter = fastjson2SecurityManager.getSecurityFilter();
+-        T result;
+-        if (securityFilter.isCheckSerializable()) {
+-            result = JSONB.parseObject(
+-                    bytes,
+-                    cls,
+-                    securityFilter,
+-                    JSONReader.Feature.UseDefaultConstructorAsPossible,
+-                    JSONReader.Feature.ErrorOnNoneSerializable,
+-                    JSONReader.Feature.IgnoreAutoTypeNotMatch,
+-                    JSONReader.Feature.UseNativeObject,
+-                    JSONReader.Feature.FieldBased);
+-        } else {
+-            result = JSONB.parseObject(
+-                    bytes,
+-                    cls,
+-                    securityFilter,
+-                    JSONReader.Feature.UseDefaultConstructorAsPossible,
+-                    JSONReader.Feature.UseNativeObject,
+-                    JSONReader.Feature.IgnoreAutoTypeNotMatch,
+-                    JSONReader.Feature.FieldBased);
+-        }
+-        if (result != null && cls != null && !ClassUtils.isMatch(result.getClass(), cls)) {
+-            throw new IllegalArgumentException(
+-                    "deserialize failed. expected class: " + cls + " but actual class: " + result.getClass());
+-        }
+-        return result;
++        return bytes;
+     }
+ 
+     private void updateClassLoaderIfNeed() {
+diff --git a/dubbo-serialization/dubbo-serialization-fastjson2/src/main/java/org/apache/dubbo/common/serialize/fastjson2/FastJson2ObjectOutput.java b/dubbo-serialization/dubbo-serialization-fastjson2/src/main/java/org/apache/dubbo/common/serialize/fastjson2/FastJson2ObjectOutput.java
+index 0240e009d..51bd3cd3b 100644
+--- a/dubbo-serialization/dubbo-serialization-fastjson2/src/main/java/org/apache/dubbo/common/serialize/fastjson2/FastJson2ObjectOutput.java
++++ b/dubbo-serialization/dubbo-serialization-fastjson2/src/main/java/org/apache/dubbo/common/serialize/fastjson2/FastJson2ObjectOutput.java
+@@ -102,34 +102,39 @@ public class FastJson2ObjectOutput implements ObjectOutput {
+     @Override
+     public void writeObject(Object obj) throws IOException {
+         updateClassLoaderIfNeed();
+-        byte[] bytes;
+-        if (fastjson2SecurityManager.getSecurityFilter().isCheckSerializable()) {
+-            bytes = JSONB.toBytes(
+-                    obj,
+-                    JSONWriter.Feature.WriteClassName,
+-                    JSONWriter.Feature.FieldBased,
+-                    JSONWriter.Feature.ErrorOnNoneSerializable,
+-                    JSONWriter.Feature.ReferenceDetection,
+-                    JSONWriter.Feature.WriteNulls,
+-                    JSONWriter.Feature.NotWriteDefaultValue,
+-                    JSONWriter.Feature.NotWriteHashMapArrayListClassName,
+-                    JSONWriter.Feature.WriteNameAsSymbol);
+-        } else {
+-            bytes = JSONB.toBytes(
+-                    obj,
+-                    JSONWriter.Feature.WriteClassName,
+-                    JSONWriter.Feature.FieldBased,
+-                    JSONWriter.Feature.ReferenceDetection,
+-                    JSONWriter.Feature.WriteNulls,
+-                    JSONWriter.Feature.NotWriteDefaultValue,
+-                    JSONWriter.Feature.NotWriteHashMapArrayListClassName,
+-                    JSONWriter.Feature.WriteNameAsSymbol);
+-        }
++        byte[] bytes = JSONB.toBytes(obj, writerFeatures());
+         writeLength(bytes.length);
+         os.write(bytes);
+         os.flush();
+     }
+ 
++    /**
++     * Select the {@link JSONWriter.Feature} set based on whether serializable checking is enabled.
++     */
++    private JSONWriter.Feature[] writerFeatures() {
++        if (fastjson2SecurityManager.getSecurityFilter().isCheckSerializable()) {
++            return new JSONWriter.Feature[] {
++                JSONWriter.Feature.WriteClassName,
++                JSONWriter.Feature.FieldBased,
++                JSONWriter.Feature.ErrorOnNoneSerializable,
++                JSONWriter.Feature.ReferenceDetection,
++                JSONWriter.Feature.WriteNulls,
++                JSONWriter.Feature.NotWriteDefaultValue,
++                JSONWriter.Feature.NotWriteHashMapArrayListClassName,
++                JSONWriter.Feature.WriteNameAsSymbol
++            };
++        }
++        return new JSONWriter.Feature[] {
++            JSONWriter.Feature.WriteClassName,
++            JSONWriter.Feature.FieldBased,
++            JSONWriter.Feature.ReferenceDetection,
++            JSONWriter.Feature.WriteNulls,
++            JSONWriter.Feature.NotWriteDefaultValue,
++            JSONWriter.Feature.NotWriteHashMapArrayListClassName,
++            JSONWriter.Feature.WriteNameAsSymbol
++        };
++    }
++
+     private void updateClassLoaderIfNeed() {
+         ClassLoader currentClassLoader = Thread.currentThread().getContextClassLoader();
+         if (currentClassLoader != classLoader) {

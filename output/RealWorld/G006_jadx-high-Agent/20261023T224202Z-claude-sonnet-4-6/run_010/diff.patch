@@ -1,0 +1,3478 @@
+diff --git a/jadx-core/src/main/java/jadx/api/JadxDecompiler.java b/jadx-core/src/main/java/jadx/api/JadxDecompiler.java
+index 6e1353923..3ab3cd238 100644
+--- a/jadx-core/src/main/java/jadx/api/JadxDecompiler.java
++++ b/jadx-core/src/main/java/jadx/api/JadxDecompiler.java
+@@ -14,7 +14,6 @@
+ import java.util.Set;
+ import java.util.concurrent.ExecutorService;
+ import java.util.function.Predicate;
+-import java.util.stream.Collectors;
+ 
+ import org.jetbrains.annotations.ApiStatus;
+ import org.jetbrains.annotations.Nullable;
+@@ -353,9 +352,10 @@ private void appendResourcesSaveTasks(ITaskExecutor executor, File outDir) {
+ 				break;
+ 			}
+ 		}
+-		Set<String> inputFileNames = args.getInputFiles().stream()
+-				.map(File::getAbsolutePath)
+-				.collect(Collectors.toSet());
++		Set<String> inputFileNames = new HashSet<>();
++		for (File f : args.getInputFiles()) {
++			inputFileNames.add(f.getAbsolutePath());
++		}
+ 		Set<String> codeSources = collectCodeSources();
+ 
+ 		List<Runnable> tasks = new ArrayList<>();
+@@ -598,11 +598,9 @@ public JavaClass searchJavaClassOrItsParentByOrigFullName(String fullName) {
+ 
+ 	@Nullable
+ 	public JavaClass searchJavaClassByAliasFullName(String fullName) {
+-		return getRoot().getClasses().stream()
+-				.filter(cls -> cls.getClassInfo().getAliasFullName().equals(fullName))
+-				.findFirst()
+-				.map(this::convertClassNode)
+-				.orElse(null);
++		ClassNode found = ListUtils.firstOrNull(getRoot().getClasses(),
++				cls -> cls.getClassInfo().getAliasFullName().equals(fullName));
++		return found != null ? convertClassNode(found) : null;
+ 	}
+ 
+ 	@Nullable
+@@ -659,10 +657,14 @@ private JavaVariable resolveVarRef(ICodeInfo codeInfo, VarRef varRef) {
+ 	}
+ 
+ 	List<JavaNode> convertNodes(Collection<? extends ICodeNodeRef> nodesList) {
+-		return nodesList.stream()
+-				.map(this::getJavaNodeByRef)
+-				.filter(Objects::nonNull)
+-				.collect(Collectors.toList());
++		List<JavaNode> result = new ArrayList<>();
++		for (ICodeNodeRef ref : nodesList) {
++			JavaNode node = getJavaNodeByRef(ref);
++			if (node != null) {
++				result.add(node);
++			}
++		}
++		return result;
+ 	}
+ 
+ 	@Nullable
+diff --git a/jadx-core/src/main/java/jadx/core/ProcessClass.java b/jadx-core/src/main/java/jadx/core/ProcessClass.java
+index e62bbce58..b0870d192 100644
+--- a/jadx-core/src/main/java/jadx/core/ProcessClass.java
++++ b/jadx-core/src/main/java/jadx/core/ProcessClass.java
+@@ -222,10 +222,7 @@ public boolean processMethodUntilVisitor(MethodNode mth, String visitorName, boo
+ 			}
+ 			prevPass = pass;
+ 		}
+-		if (foundPass == null) {
+-			return false;
+-		}
+-		return processMethodToVisitor(mth, foundPass);
++		return foundPass != null && processMethodToVisitor(mth, foundPass);
+ 	}
+ 
+ 	public boolean processMethodToVisitor(MethodNode mth, IDexTreeVisitor lastPassToProcess) {
+diff --git a/jadx-core/src/main/java/jadx/core/clsp/ClsSet.java b/jadx-core/src/main/java/jadx/core/clsp/ClsSet.java
+index 55408ecc8..538fd8995 100644
+--- a/jadx-core/src/main/java/jadx/core/clsp/ClsSet.java
++++ b/jadx-core/src/main/java/jadx/core/clsp/ClsSet.java
+@@ -15,7 +15,6 @@
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Objects;
+-import java.util.stream.Stream;
+ 
+ import org.jetbrains.annotations.Nullable;
+ import org.slf4j.Logger;
+@@ -81,7 +80,10 @@ public void loadFromClstFile() throws IOException, DecodeException {
+ 		}
+ 		if (LOG.isDebugEnabled()) {
+ 			long time = System.currentTimeMillis() - startTime;
+-			int methodsCount = Stream.of(classes).mapToInt(clspClass -> clspClass.getMethodsMap().size()).sum();
++			int methodsCount = 0;
++			for (ClspClass clspClass : classes) {
++				methodsCount += clspClass.getMethodsMap().size();
++			}
+ 			LOG.debug("Clst file loaded in {}ms, android api: {}, classes: {}, methods: {}",
+ 					time, androidApiLevel, classes.length, methodsCount);
+ 		}
+@@ -221,7 +223,10 @@ private void save(OutputStream output) throws IOException {
+ 				writeMethod(out, method, names);
+ 			}
+ 		}
+-		int methodsCount = Stream.of(classes).mapToInt(c -> c.getMethodsMap().size()).sum();
++		int methodsCount = 0;
++		for (ClspClass c : classes) {
++			methodsCount += c.getMethodsMap().size();
++		}
+ 		LOG.info("Classes: {}, methods: {}, file size: {} bytes", classes.length, methodsCount, out.size());
+ 	}
+ 
+diff --git a/jadx-core/src/main/java/jadx/core/codegen/ClassGen.java b/jadx-core/src/main/java/jadx/core/codegen/ClassGen.java
+index 13bcfdcab..de382b1c2 100644
+--- a/jadx-core/src/main/java/jadx/core/codegen/ClassGen.java
++++ b/jadx-core/src/main/java/jadx/core/codegen/ClassGen.java
+@@ -123,17 +123,17 @@ private void addPackage(ICodeWriter clsCode) {
+ 	private void addImports(ICodeWriter clsCode) {
+ 		int importsCount = imports.size();
+ 		if (importsCount != 0) {
+-			imports.stream()
+-					.sorted(Comparator.comparing(ClassInfo::getAliasFullName))
+-					.forEach(classInfo -> {
+-						clsCode.startLine("import ");
+-						ClassNode classNode = cls.root().resolveClass(classInfo);
+-						if (classNode != null) {
+-							clsCode.attachAnnotation(classNode);
+-						}
+-						clsCode.add(classInfo.getAliasFullName());
+-						clsCode.add(';');
+-					});
++			List<ClassInfo> sortedImports = new ArrayList<>(imports);
++			sortedImports.sort(Comparator.comparing(ClassInfo::getAliasFullName));
++			for (ClassInfo classInfo : sortedImports) {
++				clsCode.startLine("import ");
++				ClassNode classNode = cls.root().resolveClass(classInfo);
++				if (classNode != null) {
++					clsCode.attachAnnotation(classNode);
++				}
++				clsCode.add(classInfo.getAliasFullName());
++				clsCode.add(';');
++			}
+ 			clsCode.newLine();
+ 			imports.clear();
+ 		}
+@@ -361,12 +361,7 @@ private void addInnerClass(ICodeWriter code, ClassNode innerCls) {
+ 	}
+ 
+ 	private boolean isInnerClassesPresents() {
+-		for (ClassNode innerCls : cls.getInnerClasses()) {
+-			if (!innerCls.contains(AType.ANONYMOUS_CLASS)) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return ListUtils.anyMatch(cls.getInnerClasses(), innerCls -> !innerCls.contains(AType.ANONYMOUS_CLASS));
+ 	}
+ 
+ 	private void addMethod(ICodeWriter code, MethodNode mth) {
+@@ -822,13 +817,11 @@ private static boolean checkInnerCollision(RootNode root, @Nullable ClassInfo us
+ 			return true;
+ 		}
+ 		ClassNode classNode = root.resolveClass(useCls);
+-		if (classNode != null) {
+-			for (ClassNode inner : classNode.getInnerClasses()) {
+-				if (inner.getShortName().equals(shortName)
+-						&& !inner.getFullName().equals(searchCls.getAliasFullName())) {
+-					return true;
+-				}
+-			}
++		if (classNode != null
++				&& ListUtils.anyMatch(classNode.getInnerClasses(),
++						inner -> inner.getShortName().equals(shortName)
++								&& !inner.getFullName().equals(searchCls.getAliasFullName()))) {
++			return true;
+ 		}
+ 		return checkInnerCollision(root, useCls.getParentClass(), searchCls);
+ 	}
+diff --git a/jadx-core/src/main/java/jadx/core/deobf/DeobfAliasProvider.java b/jadx-core/src/main/java/jadx/core/deobf/DeobfAliasProvider.java
+index d617f5c93..9f7c18c4e 100644
+--- a/jadx-core/src/main/java/jadx/core/deobf/DeobfAliasProvider.java
++++ b/jadx-core/src/main/java/jadx/core/deobf/DeobfAliasProvider.java
+@@ -45,13 +45,13 @@ public String forClass(ClassNode cls) {
+ 
+ 	@Override
+ 	public String forField(FieldNode fld) {
+-		return String.format("f%d%s", fldIndex++, prepareNamePart(fld.getName()));
++		return "f" + fldIndex++ + prepareNamePart(fld.getName());
+ 	}
+ 
+ 	@Override
+ 	public String forMethod(MethodNode mth) {
+ 		String prefix = mth.contains(AType.METHOD_OVERRIDE) ? "mo" : "m";
+-		return String.format("%s%d%s", prefix, mthIndex++, prepareNamePart(mth.getName()));
++		return prefix + mthIndex++ + prepareNamePart(mth.getName());
+ 	}
+ 
+ 	private String prepareNamePart(String name) {
+diff --git a/jadx-core/src/main/java/jadx/core/deobf/conditions/ExcludePackageWithTLDNames.java b/jadx-core/src/main/java/jadx/core/deobf/conditions/ExcludePackageWithTLDNames.java
+index d19e6745f..33c8d80a1 100644
+--- a/jadx-core/src/main/java/jadx/core/deobf/conditions/ExcludePackageWithTLDNames.java
++++ b/jadx-core/src/main/java/jadx/core/deobf/conditions/ExcludePackageWithTLDNames.java
+@@ -1,9 +1,10 @@
+ package jadx.core.deobf.conditions;
+ 
+ import java.io.BufferedReader;
++import java.io.IOException;
+ import java.io.InputStreamReader;
++import java.util.HashSet;
+ import java.util.Set;
+-import java.util.stream.Collectors;
+ 
+ import jadx.core.dex.nodes.PackageNode;
+ import jadx.core.utils.exceptions.JadxRuntimeException;
+@@ -22,10 +23,15 @@ private static class TldHolder {
+ 
+ 	private static Set<String> loadTldSet() {
+ 		try (BufferedReader reader = new BufferedReader(new InputStreamReader(TldHolder.class.getResourceAsStream("tlds.txt")))) {
+-			return reader.lines()
+-					.filter(line -> !line.startsWith("#") && !line.isEmpty())
+-					.collect(Collectors.toSet());
+-		} catch (Exception e) {
++			Set<String> result = new HashSet<>();
++			String line;
++			while ((line = reader.readLine()) != null) {
++				if (!line.startsWith("#") && !line.isEmpty()) {
++					result.add(line);
++				}
++			}
++			return result;
++		} catch (IOException e) {
+ 			throw new JadxRuntimeException("Failed to load top level domain list file: tlds.txt", e);
+ 		}
+ 	}
+diff --git a/jadx-core/src/main/java/jadx/core/dex/instructions/InvokeNode.java b/jadx-core/src/main/java/jadx/core/dex/instructions/InvokeNode.java
+index 0f2aa514b..a40b4e8a7 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/instructions/InvokeNode.java
++++ b/jadx-core/src/main/java/jadx/core/dex/instructions/InvokeNode.java
+@@ -68,16 +68,11 @@ public boolean isStaticCall() {
+ 	}
+ 
+ 	public boolean isPolymorphicCall() {
+-		if (type == InvokeType.POLYMORPHIC) {
+-			return true;
+-		}
+-		// java bytecode uses virtual call with modified method info
+-		if (type == InvokeType.VIRTUAL
+-				&& mth.getDeclClass().getFullName().equals("java.lang.invoke.MethodHandle")
+-				&& (mth.getName().equals("invoke") || mth.getName().equals("invokeExact"))) {
+-			return true;
+-		}
+-		return false;
++		return type == InvokeType.POLYMORPHIC
++				// java bytecode uses virtual call with modified method info
++				|| (type == InvokeType.VIRTUAL
++						&& mth.getDeclClass().getFullName().equals("java.lang.invoke.MethodHandle")
++						&& (mth.getName().equals("invoke") || mth.getName().equals("invokeExact")));
+ 	}
+ 
+ 	public int getFirstArgOffset() {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/instructions/args/RegisterArg.java b/jadx-core/src/main/java/jadx/core/dex/instructions/args/RegisterArg.java
+index 3fff90739..162c88c81 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/instructions/args/RegisterArg.java
++++ b/jadx-core/src/main/java/jadx/core/dex/instructions/args/RegisterArg.java
+@@ -179,10 +179,7 @@ public boolean sameRegAndSVar(InsnArg arg) {
+ 	}
+ 
+ 	public boolean sameReg(InsnArg arg) {
+-		if (!arg.isRegister()) {
+-			return false;
+-		}
+-		return regNum == ((RegisterArg) arg).getRegNum();
++		return arg.isRegister() && regNum == ((RegisterArg) arg).getRegNum();
+ 	}
+ 
+ 	public boolean sameType(InsnArg arg) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/instructions/args/SSAVar.java b/jadx-core/src/main/java/jadx/core/dex/instructions/args/SSAVar.java
+index 0c4407f69..6d6d09821 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/instructions/args/SSAVar.java
++++ b/jadx-core/src/main/java/jadx/core/dex/instructions/args/SSAVar.java
+@@ -6,7 +6,6 @@
+ import java.util.HashSet;
+ import java.util.List;
+ import java.util.Set;
+-import java.util.stream.Collectors;
+ 
+ import org.jetbrains.annotations.NotNull;
+ import org.jetbrains.annotations.Nullable;
+@@ -291,19 +290,17 @@ public String getDetailedVarInfo(MethodNode mth) {
+ 		StringBuilder sb = new StringBuilder();
+ 		sb.append('r').append(regNum).append('v').append(version);
+ 		if (!names.isEmpty()) {
+-			String orderedNames = names.stream()
+-					.sorted()
+-					.collect(Collectors.joining(", ", "[", "]"));
+-
+-			sb.append(", names: ").append(orderedNames);
++			List<String> sortedNames = new ArrayList<>(names);
++			Collections.sort(sortedNames);
++			sb.append(", names: [").append(String.join(", ", sortedNames)).append(']');
+ 		}
+ 		if (!types.isEmpty()) {
+-			String orderedTypes = types.stream()
+-					.map(String::valueOf)
+-					.sorted()
+-					.collect(Collectors.joining(", ", "[", "]"));
+-
+-			sb.append(", types: ").append(orderedTypes);
++			List<String> sortedTypes = new ArrayList<>(types.size());
++			for (ArgType t : types) {
++				sortedTypes.add(String.valueOf(t));
++			}
++			Collections.sort(sortedTypes);
++			sb.append(", types: [").append(String.join(", ", sortedTypes)).append(']');
+ 		}
+ 		return sb.toString();
+ 	}
+diff --git a/jadx-core/src/main/java/jadx/core/dex/instructions/invokedynamic/CustomStringConcat.java b/jadx-core/src/main/java/jadx/core/dex/instructions/invokedynamic/CustomStringConcat.java
+index 95b509872..6df5a6252 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/instructions/invokedynamic/CustomStringConcat.java
++++ b/jadx-core/src/main/java/jadx/core/dex/instructions/invokedynamic/CustomStringConcat.java
+@@ -42,10 +42,7 @@ public static boolean isStringConcat(List<EncodedValue> values) {
+ 		if (!Objects.equals(values.get(1).getValue(), "makeConcatWithConstants")) {
+ 			return false;
+ 		}
+-		if (values.get(3).getType() != EncodedType.ENCODED_STRING) {
+-			return false;
+-		}
+-		return true;
++		return values.get(3).getType() == EncodedType.ENCODED_STRING;
+ 	}
+ 
+ 	public static InsnNode buildStringConcat(InsnData insn, boolean isRange, List<EncodedValue> values) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/instructions/mods/TernaryInsn.java b/jadx-core/src/main/java/jadx/core/dex/instructions/mods/TernaryInsn.java
+index 26b3bacf8..a8f2aa64e 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/instructions/mods/TernaryInsn.java
++++ b/jadx-core/src/main/java/jadx/core/dex/instructions/mods/TernaryInsn.java
+@@ -61,10 +61,7 @@ public void getRegisterArgs(Collection<RegisterArg> list) {
+ 
+ 	@Override
+ 	public boolean replaceArg(InsnArg from, InsnArg to) {
+-		if (super.replaceArg(from, to)) {
+-			return true;
+-		}
+-		return condition.replaceArg(from, to);
++		return super.replaceArg(from, to) || condition.replaceArg(from, to);
+ 	}
+ 
+ 	public void visitInsns(Consumer<InsnNode> visitor) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/nodes/ClassNode.java b/jadx-core/src/main/java/jadx/core/dex/nodes/ClassNode.java
+index 813fbd17d..3a194604e 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/nodes/ClassNode.java
++++ b/jadx-core/src/main/java/jadx/core/dex/nodes/ClassNode.java
+@@ -447,7 +447,6 @@ private static void processDefinitionAnnotations(ICodeInfo codeInfo) {
+ 					}
+ 					return true;
+ 				}
+-				return false;
+ 			}
+ 			return false;
+ 		});
+@@ -858,10 +857,10 @@ public String getDisassembledCode() {
+ 
+ 	protected void getDisassembledCode(SimpleCodeWriter code) {
+ 		if (clsData == null) {
+-			code.startLine(String.format("###### Class %s is created by jadx", getFullName()));
++			code.startLine("###### Class " + getFullName() + " is created by jadx");
+ 			return;
+ 		}
+-		code.startLine(String.format("###### Class %s (%s)", getFullName(), getRawName()));
++		code.startLine("###### Class " + getFullName() + " (" + getRawName() + ")");
+ 		try {
+ 			code.startLine(clsData.getDisassembledCode());
+ 		} catch (Exception e) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/nodes/InsnNode.java b/jadx-core/src/main/java/jadx/core/dex/nodes/InsnNode.java
+index bedc31075..ec429d331 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/nodes/InsnNode.java
++++ b/jadx-core/src/main/java/jadx/core/dex/nodes/InsnNode.java
+@@ -22,6 +22,7 @@
+ import jadx.core.dex.instructions.args.SSAVar;
+ import jadx.core.utils.InsnRemover;
+ import jadx.core.utils.InsnUtils;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.Utils;
+ import jadx.core.utils.exceptions.JadxRuntimeException;
+ 
+@@ -108,15 +109,7 @@ public InsnArg getArg(int n) {
+ 	}
+ 
+ 	public boolean containsArg(InsnArg arg) {
+-		if (getArgsCount() == 0) {
+-			return false;
+-		}
+-		for (InsnArg a : arguments) {
+-			if (a == arg) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return ListUtils.anyMatch(arguments, a -> a == arg);
+ 	}
+ 
+ 	public boolean containsVar(RegisterArg arg) {
+@@ -243,10 +236,7 @@ public boolean canRemoveResult() {
+ 
+ 	public boolean canReorder() {
+ 		if (contains(AFlag.DONT_GENERATE)) {
+-			if (getType() == InsnType.MONITOR_EXIT) {
+-				return false;
+-			}
+-			return true;
++			return getType() != InsnType.MONITOR_EXIT;
+ 		}
+ 		for (InsnArg arg : getArguments()) {
+ 			if (arg.isInsnWrap()) {
+@@ -286,12 +276,7 @@ public boolean canReorder() {
+ 	}
+ 
+ 	public boolean containsWrappedInsn() {
+-		for (InsnArg arg : this.getArguments()) {
+-			if (arg.isInsnWrap()) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return ListUtils.anyMatch(getArguments(), InsnArg::isInsnWrap);
+ 	}
+ 
+ 	/**
+diff --git a/jadx-core/src/main/java/jadx/core/dex/nodes/RootNode.java b/jadx-core/src/main/java/jadx/core/dex/nodes/RootNode.java
+index 9b3f9462f..0321ffbc1 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/nodes/RootNode.java
++++ b/jadx-core/src/main/java/jadx/core/dex/nodes/RootNode.java
+@@ -9,7 +9,6 @@
+ import java.util.Map;
+ import java.util.Set;
+ import java.util.function.Predicate;
+-import java.util.stream.Collectors;
+ 
+ import org.jetbrains.annotations.NotNull;
+ import org.jetbrains.annotations.Nullable;
+@@ -56,6 +55,7 @@
+ import jadx.core.utils.CacheStorage;
+ import jadx.core.utils.DebugChecks;
+ import jadx.core.utils.ErrorsCounter;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.PassMerge;
+ import jadx.core.utils.StringUtils;
+ import jadx.core.utils.Utils;
+@@ -204,30 +204,34 @@ private void addDummyClass(IClassData classData, Exception exc) {
+ 	}
+ 
+ 	private void fixDuplicatedClasses() {
+-		classes.stream()
+-				.collect(Collectors.groupingBy(ClassNode::getClassInfo))
+-				.entrySet()
+-				.stream()
+-				.filter(entry -> entry.getValue().size() > 1)
+-				.forEach(entry -> {
+-					ClassInfo clsInfo = entry.getKey();
+-					List<ClassNode> dupClsList = entry.getValue();
+-					ClassNode selectedCls = SelectFromDuplicates.process(dupClsList);
+-
+-					// keep only selected class in classes maps
+-					clsMap.put(clsInfo, selectedCls);
+-					rawClsMap.put(selectedCls.getRawName(), selectedCls);
+-
+-					String selectedSource = selectedCls.getInputFileName();
+-					String sources = dupClsList.stream()
+-							.map(ClassNode::getInputFileName)
+-							.sorted()
+-							.collect(Collectors.joining("\n  "));
+-					LOG.warn("Found duplicated class: {}, count: {}, sources:"
+-							+ "\n  {}\n Keep class with source: {}, others will be removed.",
+-							clsInfo, dupClsList.size(), sources, selectedSource);
+-					selectedCls.addWarnComment("Classes with same name are omitted, all sources:\n  " + sources + '\n');
+-				});
++		Map<ClassInfo, List<ClassNode>> grouped = new HashMap<>();
++		for (ClassNode cls : classes) {
++			grouped.computeIfAbsent(cls.getClassInfo(), k -> new ArrayList<>()).add(cls);
++		}
++		for (Map.Entry<ClassInfo, List<ClassNode>> entry : grouped.entrySet()) {
++			List<ClassNode> dupClsList = entry.getValue();
++			if (dupClsList.size() <= 1) {
++				continue;
++			}
++			ClassInfo clsInfo = entry.getKey();
++			ClassNode selectedCls = SelectFromDuplicates.process(dupClsList);
++
++			// keep only selected class in classes maps
++			clsMap.put(clsInfo, selectedCls);
++			rawClsMap.put(selectedCls.getRawName(), selectedCls);
++
++			String selectedSource = selectedCls.getInputFileName();
++			List<String> sourcesList = new ArrayList<>(dupClsList.size());
++			for (ClassNode cls : dupClsList) {
++				sourcesList.add(cls.getInputFileName());
++			}
++			Collections.sort(sourcesList);
++			String sources = String.join("\n  ", sourcesList);
++			LOG.warn("Found duplicated class: {}, count: {}, sources:"
++					+ "\n  {}\n Keep class with source: {}, others will be removed.",
++					clsInfo, dupClsList.size(), sources, selectedSource);
++			selectedCls.addWarnComment("Classes with same name are omitted, all sources:\n  " + sources + '\n');
++		}
+ 	}
+ 
+ 	public void addClassNode(ClassNode clsNode) {
+@@ -562,14 +566,10 @@ public ClassNode resolveParentClass(ClassInfo clsInfo) {
+ 	 */
+ 	@Nullable
+ 	public ClassNode searchClassByFullAlias(String fullName) {
+-		for (ClassNode cls : classes) {
+-			ClassInfo classInfo = cls.getClassInfo();
+-			if (classInfo.getFullName().equals(fullName)
+-					|| classInfo.getAliasFullName().equals(fullName)) {
+-				return cls;
+-			}
+-		}
+-		return null;
++		return ListUtils.firstOrNull(classes, cls -> {
++			ClassInfo ci = cls.getClassInfo();
++			return ci.getFullName().equals(fullName) || ci.getAliasFullName().equals(fullName);
++		});
+ 	}
+ 
+ 	public Map<String, ClassNode> buildFullAliasClassCache() {
+@@ -587,13 +587,7 @@ public Map<String, ClassNode> buildFullAliasClassCache() {
+ 	}
+ 
+ 	public List<ClassNode> searchClassByShortName(String shortName) {
+-		List<ClassNode> list = new ArrayList<>();
+-		for (ClassNode cls : classes) {
+-			if (cls.getClassInfo().getShortName().equals(shortName)) {
+-				list.add(cls);
+-			}
+-		}
+-		return list;
++		return ListUtils.filter(classes, cls -> cls.getClassInfo().getShortName().equals(shortName));
+ 	}
+ 
+ 	@Nullable
+@@ -623,12 +617,11 @@ public MethodNode resolveMethod(@NotNull MethodInfo mth) {
+ 
+ 	@Nullable
+ 	private MethodNode deepResolveMethod(@NotNull ClassNode cls, String signature) {
+-		for (MethodNode m : cls.getMethods()) {
+-			if (m.getMethodInfo().getShortId().startsWith(signature)) {
+-				return m;
+-			}
++		MethodNode found = ListUtils.firstOrNull(cls.getMethods(),
++				m -> m.getMethodInfo().getShortId().startsWith(signature));
++		if (found != null) {
++			return found;
+ 		}
+-		MethodNode found;
+ 		ArgType superClass = cls.getSuperClass();
+ 		if (superClass != null) {
+ 			ClassNode superNode = resolveClass(superClass);
+diff --git a/jadx-core/src/main/java/jadx/core/dex/nodes/utils/TypeUtils.java b/jadx-core/src/main/java/jadx/core/dex/nodes/utils/TypeUtils.java
+index 5c97a3daa..7aa0215c7 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/nodes/utils/TypeUtils.java
++++ b/jadx-core/src/main/java/jadx/core/dex/nodes/utils/TypeUtils.java
+@@ -23,6 +23,7 @@
+ import jadx.core.dex.nodes.IMethodDetails;
+ import jadx.core.dex.nodes.MethodNode;
+ import jadx.core.dex.nodes.RootNode;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.Utils;
+ 
+ import static jadx.core.utils.Utils.isEmpty;
+@@ -79,14 +80,7 @@ private void expandTypeVar(NotificationAttrNode node, ArgType type, Collection<A
+ 		if (typeVars.isEmpty()) {
+ 			return;
+ 		}
+-		boolean allExtendsEmpty = true;
+-		for (ArgType argType : typeVars) {
+-			if (notEmpty(argType.getExtendTypes())) {
+-				allExtendsEmpty = false;
+-				break;
+-			}
+-		}
+-		if (allExtendsEmpty) {
++		if (ListUtils.noneMatch(typeVars, argType -> notEmpty(argType.getExtendTypes()))) {
+ 			return;
+ 		}
+ 		type.visitTypes(t -> {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/regions/conditions/IfCondition.java b/jadx-core/src/main/java/jadx/core/dex/regions/conditions/IfCondition.java
+index 4792ac9e3..ed5ef8593 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/regions/conditions/IfCondition.java
++++ b/jadx-core/src/main/java/jadx/core/dex/regions/conditions/IfCondition.java
+@@ -23,6 +23,7 @@
+ import jadx.core.dex.nodes.BlockNode;
+ import jadx.core.dex.nodes.InsnNode;
+ import jadx.core.utils.BlockUtils;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.exceptions.JadxRuntimeException;
+ 
+ public final class IfCondition extends AttrNode {
+@@ -269,12 +270,7 @@ public boolean replaceArg(InsnArg from, InsnArg to) {
+ 		if (mode == Mode.COMPARE) {
+ 			return compare.getInsn().replaceArg(from, to);
+ 		}
+-		for (IfCondition arg : args) {
+-			if (arg.replaceArg(from, to)) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return ListUtils.anyMatch(args, arg -> arg.replaceArg(from, to));
+ 	}
+ 
+ 	public void visitInsns(Consumer<InsnNode> visitor) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/trycatch/ExceptionHandler.java b/jadx-core/src/main/java/jadx/core/dex/trycatch/ExceptionHandler.java
+index 454d42114..2fb418d51 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/trycatch/ExceptionHandler.java
++++ b/jadx-core/src/main/java/jadx/core/dex/trycatch/ExceptionHandler.java
+@@ -19,6 +19,7 @@
+ import jadx.core.dex.nodes.IRegion;
+ import jadx.core.dex.nodes.MethodNode;
+ import jadx.core.utils.InsnUtils;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.Utils;
+ 
+ public class ExceptionHandler {
+@@ -91,15 +92,7 @@ public ArgType getArgType() {
+ 	}
+ 
+ 	public boolean isCatchAll() {
+-		if (catchTypes.isEmpty()) {
+-			return true;
+-		}
+-		for (ClassInfo classInfo : catchTypes) {
+-			if (classInfo.getFullName().equals(Consts.CLASS_THROWABLE)) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return catchTypes.isEmpty() || ListUtils.anyMatch(catchTypes, classInfo -> classInfo.getFullName().equals(Consts.CLASS_THROWABLE));
+ 	}
+ 
+ 	public int getHandlerOffset() {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/trycatch/TryCatchBlockAttr.java b/jadx-core/src/main/java/jadx/core/dex/trycatch/TryCatchBlockAttr.java
+index 4cf70c83e..caff4626d 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/trycatch/TryCatchBlockAttr.java
++++ b/jadx-core/src/main/java/jadx/core/dex/trycatch/TryCatchBlockAttr.java
+@@ -237,13 +237,8 @@ private void exploreTryPath(List<TryEdge> edges, BlockNode blk, Set<BlockNode> s
+ 				}
+ 			}
+ 
+-			boolean isPathToAnySearchBlock = false;
+-			for (BlockNode searchBlock : searchBlocks) {
+-				if (BlockUtils.isPathExists(successor, searchBlock)) {
+-					isPathToAnySearchBlock = true;
+-					break;
+-				}
+-			}
++			boolean isPathToAnySearchBlock = ListUtils.anyMatch(searchBlocks,
++					searchBlock -> BlockUtils.isPathExists(successor, searchBlock));
+ 			if (!searchBlocks.contains(successor) && !isPathToAnySearchBlock) {
+ 				// This block is not contained within this try's block list. This can either be since it is an exit
+ 				// to the try or it is a block which leads to an exit (for example, an exception handler).
+diff --git a/jadx-core/src/main/java/jadx/core/dex/trycatch/TryEdgeScopeGroupMap.java b/jadx-core/src/main/java/jadx/core/dex/trycatch/TryEdgeScopeGroupMap.java
+index 849592826..29487f97b 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/trycatch/TryEdgeScopeGroupMap.java
++++ b/jadx-core/src/main/java/jadx/core/dex/trycatch/TryEdgeScopeGroupMap.java
+@@ -14,6 +14,7 @@
+ import jadx.core.dex.nodes.BlockNode;
+ import jadx.core.dex.nodes.MethodNode;
+ import jadx.core.utils.BlockUtils;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.Pair;
+ import jadx.core.utils.exceptions.JadxRuntimeException;
+ 
+@@ -181,15 +182,7 @@ public Map<BlockNode, List<TryEdge>> getScopeEnds(MethodNode mth) {
+ 		}
+ 
+ 		for (TryEdge isolatedEdge : isolatedEdgePairs) {
+-			boolean isInList = false;
+-			for (List<TryEdge> foundEdges : groups.values()) {
+-				if (foundEdges.contains(isolatedEdge)) {
+-					isInList = true;
+-					break;
+-				}
+-			}
+-
+-			if (isInList) {
++			if (ListUtils.anyMatch(groups.values(), foundEdges -> foundEdges.contains(isolatedEdge))) {
+ 				// The isolated edge is not isolated with another handler - we can ignore this edge.
+ 				break;
+ 			}
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/AttachCommentsVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/AttachCommentsVisitor.java
+index 808d970cb..91519c433 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/AttachCommentsVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/AttachCommentsVisitor.java
+@@ -1,9 +1,10 @@
+ package jadx.core.dex.visitors;
+ 
++import java.util.ArrayList;
+ import java.util.Collections;
++import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+-import java.util.stream.Collectors;
+ 
+ import org.jetbrains.annotations.Nullable;
+ import org.slf4j.Logger;
+@@ -132,8 +133,11 @@ private void updateCommentsData(@Nullable ICodeData data) {
+ 		if (data == null) {
+ 			this.clsCommentsMap = Collections.emptyMap();
+ 		} else {
+-			this.clsCommentsMap = data.getComments().stream()
+-					.collect(Collectors.groupingBy(c -> c.getNodeRef().getDeclaringClass()));
++			Map<String, List<ICodeComment>> map = new HashMap<>();
++			for (ICodeComment c : data.getComments()) {
++				map.computeIfAbsent(c.getNodeRef().getDeclaringClass(), k -> new ArrayList<>()).add(c);
++			}
++			this.clsCommentsMap = map;
+ 		}
+ 	}
+ }
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/ClassModifier.java b/jadx-core/src/main/java/jadx/core/dex/visitors/ClassModifier.java
+index b5c905821..59037afe6 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/ClassModifier.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/ClassModifier.java
+@@ -36,6 +36,7 @@
+ import jadx.core.dex.visitors.usage.UsageInfoVisitor;
+ import jadx.core.utils.BlockUtils;
+ import jadx.core.utils.InsnRemover;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.exceptions.JadxException;
+ 
+ @JadxVisitor(
+@@ -284,10 +285,8 @@ private static boolean checkSyntheticWrapper(MethodNode mth, InsnNode insn) {
+ 			return false;
+ 		}
+ 		// all args must be registers passed from method args (allow only casts insns)
+-		for (InsnArg arg : insn.getArguments()) {
+-			if (!registersAndCastsOnly(arg)) {
+-				return false;
+-			}
++		if (!ListUtils.allMatch(insn.getArguments(), ClassModifier::registersAndCastsOnly)) {
++			return false;
+ 		}
+ 		// remove confirmed, change visibility and name if needed
+ 		if (!wrappedAccFlags.isPublic() && !mth.root().getArgs().isRespectBytecodeAccModifiers()) {
+@@ -348,13 +347,7 @@ private static void removeEmptyMethods(MethodNode mth) {
+ 
+ 	private static boolean isNonDefaultConstructorExists(MethodNode defCtor) {
+ 		ClassNode parentClass = defCtor.getParentClass();
+-		for (MethodNode mth : parentClass.getMethods()) {
+-			if (mth != defCtor
+-					&& mth.isConstructor()
+-					&& !mth.isDefaultConstructor()) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return ListUtils.anyMatch(parentClass.getMethods(),
++				mth -> mth != defCtor && mth.isConstructor() && !mth.isDefaultConstructor());
+ 	}
+ }
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/ConstInlineVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/ConstInlineVisitor.java
+index def2f11a0..676c289db 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/ConstInlineVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/ConstInlineVisitor.java
+@@ -194,10 +194,7 @@ private static boolean canIgnoreInsn(RegisterArg reg) {
+ 		if (parentInsn == null || parentInsn.getType() == InsnType.PHI) {
+ 			return false;
+ 		}
+-		if (reg.isLinkedToOtherSsaVars()) {
+-			return false;
+-		}
+-		return parentInsn.contains(AFlag.DONT_GENERATE);
++		return !reg.isLinkedToOtherSsaVars() && parentInsn.contains(AFlag.DONT_GENERATE);
+ 	}
+ 
+ 	@SuppressWarnings("RedundantIfStatement")
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/ConstructorVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/ConstructorVisitor.java
+index cede8df53..a105a9e37 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/ConstructorVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/ConstructorVisitor.java
+@@ -25,6 +25,7 @@
+ import jadx.core.dex.visitors.typeinference.TypeInferenceVisitor;
+ import jadx.core.utils.BlockUtils;
+ import jadx.core.utils.InsnRemover;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.exceptions.JadxRuntimeException;
+ 
+ @JadxVisitor(
+@@ -213,17 +214,8 @@ private static ConstructorInsn processConstructor(MethodNode mth, ConstructorIns
+ 	}
+ 
+ 	private static boolean allArgsNull(ConstructorInsn insn) {
+-		for (InsnArg insnArg : insn.getArguments()) {
+-			if (insnArg.isLiteral()) {
+-				LiteralArg lit = (LiteralArg) insnArg;
+-				if (lit.getLiteral() != 0) {
+-					return false;
+-				}
+-			} else {
+-				return false;
+-			}
+-		}
+-		return true;
++		return ListUtils.allMatch(insn.getArguments(),
++				insnArg -> insnArg.isLiteral() && ((LiteralArg) insnArg).getLiteral() == 0);
+ 	}
+ 
+ 	/**
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/ExtractFieldInit.java b/jadx-core/src/main/java/jadx/core/dex/visitors/ExtractFieldInit.java
+index 6ec04bc2c..53947dbab 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/ExtractFieldInit.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/ExtractFieldInit.java
+@@ -253,14 +253,7 @@ private static boolean checkInsn(FieldInitInfo initInfo) {
+ 		}
+ 		Set<RegisterArg> regs = new HashSet<>();
+ 		insn.getRegisterArgs(regs);
+-		if (!regs.isEmpty()) {
+-			for (RegisterArg reg : regs) {
+-				if (!reg.isThis()) {
+-					return false;
+-				}
+-			}
+-		}
+-		return true;
++		return ListUtils.noneMatch(regs, reg -> !reg.isThis());
+ 	}
+ 
+ 	private static boolean insnUseExcludedField(FieldInitInfo initInfo, Set<FieldInfo> excludedFields) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/FixInstructionsVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/FixInstructionsVisitor.java
+index a89101065..4384976af 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/FixInstructionsVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/FixInstructionsVisitor.java
+@@ -48,10 +48,8 @@ private void fixInsn(InsnNode insn) {
+ 	}
+ 
+ 	private static boolean forceStringConcat(InsnNode insn) {
+-		if (insn.getArgsCount() < 2) {
+-			return false;
+-		}
+-		return !insn.getArg(0).getType().equals(ArgType.STRING)
++		return insn.getArgsCount() >= 2
++				&& !insn.getArg(0).getType().equals(ArgType.STRING)
+ 				&& !insn.getArg(1).getType().equals(ArgType.STRING);
+ 	}
+ 
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/FixSwitchOverEnum.java b/jadx-core/src/main/java/jadx/core/dex/visitors/FixSwitchOverEnum.java
+index f63c5f443..750aaec5a 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/FixSwitchOverEnum.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/FixSwitchOverEnum.java
+@@ -30,6 +30,7 @@
+ import jadx.core.dex.nodes.RootNode;
+ import jadx.core.dex.regions.SwitchRegion;
+ import jadx.core.dex.visitors.shrink.CodeShrinkVisitor;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.Utils;
+ import jadx.core.utils.exceptions.JadxException;
+ 
+@@ -120,10 +121,7 @@ private static boolean processDirectEnumSwitch(MethodNode mth, SwitchInsn swInsn
+ 			return false;
+ 		}
+ 		FieldNode[] casesReplaceArr = mapToCases(swInsn, enumClassAttr.getFields());
+-		if (casesReplaceArr == null) {
+-			return false;
+-		}
+-		return executeReplace(swInsn, arg, invVar, i -> casesReplaceArr[i]);
++		return casesReplaceArr != null && executeReplace(swInsn, arg, invVar, i -> casesReplaceArr[i]);
+ 	}
+ 
+ 	private static @Nullable FieldNode[] mapToCases(SwitchInsn swInsn, List<EnumClassAttr.EnumField> fields) {
+@@ -267,14 +265,12 @@ private static void addToEnumMap(RootNode root, EnumMapAttr mapAttr, InsnNode ap
+ 	 * If all static final synthetic fields have DONT_GENERATE => hide whole class
+ 	 */
+ 	private static void checkAndHideClass(ClassNode cls) {
+-		for (FieldNode field : cls.getFields()) {
++		if (!ListUtils.anyMatch(cls.getFields(), field -> {
+ 			AccessInfo af = field.getAccessFlags();
+-			if (af.isSynthetic() && af.isStatic() && af.isFinal()
+-					&& !field.contains(AFlag.DONT_GENERATE)) {
+-				return;
+-			}
++			return af.isSynthetic() && af.isStatic() && af.isFinal() && !field.contains(AFlag.DONT_GENERATE);
++		})) {
++			cls.add(AFlag.DONT_GENERATE);
+ 		}
+-		cls.add(AFlag.DONT_GENERATE);
+ 	}
+ 
+ 	private static class EnumMapInfo {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/InlineMethods.java b/jadx-core/src/main/java/jadx/core/dex/visitors/InlineMethods.java
+index d249e53a4..78c487652 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/InlineMethods.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/InlineMethods.java
+@@ -145,16 +145,10 @@ private boolean replaceRegs(MethodNode mth, MethodNode callMth, MethodInlineAttr
+ 	}
+ 
+ 	private boolean isAssignNeeded(InsnNode inlineInsn, InvokeNode parentInsn, MethodNode callMthNode) {
+-		if (parentInsn.getResult() != null) {
+-			return false;
+-		}
+-		if (parentInsn.contains(AFlag.WRAPPED)) {
+-			return false;
+-		}
+-		if (inlineInsn.getType() == InsnType.IPUT) {
+-			return false;
+-		}
+-		return !callMthNode.isVoidReturn();
++		return parentInsn.getResult() == null
++				&& !parentInsn.contains(AFlag.WRAPPED)
++				&& inlineInsn.getType() != InsnType.IPUT
++				&& !callMthNode.isVoidReturn();
+ 	}
+ 
+ 	private void updateUsageInfo(MethodNode mth, MethodNode inlinedMth, InsnNode insn) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/MarkMethodsForInline.java b/jadx-core/src/main/java/jadx/core/dex/visitors/MarkMethodsForInline.java
+index e7b337e8c..28db83550 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/MarkMethodsForInline.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/MarkMethodsForInline.java
+@@ -118,12 +118,10 @@ private static boolean isSyntheticAccessPattern(MethodNode mth, InsnNode firstIn
+ 						&& firstInsn.getArg(0).isSameVar(mthRegs.get(0));
+ 
+ 			case INVOKE:
+-				if (!retInsn.getArg(0).isSameVar(firstInsn.getResult())) {
+-					return false;
+-				}
+-				return ListUtils.orderedEquals(
+-						mth.getArgRegs(), firstInsn.getArgList(),
+-						(mthArg, insnArg) -> insnArg.isSameVar(mthArg));
++				return retInsn.getArg(0).isSameVar(firstInsn.getResult())
++						&& ListUtils.orderedEquals(
++								mth.getArgRegs(), firstInsn.getArgList(),
++								(mthArg, insnArg) -> insnArg.isSameVar(mthArg));
+ 			default:
+ 				return false;
+ 		}
+@@ -167,10 +165,7 @@ private static boolean fixVisibilityOfInlineCode(MethodNode mth, InsnNode insn)
+ 		}
+ 		if (insnType == InsnType.ONE_ARG) {
+ 			InsnArg arg = insn.getArg(0);
+-			if (!arg.isInsnWrap()) {
+-				return false;
+-			}
+-			return fixVisibilityOfInlineCode(mth, ((InsnWrapArg) arg).getWrapInsn());
++			return arg.isInsnWrap() && fixVisibilityOfInlineCode(mth, ((InsnWrapArg) arg).getWrapInsn());
+ 		}
+ 		if (insn instanceof IndexInsnNode) {
+ 			Object indexObj = ((IndexInsnNode) insn).getIndex();
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/MethodThrowsVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/MethodThrowsVisitor.java
+index ef26472f4..3995d316c 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/MethodThrowsVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/MethodThrowsVisitor.java
+@@ -34,6 +34,7 @@
+ import jadx.core.dex.visitors.regions.RegionMakerVisitor;
+ import jadx.core.dex.visitors.typeinference.TypeCompare;
+ import jadx.core.dex.visitors.typeinference.TypeCompareEnum;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.exceptions.JadxException;
+ 
+ @JadxVisitor(
+@@ -241,27 +242,20 @@ private ExceptionType validateException(ArgType clsType) {
+ 	 * @return is 'possibleParent' an exception class of 'exception'
+ 	 */
+ 	private boolean isBaseException(String exception, String possibleParent) {
+-		if (exception.equals(possibleParent)) {
+-			return true;
+-		}
+-		return root.getClsp().isImplements(exception, possibleParent);
++		return exception.equals(possibleParent) || root.getClsp().isImplements(exception, possibleParent);
+ 	}
+ 
+ 	private boolean isImplements(ArgType type, ArgType baseType) {
+-		if (type.equals(baseType)) {
+-			return true;
+-		}
+-		return root.getClsp().isImplements(type.getObject(), baseType.getObject());
++		return type.equals(baseType) || root.getClsp().isImplements(type.getObject(), baseType.getObject());
+ 	}
+ 
+ 	private @Nullable MethodNode searchOverriddenMethod(ClassNode cls, MethodInfo mth, String signature) {
+ 		// search by exact full signature (with return value) to fight obfuscation (see test
+ 		// 'TestOverrideWithSameName')
+ 		String shortId = mth.getShortId();
+-		for (MethodNode supMth : cls.getMethods()) {
+-			if (supMth.getMethodInfo().getShortId().equals(shortId)) {
+-				return supMth;
+-			}
++		MethodNode exactMatch = ListUtils.firstOrNull(cls.getMethods(), m -> m.getMethodInfo().getShortId().equals(shortId));
++		if (exactMatch != null) {
++			return exactMatch;
+ 		}
+ 		// search by signature without return value and check if return value is wider type
+ 		for (MethodNode supMth : cls.getMethods()) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/ModVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/ModVisitor.java
+index 09edc2731..92d53fe5e 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/ModVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/ModVisitor.java
+@@ -422,7 +422,7 @@ private static void removeCheckCast(MethodNode mth, BlockNode block, int i, Inde
+ 			replaceInsn(mth, block, i, move);
+ 			return;
+ 		}
+-		InsnNode prevCast = isCastDuplicate(insn);
++		InsnNode prevCast = InsnUtils.isCastDuplicate(insn);
+ 		if (prevCast != null) {
+ 			// replace previous cast with move
+ 			InsnNode move = new InsnNode(InsnType.MOVE, 1);
+@@ -432,10 +432,6 @@ private static void removeCheckCast(MethodNode mth, BlockNode block, int i, Inde
+ 		}
+ 	}
+ 
+-	private static @Nullable InsnNode isCastDuplicate(IndexInsnNode castInsn) {
+-		return InsnUtils.isCastDuplicate(castInsn);
+-	}
+-
+ 	/**
+ 	 * Remove unnecessary instructions
+ 	 */
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/OverrideMethodVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/OverrideMethodVisitor.java
+index e873451ca..422394f5d 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/OverrideMethodVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/OverrideMethodVisitor.java
+@@ -136,10 +136,10 @@ private MethodNode searchOverriddenMethod(ClassNode cls, MethodNode mth, String
+ 		// search by exact full signature (with return value) to fight obfuscation (see test
+ 		// 'TestOverrideWithSameName')
+ 		String shortId = mth.getMethodInfo().getShortId();
+-		for (MethodNode supMth : cls.getMethods()) {
+-			if (supMth.getMethodInfo().getShortId().equals(shortId) && !supMth.getAccessFlags().isStatic()) {
+-				return supMth;
+-			}
++		MethodNode found = ListUtils.firstOrNull(cls.getMethods(),
++				supMth -> supMth.getMethodInfo().getShortId().equals(shortId) && !supMth.getAccessFlags().isStatic());
++		if (found != null) {
++			return found;
+ 		}
+ 		// search by signature without return value and check if return value is wider type
+ 		for (MethodNode supMth : cls.getMethods()) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/PrepareForCodeGen.java b/jadx-core/src/main/java/jadx/core/dex/visitors/PrepareForCodeGen.java
+index 51af2d694..b567fbb83 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/PrepareForCodeGen.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/PrepareForCodeGen.java
+@@ -312,23 +312,16 @@ private void setClassSourceLine(ClassNode cls) {
+ 			setClassSourceLine(innerClass);
+ 		}
+ 		int minLine = 0;
+-		for (LineAttrNode node : cls.getMethods()) {
+-			if (!node.contains(AFlag.DONT_GENERATE) && node.getSourceLine() != 0) {
+-				int line = node.getSourceLine();
+-				if (minLine == 0 || line < minLine) {
+-					minLine = line;
+-				}
+-			}
+-		}
+-		for (LineAttrNode node : cls.getInnerClasses()) {
+-			if (!node.contains(AFlag.DONT_GENERATE) && node.getSourceLine() != 0) {
+-				int line = node.getSourceLine();
+-				if (minLine == 0 || line < minLine) {
+-					minLine = line;
+-				}
+-			}
++		minLine = minLineFrom(cls.getMethods(), minLine);
++		minLine = minLineFrom(cls.getInnerClasses(), minLine);
++		minLine = minLineFrom(cls.getFields(), minLine);
++		if (minLine != 0) {
++			cls.setSourceLine(minLine - 1);
+ 		}
+-		for (LineAttrNode node : cls.getFields()) {
++	}
++
++	private static int minLineFrom(List<? extends LineAttrNode> nodes, int minLine) {
++		for (LineAttrNode node : nodes) {
+ 			if (!node.contains(AFlag.DONT_GENERATE) && node.getSourceLine() != 0) {
+ 				int line = node.getSourceLine();
+ 				if (minLine == 0 || line < minLine) {
+@@ -336,9 +329,7 @@ private void setClassSourceLine(ClassNode cls) {
+ 				}
+ 			}
+ 		}
+-		if (minLine != 0) {
+-			cls.setSourceLine(minLine - 1);
+-		}
++		return minLine;
+ 	}
+ 
+ 	private void collectFieldsUsageInAnnotations(ClassNode cls) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/ProcessMethodsForInline.java b/jadx-core/src/main/java/jadx/core/dex/visitors/ProcessMethodsForInline.java
+index e7be157e5..beeb89c2c 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/ProcessMethodsForInline.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/ProcessMethodsForInline.java
+@@ -49,10 +49,7 @@ private static boolean canInline(MethodNode mth) {
+ 	}
+ 
+ 	private static boolean canInlineMethod(MethodNode mth, AccessInfo accessFlags) {
+-		if (accessFlags.isStatic()) {
+-			return true;
+-		}
+-		return mth.isConstructor() && mth.root().getArgs().isInlineAnonymousClasses();
++		return accessFlags.isStatic() || (mth.isConstructor() && mth.root().getArgs().isInlineAnonymousClasses());
+ 	}
+ 
+ 	private static void fixClassDependencies(MethodNode mth) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/ReplaceNewArray.java b/jadx-core/src/main/java/jadx/core/dex/visitors/ReplaceNewArray.java
+index 6bf592401..f877b6e53 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/ReplaceNewArray.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/ReplaceNewArray.java
+@@ -28,6 +28,8 @@
+ import jadx.core.utils.InsnList;
+ import jadx.core.utils.InsnRemover;
+ import jadx.core.utils.InsnUtils;
++import jadx.core.utils.ListUtils;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.exceptions.JadxException;
+ 
+ @JadxVisitor(
+@@ -95,15 +97,10 @@ private static boolean processNewArray(MethodNode mth,
+ 			return false;
+ 		}
+ 		// quick check if APUT is used
+-		boolean foundPut = false;
+-		for (RegisterArg registerArg : useList) {
+-			InsnNode parentInsn = registerArg.getParentInsn();
+-			if (parentInsn != null && parentInsn.getType() == InsnType.APUT) {
+-				foundPut = true;
+-				break;
+-			}
+-		}
+-		if (!foundPut) {
++		if (!ListUtils.anyMatch(useList, reg -> {
++			InsnNode parentInsn = reg.getParentInsn();
++			return parentInsn != null && parentInsn.getType() == InsnType.APUT;
++		})) {
+ 			return false;
+ 		}
+ 		// collect put instructions sorted by array index
+@@ -194,13 +191,7 @@ private static boolean verifyPutInsns(RegisterArg arrReg, List<InsnNode> insnLis
+ 			return false;
+ 		}
+ 		// array arg shouldn't be used in puts insns
+-		for (InsnNode put : puts) {
+-			InsnArg putArg = put.getArg(2);
+-			if (putArg.isUseVar(arrReg)) {
+-				return false;
+-			}
+-		}
+-		return true;
++		return ListUtils.allMatch(puts, put -> !put.getArg(2).isUseVar(arrReg));
+ 	}
+ 
+ 	private static InsnArg replaceConstInArg(MethodNode mth, InsnArg valueArg) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/SignatureProcessor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/SignatureProcessor.java
+index f6a74ae1d..56fb0bf86 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/SignatureProcessor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/SignatureProcessor.java
+@@ -19,6 +19,7 @@
+ import jadx.core.dex.nodes.parser.SignatureParser;
+ import jadx.core.dex.nodes.utils.TypeUtils;
+ import jadx.core.dex.visitors.typeinference.TypeCompareEnum;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.Utils;
+ import jadx.core.utils.exceptions.JadxException;
+ 
+@@ -283,12 +284,7 @@ private boolean validateFullClsName(String fullClsName) {
+ 	}
+ 
+ 	private boolean validateInnerType(List<ArgType> types) {
+-		for (ArgType type : types) {
+-			if (!validateInnerType(type)) {
+-				return false;
+-			}
+-		}
+-		return true;
++		return ListUtils.allMatch(types, this::validateInnerType);
+ 	}
+ 
+ 	private boolean validateInnerType(ArgType type) {
+@@ -312,12 +308,7 @@ private boolean validateInnerType(ArgType type) {
+ 		}
+ 		if (!innerObj.contains(".")) {
+ 			// short reference
+-			for (ClassNode innerClass : outerCls.getInnerClasses()) {
+-				if (innerClass.getShortName().equals(innerObj)) {
+-					return true;
+-				}
+-			}
+-			return false;
++			return ListUtils.anyMatch(outerCls.getInnerClasses(), innerClass -> innerClass.getShortName().equals(innerObj));
+ 		}
+ 		// full name
+ 		ClassNode innerCls = root.resolveClass(innerObj);
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockExceptionHandler.java b/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockExceptionHandler.java
+index 0397efb61..f02716c34 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockExceptionHandler.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockExceptionHandler.java
+@@ -646,18 +646,11 @@ private static int compareByTypeAndName(Comparator<ArgType> comparator, ClassInf
+ 	 */
+ 	private static void removeUnusedExcHandlers(MethodNode mth, List<TryCatchBlockAttr> tryBlocks, BlockSet blocks) {
+ 		for (ExceptionHandler eh : mth.getExceptionHandlers()) {
+-			boolean notProcessed = true;
+ 			BlockNode handlerBlock = eh.getHandlerBlock();
+ 			if (handlerBlock == null || blocks.contains(handlerBlock)) {
+ 				continue;
+ 			}
+-			for (TryCatchBlockAttr tcb : tryBlocks) {
+-				if (tcb.getHandlers().contains(eh)) {
+-					notProcessed = false;
+-					break;
+-				}
+-			}
+-			if (notProcessed) {
++			if (!ListUtils.anyMatch(tryBlocks, tcb -> tcb.getHandlers().contains(eh))) {
+ 				BlockProcessor.removeUnreachableBlock(handlerBlock, mth);
+ 			}
+ 		}
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockProcessor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockProcessor.java
+index 700fa6617..69a25beb0 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockProcessor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockProcessor.java
+@@ -31,6 +31,7 @@
+ import jadx.core.dex.trycatch.TryCatchBlockAttr;
+ import jadx.core.dex.visitors.AbstractVisitor;
+ import jadx.core.utils.BlockUtils;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.Utils;
+ import jadx.core.utils.exceptions.JadxRuntimeException;
+ 
+@@ -158,13 +159,8 @@ private static void checkForUnreachableBlocks(MethodNode mth) {
+ 	 *         changes were made.
+ 	 */
+ 	private static boolean fixUnreachableSplitCross(MethodNode mth, BlockNode splitCross) {
+-		BlockNode bottomSplitter = null;
+-		for (BlockNode succ : splitCross.getSuccessors()) {
+-			if (succ.contains(AFlag.EXC_BOTTOM_SPLITTER)) {
+-				bottomSplitter = succ;
+-				break;
+-			}
+-		}
++		BlockNode bottomSplitter = ListUtils.firstOrNull(splitCross.getSuccessors(),
++				succ -> succ.contains(AFlag.EXC_BOTTOM_SPLITTER));
+ 		if (bottomSplitter == null || bottomSplitter.getPredecessors().size() != 1) {
+ 			return false;
+ 		}
+@@ -617,14 +613,7 @@ private static boolean insertBlocksForContinue(MethodNode mth, LoopInfo loop) {
+ 	}
+ 
+ 	private static boolean splitLoops(MethodNode mth, BlockNode block, List<LoopInfo> loops) {
+-		boolean oneHeader = true;
+-		for (LoopInfo loop : loops) {
+-			if (loop.getStart() != block) {
+-				oneHeader = false;
+-				break;
+-			}
+-		}
+-		if (!oneHeader) {
++		if (!ListUtils.allMatch(loops, loop -> loop.getStart() == block)) {
+ 			return false;
+ 		}
+ 		// several back edges connected to one loop header => make additional block
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockSplitter.java b/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockSplitter.java
+index d9f18d367..3756f6d01 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockSplitter.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockSplitter.java
+@@ -24,6 +24,7 @@
+ import jadx.core.dex.trycatch.ExceptionHandler;
+ import jadx.core.dex.visitors.AbstractVisitor;
+ import jadx.core.utils.BlockUtils;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.exceptions.JadxRuntimeException;
+ 
+ public class BlockSplitter extends AbstractVisitor {
+@@ -303,19 +304,12 @@ private static void setupExitConnections(MethodNode mth) {
+ 	}
+ 
+ 	private static boolean isSplitByJump(InsnNode prevInsn, InsnNode currentInsn) {
+-		List<JumpInfo> pJumps = prevInsn.getAll(AType.JUMP);
+-		for (JumpInfo jump : pJumps) {
+-			if (jump.getSrc() == prevInsn.getOffset()) {
+-				return true;
+-			}
+-		}
+-		List<JumpInfo> cJumps = currentInsn.getAll(AType.JUMP);
+-		for (JumpInfo jump : cJumps) {
+-			if (jump.getDest() == currentInsn.getOffset()) {
+-				return true;
+-			}
++		int prevOffset = prevInsn.getOffset();
++		if (ListUtils.anyMatch(prevInsn.getAll(AType.JUMP), jump -> jump.getSrc() == prevOffset)) {
++			return true;
+ 		}
+-		return false;
++		int curOffset = currentInsn.getOffset();
++		return ListUtils.anyMatch(currentInsn.getAll(AType.JUMP), jump -> jump.getDest() == curOffset);
+ 	}
+ 
+ 	private static boolean isDoWhile(Map<Integer, BlockNode> blocksMap, BlockNode curBlock, InsnNode insn) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/debuginfo/DebugInfoApplyVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/debuginfo/DebugInfoApplyVisitor.java
+index e2d8a3e10..87d2a0f9e 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/debuginfo/DebugInfoApplyVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/debuginfo/DebugInfoApplyVisitor.java
+@@ -132,10 +132,7 @@ private static int getInsnOffsetByArg(InsnArg arg) {
+ 
+ 	public static boolean applyDebugInfo(MethodNode mth, SSAVar ssaVar, RegisterArg arg) {
+ 		RegDebugInfoAttr debugInfoAttr = arg.get(AType.REG_DEBUG_INFO);
+-		if (debugInfoAttr == null) {
+-			return false;
+-		}
+-		return applyDebugInfo(mth, ssaVar, debugInfoAttr.getRegType(), debugInfoAttr.getName());
++		return debugInfoAttr != null && applyDebugInfo(mth, ssaVar, debugInfoAttr.getRegType(), debugInfoAttr.getName());
+ 	}
+ 
+ 	public static boolean applyDebugInfo(MethodNode mth, SSAVar ssaVar, ArgType type, String varName) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/finaly/CentralityState.java b/jadx-core/src/main/java/jadx/core/dex/visitors/finaly/CentralityState.java
+index 9e673c487..027a72e30 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/finaly/CentralityState.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/finaly/CentralityState.java
+@@ -3,7 +3,6 @@
+ import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.HashSet;
+-import java.util.LinkedList;
+ import java.util.List;
+ import java.util.Set;
+ 
+@@ -80,35 +79,22 @@ public void addAllowableOutputs(Collection<RegisterArg> allowableOutputs) {
+ 	 * @param allowableOutputInsn The instruction to retrieve the list of inputs from.
+ 	 */
+ 	public void addAllowableOutputs(InsnNode allowableOutputInsn) {
+-		List<RegisterArg> registerArgs = new LinkedList<>();
+ 		for (InsnArg arg : allowableOutputInsn.getArgList()) {
+-			if (!(arg instanceof RegisterArg)) {
+-				continue;
++			if (arg instanceof RegisterArg) {
++				allowableOutputArguments.add((RegisterArg) arg);
+ 			}
+-			registerArgs.add((RegisterArg) arg);
+ 		}
+-		registerArgs.forEach(this::addAllowableOutput);
+ 	}
+ 
+ 	public boolean hasAllowableOutput(InsnNode insn) {
+ 		if (allowableOutputArguments.isEmpty()) {
+ 			return false;
+ 		}
+-		RegisterArg registerArg;
+-		if (insn.getResult() != null) {
+-			registerArg = insn.getResult();
+-		} else {
+-			registerArg = null;
+-		}
++		RegisterArg registerArg = insn.getResult();
+ 		if (registerArg == null) {
+ 			return false;
+ 		}
+-		for (RegisterArg allowableOutput : allowableOutputArguments) {
+-			if (allowableOutput.equals(registerArg)) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return allowableOutputArguments.contains(registerArg);
+ 	}
+ 
+ 	@SuppressWarnings("unused")
+@@ -122,22 +108,7 @@ public boolean hasAllowableInputs(InsnNode insn) {
+ 				registerArgs.add((RegisterArg) arg);
+ 			}
+ 		}
+-		if (registerArgs.isEmpty() || allowableOutputArguments.isEmpty()) {
+-			return false;
+-		}
+-		for (RegisterArg regArg : registerArgs) {
+-			boolean foundMatch = false;
+-			for (RegisterArg allowableOutput : allowableOutputArguments) {
+-				if (regArg.equals(allowableOutput)) {
+-					foundMatch = true;
+-					break;
+-				}
+-			}
+-			if (!foundMatch) {
+-				return false;
+-			}
+-		}
+-		return true;
++		return !registerArgs.isEmpty() && allowableOutputArguments.containsAll(registerArgs);
+ 	}
+ 
+ 	public CentralityState duplicate() {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/finaly/MarkFinallyVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/finaly/MarkFinallyVisitor.java
+index 7892605fa..f378f83b0 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/finaly/MarkFinallyVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/finaly/MarkFinallyVisitor.java
+@@ -170,13 +170,7 @@ private static void resetTryBlocks(MethodNode mth, List<TryCatchBlockAttr> tryBl
+ 			return null;
+ 		}
+ 		// Find the all handler
+-		ExceptionHandler allHandler = null;
+-		for (ExceptionHandler excHandler : tryBlock.getHandlers()) {
+-			if (excHandler.isCatchAll()) {
+-				allHandler = excHandler;
+-				break;
+-			}
+-		}
++		ExceptionHandler allHandler = ListUtils.firstOrNull(tryBlock.getHandlers(), ExceptionHandler::isCatchAll);
+ 		if (allHandler == null) {
+ 			return null;
+ 		}
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/gradle/NonFinalResIdsVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/gradle/NonFinalResIdsVisitor.java
+index ba0a4536f..e7b4cbd85 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/gradle/NonFinalResIdsVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/gradle/NonFinalResIdsVisitor.java
+@@ -46,10 +46,7 @@ public boolean visit(ClassNode cls) throws JadxException {
+ 			return false;
+ 		}
+ 		AnnotationsAttr annotationsList = cls.get(JadxAttrType.ANNOTATION_LIST);
+-		if (visitAnnotationList(annotationsList)) {
+-			return false;
+-		}
+-		return super.visit(cls);
++		return !visitAnnotationList(annotationsList) && super.visit(cls);
+ 	}
+ 
+ 	private static boolean isCustomResourceClass(ClassInfo cls) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/CleanRegions.java b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/CleanRegions.java
+index 9ecb5638a..2511ff7a0 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/CleanRegions.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/CleanRegions.java
+@@ -1,12 +1,11 @@
+ package jadx.core.dex.visitors.regions;
+ 
+-import java.util.List;
+-
+ import jadx.core.dex.attributes.AFlag;
+ import jadx.core.dex.nodes.BlockNode;
+ import jadx.core.dex.nodes.IContainer;
+ import jadx.core.dex.nodes.IRegion;
+ import jadx.core.dex.nodes.MethodNode;
++import jadx.core.utils.ListUtils;
+ import jadx.core.dex.regions.Region;
+ import jadx.core.dex.regions.loops.LoopRegion;
+ import jadx.core.dex.visitors.AbstractVisitor;
+@@ -51,13 +50,7 @@ private static boolean canRemoveRegion(IContainer container) {
+ 				}
+ 			}
+ 			if (container instanceof IRegion) {
+-				List<IContainer> subBlocks = ((IRegion) container).getSubBlocks();
+-				for (IContainer subBlock : subBlocks) {
+-					if (!canRemoveRegion(subBlock)) {
+-						return false;
+-					}
+-				}
+-				return true;
++				return ListUtils.allMatch(((IRegion) container).getSubBlocks(), RemoveRegionVisitor::canRemoveRegion);
+ 			}
+ 			return false;
+ 		}
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/LoopRegionVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/LoopRegionVisitor.java
+index 89e637d99..9dcc8b0c0 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/LoopRegionVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/LoopRegionVisitor.java
+@@ -73,13 +73,8 @@ private static boolean processLoopRegion(MethodNode mth, LoopRegion loopRegion)
+ 			return false;
+ 		}
+ 		IfCondition condition = loopRegion.getCondition();
+-		if (condition == null) {
+-			return false;
+-		}
+-		if (checkForIndexedLoop(mth, loopRegion, condition)) {
+-			return true;
+-		}
+-		return checkIterableForEach(mth, loopRegion, condition);
++		return condition != null
++				&& (checkForIndexedLoop(mth, loopRegion, condition) || checkIterableForEach(mth, loopRegion, condition));
+ 	}
+ 
+ 	/**
+@@ -394,10 +389,7 @@ private static boolean checkInvoke(InsnNode insn, String declClsFullName, String
+ 			MethodInfo callMth = inv.getCallMth();
+ 			if ((inv.getInvokeType() == InvokeType.INTERFACE || inv.getInvokeType() == InvokeType.VIRTUAL)
+ 					&& callMth.getShortId().equals(mthId)) {
+-				if (declClsFullName == null) {
+-					return true;
+-				}
+-				return callMth.getDeclClass().getFullName().equals(declClsFullName);
++				return declClsFullName == null || callMth.getDeclClass().getFullName().equals(declClsFullName);
+ 			}
+ 		}
+ 		return false;
+@@ -413,11 +405,7 @@ private static boolean assignOnlyInLoop(MethodNode mth, LoopRegion loopRegion, R
+ 		}
+ 		if (assignInsn instanceof PhiInsn) {
+ 			PhiInsn phiInsn = (PhiInsn) assignInsn;
+-			for (InsnArg phiArg : phiInsn.getArguments()) {
+-				if (!assignOnlyInLoop(mth, loopRegion, (RegisterArg) phiArg)) {
+-					return false;
+-				}
+-			}
++			return ListUtils.allMatch(phiInsn.getArguments(), phiArg -> assignOnlyInLoop(mth, loopRegion, (RegisterArg) phiArg));
+ 		}
+ 		return true;
+ 	}
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMakerVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMakerVisitor.java
+index 8cdaca467..3b8d96b32 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMakerVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMakerVisitor.java
+@@ -1,7 +1,6 @@
+ package jadx.core.dex.visitors.regions;
+ 
+ import jadx.core.dex.attributes.AFlag;
+-import jadx.core.dex.nodes.BlockNode;
+ import jadx.core.dex.nodes.MethodNode;
+ import jadx.core.dex.visitors.AbstractVisitor;
+ import jadx.core.dex.visitors.JadxVisitor;
+@@ -38,14 +37,8 @@ public void visit(MethodNode mth) throws JadxException {
+ 	}
+ 
+ 	private static void processForceInlineInsns(MethodNode mth) {
+-		boolean needShrink = false;
+-		for (BlockNode block : mth.getBasicBlocks()) {
+-			if (ListUtils.anyMatch(block.getInstructions(), insn -> insn.contains(AFlag.FORCE_ASSIGN_INLINE))) {
+-				needShrink = true;
+-				break;
+-			}
+-		}
+-		if (needShrink) {
++		if (ListUtils.anyMatch(mth.getBasicBlocks(),
++				block -> ListUtils.anyMatch(block.getInstructions(), insn -> insn.contains(AFlag.FORCE_ASSIGN_INLINE)))) {
+ 			CodeShrinkVisitor.shrinkMethod(mth);
+ 		}
+ 	}
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/ReturnVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/ReturnVisitor.java
+index a2ef33417..5a79ee371 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/ReturnVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/ReturnVisitor.java
+@@ -14,6 +14,7 @@
+ import jadx.core.dex.regions.SwitchRegion;
+ import jadx.core.dex.regions.loops.LoopRegion;
+ import jadx.core.dex.visitors.AbstractVisitor;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.exceptions.JadxException;
+ import jadx.core.utils.exceptions.JadxRuntimeException;
+ 
+@@ -58,15 +59,8 @@ private boolean blockNotInLoop(MethodNode mth, BlockNode block) {
+ 			if (mth.getLoopsCount() == 0) {
+ 				return true;
+ 			}
+-			if (mth.getLoopForBlock(block) != null) {
+-				return false;
+-			}
+-			for (IRegion region : getRegionStack()) {
+-				if (region.getClass() == LoopRegion.class) {
+-					return false;
+-				}
+-			}
+-			return true;
++			return mth.getLoopForBlock(block) == null
++					&& ListUtils.noneMatch(getRegionStack(), region -> region.getClass() == LoopRegion.class);
+ 		}
+ 
+ 		/**
+@@ -107,12 +101,7 @@ private static boolean isEmpty(IContainer container) {
+ 				return block.getInstructions().isEmpty() || block.contains(AFlag.RETURN);
+ 			} else if (container instanceof IRegion) {
+ 				IRegion region = (IRegion) container;
+-				for (IContainer block : region.getSubBlocks()) {
+-					if (!isEmpty(block)) {
+-						return false;
+-					}
+-				}
+-				return true;
++				return ListUtils.allMatch(region.getSubBlocks(), ReturnRemoverVisitor::isEmpty);
+ 			} else {
+ 				throw new JadxRuntimeException("Unknown container type: " + container.getClass());
+ 			}
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/IfRegionMaker.java b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/IfRegionMaker.java
+index a704ba9ac..56231794b 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/IfRegionMaker.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/IfRegionMaker.java
+@@ -166,10 +166,7 @@ static IfInfo makeIfInfo(MethodNode mth, BlockNode ifBlock) {
+ 
+ 	static IfInfo searchNestedIf(IfInfo info) {
+ 		IfInfo next = mergeNestedIfNodes(info);
+-		if (next != null) {
+-			return next;
+-		}
+-		return info;
++		return next != null ? next : info;
+ 	}
+ 
+ 	IfInfo restructureIf(BlockNode block, IfInfo info) {
+@@ -598,10 +595,8 @@ private static IfInfo getNextIf(IfInfo info, BlockNode block) {
+ 	}
+ 
+ 	private static boolean canSelectNext(IfInfo info, BlockNode block) {
+-		if (block.getPredecessors().size() == 1) {
+-			return true;
+-		}
+-		return info.getMergedBlocks().containsAll(block.getPredecessors());
++		return block.getPredecessors().size() == 1
++				|| info.getMergedBlocks().containsAll(block.getPredecessors());
+ 	}
+ 
+ 	private static IfInfo getNextIfNodeInfo(IfInfo info, BlockNode block) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/LoopRegionMaker.java b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/LoopRegionMaker.java
+index 0d69b2576..93cf53ed1 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/LoopRegionMaker.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/LoopRegionMaker.java
+@@ -218,17 +218,11 @@ private LoopRegion makeLoopRegion(IRegion curRegion, LoopInfo loop, List<BlockNo
+ 				List<LoopInfo> list = mth.getAllLoopsForBlock(block);
+ 				if (list.size() >= 2) {
+ 					// bad condition if successors going out of all loops
+-					boolean allOuter = true;
+-					for (BlockNode outerBlock : block.getCleanSuccessors()) {
++					if (ListUtils.noneMatch(block.getCleanSuccessors(), outerBlock -> {
+ 						List<LoopInfo> outLoopList = mth.getAllLoopsForBlock(outerBlock);
+ 						outLoopList.remove(loop);
+-						if (!outLoopList.isEmpty()) {
+-							// goes to outer loop
+-							allOuter = false;
+-							break;
+-						}
+-					}
+-					if (allOuter) {
++						return !outLoopList.isEmpty(); // goes to outer loop
++					})) {
+ 						found = false;
+ 					}
+ 				}
+@@ -427,16 +421,10 @@ private boolean oneBlockOfWorkBeforeEnd(BlockNode firstInstructionBlock, BlockNo
+ 		// Return true if down every path there is no more than one block of work between the crossing and
+ 		// an exit block
+ 		List<BlockNode> cleanSuccessors = firstInstructionBlock.getCleanSuccessors();
+-		if (cleanSuccessors.isEmpty()) {
+-			return false;
+-		}
+-		for (BlockNode cleanSuccessor : cleanSuccessors) {
+-			BlockNode nextInstructionBlock = BlockUtils.followEmptyPath(cleanSuccessor);
+-			if (!BlockUtils.isExitBlock(mth, nextInstructionBlock) && nextInstructionBlock != outBlock) {
+-				return false;
+-			}
+-		}
+-		return true;
++		return !cleanSuccessors.isEmpty() && ListUtils.allMatch(cleanSuccessors, cleanSuccessor -> {
++			BlockNode next = BlockUtils.followEmptyPath(cleanSuccessor);
++			return BlockUtils.isExitBlock(mth, next) || next == outBlock;
++		});
+ 	}
+ 
+ 	/*
+@@ -603,15 +591,7 @@ private BlockNode makeEndlessLoop(IRegion curRegion, RegionStack stack, LoopInfo
+ 	}
+ 
+ 	private boolean inExceptionHandlerBlocks(BlockNode loopEnd) {
+-		if (mth.getExceptionHandlersCount() == 0) {
+-			return false;
+-		}
+-		for (ExceptionHandler eh : mth.getExceptionHandlers()) {
+-			if (eh.getBlocks().contains(loopEnd)) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return ListUtils.anyMatch(mth.getExceptionHandlers(), eh -> eh.getBlocks().contains(loopEnd));
+ 	}
+ 
+ 	private boolean canInsertBreak(BlockNode exit) {
+@@ -629,12 +609,7 @@ private boolean canInsertBreak(BlockNode exit) {
+ 		}
+ 		// check if there no outer switch (TODO: very expensive check)
+ 		Set<BlockNode> paths = BlockUtils.getAllPathsBlocks(mth.getEnterBlock(), exit);
+-		for (BlockNode block : paths) {
+-			if (BlockUtils.checkLastInsnType(block, InsnType.SWITCH)) {
+-				return false;
+-			}
+-		}
+-		return true;
++		return ListUtils.noneMatch(paths, block -> BlockUtils.checkLastInsnType(block, InsnType.SWITCH));
+ 	}
+ 
+ 	/*
+@@ -716,13 +691,7 @@ private void addBreakLabel(BlockNode blockOnLoop, BlockNode exit, InsnNode break
+ 			return;
+ 		}
+ 		// search for parent loop
+-		LoopInfo parentLoop = null;
+-		for (LoopInfo loop : inLoops) {
+-			if (loop.getParentLoop() == null) {
+-				parentLoop = loop;
+-				break;
+-			}
+-		}
++		LoopInfo parentLoop = ListUtils.firstOrNull(inLoops, loop -> loop.getParentLoop() == null);
+ 		if (parentLoop == null) {
+ 			return;
+ 		}
+@@ -778,22 +747,10 @@ private static boolean canInsertContinue(BlockNode pred, List<BlockNode> predece
+ 				}
+ 			}
+ 		}
+-		boolean gotoExit = false;
+-		for (BlockNode exit : loopExitNodes) {
+-			if (BlockUtils.isPathExists(codePred, exit)) {
+-				gotoExit = true;
+-				break;
+-			}
+-		}
+-		return gotoExit;
++		return ListUtils.anyMatch(loopExitNodes, exit -> BlockUtils.isPathExists(codePred, exit));
+ 	}
+ 
+ 	private static boolean isDominatedOnBlocks(BlockNode dom, List<BlockNode> blocks) {
+-		for (BlockNode node : blocks) {
+-			if (!node.isDominator(dom)) {
+-				return false;
+-			}
+-		}
+-		return true;
++		return ListUtils.allMatch(blocks, node -> node.isDominator(dom));
+ 	}
+ }
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/RegionMaker.java b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/RegionMaker.java
+index e846d0017..c8bdb59eb 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/RegionMaker.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/RegionMaker.java
+@@ -19,6 +19,7 @@
+ import jadx.core.dex.nodes.MethodNode;
+ import jadx.core.dex.regions.Region;
+ import jadx.core.utils.BlockUtils;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.blocks.BlockSet;
+ import jadx.core.utils.exceptions.JadxOverflowException;
+ 
+@@ -92,12 +93,10 @@ Region makeRegion(BlockNode startBlock) {
+ 				next = loopMaker.process(r, loops.get(0), stack);
+ 				processed = true;
+ 			} else {
+-				for (LoopInfo loop : loops) {
+-					if (loop.getStart() == block) {
+-						next = loopMaker.process(r, loop, stack);
+-						processed = true;
+-						break;
+-					}
++				LoopInfo matchedLoop = ListUtils.firstOrNull(loops, loop -> loop.getStart() == block);
++				if (matchedLoop != null) {
++					next = loopMaker.process(r, matchedLoop, stack);
++					processed = true;
+ 				}
+ 			}
+ 		}
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/SwitchRegionMaker.java b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/SwitchRegionMaker.java
+index 387d95f6d..24d6054e2 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/SwitchRegionMaker.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/SwitchRegionMaker.java
+@@ -315,14 +315,7 @@ private boolean canRemove(IContainer container, BlockNode outBlock) {
+ 				// Base case - empty path from block node to outBlock
+ 				return BlockUtils.followEmptyPath((BlockNode) container) == outBlock;
+ 			} else if (container instanceof IRegion) {
+-				// Recursive case - every subBlock can be removed
+-				List<IContainer> subBlocks = ((IRegion) container).getSubBlocks();
+-				for (IContainer subBlock : subBlocks) {
+-					if (!canRemove(subBlock, outBlock)) {
+-						return false;
+-					}
+-				}
+-				return true;
++				return ListUtils.allMatch(((IRegion) container).getSubBlocks(), sub -> canRemove(sub, outBlock));
+ 			}
+ 			LOG.debug("Unexpected container type in switch");
+ 		}
+@@ -398,21 +391,15 @@ private static void insertBreaksForCase(MethodNode mth, SwitchRegion switchRegio
+ 		DepthRegionTraversal.traverse(mth, caseContainer, new AbstractRegionVisitor() {
+ 			@Override
+ 			public void leaveRegion(MethodNode mth, IRegion region) {
+-				boolean insertBreak = false;
++				boolean insertBreak;
+ 				if (region == caseContainer) {
+ 					// top region
+ 					insertBreak = true;
+ 				} else {
+ 					IContainer lastContainer = ListUtils.last(region.getSubBlocks());
+-					if (lastContainer instanceof BlockNode) {
+-						BlockNode lastBlock = (BlockNode) lastContainer;
+-						for (BlockNode successor : lastBlock.getSuccessors()) {
+-							if (!caseBlocks.contains(successor)) {
+-								insertBreak = true;
+-								break;
+-							}
+-						}
+-					}
++					insertBreak = lastContainer instanceof BlockNode
++							&& ListUtils.anyMatch(((BlockNode) lastContainer).getSuccessors(),
++									succ -> !caseBlocks.contains(succ));
+ 				}
+ 				if (insertBreak && canAppendBreak(region)) {
+ 					region.getSubBlocks().add(buildBreakContainer(switchRegion));
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/SynchronizedRegionMaker.java b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/SynchronizedRegionMaker.java
+index 43598490a..db0d0882b 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/SynchronizedRegionMaker.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/maker/SynchronizedRegionMaker.java
+@@ -23,6 +23,7 @@
+ import jadx.core.dex.visitors.regions.CleanRegions;
+ import jadx.core.utils.BlockUtils;
+ import jadx.core.utils.InsnRemover;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.Utils;
+ 
+ import static jadx.core.utils.BlockUtils.getNextBlock;
+@@ -117,15 +118,7 @@ private static void traverseMonitorExits(SynchronizedRegion region, InsnArg arg,
+ 	private static BlockNode traverseMonitorExitsCross(BlockNode block, Set<BlockNode> exits, Set<BlockNode> visited) {
+ 		visited.add(block);
+ 		for (BlockNode node : block.getCleanSuccessors()) {
+-			boolean cross = true;
+-			for (BlockNode exitBlock : exits) {
+-				boolean p = isPathExists(exitBlock, node);
+-				if (!p) {
+-					cross = false;
+-					break;
+-				}
+-			}
+-			if (cross) {
++			if (ListUtils.allMatch(exits, exitBlock -> isPathExists(exitBlock, node))) {
+ 				return node;
+ 			}
+ 			if (!visited.contains(node)) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/variables/ProcessVariables.java b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/variables/ProcessVariables.java
+index 456a905ec..b9ff9454a 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/variables/ProcessVariables.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/variables/ProcessVariables.java
+@@ -125,10 +125,7 @@ private boolean isVarUnused(MethodNode mth, @Nullable SSAVar ssaVar) {
+ 				if (useList.isEmpty()) {
+ 					return true;
+ 				}
+-				if (ssaVar.isUsedInPhi()) {
+-					return false;
+-				}
+-				return ListUtils.allMatch(useList, arg -> isArgUnused(mth, arg));
++				return !ssaVar.isUsedInPhi() && ListUtils.allMatch(useList, arg -> isArgUnused(mth, arg));
+ 			}
+ 
+ 			private boolean isArgUnused(MethodNode mth, RegisterArg arg) {
+@@ -270,18 +267,13 @@ private boolean checkDeclareAtAssign(List<VarUsage> list, VarUsage mergedUsage)
+ 	private static boolean canDeclareAt(VarUsage usage, UsePlace usePlace) {
+ 		IRegion region = usePlace.getRegion();
+ 		// workaround for declare variables used in several loops
+-		if (region instanceof LoopRegion) {
+-			for (UsePlace use : usage.getAssigns()) {
+-				if (!RegionUtils.isRegionContainsRegion(region, use.getRegion())) {
+-					return false;
+-				}
+-			}
+-		}
+-		// can't declare in else-if chain between 'else' and next 'if'
+-		if (region.contains(AFlag.ELSE_IF_CHAIN)) {
++		if (region instanceof LoopRegion
++				&& !ListUtils.allMatch(usage.getAssigns(), use -> RegionUtils.isRegionContainsRegion(region, use.getRegion()))) {
+ 			return false;
+ 		}
+-		return isAllUseAfter(usePlace, usage.getAssigns())
++		// can't declare in else-if chain between 'else' and next 'if'
++		return !region.contains(AFlag.ELSE_IF_CHAIN)
++				&& isAllUseAfter(usePlace, usage.getAssigns())
+ 				&& isAllUseAfter(usePlace, usage.getUses());
+ 	}
+ 
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/rename/CodeRenameVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/rename/CodeRenameVisitor.java
+index 7181dd1ce..1596be245 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/rename/CodeRenameVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/rename/CodeRenameVisitor.java
+@@ -1,9 +1,10 @@
+ package jadx.core.dex.visitors.rename;
+ 
++import java.util.ArrayList;
+ import java.util.Collections;
++import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+-import java.util.stream.Collectors;
+ 
+ import org.jetbrains.annotations.Nullable;
+ import org.slf4j.Logger;
+@@ -22,6 +23,7 @@
+ import jadx.core.dex.visitors.InitCodeVariables;
+ import jadx.core.dex.visitors.JadxVisitor;
+ import jadx.core.dex.visitors.debuginfo.DebugInfoApplyVisitor;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.exceptions.JadxException;
+ 
+ @JadxVisitor(
+@@ -86,11 +88,11 @@ private static void processRename(MethodNode mth, IJavaCodeRef codeRef, ICodeRen
+ 			case VAR: {
+ 				int regNum = codeRef.getIndex() >> 16;
+ 				int ssaVer = codeRef.getIndex() & 0xFFFF;
+-				for (SSAVar ssaVar : mth.getSVars()) {
+-					if (ssaVar.getRegNum() == regNum && ssaVar.getVersion() == ssaVer) {
+-						ssaVar.getCodeVar().setName(rename.getNewName());
+-						return;
+-					}
++				SSAVar found = ListUtils.firstOrNull(mth.getSVars(),
++						v -> v.getRegNum() == regNum && v.getVersion() == ssaVer);
++				if (found != null) {
++					found.getCodeVar().setName(rename.getNewName());
++					return;
+ 				}
+ 				LOG.warn("Can't find variable ref by {}_{}", regNum, ssaVer);
+ 				break;
+@@ -117,9 +119,13 @@ private void updateRenamesMap(@Nullable ICodeData data) {
+ 		if (data == null) {
+ 			this.clsRenamesMap = Collections.emptyMap();
+ 		} else {
+-			this.clsRenamesMap = data.getRenames().stream()
+-					.filter(r -> r.getCodeRef() != null)
+-					.collect(Collectors.groupingBy(r -> r.getNodeRef().getDeclaringClass()));
++			Map<String, List<ICodeRename>> map = new HashMap<>();
++			for (ICodeRename r : data.getRenames()) {
++				if (r.getCodeRef() != null) {
++					map.computeIfAbsent(r.getNodeRef().getDeclaringClass(), k -> new ArrayList<>()).add(r);
++				}
++			}
++			this.clsRenamesMap = map;
+ 		}
+ 	}
+ }
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/rename/RenameVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/rename/RenameVisitor.java
+index 3b50f7c7c..2ed05b425 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/rename/RenameVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/rename/RenameVisitor.java
+@@ -225,12 +225,11 @@ private static boolean canRename(MethodNode mth) {
+ 		}
+ 		MethodOverrideAttr overrideAttr = mth.get(AType.METHOD_OVERRIDE);
+ 		if (overrideAttr != null) {
+-			for (MethodNode relatedMth : overrideAttr.getRelatedMthNodes()) {
+-				if (relatedMth != mth && mth.getParentClass().equals(relatedMth.getParentClass())) {
+-					// ignore rename if exists related method from same class (bridge method in most cases)
+-					// such rename will also rename current method and will not help to resolve name collision
+-					return false;
+-				}
++			// ignore rename if exists related method from same class (bridge method in most cases)
++			// such rename will also rename current method and will not help to resolve name collision
++			if (ListUtils.anyMatch(overrideAttr.getRelatedMthNodes(),
++					relatedMth -> relatedMth != mth && mth.getParentClass().equals(relatedMth.getParentClass()))) {
++				return false;
+ 			}
+ 		}
+ 		return true;
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/rename/UserRenames.java b/jadx-core/src/main/java/jadx/core/dex/visitors/rename/UserRenames.java
+index 0f94ea18b..bf2eae0c1 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/rename/UserRenames.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/rename/UserRenames.java
+@@ -1,7 +1,9 @@
+ package jadx.core.dex.visitors.rename;
+ 
++import java.util.ArrayList;
++import java.util.HashMap;
+ import java.util.List;
+-import java.util.stream.Collectors;
++import java.util.Map;
+ 
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+@@ -29,22 +31,27 @@ public static void apply(RootNode root) {
+ 			return;
+ 		}
+ 		InfoStorage infoStorage = root.getInfoStorage();
+-		codeData.getRenames().stream()
+-				.filter(r -> r.getCodeRef() == null && r.getNodeRef().getType() != IJavaNodeRef.RefType.PKG)
+-				.collect(Collectors.groupingBy(r -> r.getNodeRef().getDeclaringClass()))
+-				.forEach((clsRawName, renames) -> {
+-					ClassInfo clsInfo = infoStorage.getCls(ArgType.object(clsRawName));
+-					if (clsInfo != null) {
+-						ClassNode cls = root.resolveClass(clsInfo);
+-						if (cls != null) {
+-							for (ICodeRename rename : renames) {
+-								applyRename(cls, rename);
+-							}
+-							return;
+-						}
++		Map<String, List<ICodeRename>> grouped = new HashMap<>();
++		for (ICodeRename r : codeData.getRenames()) {
++			if (r.getCodeRef() == null && r.getNodeRef().getType() != IJavaNodeRef.RefType.PKG) {
++				grouped.computeIfAbsent(r.getNodeRef().getDeclaringClass(), k -> new ArrayList<>()).add(r);
++			}
++		}
++		for (Map.Entry<String, List<ICodeRename>> e : grouped.entrySet()) {
++			String clsRawName = e.getKey();
++			List<ICodeRename> renames = e.getValue();
++			ClassInfo clsInfo = infoStorage.getCls(ArgType.object(clsRawName));
++			if (clsInfo != null) {
++				ClassNode cls = root.resolveClass(clsInfo);
++				if (cls != null) {
++					for (ICodeRename rename : renames) {
++						applyRename(cls, rename);
+ 					}
+-					LOG.warn("Class info with reference '{}' not found", clsRawName);
+-				});
++					continue;
++				}
++			}
++			LOG.warn("Class info with reference '{}' not found", clsRawName);
++		}
+ 		applyPkgRenames(root, codeData.getRenames());
+ 	}
+ 
+@@ -87,16 +94,17 @@ private static void applyRename(ClassNode cls, ICodeRename rename) {
+ 	}
+ 
+ 	private static void applyPkgRenames(RootNode root, List<ICodeRename> renames) {
+-		renames.stream()
+-				.filter(r -> r.getNodeRef().getType() == IJavaNodeRef.RefType.PKG)
+-				.forEach(pkgRename -> {
+-					String pkgFullName = pkgRename.getNodeRef().getDeclaringClass();
+-					PackageNode pkgNode = root.resolvePackage(pkgFullName);
+-					if (pkgNode == null) {
+-						LOG.warn("Package for rename not found: {}", pkgFullName);
+-					} else {
+-						pkgNode.rename(pkgRename.getNewName());
+-					}
+-				});
++		for (ICodeRename pkgRename : renames) {
++			if (pkgRename.getNodeRef().getType() != IJavaNodeRef.RefType.PKG) {
++				continue;
++			}
++			String pkgFullName = pkgRename.getNodeRef().getDeclaringClass();
++			PackageNode pkgNode = root.resolvePackage(pkgFullName);
++			if (pkgNode == null) {
++				LOG.warn("Package for rename not found: {}", pkgFullName);
++			} else {
++				pkgNode.rename(pkgRename.getNewName());
++			}
++		}
+ 	}
+ }
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/shrink/ArgsInfo.java b/jadx-core/src/main/java/jadx/core/dex/visitors/shrink/ArgsInfo.java
+index 74a1cc1f1..d3eb8dee3 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/shrink/ArgsInfo.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/shrink/ArgsInfo.java
+@@ -13,6 +13,7 @@
+ import jadx.core.dex.instructions.mods.TernaryInsn;
+ import jadx.core.dex.nodes.InsnNode;
+ import jadx.core.utils.EmptyBitSet;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.Utils;
+ import jadx.core.utils.exceptions.JadxRuntimeException;
+ 
+@@ -127,18 +128,8 @@ private boolean canMove(int from, int to) {
+ 	}
+ 
+ 	private boolean canReorder() {
+-		if (!insn.canReorder()) {
+-			return false;
+-		}
+-		List<ArgsInfo> wrapList = wrappedInsns;
+-		if (wrapList != null) {
+-			for (ArgsInfo wrapInsn : wrapList) {
+-				if (!wrapInsn.canReorder()) {
+-					return false;
+-				}
+-			}
+-		}
+-		return true;
++		return insn.canReorder()
++				&& (wrappedInsns == null || ListUtils.allMatch(wrappedInsns, wi -> wi.canReorder()));
+ 	}
+ 
+ 	static boolean usedArgAssign(InsnNode insn, BitSet args) {
+@@ -146,10 +137,7 @@ static boolean usedArgAssign(InsnNode insn, BitSet args) {
+ 			return false;
+ 		}
+ 		RegisterArg result = insn.getResult();
+-		if (result == null) {
+-			return false;
+-		}
+-		return args.get(result.getRegNum());
++		return result != null && args.get(result.getRegNum());
+ 	}
+ 
+ 	WrapInfo inline(int assignInsnPos, RegisterArg arg) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/ssa/SSATransform.java b/jadx-core/src/main/java/jadx/core/dex/visitors/ssa/SSATransform.java
+index 3936bafac..ae3efb4e3 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/ssa/SSATransform.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/ssa/SSATransform.java
+@@ -26,6 +26,7 @@
+ import jadx.core.utils.BlockUtils;
+ import jadx.core.utils.InsnList;
+ import jadx.core.utils.InsnRemover;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.exceptions.JadxException;
+ import jadx.core.utils.exceptions.JadxRuntimeException;
+ 
+@@ -105,11 +106,8 @@ public static PhiInsn addPhi(MethodNode mth, BlockNode block, int regNum) {
+ 			if (thisArg != null && thisArg.getRegNum() == regNum) {
+ 				size++;
+ 			} else {
+-				for (RegisterArg arg : mth.getArgRegs()) {
+-					if (arg.getRegNum() == regNum) {
+-						size++;
+-						break;
+-					}
++				if (ListUtils.anyMatch(mth.getArgRegs(), arg -> arg.getRegNum() == regNum)) {
++					size++;
+ 				}
+ 			}
+ 		}
+@@ -330,18 +328,16 @@ private static boolean fixPhiWithSameArgs(MethodNode mth, BlockNode block, PhiIn
+ 	}
+ 
+ 	private static boolean isSameArgs(PhiInsn phi) {
+-		boolean allSame = true;
+ 		SSAVar var = null;
+ 		for (int i = 0; i < phi.getArgsCount(); i++) {
+ 			RegisterArg arg = phi.getArg(i);
+ 			if (var == null) {
+ 				var = arg.getSVar();
+ 			} else if (var != arg.getSVar()) {
+-				allSame = false;
+-				break;
++				return false;
+ 			}
+ 		}
+-		return allSame;
++		return true;
+ 	}
+ 
+ 	private static SSAVar isSameMove(PhiInsn phi) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/FixTypesVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/FixTypesVisitor.java
+index 551b42468..bdde75c4c 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/FixTypesVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/FixTypesVisitor.java
+@@ -3,10 +3,9 @@
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Collections;
++import java.util.Comparator;
+ import java.util.LinkedHashSet;
+ import java.util.List;
+-import java.util.Objects;
+-import java.util.Optional;
+ import java.util.Set;
+ import java.util.function.Function;
+ 
+@@ -104,13 +103,7 @@ public void visit(MethodNode mth) {
+ 	 * Check if all types resolved
+ 	 */
+ 	private static boolean checkTypes(MethodNode mth) {
+-		for (SSAVar var : mth.getSVars()) {
+-			ArgType type = var.getTypeInfo().getType();
+-			if (!type.isTypeKnown()) {
+-				return false;
+-			}
+-		}
+-		return true;
++		return ListUtils.allMatch(mth.getSVars(), var -> var.getTypeInfo().getType().isTypeKnown());
+ 	}
+ 
+ 	private boolean runMultiVariableSearch(MethodNode mth) {
+@@ -119,12 +112,7 @@ private boolean runMultiVariableSearch(MethodNode mth) {
+ 			if (!typeSearch.run()) {
+ 				mth.addWarnComment("Multi-variable type inference failed");
+ 			}
+-			for (SSAVar var : mth.getSVars()) {
+-				if (!var.getTypeInfo().getType().isTypeKnown()) {
+-					return false;
+-				}
+-			}
+-			return true;
++			return ListUtils.allMatch(mth.getSVars(), var -> var.getTypeInfo().getType().isTypeKnown());
+ 		} catch (Exception e) {
+ 			mth.addWarnComment("Multi-variable type inference failed. Error: " + Utils.getStackTrace(e));
+ 			return false;
+@@ -145,8 +133,8 @@ private boolean setBestType(MethodNode mth, SSAVar ssaVar) {
+ 	private boolean calculateFromBounds(MethodNode mth, SSAVar ssaVar) {
+ 		TypeInfo typeInfo = ssaVar.getTypeInfo();
+ 		Set<ITypeBound> bounds = typeInfo.getBounds();
+-		Optional<ArgType> bestTypeOpt = selectBestTypeFromBounds(bounds);
+-		if (bestTypeOpt.isEmpty()) {
++		ArgType candidateType = selectBestTypeFromBounds(bounds);
++		if (candidateType == null) {
+ 			if (Consts.DEBUG_TYPE_INFERENCE) {
+ 				LOG.warn("Failed to select best type from bounds, count={} : ", bounds.size());
+ 				for (ITypeBound bound : bounds) {
+@@ -155,7 +143,6 @@ private boolean calculateFromBounds(MethodNode mth, SSAVar ssaVar) {
+ 			}
+ 			return false;
+ 		}
+-		ArgType candidateType = bestTypeOpt.get();
+ 		TypeUpdateResult result = typeUpdate.apply(mth, ssaVar, candidateType);
+ 		if (result == TypeUpdateResult.REJECT) {
+ 			if (Consts.DEBUG_TYPE_INFERENCE) {
+@@ -170,25 +157,25 @@ private boolean calculateFromBounds(MethodNode mth, SSAVar ssaVar) {
+ 		return result == TypeUpdateResult.CHANGED;
+ 	}
+ 
+-	private Optional<ArgType> selectBestTypeFromBounds(Set<ITypeBound> bounds) {
+-		return bounds.stream()
+-				.map(ITypeBound::getType)
+-				.filter(Objects::nonNull)
+-				.max(typeUpdate.getTypeCompare().getComparator());
++	private @Nullable ArgType selectBestTypeFromBounds(Set<ITypeBound> bounds) {
++		Comparator<ArgType> cmp = typeUpdate.getTypeCompare().getComparator();
++		ArgType best = null;
++		for (ITypeBound bound : bounds) {
++			ArgType t = bound.getType();
++			if (t == null) {
++				continue;
++			}
++			if (best == null || cmp.compare(t, best) > 0) {
++				best = t;
++			}
++		}
++		return best;
+ 	}
+ 
+ 	private boolean tryPossibleTypes(MethodNode mth, SSAVar var, ArgType type) {
+ 		List<ArgType> types = makePossibleTypesList(type, var);
+-		if (types.isEmpty()) {
+-			return false;
+-		}
+-		for (ArgType candidateType : types) {
+-			TypeUpdateResult result = typeUpdate.apply(mth, var, candidateType);
+-			if (result == TypeUpdateResult.CHANGED) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return !types.isEmpty()
++				&& ListUtils.anyMatch(types, t -> typeUpdate.apply(mth, var, t) == TypeUpdateResult.CHANGED);
+ 	}
+ 
+ 	private List<ArgType> makePossibleTypesList(ArgType type, @Nullable SSAVar var) {
+@@ -241,15 +228,8 @@ private boolean deduceType(MethodNode mth, SSAVar var) {
+ 		if (setBestType(mth, var)) {
+ 			return true;
+ 		}
+-		// try all possible types (useful for primitives)
+-		if (tryPossibleTypes(mth, var, type)) {
+-			return true;
+-		}
+-		// for objects try super types
+-		if (tryWiderObjects(mth, var)) {
+-			return true;
+-		}
+-		return false;
++		// try all possible types (useful for primitives), then for objects try super types
++		return tryPossibleTypes(mth, var, type) || tryWiderObjects(mth, var);
+ 	}
+ 
+ 	private boolean tryRemoveGenerics(MethodNode mth) {
+@@ -437,8 +417,8 @@ private int restoreTypeVarCasts(SSAVar var) {
+ 		if (casts.isEmpty()) {
+ 			return 0;
+ 		}
+-		ArgType bestType = selectBestTypeFromBounds(bounds).orElse(ArgType.UNKNOWN);
+-		if (!bestType.isGenericType()) {
++		ArgType bestType = selectBestTypeFromBounds(bounds);
++		if (bestType == null || !bestType.isGenericType()) {
+ 			return 0;
+ 		}
+ 		List<ArgType> extendTypes = bestType.getExtendTypes();
+@@ -940,10 +920,7 @@ private boolean tryToForceImmutableTypes(MethodNode mth) {
+ 				}
+ 			}
+ 		}
+-		if (!fixed) {
+-			return false;
+-		}
+-		return typeInference.runTypePropagation(mth);
++		return fixed && typeInference.runTypePropagation(mth);
+ 	}
+ 
+ 	private boolean forceImmutableType(SSAVar ssaVar) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/TypeInferenceVisitor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/TypeInferenceVisitor.java
+index d93d117e3..95ebcec48 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/TypeInferenceVisitor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/TypeInferenceVisitor.java
+@@ -1,8 +1,7 @@
+ package jadx.core.dex.visitors.typeinference;
+ 
++import java.util.Comparator;
+ import java.util.List;
+-import java.util.Objects;
+-import java.util.Optional;
+ import java.util.Set;
+ 
+ import org.jetbrains.annotations.Nullable;
+@@ -133,8 +132,8 @@ private void setBestType(MethodNode mth, SSAVar ssaVar) {
+ 	private void calculateFromBounds(MethodNode mth, SSAVar ssaVar) {
+ 		TypeInfo typeInfo = ssaVar.getTypeInfo();
+ 		Set<ITypeBound> bounds = typeInfo.getBounds();
+-		Optional<ArgType> bestTypeOpt = selectBestTypeFromBounds(bounds);
+-		if (bestTypeOpt.isEmpty()) {
++		ArgType candidateType = selectBestTypeFromBounds(bounds);
++		if (candidateType == null) {
+ 			if (Consts.DEBUG_TYPE_INFERENCE) {
+ 				LOG.warn("Failed to select best type from bounds, count={} : ", bounds.size());
+ 				for (ITypeBound bound : bounds) {
+@@ -143,7 +142,6 @@ private void calculateFromBounds(MethodNode mth, SSAVar ssaVar) {
+ 			}
+ 			return;
+ 		}
+-		ArgType candidateType = bestTypeOpt.get();
+ 		TypeUpdateResult result = typeUpdate.apply(mth, ssaVar, candidateType);
+ 		if (Consts.DEBUG_TYPE_INFERENCE && result == TypeUpdateResult.REJECT) {
+ 			if (ssaVar.getTypeInfo().getType().equals(candidateType)) {
+@@ -154,11 +152,19 @@ private void calculateFromBounds(MethodNode mth, SSAVar ssaVar) {
+ 		}
+ 	}
+ 
+-	private Optional<ArgType> selectBestTypeFromBounds(Set<ITypeBound> bounds) {
+-		return bounds.stream()
+-				.map(ITypeBound::getType)
+-				.filter(Objects::nonNull)
+-				.max(typeUpdate.getTypeCompare().getComparator());
++	private @Nullable ArgType selectBestTypeFromBounds(Set<ITypeBound> bounds) {
++		Comparator<ArgType> cmp = typeUpdate.getTypeCompare().getComparator();
++		ArgType best = null;
++		for (ITypeBound bound : bounds) {
++			ArgType t = bound.getType();
++			if (t == null) {
++				continue;
++			}
++			if (best == null || cmp.compare(t, best) > 0) {
++				best = t;
++			}
++		}
++		return best;
+ 	}
+ 
+ 	private void attachBounds(SSAVar var) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/TypeSearch.java b/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/TypeSearch.java
+index 8dfe8c1e8..fdbac2e5d 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/TypeSearch.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/TypeSearch.java
+@@ -168,17 +168,8 @@ private boolean search(List<TypeSearchVarInfo> vars) {
+ 	}
+ 
+ 	private boolean resolveIndependentVariables(TypeSearchVarInfo varInfo) {
+-		boolean allRelatedVarsResolved = true;
+-		outer:
+-		for (ITypeConstraint c : varInfo.getConstraints()) {
+-			for (SSAVar v : c.getRelatedVars()) {
+-				if (!state.getVarInfo(v).isTypeResolved()) {
+-					allRelatedVarsResolved = false;
+-					break outer;
+-				}
+-			}
+-		}
+-		if (!allRelatedVarsResolved) {
++		if (!ListUtils.allMatch(varInfo.getConstraints(),
++				c -> ListUtils.allMatch(c.getRelatedVars(), v -> state.getVarInfo(v).isTypeResolved()))) {
+ 			return false;
+ 		}
+ 		// variable is independent, run single search
+@@ -194,24 +185,11 @@ private boolean resolveIndependentVariables(TypeSearchVarInfo varInfo) {
+ 	}
+ 
+ 	private boolean fullCheck(List<TypeSearchVarInfo> vars) {
+-		for (TypeSearchVarInfo var : vars) {
+-			if (!singleCheck(var)) {
+-				return false;
+-			}
+-		}
+-		return true;
++		return ListUtils.allMatch(vars, this::singleCheck);
+ 	}
+ 
+ 	private boolean singleCheck(TypeSearchVarInfo var) {
+-		if (var.isTypeResolved()) {
+-			return true;
+-		}
+-		for (ITypeConstraint constraint : var.getConstraints()) {
+-			if (!constraint.check(state)) {
+-				return false;
+-			}
+-		}
+-		return true;
++		return var.isTypeResolved() || ListUtils.allMatch(var.getConstraints(), c -> c.check(state));
+ 	}
+ 
+ 	private void fillTypeCandidates(SSAVar ssaVar) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/TypeUpdate.java b/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/TypeUpdate.java
+index 32d8f6f0e..8668b27c8 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/TypeUpdate.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/typeinference/TypeUpdate.java
+@@ -384,13 +384,8 @@ private boolean checkAssignForUnknown(ArgType boundType, ArgType candidateType)
+ 		if (candidateArray && boundType.contains(PrimitiveType.ARRAY)) {
+ 			return true;
+ 		}
+-		if (candidateType.isObject() && boundType.contains(PrimitiveType.OBJECT)) {
+-			return true;
+-		}
+-		if (candidateType.isPrimitive() && boundType.contains(candidateType.getPrimitiveType())) {
+-			return true;
+-		}
+-		return false;
++		return (candidateType.isObject() && boundType.contains(PrimitiveType.OBJECT))
++				|| (candidateType.isPrimitive() && boundType.contains(candidateType.getPrimitiveType()));
+ 	}
+ 
+ 	private Map<InsnType, ITypeListener> initListenerRegistry() {
+diff --git a/jadx-core/src/main/java/jadx/core/plugins/JadxPluginManager.java b/jadx-core/src/main/java/jadx/core/plugins/JadxPluginManager.java
+index b2ac5230b..02088d2b2 100644
+--- a/jadx-core/src/main/java/jadx/core/plugins/JadxPluginManager.java
++++ b/jadx-core/src/main/java/jadx/core/plugins/JadxPluginManager.java
+@@ -1,6 +1,7 @@
+ package jadx.core.plugins;
+ 
+ import java.util.ArrayList;
++import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.List;
+ import java.util.Map;
+@@ -10,7 +11,6 @@
+ import java.util.TreeMap;
+ import java.util.TreeSet;
+ import java.util.function.Consumer;
+-import java.util.stream.Collectors;
+ 
+ import org.jetbrains.annotations.Nullable;
+ import org.slf4j.Logger;
+@@ -119,8 +119,10 @@ public SortedSet<PluginRuntime> getResolvedPlugins() {
+ 	}
+ 
+ 	private synchronized void resolve() {
+-		Map<String, List<PluginRuntime>> provides = allPlugins.stream()
+-				.collect(Collectors.groupingBy(p -> p.getPluginInfo().getProvides()));
++		Map<String, List<PluginRuntime>> provides = new HashMap<>();
++		for (PluginRuntime p : allPlugins) {
++			provides.computeIfAbsent(p.getPluginInfo().getProvides(), k -> new ArrayList<>()).add(p);
++		}
+ 		List<PluginRuntime> resolved = new ArrayList<>(provides.size());
+ 		provides.forEach((provide, list) -> {
+ 			if (list.size() == 1) {
+diff --git a/jadx-core/src/main/java/jadx/core/plugins/events/JadxEventsManager.java b/jadx-core/src/main/java/jadx/core/plugins/events/JadxEventsManager.java
+index 10075bc56..7c22348c0 100644
+--- a/jadx-core/src/main/java/jadx/core/plugins/events/JadxEventsManager.java
++++ b/jadx-core/src/main/java/jadx/core/plugins/events/JadxEventsManager.java
+@@ -9,7 +9,6 @@
+ import java.util.concurrent.ThreadFactory;
+ import java.util.concurrent.atomic.AtomicInteger;
+ import java.util.function.Consumer;
+-import java.util.stream.Collectors;
+ 
+ import org.jetbrains.annotations.NotNull;
+ 
+@@ -69,10 +68,17 @@ public Thread newThread(@NotNull Runnable r) {
+ 	}
+ 
+ 	public String listenersDebugStats() {
+-		return listeners.entrySet()
+-				.stream()
+-				.filter(p -> !p.getValue().isEmpty())
+-				.map(p -> p.getKey() + ":" + p.getValue().size())
+-				.collect(Collectors.joining(", ", "[", "]"));
++		StringBuilder sb = new StringBuilder("[");
++		boolean first = true;
++		for (Map.Entry<JadxEventType<?>, List<Consumer<IJadxEvent>>> p : listeners.entrySet()) {
++			if (!p.getValue().isEmpty()) {
++				if (!first) {
++					sb.append(", ");
++				}
++				sb.append(p.getKey()).append(':').append(p.getValue().size());
++				first = false;
++			}
++		}
++		return sb.append("]").toString();
+ 	}
+ }
+diff --git a/jadx-core/src/main/java/jadx/core/utils/BlockUtils.java b/jadx-core/src/main/java/jadx/core/utils/BlockUtils.java
+index 7343ac417..b4ca0bcf8 100644
+--- a/jadx-core/src/main/java/jadx/core/utils/BlockUtils.java
++++ b/jadx-core/src/main/java/jadx/core/utils/BlockUtils.java
+@@ -39,6 +39,7 @@
+ import jadx.core.dex.regions.conditions.IfCondition;
+ import jadx.core.dex.trycatch.CatchAttr;
+ import jadx.core.dex.trycatch.ExceptionHandler;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.blocks.BlockSet;
+ import jadx.core.utils.blocks.DFSIteration;
+ import jadx.core.utils.exceptions.JadxRuntimeException;
+@@ -105,13 +106,7 @@ public static boolean isExceptionHandlerPath(BlockNode b) {
+ 	 * Remove exception handlers from block nodes list
+ 	 */
+ 	private static List<BlockNode> cleanBlockList(List<BlockNode> list) {
+-		List<BlockNode> ret = new ArrayList<>(list.size());
+-		for (BlockNode block : list) {
+-			if (!isExceptionHandlerPath(block)) {
+-				ret.add(block);
+-			}
+-		}
+-		return ret;
++		return ListUtils.filter(list, block -> !isExceptionHandlerPath(block));
+ 	}
+ 
+ 	/**
+@@ -146,10 +141,8 @@ public static boolean isFollowBackEdge(BlockNode block) {
+ 				BlockNode loopEndBlock = predecessors.get(0);
+ 				if (loopEndBlock.contains(AFlag.LOOP_END)) {
+ 					List<LoopInfo> loops = loopEndBlock.getAll(AType.LOOP);
+-					for (LoopInfo loop : loops) {
+-						if (loop.getStart().equals(block) && loop.getEnd().equals(loopEndBlock)) {
+-							return true;
+-						}
++					if (ListUtils.anyMatch(loops, loop -> loop.getStart().equals(block) && loop.getEnd().equals(loopEndBlock))) {
++						return true;
+ 					}
+ 				}
+ 			}
+@@ -161,12 +154,7 @@ public static boolean isFollowBackEdge(BlockNode block) {
+ 	 * Check if instruction contains in block (use == for comparison, not equals)
+ 	 */
+ 	public static boolean blockContains(BlockNode block, InsnNode insn) {
+-		for (InsnNode bi : block.getInstructions()) {
+-			if (bi == insn) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return ListUtils.anyMatch(block.getInstructions(), bi -> bi == insn);
+ 	}
+ 
+ 	public static boolean checkFirstInsn(IBlock block, Predicate<InsnNode> predicate) {
+@@ -222,10 +210,7 @@ public static InsnNode getLastInsn(@Nullable IBlock block) {
+ 	}
+ 
+ 	public static boolean isExitBlock(MethodNode mth, BlockNode block) {
+-		if (block == mth.getExitBlock()) {
+-			return true;
+-		}
+-		return isExitBlock(block);
++		return block == mth.getExitBlock() || isExitBlock(block);
+ 	}
+ 
+ 	public static boolean isExitBlock(BlockNode block) {
+@@ -266,26 +251,14 @@ public static boolean containsExitInsn(IBlock block) {
+ 		if (insn.contains(AFlag.WRAPPED)) {
+ 			return getBlockByWrappedInsn(mth, insn);
+ 		}
+-		for (BlockNode bn : blocks) {
+-			if (blockContains(bn, insn)) {
+-				return bn;
+-			}
+-		}
+-		return null;
++		return ListUtils.firstOrNull(blocks, bn -> blockContains(bn, insn));
+ 	}
+ 
+ 	public static BlockNode searchBlockWithPhi(MethodNode mth, PhiInsn insn) {
+-		for (BlockNode block : mth.getBasicBlocks()) {
++		return ListUtils.firstOrNull(mth.getBasicBlocks(), block -> {
+ 			PhiListAttr phiListAttr = block.get(AType.PHI_LIST);
+-			if (phiListAttr != null) {
+-				for (PhiInsn phiInsn : phiListAttr.getList()) {
+-					if (phiInsn == insn) {
+-						return block;
+-					}
+-				}
+-			}
+-		}
+-		return null;
++			return phiListAttr != null && ListUtils.anyMatch(phiListAttr.getList(), phi -> phi == insn);
++		});
+ 	}
+ 
+ 	private static BlockNode getBlockByWrappedInsn(MethodNode mth, InsnNode insn) {
+@@ -433,12 +406,7 @@ public static BlockNode getNextBlockToPath(BlockNode block, BlockNode pathEnd) {
+ 			return pathEnd;
+ 		}
+ 		Set<BlockNode> path = getAllPathsBlocks(block, pathEnd);
+-		for (BlockNode s : successors) {
+-			if (path.contains(s)) {
+-				return s;
+-			}
+-		}
+-		return null;
++		return ListUtils.firstOrNull(successors, path::contains);
+ 	}
+ 
+ 	/**
+@@ -817,24 +785,14 @@ private static List<BlockNode> internalCollectPathUntil(BlockNode from, BlockNod
+ 	 * Search at least one path from startBlocks to end
+ 	 */
+ 	public static boolean atLeastOnePathExists(Collection<BlockNode> startBlocks, BlockNode end) {
+-		for (BlockNode startBlock : startBlocks) {
+-			if (isPathExists(startBlock, end)) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return ListUtils.anyMatch(startBlocks, startBlock -> isPathExists(startBlock, end));
+ 	}
+ 
+ 	/**
+ 	 * Check if exist path from every startBlocks to end
+ 	 */
+ 	public static boolean isAllPathExists(Collection<BlockNode> startBlocks, BlockNode end) {
+-		for (BlockNode startBlock : startBlocks) {
+-			if (!isPathExists(startBlock, end)) {
+-				return false;
+-			}
+-		}
+-		return true;
++		return ListUtils.allMatch(startBlocks, startBlock -> isPathExists(startBlock, end));
+ 	}
+ 
+ 	public static boolean isPathExists(BlockNode start, BlockNode end) {
+@@ -855,10 +813,7 @@ public static boolean isAnyPathExists(BlockNode start, BlockNode end) {
+ 	}
+ 
+ 	public static boolean isPathExists(BlockNode start, BlockNode end, Predicate<BlockNode> pred) {
+-		if (start == end) {
+-			return true;
+-		}
+-		return traverseSuccessorsUntil(start, end, new BitSet(), false, pred);
++		return start == end || traverseSuccessorsUntil(start, end, new BitSet(), false, pred);
+ 	}
+ 
+ 	public static BlockNode getTopBlock(List<BlockNode> blocks) {
+@@ -866,14 +821,7 @@ public static BlockNode getTopBlock(List<BlockNode> blocks) {
+ 			return blocks.get(0);
+ 		}
+ 		for (BlockNode from : blocks) {
+-			boolean top = true;
+-			for (BlockNode to : blocks) {
+-				if (from != to && !isAnyPathExists(from, to)) {
+-					top = false;
+-					break;
+-				}
+-			}
+-			if (top) {
++			if (ListUtils.allMatch(blocks, to -> from == to || isAnyPathExists(from, to))) {
+ 				return from;
+ 			}
+ 		}
+@@ -896,14 +844,7 @@ public static BlockNode getBottomBlock(List<BlockNode> blocks, boolean clean) {
+ 		// don't do this if clean, since dominators always consider all successors
+ 		if (!clean) {
+ 			for (BlockNode bottomCandidate : blocks) {
+-				boolean bottom = true;
+-				for (BlockNode from : blocks) {
+-					if (bottomCandidate != from && !bottomCandidate.isDominator(from)) {
+-						bottom = false;
+-						break;
+-					}
+-				}
+-				if (bottom) {
++				if (ListUtils.allMatch(blocks, from -> bottomCandidate == from || bottomCandidate.isDominator(from))) {
+ 					return bottomCandidate;
+ 				}
+ 			}
+@@ -911,23 +852,14 @@ public static BlockNode getBottomBlock(List<BlockNode> blocks, boolean clean) {
+ 
+ 		// attempt 2: look for a block with a path from every other block
+ 		for (BlockNode bottomCandidate : blocks) {
+-			boolean bottom = true;
+-			for (BlockNode from : blocks) {
+-				if (clean) {
+-					if (bottomCandidate != from && !isPathExists(from, bottomCandidate)) {
+-						bottom = false;
+-						break;
+-					}
+-				} else {
+-					if (bottomCandidate != from && !isAnyPathExists(from, bottomCandidate)) {
+-						bottom = false;
+-						break;
+-					}
++			if (clean) {
++				if (ListUtils.allMatch(blocks, from -> bottomCandidate == from || isPathExists(from, bottomCandidate))) {
++					return bottomCandidate;
++				}
++			} else {
++				if (ListUtils.allMatch(blocks, from -> bottomCandidate == from || isAnyPathExists(from, bottomCandidate))) {
++					return bottomCandidate;
+ 				}
+-
+-			}
+-			if (bottom) {
+-				return bottomCandidate;
+ 			}
+ 		}
+ 		return null;
+@@ -1307,15 +1239,7 @@ public static BlockNode skipSyntheticPredecessor(BlockNode block) {
+ 	}
+ 
+ 	public static boolean isAllBlocksEmpty(List<BlockNode> blocks) {
+-		if (Utils.isEmpty(blocks)) {
+-			return true;
+-		}
+-		for (BlockNode block : blocks) {
+-			if (!block.getInstructions().isEmpty()) {
+-				return false;
+-			}
+-		}
+-		return true;
++		return Utils.isEmpty(blocks) || ListUtils.allMatch(blocks, block -> block.getInstructions().isEmpty());
+ 	}
+ 
+ 	public static List<InsnNode> collectAllInsns(List<BlockNode> blocks) {
+@@ -1384,12 +1308,7 @@ public static boolean isFirstInsn(MethodNode mth, InsnNode insn) {
+ 			return false;
+ 		}
+ 		Set<BlockNode> allPathsBlocks = getAllPathsBlocks(mth.getEnterBlock(), block);
+-		for (BlockNode pathBlock : allPathsBlocks) {
+-			if (!pathBlock.getInstructions().isEmpty() && pathBlock != block) {
+-				return false;
+-			}
+-		}
+-		return true;
++		return ListUtils.noneMatch(allPathsBlocks, pathBlock -> !pathBlock.getInstructions().isEmpty() && pathBlock != block);
+ 	}
+ 
+ 	/**
+@@ -1464,12 +1383,7 @@ public static int getInsnIndexInBlock(BlockNode block, InsnNode insn) {
+ 	}
+ 
+ 	public static boolean replaceInsn(MethodNode mth, InsnNode oldInsn, InsnNode newInsn) {
+-		for (BlockNode block : mth.getBasicBlocks()) {
+-			if (replaceInsn(mth, block, oldInsn, newInsn)) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return ListUtils.anyMatch(mth.getBasicBlocks(), block -> replaceInsn(mth, block, oldInsn, newInsn));
+ 	}
+ 
+ 	public static BlockNode getTopSplitterForHandler(BlockNode handlerBlock) {
+@@ -1581,10 +1495,7 @@ public static boolean isEqualReturnBlocks(BlockNode b1, BlockNode b2) {
+ 		if (firstArg.isSameConst(secondArg)) {
+ 			return true;
+ 		}
+-		if (i1.getSourceLine() != i2.getSourceLine()) {
+-			return false;
+-		}
+-		return firstArg.equals(secondArg);
++		return i1.getSourceLine() == i2.getSourceLine() && firstArg.equals(secondArg);
+ 	}
+ 
+ 	public static boolean isDuplicateBlockPath(BlockNode first, BlockNode second) {
+diff --git a/jadx-core/src/main/java/jadx/core/utils/DebugChecks.java b/jadx-core/src/main/java/jadx/core/utils/DebugChecks.java
+index e92f6487b..263c7ba1e 100644
+--- a/jadx-core/src/main/java/jadx/core/utils/DebugChecks.java
++++ b/jadx-core/src/main/java/jadx/core/utils/DebugChecks.java
+@@ -129,10 +129,7 @@ public static void checkInsn(MethodNode mth, BlockNode block, InsnNode insn) {
+ 
+ 	private static boolean hasTmpEdge(BlockNode start, BlockNode end) {
+ 		TmpEdgeAttr tmpEdgeAttr = end.get(AType.TMP_EDGE);
+-		if (tmpEdgeAttr == null) {
+-			return false;
+-		}
+-		return tmpEdgeAttr.getBlock().equals(start);
++		return tmpEdgeAttr != null && tmpEdgeAttr.getBlock().equals(start);
+ 	}
+ 
+ 	private static void checkBlock(MethodNode mth, BlockNode block, Supplier<String> source) {
+@@ -315,15 +312,10 @@ private static void checkPHI(MethodNode mth) {
+ 		}
+ 		for (SSAVar ssaVar : mth.getSVars()) {
+ 			for (PhiInsn usedInPhi : ssaVar.getUsedInPhi()) {
+-				boolean found = false;
+-				for (RegisterArg useArg : ssaVar.getUseList()) {
++				if (!ListUtils.anyMatch(ssaVar.getUseList(), useArg -> {
+ 					InsnNode parentInsn = useArg.getParentInsn();
+-					if (parentInsn != null && parentInsn == usedInPhi) {
+-						found = true;
+-						break;
+-					}
+-				}
+-				if (!found) {
++					return parentInsn != null && parentInsn == usedInPhi;
++				})) {
+ 					throw new JadxRuntimeException("Used in phi incorrect");
+ 				}
+ 			}
+diff --git a/jadx-core/src/main/java/jadx/core/utils/DotGraphUtils.java b/jadx-core/src/main/java/jadx/core/utils/DotGraphUtils.java
+index f087d9dbc..85d088bf5 100644
+--- a/jadx-core/src/main/java/jadx/core/utils/DotGraphUtils.java
++++ b/jadx-core/src/main/java/jadx/core/utils/DotGraphUtils.java
+@@ -485,7 +485,7 @@ public static String unresolvedMethodFormatName(MethodInfo mthInfo, boolean long
+ 			String className = mthInfo.getDeclClass().getFullName();
+ 			String returnName = mthInfo.getReturnType().toString();
+ 			String argStr = Utils.listToString(mthInfo.getArgumentsTypes(), ArgType::toString);
+-			return String.format("%s.%s(%s):%s", className, name, argStr, returnName);
++			return className + "." + name + "(" + argStr + "):" + returnName;
+ 		}
+ 		return name;
+ 	}
+diff --git a/jadx-core/src/main/java/jadx/core/utils/InsnUtils.java b/jadx-core/src/main/java/jadx/core/utils/InsnUtils.java
+index 0967af1f8..56c30f07b 100644
+--- a/jadx-core/src/main/java/jadx/core/utils/InsnUtils.java
++++ b/jadx-core/src/main/java/jadx/core/utils/InsnUtils.java
+@@ -26,6 +26,7 @@
+ import jadx.core.dex.nodes.InsnNode;
+ import jadx.core.dex.nodes.MethodNode;
+ import jadx.core.dex.nodes.RootNode;
++import jadx.core.utils.ListUtils;
+ 
+ public class InsnUtils {
+ 
+@@ -171,13 +172,10 @@ public static void replaceInsnsInInsn(MethodNode mth, InsnNode insn, Function<In
+ 
+ 	@Nullable
+ 	public static RegisterArg getRegFromInsn(List<RegisterArg> regs, InsnType insnType) {
+-		for (RegisterArg reg : regs) {
++		return ListUtils.firstOrNull(regs, reg -> {
+ 			InsnNode parentInsn = reg.getParentInsn();
+-			if (parentInsn != null && parentInsn.getType() == insnType) {
+-				return reg;
+-			}
+-		}
+-		return null;
++			return parentInsn != null && parentInsn.getType() == insnType;
++		});
+ 	}
+ 
+ 	private static InsnNode recursiveInsnCheck(InsnNode insn, InsnType insnType, Predicate<InsnNode> test) {
+@@ -249,15 +247,7 @@ public static boolean dontGenerateIfNotUsed(InsnNode insn) {
+ 	}
+ 
+ 	public static <T extends InsnArg> boolean containsVar(List<T> list, RegisterArg arg) {
+-		if (list == null || list.isEmpty()) {
+-			return false;
+-		}
+-		for (InsnArg insnArg : list) {
+-			if (insnArg == arg || arg.sameRegAndSVar(insnArg)) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return list != null && ListUtils.anyMatch(list, insnArg -> insnArg == arg || arg.sameRegAndSVar(insnArg));
+ 	}
+ 
+ 	public static boolean containsVar(InsnNode insn, RegisterArg arg) {
+@@ -268,15 +258,8 @@ public static boolean containsVar(InsnNode insn, RegisterArg arg) {
+ 		if (result != null && result.sameRegAndSVar(arg)) {
+ 			return true;
+ 		}
+-		if (insn.getArgsCount() == 0) {
+-			return false;
+-		}
+-		for (InsnArg insnArg : insn.getArguments()) {
+-			if (containsVar(insnArg, arg)) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return insn.getArgsCount() != 0
++				&& ListUtils.anyMatch(insn.getArguments(), insnArg -> containsVar(insnArg, arg));
+ 	}
+ 
+ 	public static boolean containsVar(InsnArg insnArg, RegisterArg arg) {
+diff --git a/jadx-core/src/main/java/jadx/core/utils/ListUtils.java b/jadx-core/src/main/java/jadx/core/utils/ListUtils.java
+index 54782c68c..290072fcc 100644
+--- a/jadx-core/src/main/java/jadx/core/utils/ListUtils.java
++++ b/jadx-core/src/main/java/jadx/core/utils/ListUtils.java
+@@ -44,10 +44,7 @@ public static <T> boolean isSingleElement(@Nullable List<T> list, T obj) {
+ 	}
+ 
+ 	public static <T> boolean unorderedEquals(List<T> first, List<T> second) {
+-		if (first.size() != second.size()) {
+-			return false;
+-		}
+-		return first.containsAll(second);
++		return first.size() == second.size() && first.containsAll(second);
+ 	}
+ 
+ 	public static <T, U> boolean orderedEquals(List<T> list1, List<U> list2, BiPredicate<T, U> comparer) {
+@@ -235,8 +232,11 @@ public static <T> T filterOnlyOne(List<T> list, Predicate<T> filter) {
+ 		return found;
+ 	}
+ 
+-	public static <T> boolean allMatch(Collection<T> list, Predicate<T> test) {
+-		if (list == null || list.isEmpty()) {
++	public static <T> boolean allMatch(Iterable<T> list, Predicate<T> test) {
++		if (list == null) {
++			return false;
++		}
++		if (list instanceof Collection && ((Collection<?>) list).isEmpty()) {
+ 			return false;
+ 		}
+ 		for (T element : list) {
+@@ -247,12 +247,15 @@ public static <T> boolean allMatch(Collection<T> list, Predicate<T> test) {
+ 		return true;
+ 	}
+ 
+-	public static <T> boolean noneMatch(Collection<T> list, Predicate<T> test) {
++	public static <T> boolean noneMatch(Iterable<T> list, Predicate<T> test) {
+ 		return !anyMatch(list, test);
+ 	}
+ 
+-	public static <T> boolean anyMatch(Collection<T> list, Predicate<T> test) {
+-		if (list == null || list.isEmpty()) {
++	public static <T> boolean anyMatch(Iterable<T> list, Predicate<T> test) {
++		if (list == null) {
++			return false;
++		}
++		if (list instanceof Collection && ((Collection<?>) list).isEmpty()) {
+ 			return false;
+ 		}
+ 		for (T element : list) {
+diff --git a/jadx-core/src/main/java/jadx/core/utils/PassMerge.java b/jadx-core/src/main/java/jadx/core/utils/PassMerge.java
+index 9b23d72dc..452d99cc2 100644
+--- a/jadx-core/src/main/java/jadx/core/utils/PassMerge.java
++++ b/jadx-core/src/main/java/jadx/core/utils/PassMerge.java
+@@ -13,6 +13,7 @@
+ import jadx.api.plugins.pass.JadxPass;
+ import jadx.api.plugins.pass.JadxPassInfo;
+ import jadx.core.dex.visitors.IDexTreeVisitor;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.exceptions.JadxRuntimeException;
+ 
+ public class PassMerge {
+@@ -204,12 +205,7 @@ public int compare(MergePass first, MergePass second) {
+ 		}
+ 
+ 		private boolean containsVisitor(List<String> deps) {
+-			for (String dep : deps) {
+-				if (names.contains(dep)) {
+-					return true;
+-				}
+-			}
+-			return false;
++			return ListUtils.anyMatch(deps, names::contains);
+ 		}
+ 	}
+ 
+diff --git a/jadx-core/src/main/java/jadx/core/utils/RegionUtils.java b/jadx-core/src/main/java/jadx/core/utils/RegionUtils.java
+index d860835a5..41cca0464 100644
+--- a/jadx-core/src/main/java/jadx/core/utils/RegionUtils.java
++++ b/jadx-core/src/main/java/jadx/core/utils/RegionUtils.java
+@@ -32,6 +32,7 @@
+ import jadx.core.dex.trycatch.TryCatchBlockAttr;
+ import jadx.core.dex.visitors.regions.AbstractRegionVisitor;
+ import jadx.core.dex.visitors.regions.DepthRegionTraversal;
++import jadx.core.utils.ListUtils;
+ import jadx.core.utils.exceptions.JadxRuntimeException;
+ 
+ public class RegionUtils {
+@@ -45,12 +46,7 @@ public static boolean hasExitEdge(IContainer container) {
+ 		}
+ 		if (container instanceof IBranchRegion) {
+ 			// all branches must have exit edge
+-			for (IContainer br : ((IBranchRegion) container).getBranches()) {
+-				if (br == null || !hasExitEdge(br)) {
+-					return false;
+-				}
+-			}
+-			return true;
++			return ListUtils.noneMatch(((IBranchRegion) container).getBranches(), br -> br == null || !hasExitEdge(br));
+ 		}
+ 		if (container instanceof IRegion) {
+ 			IContainer last = Utils.last(((IRegion) container).getSubBlocks());
+@@ -254,19 +250,13 @@ public static boolean isExitBlock(MethodNode mth, IContainer container) {
+ 	 * Return true if last block in region has no successors or jump out insn (return or break)
+ 	 */
+ 	public static boolean hasExitBlock(IContainer container) {
+-		if (container == null) {
+-			return false;
+-		}
+-		return hasExitBlock(container, container);
++		return container != null && hasExitBlock(container, container);
+ 	}
+ 
+ 	private static boolean hasExitBlock(IContainer rootContainer, IContainer container) {
+ 		if (container instanceof BlockNode) {
+ 			BlockNode blockNode = (BlockNode) container;
+-			if (BlockUtils.isExitBlock(blockNode)) {
+-				return true;
+-			}
+-			return isInsnExitContainer(rootContainer, (IBlock) container);
++			return BlockUtils.isExitBlock(blockNode) || isInsnExitContainer(rootContainer, (IBlock) container);
+ 		}
+ 		if (container instanceof IBranchRegion) {
+ 			IBranchRegion branchRegion = (IBranchRegion) container;
+@@ -295,12 +285,9 @@ private static boolean isInsnExitContainer(IContainer rootContainer, IBlock bloc
+ 		if (insnType == InsnType.THROW) {
+ 			// check if after throw execution can continue in current container
+ 			CatchAttr catchAttr = lastInsn.get(AType.EXC_CATCH);
+-			if (catchAttr != null) {
+-				for (ExceptionHandler handler : catchAttr.getHandlers()) {
+-					if (RegionUtils.isRegionContainsBlock(rootContainer, handler.getHandlerBlock())) {
+-						return false;
+-					}
+-				}
++			if (catchAttr != null
++					&& ListUtils.anyMatch(catchAttr.getHandlers(), handler -> RegionUtils.isRegionContainsBlock(rootContainer, handler.getHandlerBlock()))) {
++				return false;
+ 			}
+ 			return true;
+ 		}
+@@ -372,25 +359,13 @@ public static boolean notEmpty(@Nullable IContainer container) {
+ 			return false;
+ 		}
+ 		if (container instanceof IBlock) {
+-			List<InsnNode> insnList = ((IBlock) container).getInstructions();
+-			for (InsnNode insnNode : insnList) {
+-				if (!insnNode.contains(AFlag.DONT_GENERATE)) {
+-					return true;
+-				}
+-			}
+-			return false;
++			return ListUtils.anyMatch(((IBlock) container).getInstructions(), insnNode -> !insnNode.contains(AFlag.DONT_GENERATE));
+ 		}
+ 		if (container instanceof LoopRegion) {
+ 			return true;
+ 		}
+ 		if (container instanceof IRegion) {
+-			IRegion region = (IRegion) container;
+-			for (IContainer block : region.getSubBlocks()) {
+-				if (notEmpty(block)) {
+-					return true;
+-				}
+-			}
+-			return false;
++			return ListUtils.anyMatch(((IRegion) container).getSubBlocks(), RegionUtils::notEmpty);
+ 		}
+ 		throw new JadxRuntimeException(unknownContainerType(container));
+ 	}
+@@ -413,12 +388,7 @@ public static boolean isRegionContainsBlock(IContainer container, BlockNode bloc
+ 			return container == block;
+ 		} else if (container instanceof IRegion) {
+ 			IRegion region = (IRegion) container;
+-			for (IContainer b : region.getSubBlocks()) {
+-				if (isRegionContainsBlock(b, block)) {
+-					return true;
+-				}
+-			}
+-			return false;
++			return ListUtils.anyMatch(region.getSubBlocks(), b -> isRegionContainsBlock(b, block));
+ 		} else {
+ 			throw new JadxRuntimeException(unknownContainerType(container));
+ 		}
+@@ -571,12 +541,7 @@ public static boolean isDominatedBy(BlockNode dom, IContainer cont) {
+ 			return false;
+ 		} else if (cont instanceof IRegion) {
+ 			IRegion region = (IRegion) cont;
+-			for (IContainer c : region.getSubBlocks()) {
+-				if (!isDominatedBy(dom, c)) {
+-					return false;
+-				}
+-			}
+-			return true;
++			return ListUtils.allMatch(region.getSubBlocks(), c -> isDominatedBy(dom, c));
+ 		} else {
+ 			throw new JadxRuntimeException(unknownContainerType(cont));
+ 		}
+@@ -594,12 +559,7 @@ public static boolean hasPathThroughBlock(BlockNode block, IContainer cont) {
+ 		}
+ 		if (cont instanceof IRegion) {
+ 			IRegion region = (IRegion) cont;
+-			for (IContainer c : region.getSubBlocks()) {
+-				if (hasPathThroughBlock(block, c)) {
+-					return true;
+-				}
+-			}
+-			return false;
++			return ListUtils.anyMatch(region.getSubBlocks(), c -> hasPathThroughBlock(block, c));
+ 		}
+ 		throw new JadxRuntimeException(unknownContainerType(cont));
+ 	}
+diff --git a/jadx-core/src/main/java/jadx/core/utils/StringUtils.java b/jadx-core/src/main/java/jadx/core/utils/StringUtils.java
+index abb9d77fd..42d95be85 100644
+--- a/jadx-core/src/main/java/jadx/core/utils/StringUtils.java
++++ b/jadx-core/src/main/java/jadx/core/utils/StringUtils.java
+@@ -77,10 +77,7 @@ private boolean isEscapeNeededForCodePoint(int codePoint) {
+ 		if (codePoint < 127) {
+ 			return false;
+ 		}
+-		if (escapeUnicode) {
+-			return true;
+-		}
+-		return !NameMapper.isPrintableCodePoint(codePoint);
++		return escapeUnicode || !NameMapper.isPrintableCodePoint(codePoint);
+ 	}
+ 
+ 	/**
+diff --git a/jadx-core/src/main/java/jadx/core/utils/Utils.java b/jadx-core/src/main/java/jadx/core/utils/Utils.java
+index dfb7053f2..129f67a8a 100644
+--- a/jadx-core/src/main/java/jadx/core/utils/Utils.java
++++ b/jadx-core/src/main/java/jadx/core/utils/Utils.java
+@@ -356,15 +356,7 @@ public static <T, R> List<R> collectionMapNoNull(Collection<T> list, Function<T,
+ 	}
+ 
+ 	public static <T> boolean containsInListByRef(List<T> list, T element) {
+-		if (isEmpty(list)) {
+-			return false;
+-		}
+-		for (T t : list) {
+-			if (t == element) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return ListUtils.anyMatch(list, t -> t == element);
+ 	}
+ 
+ 	public static <T> int indexInListByRef(List<T> list, T element) {
+@@ -515,12 +507,7 @@ public static <T> T getOne(@Nullable Collection<T> collection) {
+ 	}
+ 
+ 	public static <T> boolean isSetContainsAny(Set<T> inputSet, Set<T> searchKeys) {
+-		for (T t : inputSet) {
+-			if (searchKeys.contains(t)) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return ListUtils.anyMatch(inputSet, searchKeys::contains);
+ 	}
+ 
+ 	@Nullable
+diff --git a/jadx-core/src/main/java/jadx/core/utils/blocks/BlockSet.java b/jadx-core/src/main/java/jadx/core/utils/blocks/BlockSet.java
+index f8a6b5ca1..5823f0592 100644
+--- a/jadx-core/src/main/java/jadx/core/utils/blocks/BlockSet.java
++++ b/jadx-core/src/main/java/jadx/core/utils/blocks/BlockSet.java
+@@ -17,6 +17,7 @@
+ import jadx.core.dex.nodes.BlockNode;
+ import jadx.core.dex.nodes.MethodNode;
+ import jadx.core.utils.EmptyBitSet;
++import jadx.core.utils.ListUtils;
+ 
+ /**
+  * BlockNode set implementation based on BitSet.
+@@ -73,21 +74,11 @@ public boolean addChecked(BlockNode block) {
+ 	}
+ 
+ 	public boolean containsAll(List<BlockNode> blocks) {
+-		for (BlockNode block : blocks) {
+-			if (!contains(block)) {
+-				return false;
+-			}
+-		}
+-		return true;
++		return ListUtils.allMatch(blocks, this::contains);
+ 	}
+ 
+ 	public boolean intersects(List<BlockNode> blocks) {
+-		for (BlockNode block : blocks) {
+-			if (contains(block)) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return ListUtils.anyMatch(blocks, this::contains);
+ 	}
+ 
+ 	public BlockSet intersect(List<BlockNode> blocks) {
+diff --git a/jadx-gui/src/main/java/jadx/gui/device/debugger/DebugController.java b/jadx-gui/src/main/java/jadx/gui/device/debugger/DebugController.java
+index d2173a77b..6e47575cf 100644
+--- a/jadx-gui/src/main/java/jadx/gui/device/debugger/DebugController.java
++++ b/jadx-gui/src/main/java/jadx/gui/device/debugger/DebugController.java
+@@ -132,10 +132,10 @@ private void stopAtOnCreate() {
+ 			if (id != -1) {
+ 				return; // this app is running, we can't stop at onCreate anymore.
+ 			}
+-			debuggerPanel.log(String.format("Breakpoint will set at %s.%s", clsSig, ONCREATE_SIGNATURE));
++			debuggerPanel.log("Breakpoint will set at " + clsSig + "." + ONCREATE_SIGNATURE);
+ 			debugger.regMethodEntryEventSync(clsSig, ONCREATE_SIGNATURE::equals);
+ 		} catch (SmaliDebuggerException e) {
+-			logErr(e, String.format("Failed set breakpoint at %s.%s", clsSig, ONCREATE_SIGNATURE));
++			logErr(e, "Failed set breakpoint at " + clsSig + "." + ONCREATE_SIGNATURE);
+ 		}
+ 	}
+ 
+@@ -833,7 +833,7 @@ private boolean decodeObject(RuntimeValueTreeNode valNode) {
+ 					valNode.updateType(RuntimeType.INT.getDesc());
+ 					valNode.updateValue(Long.toString((int) debugger.readAll(rValue)));
+ 				} catch (SmaliDebuggerException except) {
+-					logErr(except, String.format("Update %s failed, %s", valNode.getName(), except.getMessage()));
++					logErr(except, "Update " + valNode.getName() + " failed, " + except.getMessage());
+ 					valNode.updateValue(except.getMessage());
+ 					ok = false;
+ 				}
+@@ -1329,7 +1329,7 @@ private void reset() {
+ 		@Override
+ 		public String getName() {
+ 			if (!StringUtils.isEmpty(alias)) {
+-				return String.format("%s (%s)", smaliReg.getName(), alias);
++				return smaliReg.getName() + " (" + alias + ")";
+ 			}
+ 			return String.format("%-3s", smaliReg.getName());
+ 		}
+diff --git a/jadx-gui/src/main/java/jadx/gui/device/debugger/smali/Smali.java b/jadx-gui/src/main/java/jadx/gui/device/debugger/smali/Smali.java
+index 6da54e347..c091a912e 100644
+--- a/jadx-gui/src/main/java/jadx/gui/device/debugger/smali/Smali.java
++++ b/jadx-gui/src/main/java/jadx/gui/device/debugger/smali/Smali.java
+@@ -187,7 +187,7 @@ public Object getResultRegOrField(String mthFullRawID, long codeOffset) {
+ 	private void writeClass(SmaliWriter smali, ClassNode cls) {
+ 		IClassData clsData = cls.getClsData();
+ 		if (clsData == null) {
+-			smali.startLine(String.format("###### Class %s is created by jadx", cls.getFullName()));
++			smali.startLine("###### Class " + cls.getFullName() + " is created by jadx");
+ 			return;
+ 		}
+ 		AttributeStorage clsAttributes = AttributeStorage.fromList(clsData.getAttributes());
+@@ -495,7 +495,7 @@ private void formatMthParamInfo(IMethodData mth, SmaliWriter smali, LineInfo lin
+ 				String name = Utils.getOrElse(param.getName(), "");
+ 				String type = Utils.getOrElse(param.getSignature(), paramType);
+ 				String varName = "p" + paramStart;
+-				smali.startLine(String.format(".param %s, \"%s\" # %s", varName, name, type));
++				smali.startLine(".param " + varName + ", \"" + name + "\" # " + type);
+ 				line.addRegName(regNum, varName);
+ 				line.smaliMthNode.setParamReg(regNum, varName);
+ 			}
+@@ -1015,19 +1015,19 @@ private void writeTip(SmaliWriter smali, int codeOffset, int lineOffset) {
+ 						smali.add(String.format("%s # %d refs", entry.getKey(), entry.getValue()))
+ 								.startLine();
+ 					} else if (entry.getValue() instanceof String) {
+-						smali.add(String.format("%s%s", entry.getKey(), entry.getValue()))
++						smali.add(entry.getKey() + entry.getValue())
+ 								.startLine();
+ 					} else if (entry.getValue() instanceof List) {
+ 						List<String> extras = (List<String>) entry.getValue();
+-						smali.add(String.format("%s%s", entry.getKey(), extras.get(0)))
++						smali.add(entry.getKey() + extras.get(0))
+ 								.startLine();
+ 						String pad = new String(new byte[lineOffset]).replace("\0", " ");
+ 						for (int i = 1; i < extras.size(); i++) {
+-							smali.add(String.format("%s%s", pad, extras.get(i)))
++							smali.add(pad + extras.get(i))
+ 									.startLine();
+ 						}
+ 					} else {
+-						smali.add(String.format("%s%s", entry.getKey(), entry.getValue()))
++						smali.add(entry.getKey() + entry.getValue())
+ 								.startLine();
+ 					}
+ 				}
+diff --git a/jadx-gui/src/main/java/jadx/gui/device/protocol/ADB.java b/jadx-gui/src/main/java/jadx/gui/device/protocol/ADB.java
+index 4220d5e12..f8f797d66 100644
+--- a/jadx-gui/src/main/java/jadx/gui/device/protocol/ADB.java
++++ b/jadx-gui/src/main/java/jadx/gui/device/protocol/ADB.java
+@@ -120,7 +120,7 @@ static byte[] readServiceProtocol(InputStream stream) {
+ 	static boolean setSerial(String serial, OutputStream outputStream, InputStream inputStream) throws IOException {
+ 		checkSerial(serial);
+ 		LOG.trace("setSerial({})", serial);
+-		String setSerialCmd = String.format("host:tport:serial:%s", serial);
++		String setSerialCmd = "host:tport:serial:" + serial;
+ 		setSerialCmd = String.format("%04x%s", setSerialCmd.length(), setSerialCmd);
+ 		outputStream.write(setSerialCmd.getBytes(ADB_CHARSET));
+ 		boolean ok = isOkay(inputStream, setSerialCmd);
+@@ -134,7 +134,7 @@ static boolean setSerial(String serial, OutputStream outputStream, InputStream i
+ 	}
+ 
+ 	private static byte[] execShellCommandRaw(String cmd, OutputStream outputStream, InputStream inputStream) throws IOException {
+-		cmd = String.format("shell,v2,TERM=xterm-256color,raw:%s", cmd);
++		cmd = "shell,v2,TERM=xterm-256color,raw:" + cmd;
+ 		cmd = String.format("%04x%s", cmd.length(), cmd);
+ 		outputStream.write(cmd.getBytes(ADB_CHARSET));
+ 		if (isOkay(inputStream, cmd)) {
+@@ -248,7 +248,7 @@ public static List<String> listForward(String host, int port) throws IOException
+ 
+ 	public static boolean removeForward(String host, int port, String serial, String localPort) throws IOException {
+ 		try (Socket socket = connect(host, port)) {
+-			String cmd = String.format("host:killforward:tcp:%s", localPort);
++			String cmd = "host:killforward:tcp:" + localPort;
+ 			cmd = String.format("%04x%s", cmd.length(), cmd);
+ 			InputStream inputStream = socket.getInputStream();
+ 			OutputStream outputStream = socket.getOutputStream();
+diff --git a/jadx-gui/src/main/java/jadx/gui/device/protocol/ADBDevice.java b/jadx-gui/src/main/java/jadx/gui/device/protocol/ADBDevice.java
+index 2e683e8e0..70e652e8e 100644
+--- a/jadx-gui/src/main/java/jadx/gui/device/protocol/ADBDevice.java
++++ b/jadx-gui/src/main/java/jadx/gui/device/protocol/ADBDevice.java
+@@ -60,7 +60,7 @@ public boolean removeForward(String localPort) throws IOException {
+ 
+ 	public ForwardResult forwardJDWP(String localPort, String jdwpPid) throws IOException {
+ 		try (Socket socket = ADB.connect(info.getAdbHost(), info.getAdbPort())) {
+-			String cmd = String.format("host:forward:tcp:%s;jdwp:%s", localPort, jdwpPid);
++			String cmd = "host:forward:tcp:" + localPort + ";jdwp:" + jdwpPid;
+ 			cmd = String.format("%04x%s", cmd.length(), cmd);
+ 			InputStream inputStream = socket.getInputStream();
+ 			OutputStream outputStream = socket.getOutputStream();
+diff --git a/jadx-gui/src/main/java/jadx/gui/report/ExceptionDialog.java b/jadx-gui/src/main/java/jadx/gui/report/ExceptionDialog.java
+index 00cad19a8..784f9d0bd 100644
+--- a/jadx-gui/src/main/java/jadx/gui/report/ExceptionDialog.java
++++ b/jadx-gui/src/main/java/jadx/gui/report/ExceptionDialog.java
+@@ -60,10 +60,8 @@ private ExceptionDialog(@Nullable MainWindow mainWindow, ExceptionData data) {
+ 		Map<String, String> details = new LinkedHashMap<>();
+ 		details.put("Jadx version", JadxDecompiler.getVersion());
+ 		details.put("Java version", JadxSystemInfo.JAVA_VER);
+-		details.put("Java VM", String.format("%s %s",
+-				System.getProperty("java.vm.vendor", "?"), System.getProperty("java.vm.name", "?")));
+-		details.put("Platform", String.format("%s (%s %s)",
+-				JadxSystemInfo.OS_NAME, JadxSystemInfo.OS_VERSION, JadxSystemInfo.OS_ARCH));
++		details.put("Java VM", System.getProperty("java.vm.vendor", "?") + " " + System.getProperty("java.vm.name", "?"));
++		details.put("Platform", JadxSystemInfo.OS_NAME + " (" + JadxSystemInfo.OS_VERSION + " " + JadxSystemInfo.OS_ARCH + ")");
+ 		details.put("Max heap size", String.format("%d MB", Runtime.getRuntime().maxMemory() / (1024 * 1024)));
+ 
+ 		try {
+@@ -152,9 +150,9 @@ private ExceptionDialog(@Nullable MainWindow mainWindow, ExceptionData data) {
+ 				+ "**IMPORTANT!** If the error occurs with a specific APK file please attach or provide link to apk file!\n\n";
+ 
+ 		StringBuilder detailsIssueBuilder = new StringBuilder();
+-		details.forEach((key, value) -> detailsIssueBuilder.append(String.format("* %s: %s\n", key, value)));
++		details.forEach((key, value) -> detailsIssueBuilder.append("* ").append(key).append(": ").append(value).append('\n'));
+ 
+-		String body = String.format("%s%s\n```\n%s\n```", message, detailsIssueBuilder, stackTrace);
++		String body = message + detailsIssueBuilder + "\n```\n" + stackTrace + "\n```";
+ 
+ 		String issueBody;
+ 		try {
+@@ -163,8 +161,7 @@ private ExceptionDialog(@Nullable MainWindow mainWindow, ExceptionData data) {
+ 			LOG.error("URL encoding of body failed", e);
+ 			issueBody = "Please copy the displayed text in the Jadx error dialog and paste it here";
+ 		}
+-		String url = String.format("https://github.com/%s/issues/new?labels=bug&title=%s&body=%s",
+-				project, issueTitle, issueBody);
++		String url = "https://github.com/" + project + "/issues/new?labels=bug&title=" + issueTitle + "&body=" + issueBody;
+ 		return new Link("<html><u><b>" + NLS.str("error.dialog.new_github_issue") + "</b></u></html>", url);
+ 	}
+ 
+diff --git a/jadx-gui/src/main/java/jadx/gui/tree/TreeExpansionService.java b/jadx-gui/src/main/java/jadx/gui/tree/TreeExpansionService.java
+index e18d5a724..5386357a3 100644
+--- a/jadx-gui/src/main/java/jadx/gui/tree/TreeExpansionService.java
++++ b/jadx-gui/src/main/java/jadx/gui/tree/TreeExpansionService.java
+@@ -18,6 +18,7 @@
+ import org.slf4j.LoggerFactory;
+ 
+ import jadx.api.metadata.ICodeNodeRef;
++import jadx.core.utils.ListUtils;
+ import jadx.core.dex.nodes.RootNode;
+ import jadx.core.utils.Utils;
+ import jadx.core.utils.exceptions.JadxRuntimeException;
+@@ -199,12 +200,7 @@ private static List<TreePath> collectExpandedPaths(JTree tree) {
+ 	}
+ 
+ 	private static boolean isSubPath(List<TreePath> paths, TreePath path) {
+-		for (TreePath addedPath : paths) {
+-			if (path.isDescendant(addedPath)) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return ListUtils.anyMatch(paths, addedPath -> path.isDescendant(addedPath));
+ 	}
+ 
+ 	private RootNode getRoot() {
+diff --git a/jadx-gui/src/main/java/jadx/gui/ui/action/FridaAction.java b/jadx-gui/src/main/java/jadx/gui/ui/action/FridaAction.java
+index 69f2e4253..7fb5a0d7a 100644
+--- a/jadx-gui/src/main/java/jadx/gui/ui/action/FridaAction.java
++++ b/jadx-gui/src/main/java/jadx/gui/ui/action/FridaAction.java
+@@ -80,7 +80,7 @@ private void copySnipped(String fridaSnippet) {
+ 	private String generateMethodSnippet(JMethod jMth) {
+ 		String classSnippet = generateClassSnippet(jMth.getJParent());
+ 		String methodSnippet = getMethodSnippet(jMth.getJavaMethod(), jMth.getJParent());
+-		return String.format("%s\n%s", classSnippet, methodSnippet);
++		return classSnippet + "\n" + methodSnippet;
+ 	}
+ 
+ 	private String generateMethodSnippet(JavaMethod javaMethod, JClass jc) {
+@@ -136,7 +136,7 @@ private String generateClassSnippet(JClass jc) {
+ 		JavaClass javaClass = jc.getCls();
+ 		String rawClassName = StringEscapeUtils.escapeEcmaScript(javaClass.getRawName());
+ 		String shortClassName = javaClass.getName();
+-		return String.format("var %s = Java.use(\"%s\");", shortClassName, rawClassName);
++		return "var " + shortClassName + " = Java.use(\"" + rawClassName + "\");";
+ 	}
+ 
+ 	private void showMethodSelectionDialog(JClass jc) {
+@@ -171,7 +171,7 @@ private String generateFieldSnippet(JField jf) {
+ 		}
+ 		JClass jc = jf.getRootClass();
+ 		String classSnippet = generateClassSnippet(jc);
+-		return String.format("%s\n%s = %s.%s.value;", classSnippet, fieldName, jc.getName(), rawFieldName);
++		return classSnippet + "\n" + fieldName + " = " + jc.getName() + "." + rawFieldName + ".value;";
+ 	}
+ 
+ 	public Boolean isOverloaded(MethodNode methodNode) {
+diff --git a/jadx-gui/src/main/java/jadx/gui/ui/dialog/ADBDialog.java b/jadx-gui/src/main/java/jadx/gui/ui/dialog/ADBDialog.java
+index 5b9780723..871c31e8b 100644
+--- a/jadx-gui/src/main/java/jadx/gui/ui/dialog/ADBDialog.java
++++ b/jadx-gui/src/main/java/jadx/gui/ui/dialog/ADBDialog.java
+@@ -583,9 +583,9 @@ void refresh() {
+ 			String text = info.getModel();
+ 			if (text != null) {
+ 				if (!text.equals(info.getSerial())) {
+-					text += String.format(" [serial: %s]", info.getSerial());
++					text += " [serial: " + info.getSerial() + "]";
+ 				}
+-				text += String.format(" [state: %s]", info.isOnline() ? "online" : "offline");
++				text += " [state: " + (info.isOnline() ? "online" : "offline") + "]";
+ 				tNode.setUserObject(text);
+ 			}
+ 		}
+diff --git a/jadx-gui/src/main/java/jadx/gui/ui/graphs/CallGraphDialog.java b/jadx-gui/src/main/java/jadx/gui/ui/graphs/CallGraphDialog.java
+index 48710c29f..7f520398b 100644
+--- a/jadx-gui/src/main/java/jadx/gui/ui/graphs/CallGraphDialog.java
++++ b/jadx-gui/src/main/java/jadx/gui/ui/graphs/CallGraphDialog.java
+@@ -51,7 +51,7 @@ public class CallGraphDialog extends GraphDialog {
+ 
+ 	public CallGraphDialog(MainWindow mainWindow, JavaMethod javaMethod) {
+ 		super(mainWindow,
+-				String.format("%s: %s", NLS.str("graph_viewer.call_graph.title"), DotGraphUtils.methodFormatName(javaMethod, false)));
++				NLS.str("graph_viewer.call_graph.title") + ": " + DotGraphUtils.methodFormatName(javaMethod, false));
+ 		this.javaMethod = javaMethod;
+ 	}
+ 
+diff --git a/jadx-gui/src/main/java/jadx/gui/ui/graphs/ClassInheritanceGraphDialog.java b/jadx-gui/src/main/java/jadx/gui/ui/graphs/ClassInheritanceGraphDialog.java
+index 24105df48..ce92e45f5 100644
+--- a/jadx-gui/src/main/java/jadx/gui/ui/graphs/ClassInheritanceGraphDialog.java
++++ b/jadx-gui/src/main/java/jadx/gui/ui/graphs/ClassInheritanceGraphDialog.java
+@@ -64,9 +64,7 @@ public class ClassInheritanceGraphDialog extends GraphDialog {
+ 	private int nextNodeID;
+ 
+ 	public ClassInheritanceGraphDialog(MainWindow mainWindow, ClassNode cls) {
+-		super(mainWindow, String.format("%s: %s",
+-				NLS.str("graph_viewer.inheritance_graph.title"),
+-				classFormatName(cls, false)));
++		super(mainWindow, NLS.str("graph_viewer.inheritance_graph.title") + ": " + classFormatName(cls, false));
+ 		this.cls = cls;
+ 	}
+ 
+diff --git a/jadx-gui/src/main/java/jadx/gui/ui/graphs/ClassMethodGraphDialog.java b/jadx-gui/src/main/java/jadx/gui/ui/graphs/ClassMethodGraphDialog.java
+index c9e9f28be..35a7cd39a 100644
+--- a/jadx-gui/src/main/java/jadx/gui/ui/graphs/ClassMethodGraphDialog.java
++++ b/jadx-gui/src/main/java/jadx/gui/ui/graphs/ClassMethodGraphDialog.java
+@@ -45,7 +45,7 @@ public class ClassMethodGraphDialog extends GraphDialog {
+ 	private boolean longNames = false;
+ 
+ 	public ClassMethodGraphDialog(MainWindow mainWindow, ClassNode cls) {
+-		super(mainWindow, String.format("%s: %s", NLS.str("graph_viewer.method_graph.title"), DotGraphUtils.classFormatName(cls, false)));
++		super(mainWindow, NLS.str("graph_viewer.method_graph.title") + ": " + DotGraphUtils.classFormatName(cls, false));
+ 		this.cls = cls;
+ 	}
+ 
+diff --git a/jadx-gui/src/main/java/jadx/gui/ui/graphs/ControlFlowGraphDialog.java b/jadx-gui/src/main/java/jadx/gui/ui/graphs/ControlFlowGraphDialog.java
+index 0bdb24133..58c2c620c 100644
+--- a/jadx-gui/src/main/java/jadx/gui/ui/graphs/ControlFlowGraphDialog.java
++++ b/jadx-gui/src/main/java/jadx/gui/ui/graphs/ControlFlowGraphDialog.java
+@@ -68,7 +68,7 @@ private ControlFlowGraphDialog(MainWindow mainWindow, JMethod jMth) {
+ 		super(mainWindow);
+ 		mth = jMth.getJavaMethod().getMethodNode();
+ 		String mthName = DotGraphUtils.methodFormatName(jMth.getJavaMethod(), false);
+-		setTitle(String.format("%s: %s", NLS.str("graph_viewer.cfg.title"), mthName));
++		setTitle(NLS.str("graph_viewer.cfg.title") + ": " + mthName);
+ 	}
+ 
+ 	private void usePreset(@Nullable GraphPreset graphPreset) {
+diff --git a/jadx-gui/src/main/java/jadx/gui/ui/tab/TabbedPane.java b/jadx-gui/src/main/java/jadx/gui/ui/tab/TabbedPane.java
+index e74cfc408..ffae04596 100644
+--- a/jadx-gui/src/main/java/jadx/gui/ui/tab/TabbedPane.java
++++ b/jadx-gui/src/main/java/jadx/gui/ui/tab/TabbedPane.java
+@@ -303,12 +303,7 @@ public List<ContentPanel> getTabs() {
+ 	}
+ 
+ 	public boolean tabWithTitleExists(String tabTitle) {
+-		for (EditorDock dock : docks.values()) {
+-			if (dock.getTabText().equals(tabTitle)) {
+-				return true;
+-			}
+-		}
+-		return false;
++		return ListUtils.anyMatch(docks.values(), dock -> dock.getTabText().equals(tabTitle));
+ 	}
+ 
+ 	public void refresh(JNode node) {
+diff --git a/jadx-gui/src/main/java/jadx/gui/utils/NLS.java b/jadx-gui/src/main/java/jadx/gui/utils/NLS.java
+index 9e926b5a3..cbac1c371 100644
+--- a/jadx-gui/src/main/java/jadx/gui/utils/NLS.java
++++ b/jadx-gui/src/main/java/jadx/gui/utils/NLS.java
+@@ -53,7 +53,7 @@ private NLS() {
+ 
+ 	private static void load(LangLocale lang) {
+ 		Locale locale = lang.get();
+-		String resName = String.format("i18n/Messages_%s.properties", locale.toLanguageTag().replace('-', '_'));
++		String resName = "i18n/Messages_" + locale.toLanguageTag().replace('-', '_') + ".properties";
+ 		URL bundleUrl = NLS.class.getClassLoader().getResource(resName);
+ 		if (bundleUrl == null) {
+ 			throw new JadxRuntimeException("Locale resource not found: " + resName);
+diff --git a/jadx-plugins/jadx-rename-mappings/src/main/java/jadx/plugins/mappings/load/LoadMappingsPass.java b/jadx-plugins/jadx-rename-mappings/src/main/java/jadx/plugins/mappings/load/LoadMappingsPass.java
+index 9bfea0add..21ffc79a2 100644
+--- a/jadx-plugins/jadx-rename-mappings/src/main/java/jadx/plugins/mappings/load/LoadMappingsPass.java
++++ b/jadx-plugins/jadx-rename-mappings/src/main/java/jadx/plugins/mappings/load/LoadMappingsPass.java
+@@ -50,8 +50,8 @@ private MappingTreeView loadMapping(JadxArgs args) {
+ 				mappingTree.setDstNamespaces(Collections.singletonList(MappingUtil.NS_TARGET_FALLBACK));
+ 			} else if (mappingTree.getDstNamespaces().size() > 1) {
+ 				throw new JadxRuntimeException(
+-						String.format("JADX only supports mappings with just one destination namespace! The provided ones have %s.",
+-								mappingTree.getDstNamespaces().size()));
++						"JADX only supports mappings with just one destination namespace! The provided ones have "
++								+ mappingTree.getDstNamespaces().size() + ".");
+ 			}
+ 			if (options.isInvert()) {
+ 				VisitableMappingTree invertedMappingTree = new MemoryMappingTree();

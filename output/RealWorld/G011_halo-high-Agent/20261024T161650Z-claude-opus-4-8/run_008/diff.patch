@@ -1,0 +1,243 @@
+diff --git a/ui/console-src/composables/__tests__/create-post-update-mutate.spec.ts b/ui/console-src/composables/__tests__/create-post-update-mutate.spec.ts
+new file mode 100644
+index 000000000..9664b9f28
+--- /dev/null
++++ b/ui/console-src/composables/__tests__/create-post-update-mutate.spec.ts
+@@ -0,0 +1,48 @@
++import type { Post } from "@halo-dev/api-client";
++import { expect, it } from "vite-plus/test";
++import { mergePostForUpdate } from "../create-post-update-mutate";
++
++const latest = {
++  apiVersion: "content.halo.run/v1alpha1",
++  kind: "Post",
++  metadata: { name: "p", version: 5, annotations: { old: "1" } },
++  spec: { title: "latest", slug: "s", a: 1, b: 2 },
++  status: { phase: "latest" },
++} as unknown as Post;
++
++const incoming = {
++  apiVersion: "content.halo.run/v1alpha1",
++  kind: "Post",
++  metadata: { name: "p", version: 1, annotations: { new: "2" } },
++  spec: { title: "incoming", a: 9 },
++  status: { phase: "incoming" },
++} as unknown as Post;
++
++it("replaces the spec and overlays annotations onto the latest post (console behavior)", () => {
++  const result = mergePostForUpdate(latest, incoming, false);
++
++  // spec fully replaced by the incoming spec
++  expect(result.spec).toEqual({ title: "incoming", a: 9 });
++  // annotations taken from the incoming post
++  expect(result.metadata.annotations).toEqual({ new: "2" });
++  // the rest of metadata and other top-level fields come from the latest post
++  expect(result.metadata.name).toBe("p");
++  expect(result.metadata.version).toBe(5);
++  expect(result.status).toEqual({ phase: "latest" });
++});
++
++it("merges the spec over the latest spec when mergeSpec is true (uc behavior)", () => {
++  const result = mergePostForUpdate(latest, incoming, true);
++
++  expect(result.spec).toEqual({ title: "incoming", slug: "s", a: 9, b: 2 });
++  expect(result.metadata.annotations).toEqual({ new: "2" });
++  expect(result.metadata.version).toBe(5);
++});
++
++it("does not mutate the input posts", () => {
++  mergePostForUpdate(latest, incoming, true);
++
++  expect(latest.spec).toEqual({ title: "latest", slug: "s", a: 1, b: 2 });
++  expect(latest.metadata.annotations).toEqual({ old: "1" });
++  expect(incoming.spec).toEqual({ title: "incoming", a: 9 });
++});
+diff --git a/ui/console-src/composables/create-post-update-mutate.ts b/ui/console-src/composables/create-post-update-mutate.ts
+new file mode 100644
+index 000000000..7bb1c5ba7
+--- /dev/null
++++ b/ui/console-src/composables/create-post-update-mutate.ts
+@@ -0,0 +1,75 @@
++import type { Post } from "@halo-dev/api-client";
++import { Toast } from "@halo-dev/components";
++import { useMutation } from "@tanstack/vue-query";
++import { useI18n } from "vue-i18n";
++
++/**
++ * Builds the post payload to persist: the latest persisted post with the incoming annotations overlaid and the
++ * incoming spec either replacing or merging onto the latest spec.
++ */
++export function mergePostForUpdate(
++  latestPost: Post,
++  incomingPost: Post,
++  mergeSpec: boolean
++): Post {
++  return {
++    ...latestPost,
++    spec: mergeSpec
++      ? { ...latestPost.spec, ...incomingPost.spec }
++      : incomingPost.spec,
++    metadata: {
++      ...latestPost.metadata,
++      annotations: incomingPost.metadata.annotations,
++    },
++  };
++}
++
++export interface CreatePostUpdateMutateOptions<TVariables, TResult> {
++  /** vue-query mutation key. */
++  mutationKey: string[];
++  /** Extracts the post carrying the desired spec/annotations from the mutation variables. */
++  toPost: (variables: TVariables) => Post;
++  /** Fetches the latest persisted post by name. */
++  getPost: (name: string) => Promise<{ data: Post }>;
++  /** Persists the merged post (the caller owns the request options, e.g. `{ mute: true }`). */
++  updatePost: (name: string, post: Post) => Promise<TResult>;
++  /** When true, merge the incoming spec over the latest spec; otherwise replace it. Defaults to replace. */
++  mergeSpec?: boolean;
++  /** i18n key for the error toast. */
++  errorMessageKey: string;
++  /** When true, also log the error to the console. */
++  logError?: boolean;
++}
++
++/**
++ * Factory for the "fetch latest, overlay spec + annotations, update, retry on conflict" post-update mutation shared
++ * by the console and user-center editors. The two differ only in the API client (`getPost`/`updatePost`), the
++ * mutation-variables shape (`toPost`), whether the incoming spec replaces or merges (`mergeSpec`), and the error
++ * reporting (`errorMessageKey`/`logError`).
++ */
++export function createPostUpdateMutate<TVariables, TResult>(
++  options: CreatePostUpdateMutateOptions<TVariables, TResult>
++) {
++  const { t } = useI18n();
++
++  return useMutation({
++    mutationKey: options.mutationKey,
++    mutationFn: async (variables: TVariables) => {
++      const post = options.toPost(variables);
++      const { data: latestPost } = await options.getPost(post.metadata.name);
++      const mergedPost = mergePostForUpdate(
++        latestPost,
++        post,
++        options.mergeSpec ?? false
++      );
++      return await options.updatePost(post.metadata.name, mergedPost);
++    },
++    retry: 3,
++    onError: (error) => {
++      if (options.logError) {
++        console.error("Failed to update post", error);
++      }
++      Toast.error(t(options.errorMessageKey));
++    },
++  });
++}
+diff --git a/ui/console-src/modules/contents/posts/composables/use-post-update-mutate.ts b/ui/console-src/modules/contents/posts/composables/use-post-update-mutate.ts
+index 2716c75dc..e93b7207e 100644
+--- a/ui/console-src/modules/contents/posts/composables/use-post-update-mutate.ts
++++ b/ui/console-src/modules/contents/posts/composables/use-post-update-mutate.ts
+@@ -1,40 +1,15 @@
++import { createPostUpdateMutate } from "@console/composables/create-post-update-mutate";
+ import type { Post } from "@halo-dev/api-client";
+ import { coreApiClient } from "@halo-dev/api-client";
+-import { Toast } from "@halo-dev/components";
+-import { useMutation } from "@tanstack/vue-query";
+-import { useI18n } from "vue-i18n";
+ 
+ export function usePostUpdateMutate() {
+-  const { t } = useI18n();
+-
+-  return useMutation({
++  return createPostUpdateMutate({
+     mutationKey: ["post-update"],
+-    mutationFn: async (post: Post) => {
+-      const { data: latestPost } = await coreApiClient.content.post.getPost({
+-        name: post.metadata.name,
+-      });
+-
+-      return await coreApiClient.content.post.updatePost(
+-        {
+-          name: post.metadata.name,
+-          post: {
+-            ...latestPost,
+-            spec: post.spec,
+-            metadata: {
+-              ...latestPost.metadata,
+-              annotations: post.metadata.annotations,
+-            },
+-          },
+-        },
+-        {
+-          mute: true,
+-        }
+-      );
+-    },
+-    retry: 3,
+-    onError: (error) => {
+-      console.error("Failed to update post", error);
+-      Toast.error(t("core.common.toast.server_internal_error"));
+-    },
++    toPost: (post: Post) => post,
++    getPost: (name) => coreApiClient.content.post.getPost({ name }),
++    updatePost: (name, post) =>
++      coreApiClient.content.post.updatePost({ name, post }, { mute: true }),
++    errorMessageKey: "core.common.toast.server_internal_error",
++    logError: true,
+   });
+ }
+diff --git a/ui/uc-src/modules/contents/posts/composables/use-post-update-mutate.ts b/ui/uc-src/modules/contents/posts/composables/use-post-update-mutate.ts
+index 187a5665f..1637167a1 100644
+--- a/ui/uc-src/modules/contents/posts/composables/use-post-update-mutate.ts
++++ b/ui/uc-src/modules/contents/posts/composables/use-post-update-mutate.ts
+@@ -1,42 +1,15 @@
++import { createPostUpdateMutate } from "@console/composables/create-post-update-mutate";
+ import type { Post } from "@halo-dev/api-client";
+ import { ucApiClient } from "@halo-dev/api-client";
+-import { Toast } from "@halo-dev/components";
+-import { useMutation } from "@tanstack/vue-query";
+-import { useI18n } from "vue-i18n";
+ 
+ export function usePostUpdateMutate() {
+-  const { t } = useI18n();
+-
+-  return useMutation({
++  return createPostUpdateMutate({
+     mutationKey: ["uc:update-post"],
+-    mutationFn: async ({ postToUpdate }: { postToUpdate: Post }) => {
+-      const { data: latestPost } = await ucApiClient.content.post.getMyPost({
+-        name: postToUpdate.metadata.name,
+-      });
+-
+-      return await ucApiClient.content.post.updateMyPost(
+-        {
+-          name: postToUpdate.metadata.name,
+-          post: {
+-            ...latestPost,
+-            spec: {
+-              ...latestPost.spec,
+-              ...postToUpdate.spec,
+-            },
+-            metadata: {
+-              ...latestPost.metadata,
+-              annotations: postToUpdate.metadata.annotations,
+-            },
+-          },
+-        },
+-        {
+-          mute: true,
+-        }
+-      );
+-    },
+-    retry: 3,
+-    onError: () => {
+-      Toast.error(t("core.common.toast.save_failed_and_retry"));
+-    },
++    toPost: ({ postToUpdate }: { postToUpdate: Post }) => postToUpdate,
++    getPost: (name) => ucApiClient.content.post.getMyPost({ name }),
++    updatePost: (name, post) =>
++      ucApiClient.content.post.updateMyPost({ name, post }, { mute: true }),
++    mergeSpec: true,
++    errorMessageKey: "core.common.toast.save_failed_and_retry",
+   });
+ }

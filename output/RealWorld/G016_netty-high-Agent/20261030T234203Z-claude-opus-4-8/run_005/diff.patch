@@ -1,0 +1,164 @@
+diff --git a/transport/src/main/java/io/netty/channel/group/DefaultChannelGroup.java b/transport/src/main/java/io/netty/channel/group/DefaultChannelGroup.java
+index ba5056cb6..a8b7afd21 100644
+--- a/transport/src/main/java/io/netty/channel/group/DefaultChannelGroup.java
++++ b/transport/src/main/java/io/netty/channel/group/DefaultChannelGroup.java
+@@ -36,6 +36,7 @@ import java.util.Map;
+ import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.ConcurrentMap;
+ import java.util.concurrent.atomic.AtomicInteger;
++import java.util.function.Function;
+ 
+ /**
+  * The default {@link ChannelGroup} implementation.
+@@ -297,31 +298,13 @@ public class DefaultChannelGroup extends AbstractSet<Channel> implements Channel
+     @Override
+     public ChannelGroupFuture disconnect(ChannelMatcher matcher) {
+         ObjectUtil.checkNotNull(matcher, "matcher");
+-
+-        Map<Channel, ChannelFuture> futures =
+-                new LinkedHashMap<Channel, ChannelFuture>(size());
+-
+-        for (Channel c: serverChannels.values()) {
+-            if (matcher.matches(c)) {
+-                futures.put(c, c.disconnect());
+-            }
+-        }
+-        for (Channel c: nonServerChannels.values()) {
+-            if (matcher.matches(c)) {
+-                futures.put(c, c.disconnect());
+-            }
+-        }
+-
+-        return new DefaultChannelGroupFuture(this, futures, executor);
++        return newGroupFuture(matcher, Channel::disconnect);
+     }
+ 
+     @Override
+     public ChannelGroupFuture close(ChannelMatcher matcher) {
+         ObjectUtil.checkNotNull(matcher, "matcher");
+ 
+-        Map<Channel, ChannelFuture> futures =
+-                new LinkedHashMap<Channel, ChannelFuture>(size());
+-
+         if (stayClosed) {
+             // It is important to set the closed to true, before closing channels.
+             // Our invariants are:
+@@ -332,35 +315,31 @@ public class DefaultChannelGroup extends AbstractSet<Channel> implements Channel
+             closed = true;
+         }
+ 
+-        for (Channel c: serverChannels.values()) {
+-            if (matcher.matches(c)) {
+-                futures.put(c, c.close());
+-            }
+-        }
+-        for (Channel c: nonServerChannels.values()) {
+-            if (matcher.matches(c)) {
+-                futures.put(c, c.close());
+-            }
+-        }
+-
+-        return new DefaultChannelGroupFuture(this, futures, executor);
++        return newGroupFuture(matcher, Channel::close);
+     }
+ 
+     @Override
+     public ChannelGroupFuture deregister(ChannelMatcher matcher) {
+         ObjectUtil.checkNotNull(matcher, "matcher");
++        return newGroupFuture(matcher, Channel::deregister);
++    }
+ 
++    /**
++     * Applies {@code op} to every matching channel (server channels first, then non-server channels, preserving
++     * iteration order) and aggregates the resulting futures into a single {@link ChannelGroupFuture}.
++     */
++    private ChannelGroupFuture newGroupFuture(ChannelMatcher matcher, Function<Channel, ChannelFuture> op) {
+         Map<Channel, ChannelFuture> futures =
+                 new LinkedHashMap<Channel, ChannelFuture>(size());
+ 
+         for (Channel c: serverChannels.values()) {
+             if (matcher.matches(c)) {
+-                futures.put(c, c.deregister());
++                futures.put(c, op.apply(c));
+             }
+         }
+         for (Channel c: nonServerChannels.values()) {
+             if (matcher.matches(c)) {
+-                futures.put(c, c.deregister());
++                futures.put(c, op.apply(c));
+             }
+         }
+ 
+@@ -419,21 +398,7 @@ public class DefaultChannelGroup extends AbstractSet<Channel> implements Channel
+ 
+     @Override
+     public ChannelGroupFuture newCloseFuture(ChannelMatcher matcher) {
+-        Map<Channel, ChannelFuture> futures =
+-                new LinkedHashMap<Channel, ChannelFuture>(size());
+-
+-        for (Channel c: serverChannels.values()) {
+-            if (matcher.matches(c)) {
+-                futures.put(c, c.closeFuture());
+-            }
+-        }
+-        for (Channel c: nonServerChannels.values()) {
+-            if (matcher.matches(c)) {
+-                futures.put(c, c.closeFuture());
+-            }
+-        }
+-
+-        return new DefaultChannelGroupFuture(this, futures, executor);
++        return newGroupFuture(matcher, Channel::closeFuture);
+     }
+ 
+     @Override
+diff --git a/transport/src/main/java/io/netty/channel/group/DefaultChannelGroupFuture.java b/transport/src/main/java/io/netty/channel/group/DefaultChannelGroupFuture.java
+index 4b1a05103..860fb9587 100644
+--- a/transport/src/main/java/io/netty/channel/group/DefaultChannelGroupFuture.java
++++ b/transport/src/main/java/io/netty/channel/group/DefaultChannelGroupFuture.java
+@@ -24,13 +24,10 @@ import io.netty.util.concurrent.EventExecutor;
+ import io.netty.util.concurrent.Future;
+ import io.netty.util.concurrent.GenericFutureListener;
+ import io.netty.util.concurrent.ImmediateEventExecutor;
+-import io.netty.util.internal.ObjectUtil;
+ 
+ import java.util.ArrayList;
+-import java.util.Collection;
+ import java.util.Collections;
+ import java.util.Iterator;
+-import java.util.LinkedHashMap;
+ import java.util.List;
+ import java.util.Map;
+ 
+@@ -78,31 +75,6 @@ final class DefaultChannelGroupFuture extends DefaultPromise<Void> implements Ch
+         }
+     };
+ 
+-    /**
+-     * Creates a new instance.
+-     */
+-    DefaultChannelGroupFuture(ChannelGroup group, Collection<ChannelFuture> futures,  EventExecutor executor) {
+-        super(executor);
+-        this.group = ObjectUtil.checkNotNull(group, "group");
+-        ObjectUtil.checkNotNull(futures, "futures");
+-
+-        Map<Channel, ChannelFuture> futureMap = new LinkedHashMap<Channel, ChannelFuture>();
+-        for (ChannelFuture f: futures) {
+-            futureMap.put(f.channel(), f);
+-        }
+-
+-        this.futures = Collections.unmodifiableMap(futureMap);
+-
+-        for (ChannelFuture f: this.futures.values()) {
+-            f.addListener(childListener);
+-        }
+-
+-        // Done on arrival?
+-        if (this.futures.isEmpty()) {
+-            setSuccess0();
+-        }
+-    }
+-
+     DefaultChannelGroupFuture(ChannelGroup group, Map<Channel, ChannelFuture> futures, EventExecutor executor) {
+         super(executor);
+         this.group = group;

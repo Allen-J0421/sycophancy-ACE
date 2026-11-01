@@ -1,0 +1,316 @@
+diff --git a/core/src/main/java/com/taobao/arthas/core/command/monitor200/ProfilerCommand.java b/core/src/main/java/com/taobao/arthas/core/command/monitor200/ProfilerCommand.java
+index 1f30dd8ff..8b484f516 100644
+--- a/core/src/main/java/com/taobao/arthas/core/command/monitor200/ProfilerCommand.java
++++ b/core/src/main/java/com/taobao/arthas/core/command/monitor200/ProfilerCommand.java
+@@ -745,19 +745,19 @@ public class ProfilerCommand extends AnnotatedCommand {
+             } else if (ProfilerAction.dumpFlat.equals(profilerAction)) {
+                 int maxMethods = 0;
+                 if (actionArg != null) {
+-                    maxMethods = Integer.valueOf(actionArg);
++                    maxMethods = Integer.parseInt(actionArg);
+                 }
+                 String result = asyncProfiler.dumpFlat(maxMethods);
+                 appendExecuteResult(process, result);
+             } else if (ProfilerAction.dumpTraces.equals(profilerAction)) {
+                 int maxTraces = 0;
+                 if (actionArg != null) {
+-                    maxTraces = Integer.valueOf(actionArg);
++                    maxTraces = Integer.parseInt(actionArg);
+                 }
+                 String result = asyncProfiler.dumpTraces(maxTraces);
+                 appendExecuteResult(process, result);
+             } else if (ProfilerAction.getSamples.equals(profilerAction)) {
+-                String result = "" + asyncProfiler.getSamples() + "\n";
++                String result = Long.toString(asyncProfiler.getSamples()) + "\n";
+                 appendExecuteResult(process, result);
+             }
+             process.end();
+diff --git a/core/src/main/java/com/taobao/arthas/core/security/SecurityAuthenticatorImpl.java b/core/src/main/java/com/taobao/arthas/core/security/SecurityAuthenticatorImpl.java
+index b684a11c3..ca94e4c43 100644
+--- a/core/src/main/java/com/taobao/arthas/core/security/SecurityAuthenticatorImpl.java
++++ b/core/src/main/java/com/taobao/arthas/core/security/SecurityAuthenticatorImpl.java
+@@ -39,20 +39,15 @@ public class SecurityAuthenticatorImpl implements SecurityAuthenticator {
+ 
+     @Override
+     public void setName(String name) {
+-        // TODO Auto-generated method stub
+-
+     }
+ 
+     @Override
+     public String getName() {
+-        // TODO Auto-generated method stub
+         return null;
+     }
+ 
+     @Override
+     public void setRoleClassNames(String names) {
+-        // TODO Auto-generated method stub
+-
+     }
+ 
+     @Override
+@@ -82,13 +77,10 @@ public class SecurityAuthenticatorImpl implements SecurityAuthenticator {
+ 
+     @Override
+     public void logout(Subject subject) throws LoginException {
+-        // TODO Auto-generated method stub
+-
+     }
+ 
+     @Override
+     public String getUserRoles(Subject subject) {
+-        // TODO Auto-generated method stub
+         return null;
+     }
+ 
+diff --git a/core/src/main/java/com/taobao/arthas/core/server/ArthasBootstrap.java b/core/src/main/java/com/taobao/arthas/core/server/ArthasBootstrap.java
+index 2b62037d1..2c5095055 100644
+--- a/core/src/main/java/com/taobao/arthas/core/server/ArthasBootstrap.java
++++ b/core/src/main/java/com/taobao/arthas/core/server/ArthasBootstrap.java
+@@ -364,13 +364,24 @@ public class ArthasBootstrap {
+      * @throws IOException 服务器启动失败
+      */
+     private void bind(Configure configure) throws Throwable {
+-
+         long start = System.currentTimeMillis();
+-
+         if (!isBindRef.compareAndSet(false, true)) {
+             throw new IllegalStateException("already bind");
+         }
++        resolvePortsAndAppName(configure);
++        startTunnelClient(configure);
++        try {
++            initShellServer(configure);
++            logger().info("as-server started in {} ms", System.currentTimeMillis() - start);
++            logCrossMountNamespaceAttachSuccess(configure, arthasHome(), logger());
++        } catch (Throwable e) {
++            logger().error("Error during start as-server", e);
++            destroy();
++            throw e;
++        }
++    }
+ 
++    private void resolvePortsAndAppName(Configure configure) {
+         // init random port
+         if (configure.getTelnetPort() != null && configure.getTelnetPort() == 0) {
+             int newTelnetPort = SocketUtils.findAvailableTcpPort();
+@@ -387,7 +398,9 @@ public class ArthasBootstrap {
+             configure.setAppName(System.getProperty(ArthasConstants.PROJECT_NAME,
+                     System.getProperty(ArthasConstants.SPRING_APPLICATION_NAME, null)));
+         }
++    }
+ 
++    private void startTunnelClient(Configure configure) {
+         try {
+             if (configure.getTunnelServer() != null) {
+                 tunnelClient = new TunnelClient();
+@@ -401,120 +414,112 @@ public class ArthasBootstrap {
+         } catch (Throwable t) {
+             logger().error("start tunnel client error", t);
+         }
++    }
+ 
+-        try {
+-            ShellServerOptions options = new ShellServerOptions()
+-                            .setInstrumentation(instrumentation)
+-                            .setPid(PidUtils.currentLongPid())
+-                            .setWelcomeMessage(ArthasBanner.welcome());
+-            if (configure.getSessionTimeout() != null) {
+-                options.setSessionTimeout(configure.getSessionTimeout() * 1000);
+-            }
++    private void initShellServer(Configure configure) throws Throwable {
++        ShellServerOptions options = new ShellServerOptions()
++                        .setInstrumentation(instrumentation)
++                        .setPid(PidUtils.currentLongPid())
++                        .setWelcomeMessage(ArthasBanner.welcome());
++        if (configure.getSessionTimeout() != null) {
++            options.setSessionTimeout(configure.getSessionTimeout() * 1000);
++        }
+ 
+-            this.httpSessionManager = new HttpSessionManager();
+-            if (IPUtils.isAllZeroIP(configure.getIp()) && StringUtils.isBlank(configure.getPassword())) {
+-                // 当 listen 0.0.0.0 时，强制生成密码，防止被远程连接
+-                String errorMsg = "Listening on 0.0.0.0 is very dangerous! External users can connect to your machine! "
+-                        + "No password is currently configured. " + "Therefore, a default password is generated, "
+-                        + "and clients need to use the password to connect!";
+-                AnsiLog.error(errorMsg);
+-                configure.setPassword(StringUtils.randomString(64));
+-                AnsiLog.error("Generated arthas password: " + configure.getPassword());
+-
+-                logger().error(errorMsg);
+-                logger().info("Generated arthas password: " + configure.getPassword());
+-            }
++        this.httpSessionManager = new HttpSessionManager();
++        if (IPUtils.isAllZeroIP(configure.getIp()) && StringUtils.isBlank(configure.getPassword())) {
++            // 当 listen 0.0.0.0 时，强制生成密码，防止被远程连接
++            String errorMsg = "Listening on 0.0.0.0 is very dangerous! External users can connect to your machine! "
++                    + "No password is currently configured. " + "Therefore, a default password is generated, "
++                    + "and clients need to use the password to connect!";
++            AnsiLog.error(errorMsg);
++            configure.setPassword(StringUtils.randomString(64));
++            AnsiLog.error("Generated arthas password: " + configure.getPassword());
+ 
+-            this.securityAuthenticator = new SecurityAuthenticatorImpl(configure.getUsername(), configure.getPassword());
++            logger().error(errorMsg);
++            logger().info("Generated arthas password: " + configure.getPassword());
++        }
+ 
+-            shellServer = new ShellServerImpl(options);
++        this.securityAuthenticator = new SecurityAuthenticatorImpl(configure.getUsername(), configure.getPassword());
+ 
+-            List<String> disabledCommands = new ArrayList<String>();
+-            if (configure.getDisabledCommands() != null) {
+-                String[] strings = StringUtils.tokenizeToStringArray(configure.getDisabledCommands(), ",");
+-                if (strings != null) {
+-                    disabledCommands.addAll(Arrays.asList(strings));
+-                }
+-            }
+-            BuiltinCommandPack builtinCommands = new BuiltinCommandPack(disabledCommands);
+-            List<CommandResolver> resolvers = new ArrayList<CommandResolver>();
+-            CommandResolver externalCommands = loadExternalCommandResolver(shellServer, builtinCommands);
+-            if (externalCommands != null) {
+-                resolvers.add(externalCommands);
++        shellServer = new ShellServerImpl(options);
++
++        List<String> disabledCommands = new ArrayList<String>();
++        if (configure.getDisabledCommands() != null) {
++            String[] strings = StringUtils.tokenizeToStringArray(configure.getDisabledCommands(), ",");
++            if (strings != null) {
++                disabledCommands.addAll(Arrays.asList(strings));
+             }
+-            resolvers.add(builtinCommands);
++        }
++        BuiltinCommandPack builtinCommands = new BuiltinCommandPack(disabledCommands);
++        List<CommandResolver> resolvers = new ArrayList<CommandResolver>();
++        CommandResolver externalCommands = loadExternalCommandResolver(shellServer, builtinCommands);
++        if (externalCommands != null) {
++            resolvers.add(externalCommands);
++        }
++        resolvers.add(builtinCommands);
+ 
+-            //worker group
+-            workerGroup = new NioEventLoopGroup(new DefaultThreadFactory("arthas-TermServer", true));
++        //worker group
++        workerGroup = new NioEventLoopGroup(new DefaultThreadFactory("arthas-TermServer", true));
+ 
+-            if (configure.getTelnetPort() != null && configure.getTelnetPort() > 0) {
+-                logger().info("try to bind telnet server, host: {}, port: {}.", configure.getIp(), configure.getTelnetPort());
+-                shellServer.registerTermServer(new HttpTelnetTermServer(configure.getIp(), configure.getTelnetPort(),
+-                        options.getConnectionTimeout(), workerGroup, httpSessionManager));
+-            } else {
+-                logger().info("telnet port is {}, skip bind telnet server.", configure.getTelnetPort());
+-            }
+-            if (configure.getHttpPort() != null && configure.getHttpPort() > 0) {
+-                logger().info("try to bind http server, host: {}, port: {}.", configure.getIp(), configure.getHttpPort());
++        if (configure.getTelnetPort() != null && configure.getTelnetPort() > 0) {
++            logger().info("try to bind telnet server, host: {}, port: {}.", configure.getIp(), configure.getTelnetPort());
++            shellServer.registerTermServer(new HttpTelnetTermServer(configure.getIp(), configure.getTelnetPort(),
++                    options.getConnectionTimeout(), workerGroup, httpSessionManager));
++        } else {
++            logger().info("telnet port is {}, skip bind telnet server.", configure.getTelnetPort());
++        }
++        if (configure.getHttpPort() != null && configure.getHttpPort() > 0) {
++            logger().info("try to bind http server, host: {}, port: {}.", configure.getIp(), configure.getHttpPort());
++            shellServer.registerTermServer(new HttpTermServer(configure.getIp(), configure.getHttpPort(),
++                    options.getConnectionTimeout(), workerGroup, httpSessionManager));
++        } else {
++            // listen local address in VM communication
++            if (configure.getTunnelServer() != null) {
+                 shellServer.registerTermServer(new HttpTermServer(configure.getIp(), configure.getHttpPort(),
+                         options.getConnectionTimeout(), workerGroup, httpSessionManager));
+-            } else {
+-                // listen local address in VM communication
+-                if (configure.getTunnelServer() != null) {
+-                    shellServer.registerTermServer(new HttpTermServer(configure.getIp(), configure.getHttpPort(),
+-                            options.getConnectionTimeout(), workerGroup, httpSessionManager));
+-                }
+-                logger().info("http port is {}, skip bind http server.", configure.getHttpPort());
+             }
++            logger().info("http port is {}, skip bind http server.", configure.getHttpPort());
++        }
+ 
+-            for (CommandResolver resolver : resolvers) {
+-                shellServer.registerCommandResolver(resolver);
+-            }
++        for (CommandResolver resolver : resolvers) {
++            shellServer.registerCommandResolver(resolver);
++        }
+ 
+-            shellServer.listen(new BindHandler(isBindRef));
+-            if (!isBind()) {
+-                throw new IllegalStateException("Arthas failed to bind telnet or http port! Telnet port: "
+-                        + String.valueOf(configure.getTelnetPort()) + ", http port: "
+-                        + String.valueOf(configure.getHttpPort()));
+-            }
++        shellServer.listen(new BindHandler(isBindRef));
++        if (!isBind()) {
++            throw new IllegalStateException("Arthas failed to bind telnet or http port! Telnet port: "
++                    + configure.getTelnetPort() + ", http port: " + configure.getHttpPort());
++        }
+ 
+-            //http api session manager
+-            sessionManager = new SessionManagerImpl(options, shellServer.getCommandManager(), shellServer.getJobController());
+-            //http api handler
+-            httpApiHandler = new HttpApiHandler(historyManager, sessionManager);
+-
+-            // Mcp Server
+-            String mcpEndpoint = configure.getMcpEndpoint();
+-            String mcpProtocol = configure.getMcpProtocol();
+-            if (mcpEndpoint != null && !mcpEndpoint.trim().isEmpty()) {
+-                logger().info("try to start mcp server, endpoint: {}, protocol: {}.", mcpEndpoint, mcpProtocol);
+-                CommandExecutor commandExecutor = new CommandExecutorImpl(sessionManager);
+-                this.arthasMcpBootstrap = new ArthasMcpBootstrap(commandExecutor, mcpEndpoint, mcpProtocol);
+-                this.mcpRequestHandler = this.arthasMcpBootstrap.start().getMcpRequestHandler();
+-            }
+-            logger().info("as-server listening on network={};telnet={};http={};timeout={};mcp={};mcpProtocol={};", configure.getIp(),
+-                    configure.getTelnetPort(), configure.getHttpPort(), options.getConnectionTimeout(), configure.getMcpEndpoint(), configure.getMcpProtocol());
++        //http api session manager
++        sessionManager = new SessionManagerImpl(options, shellServer.getCommandManager(), shellServer.getJobController());
++        //http api handler
++        httpApiHandler = new HttpApiHandler(historyManager, sessionManager);
+ 
+-            // 异步回报启动次数
+-            if (configure.getStatUrl() != null) {
+-                logger().info("arthas stat url: {}", configure.getStatUrl());
+-            }
+-            UserStatUtil.setStatUrl(configure.getStatUrl());
+-            UserStatUtil.setAgentId(configure.getAgentId());
+-            UserStatUtil.arthasStart();
++        // Mcp Server
++        String mcpEndpoint = configure.getMcpEndpoint();
++        String mcpProtocol = configure.getMcpProtocol();
++        if (mcpEndpoint != null && !mcpEndpoint.trim().isEmpty()) {
++            logger().info("try to start mcp server, endpoint: {}, protocol: {}.", mcpEndpoint, mcpProtocol);
++            CommandExecutor commandExecutor = new CommandExecutorImpl(sessionManager);
++            this.arthasMcpBootstrap = new ArthasMcpBootstrap(commandExecutor, mcpEndpoint, mcpProtocol);
++            this.mcpRequestHandler = this.arthasMcpBootstrap.start().getMcpRequestHandler();
++        }
++        logger().info("as-server listening on network={};telnet={};http={};timeout={};mcp={};mcpProtocol={};", configure.getIp(),
++                configure.getTelnetPort(), configure.getHttpPort(), options.getConnectionTimeout(), configure.getMcpEndpoint(), configure.getMcpProtocol());
+ 
+-            try {
+-                SpyAPI.init();
+-            } catch (Throwable e) {
+-                // ignore
+-            }
++        // 异步回报启动次数
++        if (configure.getStatUrl() != null) {
++            logger().info("arthas stat url: {}", configure.getStatUrl());
++        }
++        UserStatUtil.setStatUrl(configure.getStatUrl());
++        UserStatUtil.setAgentId(configure.getAgentId());
++        UserStatUtil.arthasStart();
+ 
+-            logger().info("as-server started in {} ms", System.currentTimeMillis() - start);
+-            logCrossMountNamespaceAttachSuccess(configure, arthasHome(), logger());
++        try {
++            SpyAPI.init();
+         } catch (Throwable e) {
+-            logger().error("Error during start as-server", e);
+-            destroy();
+-            throw e;
++            logger().warn("SpyAPI.init() failed", e);
+         }
+     }
+ 

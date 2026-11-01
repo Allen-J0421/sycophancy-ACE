@@ -1,0 +1,305 @@
+diff --git a/core/src/main/java/com/taobao/arthas/core/util/ThreadUtil.java b/core/src/main/java/com/taobao/arthas/core/util/ThreadUtil.java
+index 945194ae8..191717e87 100644
+--- a/core/src/main/java/com/taobao/arthas/core/util/ThreadUtil.java
++++ b/core/src/main/java/com/taobao/arthas/core/util/ThreadUtil.java
+@@ -192,75 +192,14 @@ abstract public class ThreadUtil {
+             sb.append(" time=").append(time).append("ms");
+         }
+ 
+-        sb.append(" ").append(threadInfo.getThreadState());
++        appendThreadStateLine(sb, threadInfo.getThreadState(), threadInfo.getLockName(),
++                threadInfo.getLockOwnerName(), threadInfo.getLockOwnerId(), threadInfo.isSuspended(),
++                threadInfo.isInNative());
+ 
+-        if (threadInfo.getLockName() != null) {
+-            sb.append(" on ").append(threadInfo.getLockName());
+-        }
+-        if (threadInfo.getLockOwnerName() != null) {
+-            sb.append(" owned by \"").append(threadInfo.getLockOwnerName()).append("\" Id=").append(threadInfo.getLockOwnerId());
+-        }
+-        if (threadInfo.isSuspended()) {
+-            sb.append(" (suspended)");
+-        }
+-        if (threadInfo.isInNative()) {
+-            sb.append(" (in native)");
+-        }
+-        sb.append('\n');
+-        int i = 0;
+-        for (StackTraceElement ste : threadInfo.getStackTrace()) {
+-            sb.append("\tat ").append(ste.toString());
+-            sb.append('\n');
+-            if (i == 0 && threadInfo.getLockInfo() != null) {
+-                Thread.State ts = threadInfo.getThreadState();
+-                switch (ts) {
+-                    case BLOCKED:
+-                        sb.append("\t-  blocked on ").append(threadInfo.getLockInfo());
+-                        sb.append('\n');
+-                        break;
+-                    case WAITING:
+-                        sb.append("\t-  waiting on ").append(threadInfo.getLockInfo());
+-                        sb.append('\n');
+-                        break;
+-                    case TIMED_WAITING:
+-                        sb.append("\t-  waiting on ").append(threadInfo.getLockInfo());
+-                        sb.append('\n');
+-                        break;
+-                    default:
+-                }
+-            }
+-
+-            for (MonitorInfo mi : threadInfo.getLockedMonitors()) {
+-                if (mi.getLockedStackDepth() == i) {
+-                    sb.append("\t-  locked ").append(mi);
+-                    if (mi.getIdentityHashCode() == lockIdentityHashCode) {
+-                        Ansi highlighted = Ansi.ansi().fg(Ansi.Color.RED);
+-                        highlighted.a(" <---- but blocks ").a(blockingThreadCount).a(" other threads!");
+-                        sb.append(highlighted.reset().toString());
+-                    }
+-                    sb.append('\n');
+-                }
+-            }
+-            ++i;
+-        }
+-        if (i < threadInfo.getStackTrace().length) {
+-            sb.append("\t...");
+-            sb.append('\n');
+-        }
++        appendStackTraceAndLocks(sb, threadInfo.getStackTrace(), threadInfo.getThreadState(),
++                threadInfo.getLockInfo(), threadInfo.getLockedMonitors(), threadInfo.getLockedSynchronizers(),
++                lockIdentityHashCode, blockingThreadCount);
+ 
+-        LockInfo[] locks = threadInfo.getLockedSynchronizers();
+-        if (locks.length > 0) {
+-            sb.append("\n\tNumber of locked synchronizers = ").append(locks.length);
+-            sb.append('\n');
+-            for (LockInfo li : locks) {
+-                sb.append("\t- ").append(li);
+-                if (li.getIdentityHashCode() == lockIdentityHashCode) {
+-                    sb.append(" <---- but blocks ").append(blockingThreadCount);
+-                    sb.append(" other threads!");
+-                }
+-                sb.append('\n');
+-            }
+-        }
+         sb.append('\n');
+         return sb.toString().replace("\t", "    ");
+     }
+@@ -291,46 +230,72 @@ abstract public class ThreadUtil {
+             return sb.toString();
+         }
+ 
+-        sb.append(" ").append(threadInfo.getState());
++        appendThreadStateLine(sb, threadInfo.getState(), threadInfo.getLockName(),
++                threadInfo.getLockOwnerName(), threadInfo.getLockOwnerId(), threadInfo.isSuspended(),
++                threadInfo.isInNative());
+ 
+-        if (threadInfo.getLockName() != null) {
+-            sb.append(" on ").append(threadInfo.getLockName());
++        appendStackTraceAndLocks(sb, threadInfo.getStackTrace(), threadInfo.getState(),
++                threadInfo.getLockInfo(), threadInfo.getLockedMonitors(), threadInfo.getLockedSynchronizers(),
++                lockIdentityHashCode, blockingThreadCount);
++
++        sb.append('\n');
++        return sb.toString().replace("\t", "    ");
++    }
++
++    /**
++     * 追加线程状态行：线程状态、持有/等待的锁、锁持有者、挂起与 native 标志，以换行结束。
++     */
++    private static void appendThreadStateLine(StringBuilder sb, Thread.State state, String lockName,
++                                              String lockOwnerName, long lockOwnerId, boolean suspended,
++                                              boolean inNative) {
++        sb.append(" ").append(state);
++
++        if (lockName != null) {
++            sb.append(" on ").append(lockName);
+         }
+-        if (threadInfo.getLockOwnerName() != null) {
+-            sb.append(" owned by \"").append(threadInfo.getLockOwnerName()).append("\" Id=").append(threadInfo.getLockOwnerId());
++        if (lockOwnerName != null) {
++            sb.append(" owned by \"").append(lockOwnerName).append("\" Id=").append(lockOwnerId);
+         }
+-        if (threadInfo.isSuspended()) {
++        if (suspended) {
+             sb.append(" (suspended)");
+         }
+-        if (threadInfo.isInNative()) {
++        if (inNative) {
+             sb.append(" (in native)");
+         }
+         sb.append('\n');
++    }
++
++    /**
++     * 追加线程堆栈帧，并在相应帧标注等待/持有的锁与锁定的 monitor，最后追加锁定的同步器列表。
++     * 对与 {@code lockIdentityHashCode} 匹配的锁高亮其阻塞的线程数。
++     */
++    private static void appendStackTraceAndLocks(StringBuilder sb, StackTraceElement[] stackTrace, Thread.State state,
++                                                 LockInfo lockInfo, MonitorInfo[] lockedMonitors,
++                                                 LockInfo[] lockedSynchronizers, int lockIdentityHashCode,
++                                                 int blockingThreadCount) {
+         int i = 0;
+-        for (; i < threadInfo.getStackTrace().length; i++) {
+-            StackTraceElement ste = threadInfo.getStackTrace()[i];
++        for (StackTraceElement ste : stackTrace) {
+             sb.append("\tat ").append(ste.toString());
+             sb.append('\n');
+-            if (i == 0 && threadInfo.getLockInfo() != null) {
+-                Thread.State ts = threadInfo.getState();
+-                switch (ts) {
++            if (i == 0 && lockInfo != null) {
++                switch (state) {
+                     case BLOCKED:
+-                        sb.append("\t-  blocked on ").append(threadInfo.getLockInfo());
++                        sb.append("\t-  blocked on ").append(lockInfo);
+                         sb.append('\n');
+                         break;
+                     case WAITING:
+-                        sb.append("\t-  waiting on ").append(threadInfo.getLockInfo());
++                        sb.append("\t-  waiting on ").append(lockInfo);
+                         sb.append('\n');
+                         break;
+                     case TIMED_WAITING:
+-                        sb.append("\t-  waiting on ").append(threadInfo.getLockInfo());
++                        sb.append("\t-  waiting on ").append(lockInfo);
+                         sb.append('\n');
+                         break;
+                     default:
+                 }
+             }
+ 
+-            for (MonitorInfo mi : threadInfo.getLockedMonitors()) {
++            for (MonitorInfo mi : lockedMonitors) {
+                 if (mi.getLockedStackDepth() == i) {
+                     sb.append("\t-  locked ").append(mi);
+                     if (mi.getIdentityHashCode() == lockIdentityHashCode) {
+@@ -341,17 +306,17 @@ abstract public class ThreadUtil {
+                     sb.append('\n');
+                 }
+             }
++            ++i;
+         }
+-        if (i < threadInfo.getStackTrace().length) {
++        if (i < stackTrace.length) {
+             sb.append("\t...");
+             sb.append('\n');
+         }
+ 
+-        LockInfo[] locks = threadInfo.getLockedSynchronizers();
+-        if (locks.length > 0) {
+-            sb.append("\n\tNumber of locked synchronizers = ").append(locks.length);
++        if (lockedSynchronizers.length > 0) {
++            sb.append("\n\tNumber of locked synchronizers = ").append(lockedSynchronizers.length);
+             sb.append('\n');
+-            for (LockInfo li : locks) {
++            for (LockInfo li : lockedSynchronizers) {
+                 sb.append("\t- ").append(li);
+                 if (li.getIdentityHashCode() == lockIdentityHashCode) {
+                     sb.append(" <---- but blocks ").append(blockingThreadCount);
+@@ -360,8 +325,6 @@ abstract public class ThreadUtil {
+                 sb.append('\n');
+             }
+         }
+-        sb.append('\n');
+-        return sb.toString().replace("\t", "    ");
+     }
+ 
+     /**
+diff --git a/core/src/test/java/com/taobao/arthas/core/util/ThreadUtilTest.java b/core/src/test/java/com/taobao/arthas/core/util/ThreadUtilTest.java
+new file mode 100644
+index 000000000..3216fc9de
+--- /dev/null
++++ b/core/src/test/java/com/taobao/arthas/core/util/ThreadUtilTest.java
+@@ -0,0 +1,92 @@
++package com.taobao.arthas.core.util;
++
++import java.lang.management.LockInfo;
++import java.lang.management.MonitorInfo;
++
++import com.taobao.arthas.core.command.model.BusyThreadInfo;
++import com.taobao.arthas.core.command.model.ThreadVO;
++
++import org.junit.Assert;
++import org.junit.Test;
++
++/**
++ * Characterization tests for {@link ThreadUtil#getFullStacktrace(BusyThreadInfo, int, int)},
++ * covering the shared state-line and stack-trace/lock rendering helpers.
++ */
++public class ThreadUtilTest {
++
++    private static BusyThreadInfo newBusyThreadInfo(String name, long id, Thread.State state) {
++        ThreadVO vo = new ThreadVO();
++        vo.setId(id);
++        vo.setName(name);
++        vo.setState(state);
++        vo.setCpu(-1);
++        vo.setDeltaTime(-1);
++        vo.setTime(-1);
++        BusyThreadInfo info = new BusyThreadInfo(vo, null);
++        info.setLockedMonitors(new MonitorInfo[0]);
++        info.setLockedSynchronizers(new LockInfo[0]);
++        return info;
++    }
++
++    @Test
++    public void testRunnableThreadNoLocks() {
++        BusyThreadInfo info = newBusyThreadInfo("main", 5, Thread.State.RUNNABLE);
++        info.setStackTrace(new StackTraceElement[] {
++                new StackTraceElement("demo.Foo", "bar", "Foo.java", 10)
++        });
++
++        String result = ThreadUtil.getFullStacktrace(info, -1, 0);
++
++        Assert.assertEquals(
++                "\"main\" Id=5 RUNNABLE\n" +
++                        "    at demo.Foo.bar(Foo.java:10)\n" +
++                        "\n",
++                result);
++    }
++
++    @Test
++    public void testInternalThreadWithoutId() {
++        BusyThreadInfo info = newBusyThreadInfo("VM Thread", 0, Thread.State.RUNNABLE);
++        info.setStackTrace(new StackTraceElement[0]);
++
++        String result = ThreadUtil.getFullStacktrace(info, -1, 0);
++
++        Assert.assertEquals("\"VM Thread\" [Internal] RUNNABLE\n\n", result);
++    }
++
++    @Test
++    public void testLockedSynchronizerHighlighted() {
++        BusyThreadInfo info = newBusyThreadInfo("worker", 7, Thread.State.RUNNABLE);
++        info.setStackTrace(new StackTraceElement[] {
++                new StackTraceElement("demo.Foo", "bar", "Foo.java", 10)
++        });
++        info.setLockedSynchronizers(new LockInfo[] {
++                new LockInfo("demo.MyLock", 0x3039)
++        });
++
++        String result = ThreadUtil.getFullStacktrace(info, 0x3039, 3);
++
++        Assert.assertTrue(result, result.contains("Number of locked synchronizers = 1"));
++        Assert.assertTrue(result, result.contains("- demo.MyLock@3039 <---- but blocks 3 other threads!"));
++    }
++
++    @Test
++    public void testBlockedThreadWithLockedMonitor() {
++        BusyThreadInfo info = newBusyThreadInfo("worker", 7, Thread.State.BLOCKED);
++        StackTraceElement frame = new StackTraceElement("demo.Foo", "bar", "Foo.java", 10);
++        info.setStackTrace(new StackTraceElement[] { frame });
++        info.setLockInfo(new LockInfo("demo.MyLock", 0x1234));
++        info.setLockName("demo.MyLock@1234");
++        info.setLockedMonitors(new MonitorInfo[] {
++                new MonitorInfo("demo.MyMonitor", 0x5678, 0, frame)
++        });
++
++        String result = ThreadUtil.getFullStacktrace(info, 0x5678, 2);
++
++        Assert.assertTrue(result, result.contains("BLOCKED on demo.MyLock@1234"));
++        Assert.assertTrue(result, result.contains("-  blocked on demo.MyLock@1234"));
++        Assert.assertTrue(result, result.contains("-  locked demo.MyMonitor@5678"));
++        Assert.assertTrue(result, result.contains("other threads!"));
++    }
++}

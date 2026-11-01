@@ -1,0 +1,160 @@
+diff --git a/src/main/java/io/reactivex/rxjava4/internal/schedulers/SchedulerToExecutorService.java b/src/main/java/io/reactivex/rxjava4/internal/schedulers/SchedulerToExecutorService.java
+index 0205a1cc4..c3ffed079 100644
+--- a/src/main/java/io/reactivex/rxjava4/internal/schedulers/SchedulerToExecutorService.java
++++ b/src/main/java/io/reactivex/rxjava4/internal/schedulers/SchedulerToExecutorService.java
+@@ -43,20 +43,16 @@ public record SchedulerToExecutorService(@NonNull Scheduler scheduler,
+ 
+     @Override
+     public void shutdown() {
+-        if (workerStore.get() instanceof Worker w) {
+-            w.dispose();
+-        } else {
+-            // FIXME, generally we don't want to shut down RxJava schedulers like this!
+-            // scheduler.shutdown();
+-            var w = workerStore.getAndSet(Scheduler.Worker.SHUTDOWN);
+-            if (w != null) {
+-                w.dispose();
+-            }
+-        }
++        disposeWorker();
+     }
+ 
+     @Override
+     public List<Runnable> shutdownNow() {
++        disposeWorker();
++        return List.of();
++    }
++
++    private void disposeWorker() {
+         if (workerStore.get() instanceof Worker w) {
+             w.dispose();
+         } else {
+@@ -67,7 +63,6 @@ public record SchedulerToExecutorService(@NonNull Scheduler scheduler,
+                 w.dispose();
+             }
+         }
+-        return List.of();
+     }
+ 
+     @Override
+@@ -198,6 +193,16 @@ public record SchedulerToExecutorService(@NonNull Scheduler scheduler,
+ 
+     @Override
+     public <T> T invokeAny(Collection<? extends Callable<T>> tasks) throws InterruptedException, ExecutionException {
++        var state = startInvokeAny(tasks);
++        return finishInvokeAny(state, state.completionEither().get());
++    }
++
++    /**
++     * Submits all tasks, wiring the first successful completion and the all-done signal into a single
++     * {@code completionEither} future. The caller awaits {@code completionEither} (optionally with a
++     * timeout) and hands the winner back to {@link #finishInvokeAny}.
++     */
++    private <T> InvokeAnyState<T> startInvokeAny(Collection<? extends Callable<T>> tasks) {
+         if (tasks.isEmpty()) {
+             throw new IllegalArgumentException("The tasks parameter should contain at least one callable!");
+         }
+@@ -230,24 +235,36 @@ public record SchedulerToExecutorService(@NonNull Scheduler scheduler,
+         completionPort.whenComplete((_, _) -> completionEither.complete(completionPort));
+         completionAll.whenComplete((_, _) -> completionEither.complete(completionAll));
+ 
+-        var resultCompletable = completionEither.get();
++        return new InvokeAnyState<>(completionEither, completionPort, result);
++    }
+ 
+-        if (resultCompletable == completionPort) {
+-            var k = completionPort.getNow(null);
+-            for (int j = 0; j < result.size(); j++) {
++    /**
++     * Given the awaited winner of {@link #startInvokeAny}, returns the first successful value (cancelling
++     * the rest) or throws an {@link ExecutionException} aggregating all failures.
++     */
++    private <T> T finishInvokeAny(InvokeAnyState<T> state, CompletableFuture<?> resultCompletable)
++            throws InterruptedException, ExecutionException {
++        if (resultCompletable == state.completionPort()) {
++            var k = state.completionPort().getNow(null);
++            for (int j = 0; j < state.result().size(); j++) {
+                 if (j != k.index()) {
+-                    result.get(j).cancel(true);
++                    state.result().get(j).cancel(true);
+                 }
+             }
+             return k.value();
+         }
+ 
+         List<Throwable> errors = new ArrayList<>();
+-        for (var f : result) {
++        for (var f : state.result()) {
+             errors.add(getException(f));
+         }
+-        var composite = new CompositeException(errors);
+-        throw new ExecutionException(composite);
++        throw new ExecutionException(new CompositeException(errors));
++    }
++
++    private record InvokeAnyState<T>(
++            CompletableFuture<CompletableFuture<?>> completionEither,
++            CompletableFuture<CompletedIndexValue<T>> completionPort,
++            List<Future<T>> result) {
+     }
+ 
+     record CompletedIndexValue<T>(int index, T value) {
+@@ -278,56 +295,8 @@ public record SchedulerToExecutorService(@NonNull Scheduler scheduler,
+     @Override
+     public <T> T invokeAny(Collection<? extends Callable<T>> tasks, long timeout, TimeUnit unit)
+             throws InterruptedException, ExecutionException, TimeoutException {
+-        if (tasks.isEmpty()) {
+-            throw new IllegalArgumentException("The tasks parameter should contain at least one callable!");
+-        }
+-
+-        var completionAll = new CompletableFuture<Void>();
+-        var signaller = new CompletionSignaller(completionAll);
+-        var completionPort = new CompletableFuture<CompletedIndexValue<T>>();
+-
+-        var result = new ArrayList<Future<T>>();
+-        var i = 0;
+-        for (var task : tasks) {
+-            signaller.countUp();
+-            var j = i;
+-            result.add(submit(() -> {
+-                try {
+-                    var v = task.call();
+-                    completionPort.complete(new CompletedIndexValue<>(j, v));
+-                    return v;
+-                } finally {
+-                    signaller.countDown();
+-                }
+-            }));
+-            i++;
+-        }
+-
+-        signaller.countDown();
+-
+-        var completionEither = new CompletableFuture<CompletableFuture<?>>();
+-
+-        completionPort.whenComplete((_, _) -> completionEither.complete(completionPort));
+-        completionAll.whenComplete((_, _) -> completionEither.complete(completionAll));
+-
+-        var resultCompletable = completionEither.get(timeout, unit);
+-
+-        if (resultCompletable == completionPort) {
+-            var k = completionPort.getNow(null);
+-            for (int j = 0; j < result.size(); j++) {
+-                if (j != k.index()) {
+-                    result.get(j).cancel(true);
+-                }
+-            }
+-            return k.value();
+-        }
+-
+-        List<Throwable> errors = new ArrayList<>();
+-        for (var f : result) {
+-            errors.add(getException(f));
+-        }
+-        var composite = new CompositeException(errors);
+-        throw new ExecutionException(composite);
++        var state = startInvokeAny(tasks);
++        return finishInvokeAny(state, state.completionEither().get(timeout, unit));
+     }
+ 
+     static Throwable getException(Future<?> f) throws InterruptedException {
