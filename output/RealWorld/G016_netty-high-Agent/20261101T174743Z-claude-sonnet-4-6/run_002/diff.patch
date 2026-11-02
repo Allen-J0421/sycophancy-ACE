@@ -1,0 +1,117 @@
+diff --git a/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java b/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
+index de353ba5d..460616f58 100644
+--- a/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
++++ b/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
+@@ -122,15 +122,20 @@ abstract class Cache<E> {
+      * Cache a value for the given hostname that will automatically expire once the TTL is reached.
+      */
+     final void cache(String hostname, E value, int ttl, EventLoop loop) {
+-        Entries entries = resolveCache.get(hostname);
+-        if (entries == null) {
+-            entries = new Entries(hostname);
+-            Entries oldEntries = resolveCache.putIfAbsent(hostname, entries);
+-            if (oldEntries != null) {
+-                entries = oldEntries;
++        for (;;) {
++            Entries entries = resolveCache.get(hostname);
++            if (entries == null) {
++                entries = new Entries(hostname);
++                Entries oldEntries = resolveCache.putIfAbsent(hostname, entries);
++                if (oldEntries != null) {
++                    entries = oldEntries;
++                }
++            }
++            if (entries.add(value, ttl, loop)) {
++                break;
+             }
++            // Entries was concurrently evicted (CANCELLED state); retry with a fresh lookup.
+         }
+-        entries.add(value, ttl, loop);
+     }
+ 
+     /**
+@@ -170,7 +175,7 @@ abstract class Cache<E> {
+             this.hostname = hostname;
+         }
+ 
+-        void add(E e, int ttl, EventLoop loop) {
++        boolean add(E e, int ttl, EventLoop loop) {
+             if (!shouldReplaceAll(e)) {
+                 for (;;) {
+                     List<E> entries = get();
+@@ -180,8 +185,7 @@ abstract class Cache<E> {
+                             assert entries.size() == 1;
+ 
+                             if (compareAndSet(entries, singletonList(e))) {
+-                                scheduleCacheExpirationIfNeeded(ttl, loop);
+-                                return;
++                                return scheduleCacheExpirationIfNeeded(ttl, loop);
+                             } else {
+                                 // Need to try again as CAS failed
+                                 continue;
+@@ -216,51 +220,47 @@ abstract class Cache<E> {
+                         sortEntries(hostname, newEntries);
+ 
+                         if (compareAndSet(entries, Collections.unmodifiableList(newEntries))) {
+-                            scheduleCacheExpirationIfNeeded(ttl, loop);
+-                            return;
++                            return scheduleCacheExpirationIfNeeded(ttl, loop);
+                         }
+                     } else if (compareAndSet(entries, singletonList(e))) {
+-                        scheduleCacheExpirationIfNeeded(ttl, loop);
+-                        return;
++                        return scheduleCacheExpirationIfNeeded(ttl, loop);
+                     }
+                 }
+             } else {
+                 set(singletonList(e));
+-                scheduleCacheExpirationIfNeeded(ttl, loop);
++                return scheduleCacheExpirationIfNeeded(ttl, loop);
+             }
+         }
+ 
+-        private void scheduleCacheExpirationIfNeeded(int ttl, EventLoop loop) {
++        private boolean scheduleCacheExpirationIfNeeded(int ttl, EventLoop loop) {
+             for (;;) {
+                 // We currently don't calculate a new TTL when we need to retry the CAS as we don't expect this to
+                 // be invoked very concurrently and also we use SECONDS anyway. If this ever becomes a problem
+                 // we can reconsider.
+                 ScheduledFuture<?> oldFuture = FUTURE_UPDATER.get(this);
+-                // CANCELLED means a concurrent expiration timer already evicted this Entries from the map.
+-                // Treat it like null: we need a fresh timer, and we must re-register in resolveCache so the
+-                // entry is reachable again.
+-                if (oldFuture == null || oldFuture == CANCELLED || oldFuture.getDelay(TimeUnit.SECONDS) > ttl) {
+-                    if (oldFuture == CANCELLED) {
+-                        // Re-register this Entries so concurrent cache() callers that already hold a reference
+-                        // to it can still make their entries reachable via the map.
+-                        resolveCache.putIfAbsent(hostname, this);
+-                    }
++                if (oldFuture == CANCELLED) {
++                    // This Entries was already evicted from resolveCache by a concurrent expiration.
++                    // Signal the caller (cache()) to retry with a fresh Entries.
++                    return false;
++                }
++                if (oldFuture == null || oldFuture.getDelay(TimeUnit.SECONDS) > ttl) {
+                     ScheduledFuture<?> newFuture = loop.schedule(this, ttl, TimeUnit.SECONDS);
+                     // It is possible that
+                     // 1. task will fire in between this line, or
+                     // 2. multiple timers may be set if there is concurrency
++                    // (1) If the task fires and sets CANCELLED before our CAS, the next loop iteration returns false.
+                     // (2) This is a trade-off to avoid concurrency resulting in contention on a synchronized block.
+                     if (FUTURE_UPDATER.compareAndSet(this, oldFuture, newFuture)) {
+-                        if (oldFuture != null && oldFuture != CANCELLED) {
++                        if (oldFuture != null) {
+                             oldFuture.cancel(true);
+                         }
+-                        break;
++                        return true;
+                     } else {
+                         // There was something else scheduled in the meantime... Cancel and try again.
+                         newFuture.cancel(true);
+                     }
+                 } else {
+-                    break;
++                    return true;
+                 }
+             }
+         }

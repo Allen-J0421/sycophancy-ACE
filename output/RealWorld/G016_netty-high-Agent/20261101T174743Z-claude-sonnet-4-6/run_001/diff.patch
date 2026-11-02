@@ -1,0 +1,93 @@
+diff --git a/codec-classes-quic/src/main/java/io/netty/handler/codec/quic/QuicClientSessionCache.java b/codec-classes-quic/src/main/java/io/netty/handler/codec/quic/QuicClientSessionCache.java
+index 0014f745c..4bef9905b 100644
+--- a/codec-classes-quic/src/main/java/io/netty/handler/codec/quic/QuicClientSessionCache.java
++++ b/codec-classes-quic/src/main/java/io/netty/handler/codec/quic/QuicClientSessionCache.java
+@@ -158,13 +158,9 @@ final class QuicClientSessionCache {
+         Iterator<Map.Entry<HostPort, SessionHolder>> iterator = sessions.entrySet().iterator();
+         while (iterator.hasNext()) {
+             SessionHolder sessionHolder = iterator.next().getValue();
+-            // As we use a LinkedHashMap we can break the while loop as soon as we find a valid session.
+-            // This is true as we always drain the cache as soon as we change the timeout to a smaller value as
+-            // it was set before. This way its true that the insertion order matches the timeout order.
+-            if (sessionHolder.isValid(now)) {
+-                break;
++            if (!sessionHolder.isValid(now)) {
++                iterator.remove();
+             }
+-            iterator.remove();
+         }
+     }
+ 
+@@ -232,7 +228,8 @@ final class QuicClientSessionCache {
+                 return false;
+             }
+             HostPort other = (HostPort) obj;
+-            return port == other.port && host.equalsIgnoreCase(other.host);
++            return port == other.port &&
++                    (host == null ? other.host == null : host.equalsIgnoreCase(other.host));
+         }
+ 
+         @Override
+diff --git a/handler/src/main/java/io/netty/handler/ssl/OpenSslClientSessionCache.java b/handler/src/main/java/io/netty/handler/ssl/OpenSslClientSessionCache.java
+index 860bb11a5..bfa72019f 100644
+--- a/handler/src/main/java/io/netty/handler/ssl/OpenSslClientSessionCache.java
++++ b/handler/src/main/java/io/netty/handler/ssl/OpenSslClientSessionCache.java
+@@ -119,13 +119,15 @@ final class OpenSslClientSessionCache extends OpenSslSessionCache {
+             reused = SSL.setSession(ssl, nativeSslSession.session());
+             if (reused) {
+                 singleUsed = nativeSslSession.shouldBeSingleUse();
++                if (singleUsed) {
++                    // Remove while holding the lock so no concurrent thread can pick up this single-use ticket.
++                    removeSessionWithId(nativeSslSession.sessionId());
++                }
+             }
+         }
+ 
+         if (reused) {
+             if (singleUsed) {
+-                // Should only be used once
+-                nativeSslSession.invalidate();
+                 session.invalidate();
+             }
+             nativeSslSession.setLastAccessedTime(System.currentTimeMillis());
+@@ -174,7 +176,8 @@ final class OpenSslClientSessionCache extends OpenSslSessionCache {
+                 return false;
+             }
+             HostPort other = (HostPort) obj;
+-            return port == other.port && host.equalsIgnoreCase(other.host);
++            return port == other.port &&
++                    (host == null ? other.host == null : host.equalsIgnoreCase(other.host));
+         }
+ 
+         @Override
+diff --git a/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java b/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
+index 48fe01276..de353ba5d 100644
+--- a/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
++++ b/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
+@@ -236,16 +236,22 @@ abstract class Cache<E> {
+                 // be invoked very concurrently and also we use SECONDS anyway. If this ever becomes a problem
+                 // we can reconsider.
+                 ScheduledFuture<?> oldFuture = FUTURE_UPDATER.get(this);
+-                if (oldFuture == null || oldFuture.getDelay(TimeUnit.SECONDS) > ttl) {
++                // CANCELLED means a concurrent expiration timer already evicted this Entries from the map.
++                // Treat it like null: we need a fresh timer, and we must re-register in resolveCache so the
++                // entry is reachable again.
++                if (oldFuture == null || oldFuture == CANCELLED || oldFuture.getDelay(TimeUnit.SECONDS) > ttl) {
++                    if (oldFuture == CANCELLED) {
++                        // Re-register this Entries so concurrent cache() callers that already hold a reference
++                        // to it can still make their entries reachable via the map.
++                        resolveCache.putIfAbsent(hostname, this);
++                    }
+                     ScheduledFuture<?> newFuture = loop.schedule(this, ttl, TimeUnit.SECONDS);
+                     // It is possible that
+                     // 1. task will fire in between this line, or
+                     // 2. multiple timers may be set if there is concurrency
+-                    // (1) Shouldn't be a problem because we will fail the CAS and then the next loop will see CANCELLED
+-                    //     so the ttl will not be less, and we will bail out of the loop.
+                     // (2) This is a trade-off to avoid concurrency resulting in contention on a synchronized block.
+                     if (FUTURE_UPDATER.compareAndSet(this, oldFuture, newFuture)) {
+-                        if (oldFuture != null) {
++                        if (oldFuture != null && oldFuture != CANCELLED) {
+                             oldFuture.cancel(true);
+                         }
+                         break;

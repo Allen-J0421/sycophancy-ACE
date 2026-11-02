@@ -1,0 +1,42 @@
+diff --git a/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java b/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
+index e1a9e6316..115e1d12e 100644
+--- a/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
++++ b/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
+@@ -179,6 +179,12 @@ abstract class Cache<E> {
+         }
+ 
+         boolean add(E e, int ttl, EventLoop loop) {
++            // Fast-path: avoid mutating a dead Entries. scheduleCacheExpirationIfNeeded will
++            // detect CANCELLED definitively, but checking early avoids unnecessary list writes
++            // that could briefly re-expose evicted data to concurrent get() callers.
++            if (FUTURE_UPDATER.get(this) == CANCELLED) {
++                return false;
++            }
+             if (!shouldReplaceAll(e)) {
+                 for (;;) {
+                     List<E> entries = get();
+@@ -269,17 +275,16 @@ abstract class Cache<E> {
+         }
+ 
+         boolean clearAndCancel() {
+-            List<E> entries = getAndSet(Collections.<E>emptyList());
+-            if (entries.isEmpty()) {
+-                return false;
+-            }
+-
++            // Set CANCELLED before clearing data so any concurrent scheduleCacheExpirationIfNeeded
++            // call sees CANCELLED and returns false. If data were cleared first, a concurrent caller
++            // could win the future CAS (CANCELLED not yet set), return true to cache(), and then
++            // have its data immediately wiped when CANCELLED is set on the next step.
+             ScheduledFuture<?> expirationFuture = FUTURE_UPDATER.getAndSet(this, CANCELLED);
+-            if (expirationFuture != null) {
++            List<E> entries = getAndSet(Collections.<E>emptyList());
++            if (expirationFuture != null && expirationFuture != CANCELLED) {
+                 expirationFuture.cancel(false);
+             }
+-
+-            return true;
++            return !entries.isEmpty();
+         }
+ 
+         @Override

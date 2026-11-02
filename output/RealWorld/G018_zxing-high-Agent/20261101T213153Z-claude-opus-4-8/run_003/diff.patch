@@ -1,0 +1,210 @@
+diff --git a/core/src/main/java/com/google/zxing/datamatrix/decoder/DecodedBitStreamParser.java b/core/src/main/java/com/google/zxing/datamatrix/decoder/DecodedBitStreamParser.java
+index 6d370b51f..9581c20df 100644
+--- a/core/src/main/java/com/google/zxing/datamatrix/decoder/DecodedBitStreamParser.java
++++ b/core/src/main/java/com/google/zxing/datamatrix/decoder/DecodedBitStreamParser.java
+@@ -75,9 +75,6 @@ final class DecodedBitStreamParser {
+     'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z'
+   };
+ 
+-  // Shift 2 for Text is the same encoding as C40
+-  private static final char[] TEXT_SHIFT2_SET_CHARS = C40_SHIFT2_SET_CHARS;
+-
+   private static final char[] TEXT_SHIFT3_SET_CHARS = {
+     '`', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N',
+     'O',  'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '{', '|', '}', '~', (char) 127
+@@ -239,91 +236,7 @@ final class DecodedBitStreamParser {
+    */
+   private static void decodeC40Segment(BitSource bits, ECIStringBuilder result, Set<Integer> fnc1positions)
+       throws FormatException {
+-    // Three C40 values are encoded in a 16-bit value as
+-    // (1600 * C1) + (40 * C2) + C3 + 1
+-    // TODO(bbrown): The Upper Shift with C40 doesn't work in the 4 value scenario all the time
+-    boolean upperShift = false;
+-
+-    int[] cValues = new int[3];
+-    int shift = 0;
+-
+-    do {
+-      // If there is only one byte left then it will be encoded as ASCII
+-      if (bits.available() == 8) {
+-        return;
+-      }
+-      int firstByte = bits.readBits(8);
+-      if (firstByte == 254) {  // Unlatch codeword
+-        return;
+-      }
+-
+-      parseTwoBytes(firstByte, bits.readBits(8), cValues);
+-
+-      for (int i = 0; i < 3; i++) {
+-        int cValue = cValues[i];
+-        switch (shift) {
+-          case 0:
+-            if (cValue < 3) {
+-              shift = cValue + 1;
+-            } else if (cValue < C40_BASIC_SET_CHARS.length) {
+-              char c40char = C40_BASIC_SET_CHARS[cValue];
+-              if (upperShift) {
+-                result.append((char) (c40char + 128));
+-                upperShift = false;
+-              } else {
+-                result.append(c40char);
+-              }
+-            } else {
+-              throw FormatException.getFormatInstance();
+-            }
+-            break;
+-          case 1:
+-            if (upperShift) {
+-              result.append((char) (cValue + 128));
+-              upperShift = false;
+-            } else {
+-              result.append((char) cValue);
+-            }
+-            shift = 0;
+-            break;
+-          case 2:
+-            if (cValue < C40_SHIFT2_SET_CHARS.length) {
+-              char c40char = C40_SHIFT2_SET_CHARS[cValue];
+-              if (upperShift) {
+-                result.append((char) (c40char + 128));
+-                upperShift = false;
+-              } else {
+-                result.append(c40char);
+-              }
+-            } else {
+-              switch (cValue) {
+-                case 27: // FNC1
+-                  fnc1positions.add(result.length());
+-                  result.append((char) 29); // translate as ASCII 29
+-                  break;
+-                case 30: // Upper Shift
+-                  upperShift = true;
+-                  break;
+-                default:
+-                  throw FormatException.getFormatInstance();
+-              }
+-            }
+-            shift = 0;
+-            break;
+-          case 3:
+-            if (upperShift) {
+-              result.append((char) (cValue + 224));
+-              upperShift = false;
+-            } else {
+-              result.append((char) (cValue + 96));
+-            }
+-            shift = 0;
+-            break;
+-          default:
+-            throw FormatException.getFormatInstance();
+-        }
+-      }
+-    } while (bits.available() > 0);
++    decodeC40OrTextSegment(bits, result, fnc1positions, C40_BASIC_SET_CHARS, false);
+   }
+ 
+   /**
+@@ -331,13 +244,30 @@ final class DecodedBitStreamParser {
+    */
+   private static void decodeTextSegment(BitSource bits, ECIStringBuilder result, Set<Integer> fnc1positions)
+       throws FormatException {
+-    // Three Text values are encoded in a 16-bit value as
++    decodeC40OrTextSegment(bits, result, fnc1positions, TEXT_BASIC_SET_CHARS, true);
++  }
++
++  /**
++   * Decodes a C40 or Text segment. The two encodings share the same triplet structure and Shift 1/2
++   * handling, and differ only in the basic character set and in Shift 3 (C40 maps values
++   * arithmetically, Text looks them up in {@link #TEXT_SHIFT3_SET_CHARS}).
++   *
++   * @param basicSetChars the Shift 0 basic character set for this encoding
++   * @param text {@code true} to decode Text (ISO 16022:2006 5.2.6), {@code false} for C40 (5.2.5)
++   */
++  private static void decodeC40OrTextSegment(BitSource bits,
++                                             ECIStringBuilder result,
++                                             Set<Integer> fnc1positions,
++                                             char[] basicSetChars,
++                                             boolean text) throws FormatException {
++    // Three values are encoded in a 16-bit value as
+     // (1600 * C1) + (40 * C2) + C3 + 1
+-    // TODO(bbrown): The Upper Shift with Text doesn't work in the 4 value scenario all the time
++    // TODO(bbrown): The Upper Shift doesn't work in the 4 value scenario all the time
+     boolean upperShift = false;
+ 
+     int[] cValues = new int[3];
+     int shift = 0;
++
+     do {
+       // If there is only one byte left then it will be encoded as ASCII
+       if (bits.available() == 8) {
+@@ -356,13 +286,13 @@ final class DecodedBitStreamParser {
+           case 0:
+             if (cValue < 3) {
+               shift = cValue + 1;
+-            } else if (cValue < TEXT_BASIC_SET_CHARS.length) {
+-              char textChar = TEXT_BASIC_SET_CHARS[cValue];
++            } else if (cValue < basicSetChars.length) {
++              char setChar = basicSetChars[cValue];
+               if (upperShift) {
+-                result.append((char) (textChar + 128));
++                result.append((char) (setChar + 128));
+                 upperShift = false;
+               } else {
+-                result.append(textChar);
++                result.append(setChar);
+               }
+             } else {
+               throw FormatException.getFormatInstance();
+@@ -379,13 +309,13 @@ final class DecodedBitStreamParser {
+             break;
+           case 2:
+             // Shift 2 for Text is the same encoding as C40
+-            if (cValue < TEXT_SHIFT2_SET_CHARS.length) {
+-              char textChar = TEXT_SHIFT2_SET_CHARS[cValue];
++            if (cValue < C40_SHIFT2_SET_CHARS.length) {
++              char setChar = C40_SHIFT2_SET_CHARS[cValue];
+               if (upperShift) {
+-                result.append((char) (textChar + 128));
++                result.append((char) (setChar + 128));
+                 upperShift = false;
+               } else {
+-                result.append(textChar);
++                result.append(setChar);
+               }
+             } else {
+               switch (cValue) {
+@@ -403,17 +333,27 @@ final class DecodedBitStreamParser {
+             shift = 0;
+             break;
+           case 3:
+-            if (cValue < TEXT_SHIFT3_SET_CHARS.length) {
+-              char textChar = TEXT_SHIFT3_SET_CHARS[cValue];
++            if (text) {
++              if (cValue < TEXT_SHIFT3_SET_CHARS.length) {
++                char textChar = TEXT_SHIFT3_SET_CHARS[cValue];
++                if (upperShift) {
++                  result.append((char) (textChar + 128));
++                  upperShift = false;
++                } else {
++                  result.append(textChar);
++                }
++                shift = 0;
++              } else {
++                throw FormatException.getFormatInstance();
++              }
++            } else {
+               if (upperShift) {
+-                result.append((char) (textChar + 128));
++                result.append((char) (cValue + 224));
+                 upperShift = false;
+               } else {
+-                result.append(textChar);
++                result.append((char) (cValue + 96));
+               }
+               shift = 0;
+-            } else {
+-              throw FormatException.getFormatInstance();
+             }
+             break;
+           default:

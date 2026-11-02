@@ -1,0 +1,137 @@
+diff --git a/clients/src/main/java/org/apache/kafka/common/security/auth/SaslExtensions.java b/clients/src/main/java/org/apache/kafka/common/security/auth/SaslExtensions.java
+index b16f32081..58d8e73c4 100644
+--- a/clients/src/main/java/org/apache/kafka/common/security/auth/SaslExtensions.java
++++ b/clients/src/main/java/org/apache/kafka/common/security/auth/SaslExtensions.java
+@@ -74,11 +74,10 @@ public class SaslExtensions {
+      * See the class-level documentation for details.
+      * @return Unique, but empty, <code>SaslExtensions</code> instance
+      */
+-    @SuppressWarnings("unchecked")
+     public static SaslExtensions empty() {
+         // It's ok to re-use the EMPTY_MAP instance as the object equality is on the outer
+         // SaslExtensions reference.
+-        return new SaslExtensions(Collections.EMPTY_MAP);
++        return new SaslExtensions(Collections.<String, String>emptyMap());
+     }
+ 
+     /**
+diff --git a/clients/src/main/java/org/apache/kafka/common/utils/internals/Shell.java b/clients/src/main/java/org/apache/kafka/common/utils/internals/Shell.java
+index 0919256f6..b5557d9b6 100644
+--- a/clients/src/main/java/org/apache/kafka/common/utils/internals/Shell.java
++++ b/clients/src/main/java/org/apache/kafka/common/utils/internals/Shell.java
+@@ -93,7 +93,7 @@ public abstract class Shell {
+             new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8));
+         BufferedReader inReader = new BufferedReader(
+             new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
+-        final StringBuffer errMsg = new StringBuffer();
++        final StringBuilder errMsg = new StringBuilder();
+ 
+         // read error and input streams as this would free up the buffers
+         // free the error stream buffer
+@@ -180,7 +180,7 @@ public abstract class Shell {
+     public static class ShellCommandExecutor extends Shell {
+ 
+         private final String[] command;
+-        private StringBuffer output;
++        private StringBuilder output;
+ 
+         /**
+          * Create a new instance of the ShellCommandExecutor to execute a command.
+@@ -206,7 +206,7 @@ public abstract class Shell {
+         }
+ 
+         protected void parseExecResult(BufferedReader reader) throws IOException {
+-            output = new StringBuffer();
++            output = new StringBuilder();
+             char[] buf = new char[512];
+             int nRead;
+             while ((nRead = reader.read(buf, 0, buf.length)) > 0) {
+diff --git a/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupMetadataManager.java b/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupMetadataManager.java
+index 1087c7554..0b9489713 100644
+--- a/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupMetadataManager.java
++++ b/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupMetadataManager.java
+@@ -1736,13 +1736,7 @@ public class GroupMetadataManager {
+      * @throws UnreleasedInstanceIdException if the instance id received in the request is still in use by an existing static member.
+      */
+     private void throwIfInstanceIdIsUnreleased(ConsumerGroupMember member, String groupId, String receivedMemberId, String receivedInstanceId) {
+-        if (member.memberEpoch() != LEAVE_GROUP_STATIC_MEMBER_EPOCH) {
+-            // The new member can't join.
+-            log.info("[GroupId {}] Static member {} with instance id {} cannot join the group because the instance id is" +
+-                    " owned by member {}.", groupId, receivedMemberId, receivedInstanceId, member.memberId());
+-            throw Errors.UNRELEASED_INSTANCE_ID.exception("Static member " + receivedMemberId + " with instance id "
+-                + receivedInstanceId + " cannot join the group because the instance id is owned by " + member.memberId() + " member.");
+-        }
++        throwIfInstanceIdIsUnreleased(member.memberId(), member.memberEpoch(), groupId, receivedMemberId, receivedInstanceId);
+     }
+ 
+     /**
+@@ -1756,15 +1750,19 @@ public class GroupMetadataManager {
+      * @throws UnreleasedInstanceIdException if the instance id received in the request is still in use by an existing static member.
+      */
+     private void throwIfInstanceIdIsUnreleased(StreamsGroupMember member, String groupId, String receivedMemberId, String receivedInstanceId) {
+-        if (member.memberEpoch() != LEAVE_GROUP_STATIC_MEMBER_EPOCH) {
++        throwIfInstanceIdIsUnreleased(member.memberId(), member.memberEpoch(), groupId, receivedMemberId, receivedInstanceId);
++    }
++
++    private void throwIfInstanceIdIsUnreleased(String ownerMemberId, int ownerEpoch, String groupId, String receivedMemberId, String receivedInstanceId) {
++        if (ownerEpoch != LEAVE_GROUP_STATIC_MEMBER_EPOCH) {
+             // The new member can't join.
+             log.info("[GroupId {}] Static member {} with instance id {} cannot join the group because the instance id is" +
+-                " owned by member {}.", groupId, receivedMemberId, receivedInstanceId, member.memberId());
++                    " owned by member {}.", groupId, receivedMemberId, receivedInstanceId, ownerMemberId);
+             throw Errors.UNRELEASED_INSTANCE_ID.exception("Static member " + receivedMemberId + " with instance id "
+-                + receivedInstanceId + " cannot join the group because the instance id is owned by " + member.memberId() + " member.");
++                + receivedInstanceId + " cannot join the group because the instance id is owned by " + ownerMemberId + " member.");
+         }
+     }
+-    
++
+     /**
+      * Validates if the received instanceId has been released from the group
+      *
+@@ -1776,12 +1774,7 @@ public class GroupMetadataManager {
+      * @throws FencedInstanceIdException if the instance id provided is fenced because of another static member.
+      */
+     private void throwIfInstanceIdIsFenced(ConsumerGroupMember member, String groupId, String receivedMemberId, String receivedInstanceId) {
+-        if (!member.memberId().equals(receivedMemberId)) {
+-            log.info("[GroupId {}] Static member {} with instance id {} is fenced by existing member {}.",
+-                groupId, receivedMemberId, receivedInstanceId, member.memberId());
+-            throw Errors.FENCED_INSTANCE_ID.exception("Static member " + receivedMemberId + " with instance id "
+-                + receivedInstanceId + " was fenced by member " + member.memberId() + ".");
+-        }
++        throwIfInstanceIdIsFenced(member.memberId(), groupId, receivedMemberId, receivedInstanceId);
+     }
+ 
+     /**
+@@ -1795,11 +1788,15 @@ public class GroupMetadataManager {
+      * @throws FencedInstanceIdException if the instance id provided is fenced because of another static member.
+      */
+     private void throwIfInstanceIdIsFenced(StreamsGroupMember member, String groupId, String receivedMemberId, String receivedInstanceId) {
+-        if (!member.memberId().equals(receivedMemberId)) {
++        throwIfInstanceIdIsFenced(member.memberId(), groupId, receivedMemberId, receivedInstanceId);
++    }
++
++    private void throwIfInstanceIdIsFenced(String ownerMemberId, String groupId, String receivedMemberId, String receivedInstanceId) {
++        if (!ownerMemberId.equals(receivedMemberId)) {
+             log.info("[GroupId {}] Static member {} with instance id {} is fenced by existing member {}.",
+-                groupId, receivedMemberId, receivedInstanceId, member.memberId());
++                groupId, receivedMemberId, receivedInstanceId, ownerMemberId);
+             throw Errors.FENCED_INSTANCE_ID.exception("Static member " + receivedMemberId + " with instance id "
+-                + receivedInstanceId + " was fenced by member " + member.memberId() + ".");
++                + receivedInstanceId + " was fenced by member " + ownerMemberId + ".");
+         }
+     }
+     
+diff --git a/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/streams/topics/EndpointToPartitionsManager.java b/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/streams/topics/EndpointToPartitionsManager.java
+index cebadb803..c7562ce4d 100644
+--- a/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/streams/topics/EndpointToPartitionsManager.java
++++ b/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/streams/topics/EndpointToPartitionsManager.java
+@@ -54,7 +54,7 @@ public class EndpointToPartitionsManager {
+             return Optional.empty();
+         }
+ 
+-        StreamsGroupMemberMetadataValue.Endpoint endpoint = endpointOptional.get();
++        StreamsGroupMemberMetadataValue.Endpoint endpoint = endpointOptional.orElseThrow();
+         StreamsGroupHeartbeatResponseData.Endpoint responseEndpoint = new StreamsGroupHeartbeatResponseData.Endpoint();
+         responseEndpoint.setHost(endpoint.host());
+         responseEndpoint.setPort(endpoint.port());

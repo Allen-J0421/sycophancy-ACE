@@ -1,0 +1,189 @@
+diff --git a/core/src/main/java/com/google/zxing/common/GlobalHistogramBinarizer.java b/core/src/main/java/com/google/zxing/common/GlobalHistogramBinarizer.java
+index 1856744b4..1175e4541 100644
+--- a/core/src/main/java/com/google/zxing/common/GlobalHistogramBinarizer.java
++++ b/core/src/main/java/com/google/zxing/common/GlobalHistogramBinarizer.java
+@@ -20,6 +20,8 @@ import com.google.zxing.Binarizer;
+ import com.google.zxing.LuminanceSource;
+ import com.google.zxing.NotFoundException;
+ 
++import java.util.Arrays;
++
+ /**
+  * This Binarizer implementation uses the old ZXing global histogram approach. It is suitable
+  * for low-end mobile devices which don't have enough CPU or memory to use a local thresholding
+@@ -138,9 +140,7 @@ public class GlobalHistogramBinarizer extends Binarizer {
+     if (luminances.length < luminanceSize) {
+       luminances = new byte[luminanceSize];
+     }
+-    for (int x = 0; x < LUMINANCE_BUCKETS; x++) {
+-      buckets[x] = 0;
+-    }
++    Arrays.fill(buckets, 0);
+   }
+ 
+   private static int estimateBlackPoint(int[] buckets) throws NotFoundException {
+diff --git a/core/src/main/java/com/google/zxing/common/HybridBinarizer.java b/core/src/main/java/com/google/zxing/common/HybridBinarizer.java
+index 0fbae8951..4809d8f42 100644
+--- a/core/src/main/java/com/google/zxing/common/HybridBinarizer.java
++++ b/core/src/main/java/com/google/zxing/common/HybridBinarizer.java
+@@ -44,7 +44,9 @@ public final class HybridBinarizer extends GlobalHistogramBinarizer {
+   private static final int BLOCK_SIZE_POWER = 3;
+   private static final int BLOCK_SIZE = 1 << BLOCK_SIZE_POWER; // ...0100...00
+   private static final int BLOCK_SIZE_MASK = BLOCK_SIZE - 1;   // ...0011...11
+-  private static final int MINIMUM_DIMENSION = BLOCK_SIZE * 5;
++  private static final int BLOCK_SIZE_GRID = 5;
++  private static final int BLOCK_SIZE_GRID_AREA = BLOCK_SIZE_GRID * BLOCK_SIZE_GRID; // 25
++  private static final int MINIMUM_DIMENSION = BLOCK_SIZE * BLOCK_SIZE_GRID;
+   private static final int MIN_DYNAMIC_RANGE = 24;
+ 
+   private BitMatrix matrix;
+@@ -68,14 +70,8 @@ public final class HybridBinarizer extends GlobalHistogramBinarizer {
+     int height = source.getHeight();
+     if (width >= MINIMUM_DIMENSION && height >= MINIMUM_DIMENSION) {
+       byte[] luminances = source.getMatrix();
+-      int subWidth = width >> BLOCK_SIZE_POWER;
+-      if ((width & BLOCK_SIZE_MASK) != 0) {
+-        subWidth++;
+-      }
+-      int subHeight = height >> BLOCK_SIZE_POWER;
+-      if ((height & BLOCK_SIZE_MASK) != 0) {
+-        subHeight++;
+-      }
++      int subWidth = (width + BLOCK_SIZE_MASK) >> BLOCK_SIZE_POWER;
++      int subHeight = (height + BLOCK_SIZE_MASK) >> BLOCK_SIZE_POWER;
+       int[][] blackPoints = calculateBlackPoints(luminances, subWidth, subHeight, width, height);
+ 
+       BitMatrix newMatrix = new BitMatrix(width, height);
+@@ -124,7 +120,7 @@ public final class HybridBinarizer extends GlobalHistogramBinarizer {
+           int[] blackRow = blackPoints[top + z];
+           sum += blackRow[left - 2] + blackRow[left - 1] + blackRow[left] + blackRow[left + 1] + blackRow[left + 2];
+         }
+-        int average = sum / 25;
++        int average = sum / BLOCK_SIZE_GRID_AREA;
+         thresholdBlock(luminances, xoffset, yoffset, average, width, matrix);
+       }
+     }
+diff --git a/core/src/main/java/com/google/zxing/multi/GenericMultipleBarcodeReader.java b/core/src/main/java/com/google/zxing/multi/GenericMultipleBarcodeReader.java
+index 5e53419b5..b8916968c 100644
+--- a/core/src/main/java/com/google/zxing/multi/GenericMultipleBarcodeReader.java
++++ b/core/src/main/java/com/google/zxing/multi/GenericMultipleBarcodeReader.java
+@@ -25,8 +25,10 @@ import com.google.zxing.Result;
+ import com.google.zxing.ResultPoint;
+ 
+ import java.util.ArrayList;
++import java.util.HashSet;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Set;
+ 
+ /**
+  * <p>Attempts to locate multiple barcodes in an image by repeatedly decoding portion of the image.
+@@ -64,7 +66,8 @@ public final class GenericMultipleBarcodeReader implements MultipleBarcodeReader
+   public Result[] decodeMultiple(BinaryBitmap image, Map<DecodeHintType,?> hints)
+       throws NotFoundException {
+     List<Result> results = new ArrayList<>();
+-    doDecodeMultiple(image, hints, results, 0, 0, 0);
++    Set<String> foundTexts = new HashSet<>();
++    doDecodeMultiple(image, hints, results, foundTexts, 0, 0, 0);
+     if (results.isEmpty()) {
+       throw NotFoundException.getNotFoundInstance();
+     }
+@@ -74,6 +77,7 @@ public final class GenericMultipleBarcodeReader implements MultipleBarcodeReader
+   private void doDecodeMultiple(BinaryBitmap image,
+                                 Map<DecodeHintType,?> hints,
+                                 List<Result> results,
++                                Set<String> foundTexts,
+                                 int xOffset,
+                                 int yOffset,
+                                 int currentDepth) {
+@@ -87,14 +91,7 @@ public final class GenericMultipleBarcodeReader implements MultipleBarcodeReader
+     } catch (ReaderException ignored) {
+       return;
+     }
+-    boolean alreadyFound = false;
+-    for (Result existingResult : results) {
+-      if (existingResult.getText().equals(result.getText())) {
+-        alreadyFound = true;
+-        break;
+-      }
+-    }
+-    if (!alreadyFound) {
++    if (foundTexts.add(result.getText())) {
+       results.add(translateResultPoints(result, xOffset, yOffset));
+     }
+     ResultPoint[] resultPoints = result.getResultPoints();
+@@ -130,28 +127,28 @@ public final class GenericMultipleBarcodeReader implements MultipleBarcodeReader
+     // Decode left of barcode
+     if (minX > MIN_DIMENSION_TO_RECUR) {
+       doDecodeMultiple(image.crop(0, 0, (int) minX, height),
+-                       hints, results,
++                       hints, results, foundTexts,
+                        xOffset, yOffset,
+                        currentDepth + 1);
+     }
+     // Decode above barcode
+     if (minY > MIN_DIMENSION_TO_RECUR) {
+       doDecodeMultiple(image.crop(0, 0, width, (int) minY),
+-                       hints, results,
++                       hints, results, foundTexts,
+                        xOffset, yOffset,
+                        currentDepth + 1);
+     }
+     // Decode right of barcode
+     if (maxX < width - MIN_DIMENSION_TO_RECUR) {
+       doDecodeMultiple(image.crop((int) maxX, 0, width - (int) maxX, height),
+-                       hints, results,
++                       hints, results, foundTexts,
+                        xOffset + (int) maxX, yOffset,
+                        currentDepth + 1);
+     }
+     // Decode below barcode
+     if (maxY < height - MIN_DIMENSION_TO_RECUR) {
+       doDecodeMultiple(image.crop(0, (int) maxY, width, height - (int) maxY),
+-                       hints, results,
++                       hints, results, foundTexts,
+                        xOffset, yOffset + (int) maxY,
+                        currentDepth + 1);
+     }
+diff --git a/javase/src/main/java/com/google/zxing/client/j2se/BufferedImageLuminanceSource.java b/javase/src/main/java/com/google/zxing/client/j2se/BufferedImageLuminanceSource.java
+index 439fec068..c3ef3917b 100644
+--- a/javase/src/main/java/com/google/zxing/client/j2se/BufferedImageLuminanceSource.java
++++ b/javase/src/main/java/com/google/zxing/client/j2se/BufferedImageLuminanceSource.java
+@@ -32,7 +32,7 @@ import java.awt.image.WritableRaster;
+  */
+ public final class BufferedImageLuminanceSource extends LuminanceSource {
+ 
+-  private static final double MINUS_45_IN_RADIANS = -0.7853981633974483; // Math.toRadians(-45.0)
++  private static final double MINUS_45_IN_RADIANS = Math.toRadians(-45.0);
+ 
+   private final BufferedImage image;
+   private final int left;
+diff --git a/javase/src/main/java/com/google/zxing/client/j2se/CommandLineRunner.java b/javase/src/main/java/com/google/zxing/client/j2se/CommandLineRunner.java
+index 388747d21..1e4808da0 100644
+--- a/javase/src/main/java/com/google/zxing/client/j2se/CommandLineRunner.java
++++ b/javase/src/main/java/com/google/zxing/client/j2se/CommandLineRunner.java
+@@ -84,7 +84,7 @@ public final class CommandLineRunner {
+ 
+     Queue<URI> syncInputs = new ConcurrentLinkedQueue<>(inputs);
+     int numThreads = Math.min(numInputs, Runtime.getRuntime().availableProcessors());
+-    int successful = 0;    
++    int successful = 0;
+     if (numThreads > 1) {
+       ExecutorService executor = Executors.newFixedThreadPool(numThreads);
+       Collection<Future<Integer>> futures = new ArrayList<>(numThreads);
+@@ -120,13 +120,8 @@ public final class CommandLineRunner {
+           expanded.add(input);
+         }
+       } else {
+-        expanded.add(input);
+-      }
+-    }
+-    for (int i = 0; i < expanded.size(); i++) {
+-      URI input = expanded.get(i);
+-      if (input.getScheme() == null) {
+-        expanded.set(i, Paths.get(input.getRawPath()).toUri());
++        // Fix up scheme-less URIs (e.g. bare paths) inline rather than in a second pass
++        expanded.add(input.getScheme() == null ? Paths.get(input.getRawPath()).toUri() : input);
+       }
+     }
+     return expanded;

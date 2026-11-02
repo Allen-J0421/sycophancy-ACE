@@ -1,0 +1,77 @@
+diff --git a/handler/src/main/java/io/netty/handler/ssl/OpenSslClientSessionCache.java b/handler/src/main/java/io/netty/handler/ssl/OpenSslClientSessionCache.java
+index ea3179cfc..8f8fd362c 100644
+--- a/handler/src/main/java/io/netty/handler/ssl/OpenSslClientSessionCache.java
++++ b/handler/src/main/java/io/netty/handler/ssl/OpenSslClientSessionCache.java
+@@ -123,30 +123,28 @@ final class OpenSslClientSessionCache extends OpenSslSessionCache {
+             reused = SSL.setSession(ssl, nativeSslSession.session());
+             if (reused) {
+                 singleUsed = nativeSslSession.shouldBeSingleUse();
++                // Capture all Java-heap fields before any removal. removeSessionWithId frees the
++                // native SSL_SESSION* pointer, but the Java wrapper's plain fields remain readable.
++                // Capturing here also means setLastAccessedTime is always recorded for resumed sessions.
++                long now = System.currentTimeMillis();
++                nativeSslSession.setLastAccessedTime(now);
++                capturedCreationTime = nativeSslSession.getCreationTime();
++                capturedLastAccessedTime = now;
++                capturedSessionId = nativeSslSession.sessionId();
++                capturedKeyValueStorage = nativeSslSession.keyValueStorage;
+                 if (singleUsed) {
+                     // Remove while holding the lock so no concurrent thread can pick up this single-use ticket.
+                     removeSessionWithId(nativeSslSession.sessionId());
+-                } else {
+-                    // Capture all fields from the native session while holding the lock so a concurrent
+-                    // removeSessionWithId cannot free the session before we read from it.
+-                    long now = System.currentTimeMillis();
+-                    nativeSslSession.setLastAccessedTime(now);
+-                    capturedCreationTime = nativeSslSession.getCreationTime();
+-                    capturedLastAccessedTime = now;
+-                    capturedSessionId = nativeSslSession.sessionId();
+-                    capturedKeyValueStorage = nativeSslSession.keyValueStorage;
+                 }
+             }
+         }
+ 
+         if (reused) {
+             if (singleUsed) {
+-                // The native session was already removed and freed inside the lock; don't touch it again.
+                 session.invalidate();
+-            } else {
+-                session.setSessionDetails(capturedCreationTime, capturedLastAccessedTime,
+-                        capturedSessionId, capturedKeyValueStorage);
+             }
++            session.setSessionDetails(capturedCreationTime, capturedLastAccessedTime,
++                    capturedSessionId, capturedKeyValueStorage);
+         }
+         return reused;
+     }
+@@ -175,8 +173,9 @@ final class OpenSslClientSessionCache extends OpenSslSessionCache {
+         HostPort(String host, int port) {
+             this.host = host;
+             this.port = port;
+-            // Calculate a hashCode that does ignore case.
+-            this.hash = 31 * AsciiString.hashCode(host) + port;
++            // Calculate a hashCode that does ignore case. Use -1 for null host to avoid colliding
++            // with non-null hosts whose AsciiString.hashCode happens to be 0.
++            this.hash = 31 * (host != null ? AsciiString.hashCode(host) : -1) + port;
+         }
+ 
+         @Override
+diff --git a/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java b/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
+index eba7ff750..c8fdda22c 100644
+--- a/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
++++ b/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
+@@ -227,12 +227,8 @@ abstract class Cache<E> {
+                     }
+                 }
+             } else {
+-                for (;;) {
+-                    List<E> entries = get();
+-                    if (compareAndSet(entries, singletonList(e))) {
+-                        return scheduleCacheExpirationIfNeeded(ttl, loop);
+-                    }
+-                }
++                getAndSet(singletonList(e));
++                return scheduleCacheExpirationIfNeeded(ttl, loop);
+             }
+         }
+ 

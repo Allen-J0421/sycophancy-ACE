@@ -1,0 +1,36 @@
+diff --git a/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java b/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
+index cdd7c78e4..898ffe175 100644
+--- a/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
++++ b/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
+@@ -95,9 +95,11 @@ abstract class Cache<E> {
+         while (!resolveCache.isEmpty()) {
+             for (Iterator<Entry<String, Entries>> i = resolveCache.entrySet().iterator(); i.hasNext();) {
+                 Map.Entry<String, Entries> e = i.next();
+-                i.remove();
+-
++                // Cancel before removing from the map (consistent with run() ordering) so any
++                // concurrent scheduleCacheExpirationIfNeeded sees CANCELLED and returns false
++                // rather than succeeding its CAS and returning true with data about to be wiped.
+                 e.getValue().clearAndCancel();
++                i.remove();
+             }
+         }
+     }
+@@ -106,8 +108,15 @@ abstract class Cache<E> {
+      * Clear all entries (if anything exists) for the given hostname and return {@code true} if anything was removed.
+      */
+     final boolean clear(String hostname) {
+-        Entries entries = resolveCache.remove(hostname);
+-        return entries != null && entries.clearAndCancel();
++        Entries entries = resolveCache.get(hostname);
++        if (entries == null) {
++            return false;
++        }
++        // Cancel before removing from the map (consistent with run() ordering).
++        boolean hadData = entries.clearAndCancel();
++        // Use identity remove so a concurrently-inserted fresh Entries is not accidentally removed.
++        resolveCache.remove(hostname, entries);
++        return hadData;
+     }
+ 
+     /**

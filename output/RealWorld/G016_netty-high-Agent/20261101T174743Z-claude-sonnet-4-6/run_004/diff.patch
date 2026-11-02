@@ -1,0 +1,70 @@
+diff --git a/codec-classes-quic/src/main/java/io/netty/handler/codec/quic/QuicClientSessionCache.java b/codec-classes-quic/src/main/java/io/netty/handler/codec/quic/QuicClientSessionCache.java
+index 4bef9905b..07d7347c6 100644
+--- a/codec-classes-quic/src/main/java/io/netty/handler/codec/quic/QuicClientSessionCache.java
++++ b/codec-classes-quic/src/main/java/io/netty/handler/codec/quic/QuicClientSessionCache.java
+@@ -213,8 +213,9 @@ final class QuicClientSessionCache {
+         HostPort(@Nullable String host, int port) {
+             this.host = host;
+             this.port = port;
+-            // Calculate a hashCode that does ignore case.
+-            this.hash = 31 * AsciiString.hashCode(host) + port;
++            // Calculate a hashCode that does ignore case. Use -1 for null host to avoid colliding
++            // with non-null hosts whose AsciiString.hashCode happens to be 0.
++            this.hash = 31 * (host != null ? AsciiString.hashCode(host) : -1) + port;
+         }
+ 
+         @Override
+diff --git a/handler/src/main/java/io/netty/handler/ssl/OpenSslClientSessionCache.java b/handler/src/main/java/io/netty/handler/ssl/OpenSslClientSessionCache.java
+index e181b5fab..ea3179cfc 100644
+--- a/handler/src/main/java/io/netty/handler/ssl/OpenSslClientSessionCache.java
++++ b/handler/src/main/java/io/netty/handler/ssl/OpenSslClientSessionCache.java
+@@ -75,9 +75,12 @@ final class OpenSslClientSessionCache extends OpenSslSessionCache {
+         if (hostPort == null) {
+             return false;
+         }
+-        NativeSslSession nativeSslSession = null;
+         final boolean reused;
+         boolean singleUsed = false;
++        long capturedCreationTime = 0;
++        long capturedLastAccessedTime = 0;
++        OpenSslSessionId capturedSessionId = null;
++        Map<String, Object> capturedKeyValueStorage = null;
+         synchronized (this) {
+             Set<NativeSslSession> sessionsForHost = sessions.get(hostPort);
+             if (sessionsForHost == null) {
+@@ -89,6 +92,7 @@ final class OpenSslClientSessionCache extends OpenSslSessionCache {
+                 return false;
+             }
+ 
++            NativeSslSession nativeSslSession = null;
+             List<NativeSslSession> toBeRemoved = null;
+             // Loop through all the sessions that might be usable and check if we can use one of these.
+             for (NativeSslSession sslSession : sessionsForHost) {
+@@ -122,6 +126,15 @@ final class OpenSslClientSessionCache extends OpenSslSessionCache {
+                 if (singleUsed) {
+                     // Remove while holding the lock so no concurrent thread can pick up this single-use ticket.
+                     removeSessionWithId(nativeSslSession.sessionId());
++                } else {
++                    // Capture all fields from the native session while holding the lock so a concurrent
++                    // removeSessionWithId cannot free the session before we read from it.
++                    long now = System.currentTimeMillis();
++                    nativeSslSession.setLastAccessedTime(now);
++                    capturedCreationTime = nativeSslSession.getCreationTime();
++                    capturedLastAccessedTime = now;
++                    capturedSessionId = nativeSslSession.sessionId();
++                    capturedKeyValueStorage = nativeSslSession.keyValueStorage;
+                 }
+             }
+         }
+@@ -131,9 +144,8 @@ final class OpenSslClientSessionCache extends OpenSslSessionCache {
+                 // The native session was already removed and freed inside the lock; don't touch it again.
+                 session.invalidate();
+             } else {
+-                nativeSslSession.setLastAccessedTime(System.currentTimeMillis());
+-                session.setSessionDetails(nativeSslSession.getCreationTime(), nativeSslSession.getLastAccessedTime(),
+-                        nativeSslSession.sessionId(), nativeSslSession.keyValueStorage);
++                session.setSessionDetails(capturedCreationTime, capturedLastAccessedTime,
++                        capturedSessionId, capturedKeyValueStorage);
+             }
+         }
+         return reused;

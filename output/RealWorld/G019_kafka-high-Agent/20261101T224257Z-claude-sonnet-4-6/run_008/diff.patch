@@ -1,0 +1,2074 @@
+diff --git a/connect/mirror/src/main/java/org/apache/kafka/connect/mirror/OffsetSyncStore.java b/connect/mirror/src/main/java/org/apache/kafka/connect/mirror/OffsetSyncStore.java
+index 0829a9adb..926f370e8 100644
+--- a/connect/mirror/src/main/java/org/apache/kafka/connect/mirror/OffsetSyncStore.java
++++ b/connect/mirror/src/main/java/org/apache/kafka/connect/mirror/OffsetSyncStore.java
+@@ -131,11 +131,12 @@ public class OffsetSyncStore implements AutoCloseable {
+         }
+         Optional<OffsetSync> offsetSync = latestOffsetSync(sourceTopicPartition, upstreamOffset);
+         if (offsetSync.isPresent()) {
+-            if (offsetSync.get().upstreamOffset() > upstreamOffset) {
++            OffsetSync sync = offsetSync.orElseThrow();
++            if (sync.upstreamOffset() > upstreamOffset) {
+                 // Offset is too far in the past to translate accurately
+                 log.debug("translateDownstream({},{},{}): Skipped ({} is ahead of upstream consumer group {})",
+                         group, sourceTopicPartition, upstreamOffset,
+-                        offsetSync.get(), upstreamOffset);
++                        sync, upstreamOffset);
+                 return OptionalLong.of(-1L);
+             }
+             // If the consumer group is ahead of the offset sync, we can translate the upstream offset only 1
+@@ -150,11 +151,11 @@ public class OffsetSyncStore implements AutoCloseable {
+             //          | /
+             //          vv
+             // target |-sg----r-----|
+-            long translatedDownstreamOffset = offsetSync.get().translateDownstream(upstreamOffset);
++            long translatedDownstreamOffset = sync.translateDownstream(upstreamOffset);
+             log.debug("translateDownstream({},{},{}): Translated {} (relative to {})",
+                     group, sourceTopicPartition, upstreamOffset,
+                     translatedDownstreamOffset,
+-                    offsetSync.get()
++                    sync
+             );
+             return OptionalLong.of(translatedDownstreamOffset);
+         } else {
+diff --git a/connect/runtime/src/main/java/org/apache/kafka/connect/runtime/standalone/StandaloneHerder.java b/connect/runtime/src/main/java/org/apache/kafka/connect/runtime/standalone/StandaloneHerder.java
+index fa8a4110b..b17e66694 100644
+--- a/connect/runtime/src/main/java/org/apache/kafka/connect/runtime/standalone/StandaloneHerder.java
++++ b/connect/runtime/src/main/java/org/apache/kafka/connect/runtime/standalone/StandaloneHerder.java
+@@ -439,7 +439,7 @@ public final class StandaloneHerder extends AbstractHerder {
+             cb.onCompletion(new NotFoundException("Status for connector " + connectorName + " not found", null), null);
+             return;
+         }
+-        RestartPlan plan = maybePlan.get();
++        RestartPlan plan = maybePlan.orElseThrow();
+ 
+         // If requested, stop the connector and any tasks, marking each as restarting
+         log.info("Received {}", plan);
+diff --git a/connect/runtime/src/main/java/org/apache/kafka/connect/storage/ConnectorOffsetBackingStore.java b/connect/runtime/src/main/java/org/apache/kafka/connect/storage/ConnectorOffsetBackingStore.java
+index 99e7f94fc..1337aa564 100644
+--- a/connect/runtime/src/main/java/org/apache/kafka/connect/storage/ConnectorOffsetBackingStore.java
++++ b/connect/runtime/src/main/java/org/apache/kafka/connect/storage/ConnectorOffsetBackingStore.java
+@@ -289,10 +289,10 @@ public class ConnectorOffsetBackingStore implements OffsetBackingStore {
+         final OffsetBackingStore primaryStore;
+         final OffsetBackingStore secondaryStore;
+         if (connectorStore.isPresent()) {
+-            primaryStore = connectorStore.get();
++            primaryStore = connectorStore.orElseThrow();
+             secondaryStore = workerStore.orElse(null);
+         } else if (workerStore.isPresent()) {
+-            primaryStore = workerStore.get();
++            primaryStore = workerStore.orElseThrow();
+             secondaryStore = null;
+         } else {
+             // Should never happen since we check for this case in the constructor, but just in case, this should
+diff --git a/connect/runtime/src/main/java/org/apache/kafka/connect/storage/KafkaConfigBackingStore.java b/connect/runtime/src/main/java/org/apache/kafka/connect/storage/KafkaConfigBackingStore.java
+index 3aefbc082..03ca891ea 100644
+--- a/connect/runtime/src/main/java/org/apache/kafka/connect/storage/KafkaConfigBackingStore.java
++++ b/connect/runtime/src/main/java/org/apache/kafka/connect/storage/KafkaConfigBackingStore.java
+@@ -1018,8 +1018,7 @@ public final class KafkaConfigBackingStore extends KafkaTopicBasedBackingStore i
+ 
+                 // Set the initial state of the connector to STARTED, which ensures that any connectors
+                 // which were created with 0.9 Connect will be initialized in the STARTED state.
+-                if (!connectorTargetStates.containsKey(connectorName))
+-                    connectorTargetStates.put(connectorName, TargetState.STARTED);
++                connectorTargetStates.putIfAbsent(connectorName, TargetState.STARTED);
+             }
+         }
+         if (started) {
+diff --git a/coordinator-common/src/main/java/org/apache/kafka/coordinator/common/runtime/CoordinatorRuntime.java b/coordinator-common/src/main/java/org/apache/kafka/coordinator/common/runtime/CoordinatorRuntime.java
+index d9d4ed15d..3335d17e4 100644
+--- a/coordinator-common/src/main/java/org/apache/kafka/coordinator/common/runtime/CoordinatorRuntime.java
++++ b/coordinator-common/src/main/java/org/apache/kafka/coordinator/common/runtime/CoordinatorRuntime.java
+@@ -527,7 +527,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
+ 
+             log.debug("Transition from {} to {}.", state, newState);
+             switch (newState) {
+-                case LOADING:
++                case LOADING -> {
+                     state = CoordinatorState.LOADING;
+                     SnapshotRegistry snapshotRegistry = new SnapshotRegistry(logContext);
+                     coordinator = new SnapshottableCoordinator<>(
+@@ -546,27 +546,22 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
+                         tp
+                     );
+                     load();
+-                    break;
+-
+-                case ACTIVE:
++                }
++                case ACTIVE -> {
+                     state = CoordinatorState.ACTIVE;
+                     highWatermarklistener = new HighWatermarkListener();
+                     partitionWriter.registerListener(tp, highWatermarklistener);
+                     coordinator.onLoaded(metadataImage);
+-                    break;
+-
+-                case FAILED:
++                }
++                case FAILED -> {
+                     state = CoordinatorState.FAILED;
+                     unload();
+-                    break;
+-
+-                case CLOSED:
++                }
++                case CLOSED -> {
+                     state = CoordinatorState.CLOSED;
+                     unload();
+-                    break;
+-
+-                default:
+-                    throw new IllegalArgumentException("Transitioning to " + newState + " is not supported.");
++                }
++                default -> throw new IllegalArgumentException("Transitioning to " + newState + " is not supported.");
+             }
+ 
+             runtimeMetrics.recordPartitionStateChange(oldState, state);
+@@ -2372,21 +2367,10 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
+                     context.epoch = partitionEpoch;
+ 
+                     switch (context.state) {
+-                        case FAILED:
+-                        case INITIAL:
+-                            context.transitionTo(CoordinatorState.LOADING);
+-                            break;
+-
+-                        case LOADING:
+-                            log.info("The coordinator {} is already loading metadata.", tp);
+-                            break;
+-
+-                        case ACTIVE:
+-                            log.info("The coordinator {} is already active.", tp);
+-                            break;
+-
+-                        default:
+-                            log.error("Cannot load coordinator {} in state {}.", tp, context.state);
++                        case FAILED, INITIAL -> context.transitionTo(CoordinatorState.LOADING);
++                        case LOADING -> log.info("The coordinator {} is already loading metadata.", tp);
++                        case ACTIVE -> log.info("The coordinator {} is already active.", tp);
++                        default -> log.error("Cannot load coordinator {} in state {}.", tp, context.state);
+                     }
+                 } else {
+                     log.info("Ignored loading metadata from {} since current epoch {} is larger than or equals to {}.",
+diff --git a/coordinator-common/src/main/java/org/apache/kafka/coordinator/common/runtime/CoordinatorRuntimeMetricsImpl.java b/coordinator-common/src/main/java/org/apache/kafka/coordinator/common/runtime/CoordinatorRuntimeMetricsImpl.java
+index b681e9d2b..bf10eee2a 100644
+--- a/coordinator-common/src/main/java/org/apache/kafka/coordinator/common/runtime/CoordinatorRuntimeMetricsImpl.java
++++ b/coordinator-common/src/main/java/org/apache/kafka/coordinator/common/runtime/CoordinatorRuntimeMetricsImpl.java
+@@ -382,31 +382,17 @@ public class CoordinatorRuntimeMetricsImpl implements CoordinatorRuntimeMetrics
+     @Override
+     public void recordPartitionStateChange(CoordinatorState oldState, CoordinatorState newState) {
+         switch (oldState) {
+-            case INITIAL:
+-            case CLOSED:
+-                break;
+-            case LOADING:
+-                numPartitionsLoadingCounter.decrementAndGet();
+-                break;
+-            case ACTIVE:
+-                numPartitionsActiveCounter.decrementAndGet();
+-                break;
+-            case FAILED:
+-                numPartitionsFailedCounter.decrementAndGet();
++            case INITIAL, CLOSED -> { }
++            case LOADING -> numPartitionsLoadingCounter.decrementAndGet();
++            case ACTIVE -> numPartitionsActiveCounter.decrementAndGet();
++            case FAILED -> numPartitionsFailedCounter.decrementAndGet();
+         }
+ 
+         switch (newState) {
+-            case INITIAL:
+-            case CLOSED:
+-                break;
+-            case LOADING:
+-                numPartitionsLoadingCounter.incrementAndGet();
+-                break;
+-            case ACTIVE:
+-                numPartitionsActiveCounter.incrementAndGet();
+-                break;
+-            case FAILED:
+-                numPartitionsFailedCounter.incrementAndGet();
++            case INITIAL, CLOSED -> { }
++            case LOADING -> numPartitionsLoadingCounter.incrementAndGet();
++            case ACTIVE -> numPartitionsActiveCounter.incrementAndGet();
++            case FAILED -> numPartitionsFailedCounter.incrementAndGet();
+         }
+     }
+ 
+diff --git a/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupCoordinatorShard.java b/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupCoordinatorShard.java
+index 23b5a4f82..5c039f507 100644
+--- a/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupCoordinatorShard.java
++++ b/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupCoordinatorShard.java
+@@ -1313,167 +1313,100 @@ public class GroupCoordinatorShard implements CoordinatorShard<CoordinatorRecord
+         }
+ 
+         switch (recordType) {
+-            case LEGACY_OFFSET_COMMIT:
+-                offsetMetadataManager.replay(
+-                    offset,
+-                    producerId,
+-                    convertLegacyOffsetCommitKey((LegacyOffsetCommitKey) key),
+-                    convertLegacyOffsetCommitValue((LegacyOffsetCommitValue) Utils.messageOrNull(value))
+-                );
+-                break;
+-
+-            case OFFSET_COMMIT:
+-                offsetMetadataManager.replay(
+-                    offset,
+-                    producerId,
+-                    (OffsetCommitKey) key,
+-                    (OffsetCommitValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case GROUP_METADATA:
+-                groupMetadataManager.replay(
+-                    (GroupMetadataKey) key,
+-                    (GroupMetadataValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case CONSUMER_GROUP_METADATA:
+-                groupMetadataManager.replay(
+-                    (ConsumerGroupMetadataKey) key,
+-                    (ConsumerGroupMetadataValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case CONSUMER_GROUP_PARTITION_METADATA:
+-                groupMetadataManager.replay(
+-                    (ConsumerGroupPartitionMetadataKey) key,
+-                    (ConsumerGroupPartitionMetadataValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case CONSUMER_GROUP_MEMBER_METADATA:
+-                groupMetadataManager.replay(
+-                    (ConsumerGroupMemberMetadataKey) key,
+-                    (ConsumerGroupMemberMetadataValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case CONSUMER_GROUP_TARGET_ASSIGNMENT_METADATA:
+-                groupMetadataManager.replay(
+-                    (ConsumerGroupTargetAssignmentMetadataKey) key,
+-                    (ConsumerGroupTargetAssignmentMetadataValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case CONSUMER_GROUP_TARGET_ASSIGNMENT_MEMBER:
+-                groupMetadataManager.replay(
+-                    (ConsumerGroupTargetAssignmentMemberKey) key,
+-                    (ConsumerGroupTargetAssignmentMemberValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case CONSUMER_GROUP_CURRENT_MEMBER_ASSIGNMENT:
+-                groupMetadataManager.replay(
+-                    (ConsumerGroupCurrentMemberAssignmentKey) key,
+-                    (ConsumerGroupCurrentMemberAssignmentValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case SHARE_GROUP_MEMBER_METADATA:
+-                groupMetadataManager.replay(
+-                    (ShareGroupMemberMetadataKey) key,
+-                    (ShareGroupMemberMetadataValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case SHARE_GROUP_METADATA:
+-                groupMetadataManager.replay(
+-                    (ShareGroupMetadataKey) key,
+-                    (ShareGroupMetadataValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case SHARE_GROUP_TARGET_ASSIGNMENT_METADATA:
+-                groupMetadataManager.replay(
+-                    (ShareGroupTargetAssignmentMetadataKey) key,
+-                    (ShareGroupTargetAssignmentMetadataValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case SHARE_GROUP_TARGET_ASSIGNMENT_MEMBER:
+-                groupMetadataManager.replay(
+-                    (ShareGroupTargetAssignmentMemberKey) key,
+-                    (ShareGroupTargetAssignmentMemberValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case SHARE_GROUP_CURRENT_MEMBER_ASSIGNMENT:
+-                groupMetadataManager.replay(
+-                    (ShareGroupCurrentMemberAssignmentKey) key,
+-                    (ShareGroupCurrentMemberAssignmentValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case SHARE_GROUP_STATE_PARTITION_METADATA:
+-                groupMetadataManager.replay(
+-                    (ShareGroupStatePartitionMetadataKey) key,
+-                    (ShareGroupStatePartitionMetadataValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case CONSUMER_GROUP_REGULAR_EXPRESSION:
+-                groupMetadataManager.replay(
+-                    (ConsumerGroupRegularExpressionKey) key,
+-                    (ConsumerGroupRegularExpressionValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case STREAMS_GROUP_METADATA:
+-                groupMetadataManager.replay(
+-                    (StreamsGroupMetadataKey) key,
+-                    (StreamsGroupMetadataValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case STREAMS_GROUP_MEMBER_METADATA:
+-                groupMetadataManager.replay(
+-                    (StreamsGroupMemberMetadataKey) key,
+-                    (StreamsGroupMemberMetadataValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case STREAMS_GROUP_TARGET_ASSIGNMENT_METADATA:
+-                groupMetadataManager.replay(
+-                    (StreamsGroupTargetAssignmentMetadataKey) key,
+-                    (StreamsGroupTargetAssignmentMetadataValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case STREAMS_GROUP_TARGET_ASSIGNMENT_MEMBER:
+-                groupMetadataManager.replay(
+-                    (StreamsGroupTargetAssignmentMemberKey) key,
+-                    (StreamsGroupTargetAssignmentMemberValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case STREAMS_GROUP_CURRENT_MEMBER_ASSIGNMENT:
+-                groupMetadataManager.replay(
+-                    (StreamsGroupCurrentMemberAssignmentKey) key,
+-                    (StreamsGroupCurrentMemberAssignmentValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            case STREAMS_GROUP_TOPOLOGY:
+-                groupMetadataManager.replay(
+-                    (StreamsGroupTopologyKey) key,
+-                    (StreamsGroupTopologyValue) Utils.messageOrNull(value)
+-                );
+-                break;
+-
+-            default:
+-                throw new IllegalStateException("Received an unknown record type " + recordType
+-                    + " in " + record);
++            case LEGACY_OFFSET_COMMIT -> offsetMetadataManager.replay(
++                offset,
++                producerId,
++                convertLegacyOffsetCommitKey((LegacyOffsetCommitKey) key),
++                convertLegacyOffsetCommitValue((LegacyOffsetCommitValue) Utils.messageOrNull(value))
++            );
++            case OFFSET_COMMIT -> offsetMetadataManager.replay(
++                offset,
++                producerId,
++                (OffsetCommitKey) key,
++                (OffsetCommitValue) Utils.messageOrNull(value)
++            );
++            case GROUP_METADATA -> groupMetadataManager.replay(
++                (GroupMetadataKey) key,
++                (GroupMetadataValue) Utils.messageOrNull(value)
++            );
++            case CONSUMER_GROUP_METADATA -> groupMetadataManager.replay(
++                (ConsumerGroupMetadataKey) key,
++                (ConsumerGroupMetadataValue) Utils.messageOrNull(value)
++            );
++            case CONSUMER_GROUP_PARTITION_METADATA -> groupMetadataManager.replay(
++                (ConsumerGroupPartitionMetadataKey) key,
++                (ConsumerGroupPartitionMetadataValue) Utils.messageOrNull(value)
++            );
++            case CONSUMER_GROUP_MEMBER_METADATA -> groupMetadataManager.replay(
++                (ConsumerGroupMemberMetadataKey) key,
++                (ConsumerGroupMemberMetadataValue) Utils.messageOrNull(value)
++            );
++            case CONSUMER_GROUP_TARGET_ASSIGNMENT_METADATA -> groupMetadataManager.replay(
++                (ConsumerGroupTargetAssignmentMetadataKey) key,
++                (ConsumerGroupTargetAssignmentMetadataValue) Utils.messageOrNull(value)
++            );
++            case CONSUMER_GROUP_TARGET_ASSIGNMENT_MEMBER -> groupMetadataManager.replay(
++                (ConsumerGroupTargetAssignmentMemberKey) key,
++                (ConsumerGroupTargetAssignmentMemberValue) Utils.messageOrNull(value)
++            );
++            case CONSUMER_GROUP_CURRENT_MEMBER_ASSIGNMENT -> groupMetadataManager.replay(
++                (ConsumerGroupCurrentMemberAssignmentKey) key,
++                (ConsumerGroupCurrentMemberAssignmentValue) Utils.messageOrNull(value)
++            );
++            case SHARE_GROUP_MEMBER_METADATA -> groupMetadataManager.replay(
++                (ShareGroupMemberMetadataKey) key,
++                (ShareGroupMemberMetadataValue) Utils.messageOrNull(value)
++            );
++            case SHARE_GROUP_METADATA -> groupMetadataManager.replay(
++                (ShareGroupMetadataKey) key,
++                (ShareGroupMetadataValue) Utils.messageOrNull(value)
++            );
++            case SHARE_GROUP_TARGET_ASSIGNMENT_METADATA -> groupMetadataManager.replay(
++                (ShareGroupTargetAssignmentMetadataKey) key,
++                (ShareGroupTargetAssignmentMetadataValue) Utils.messageOrNull(value)
++            );
++            case SHARE_GROUP_TARGET_ASSIGNMENT_MEMBER -> groupMetadataManager.replay(
++                (ShareGroupTargetAssignmentMemberKey) key,
++                (ShareGroupTargetAssignmentMemberValue) Utils.messageOrNull(value)
++            );
++            case SHARE_GROUP_CURRENT_MEMBER_ASSIGNMENT -> groupMetadataManager.replay(
++                (ShareGroupCurrentMemberAssignmentKey) key,
++                (ShareGroupCurrentMemberAssignmentValue) Utils.messageOrNull(value)
++            );
++            case SHARE_GROUP_STATE_PARTITION_METADATA -> groupMetadataManager.replay(
++                (ShareGroupStatePartitionMetadataKey) key,
++                (ShareGroupStatePartitionMetadataValue) Utils.messageOrNull(value)
++            );
++            case CONSUMER_GROUP_REGULAR_EXPRESSION -> groupMetadataManager.replay(
++                (ConsumerGroupRegularExpressionKey) key,
++                (ConsumerGroupRegularExpressionValue) Utils.messageOrNull(value)
++            );
++            case STREAMS_GROUP_METADATA -> groupMetadataManager.replay(
++                (StreamsGroupMetadataKey) key,
++                (StreamsGroupMetadataValue) Utils.messageOrNull(value)
++            );
++            case STREAMS_GROUP_MEMBER_METADATA -> groupMetadataManager.replay(
++                (StreamsGroupMemberMetadataKey) key,
++                (StreamsGroupMemberMetadataValue) Utils.messageOrNull(value)
++            );
++            case STREAMS_GROUP_TARGET_ASSIGNMENT_METADATA -> groupMetadataManager.replay(
++                (StreamsGroupTargetAssignmentMetadataKey) key,
++                (StreamsGroupTargetAssignmentMetadataValue) Utils.messageOrNull(value)
++            );
++            case STREAMS_GROUP_TARGET_ASSIGNMENT_MEMBER -> groupMetadataManager.replay(
++                (StreamsGroupTargetAssignmentMemberKey) key,
++                (StreamsGroupTargetAssignmentMemberValue) Utils.messageOrNull(value)
++            );
++            case STREAMS_GROUP_CURRENT_MEMBER_ASSIGNMENT -> groupMetadataManager.replay(
++                (StreamsGroupCurrentMemberAssignmentKey) key,
++                (StreamsGroupCurrentMemberAssignmentValue) Utils.messageOrNull(value)
++            );
++            case STREAMS_GROUP_TOPOLOGY -> groupMetadataManager.replay(
++                (StreamsGroupTopologyKey) key,
++                (StreamsGroupTopologyValue) Utils.messageOrNull(value)
++            );
++            default -> throw new IllegalStateException("Received an unknown record type " + recordType
++                + " in " + record);
+         }
+     }
+ 
+diff --git a/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupMetadataManager.java b/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupMetadataManager.java
+index 0b9489713..d3092c91c 100644
+--- a/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupMetadataManager.java
++++ b/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupMetadataManager.java
+@@ -6876,20 +6876,11 @@ public class GroupMetadataManager {
+         Map<ShareGroup.ShareGroupState, Long> shareGroupSizeCounter = new HashMap<>();
+         groups.forEach((__, group) -> {
+             switch (group.type()) {
+-                case CLASSIC:
+-                    classicGroupSizeCounter.compute(((ClassicGroup) group).currentState(), Utils::incValue);
+-                    break;
+-                case CONSUMER:
+-                    consumerGroupSizeCounter.compute(((ConsumerGroup) group).state(), Utils::incValue);
+-                    break;
+-                case STREAMS:
+-                    streamsGroupSizeCounter.compute(((StreamsGroup) group).state(), Utils::incValue);
+-                    break;
+-                case SHARE:
+-                    shareGroupSizeCounter.compute(((ShareGroup) group).state(), Utils::incValue);
+-                    break;
+-                default:
+-                    break;
++                case CLASSIC -> classicGroupSizeCounter.compute(((ClassicGroup) group).currentState(), Utils::incValue);
++                case CONSUMER -> consumerGroupSizeCounter.compute(((ConsumerGroup) group).state(), Utils::incValue);
++                case STREAMS -> streamsGroupSizeCounter.compute(((StreamsGroup) group).state(), Utils::incValue);
++                case SHARE -> shareGroupSizeCounter.compute(((ShareGroup) group).state(), Utils::incValue);
++                default -> { }
+             }
+         });
+         metrics.setClassicGroupGauges(classicGroupSizeCounter);
+@@ -6986,51 +6977,40 @@ public class GroupMetadataManager {
+     public void onUnloaded() {
+         groups.values().forEach(group -> {
+             switch (group.type()) {
+-                case STREAMS:
++                case STREAMS -> {
+                     StreamsGroup streamsGroup = (StreamsGroup) group;
+                     log.info("[GroupId={}] Unloaded group metadata for group epoch {}.",
+                         streamsGroup.groupId(), streamsGroup.groupEpoch());
+-                    break;
+-                case CONSUMER:
++                }
++                case CONSUMER -> {
+                     ConsumerGroup consumerGroup = (ConsumerGroup) group;
+                     log.info("[GroupId={}] Unloaded group metadata for group epoch {}.",
+                         consumerGroup.groupId(), consumerGroup.groupEpoch());
+-                    break;
+-                case CLASSIC:
++                }
++                case CLASSIC -> {
+                     ClassicGroup classicGroup = (ClassicGroup) group;
+                     log.info("[GroupId={}] Unloading group metadata for generation {}.",
+                         classicGroup.groupId(), classicGroup.generationId());
+-
+                     classicGroup.transitionTo(DEAD);
+                     switch (classicGroup.previousState()) {
+-                        case EMPTY:
+-                        case DEAD:
+-                            break;
+-                        case PREPARING_REBALANCE:
+-                            classicGroup.allMembers().forEach(member ->
+-                                classicGroup.completeJoinFuture(member, new JoinGroupResponseData()
+-                                    .setMemberId(member.memberId())
+-                                    .setErrorCode(NOT_COORDINATOR.code()))
+-                            );
+-
+-                            break;
+-                        case COMPLETING_REBALANCE:
+-                        case STABLE:
+-                            classicGroup.allMembers().forEach(member ->
+-                                classicGroup.completeSyncFuture(member, new SyncGroupResponseData()
+-                                    .setErrorCode(NOT_COORDINATOR.code()))
+-                            );
++                        case EMPTY, DEAD -> { }
++                        case PREPARING_REBALANCE -> classicGroup.allMembers().forEach(member ->
++                            classicGroup.completeJoinFuture(member, new JoinGroupResponseData()
++                                .setMemberId(member.memberId())
++                                .setErrorCode(NOT_COORDINATOR.code()))
++                        );
++                        case COMPLETING_REBALANCE, STABLE -> classicGroup.allMembers().forEach(member ->
++                            classicGroup.completeSyncFuture(member, new SyncGroupResponseData()
++                                .setErrorCode(NOT_COORDINATOR.code()))
++                        );
+                     }
+-                    break;
+-                case SHARE:
++                }
++                case SHARE -> {
+                     ShareGroup shareGroup = (ShareGroup) group;
+                     log.info("[GroupId={}] Unloaded group metadata for group epoch {}.",
+                         shareGroup.groupId(), shareGroup.groupEpoch());
+-                    break;
+-
+-                default:
+-                    log.warn("onUnloaded group with an unknown group type {}.", group.type());
+-                    break;
++                }
++                default -> log.warn("onUnloaded group with an unknown group type {}.", group.type());
+             }
+         });
+     }
+@@ -8621,19 +8601,13 @@ public class GroupMetadataManager {
+         group.removePendingSyncMember(memberId);
+         String syncKey = classicGroupSyncKey(group.groupId());
+         switch (group.currentState()) {
+-            case DEAD:
+-            case EMPTY:
+-            case PREPARING_REBALANCE:
+-                timer.cancel(syncKey);
+-                break;
+-            case COMPLETING_REBALANCE:
+-            case STABLE:
++            case DEAD, EMPTY, PREPARING_REBALANCE -> timer.cancel(syncKey);
++            case COMPLETING_REBALANCE, STABLE -> {
+                 if (group.hasReceivedSyncFromAllMembers()) {
+                     timer.cancel(syncKey);
+                 }
+-                break;
+-            default:
+-                throw new IllegalStateException("Unknown group state: " + group.stateAsString());
++            }
++            default -> throw new IllegalStateException("Unknown group state: " + group.stateAsString());
+         }
+     }
+ 
+@@ -9278,14 +9252,10 @@ public class GroupMetadataManager {
+ 
+         if (!validLeaveGroupMembers.isEmpty()) {
+             switch (group.currentState()) {
+-                case STABLE:
+-                case COMPLETING_REBALANCE:
++                case STABLE, COMPLETING_REBALANCE ->
+                     coordinatorResult = maybePrepareRebalanceOrCompleteJoin(group, reason);
+-                    break;
+-                case PREPARING_REBALANCE:
+-                    coordinatorResult = maybeCompleteJoinPhase(group);
+-                    break;
+-                default:
++                case PREPARING_REBALANCE -> coordinatorResult = maybeCompleteJoinPhase(group);
++                default -> { }
+             }
+         }
+ 
+diff --git a/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/classic/ClassicGroup.java b/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/classic/ClassicGroup.java
+index 641b9425f..93c06fd2e 100644
+--- a/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/classic/ClassicGroup.java
++++ b/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/classic/ClassicGroup.java
+@@ -897,16 +897,13 @@ public class ClassicGroup implements Group {
+     @Override
+     public void validateOffsetDelete() throws ApiException {
+         switch (currentState()) {
+-            case DEAD:
+-                throw new GroupIdNotFoundException(String.format("Group %s is in dead state.", groupId));
+-            case STABLE:
+-            case PREPARING_REBALANCE:
+-            case COMPLETING_REBALANCE:
++            case DEAD -> throw new GroupIdNotFoundException(String.format("Group %s is in dead state.", groupId));
++            case STABLE, PREPARING_REBALANCE, COMPLETING_REBALANCE -> {
+                 if (!usesConsumerGroupProtocol()) {
+                     throw Errors.NON_EMPTY_GROUP.exception();
+                 }
+-                break;
+-            default:
++            }
++            default -> { }
+         }
+     }
+ 
+diff --git a/metadata/src/main/java/org/apache/kafka/controller/QuorumController.java b/metadata/src/main/java/org/apache/kafka/controller/QuorumController.java
+index 33791c5cd..cbf35b6ab 100644
+--- a/metadata/src/main/java/org/apache/kafka/controller/QuorumController.java
++++ b/metadata/src/main/java/org/apache/kafka/controller/QuorumController.java
+@@ -1239,91 +1239,36 @@ public final class QuorumController implements Controller {
+         }
+         MetadataRecordType type = MetadataRecordType.fromId(message.apiKey());
+         switch (type) {
+-            case REGISTER_BROKER_RECORD:
+-                clusterControl.replay((RegisterBrokerRecord) message, offset);
+-                break;
+-            case UNREGISTER_BROKER_RECORD:
+-                clusterControl.replay((UnregisterBrokerRecord) message);
+-                break;
+-            case TOPIC_RECORD:
+-                replicationControl.replay((TopicRecord) message);
+-                break;
+-            case PARTITION_RECORD:
+-                replicationControl.replay((PartitionRecord) message);
+-                break;
+-            case CONFIG_RECORD:
+-                configurationControl.replay((ConfigRecord) message);
+-                break;
+-            case PARTITION_CHANGE_RECORD:
+-                replicationControl.replay((PartitionChangeRecord) message);
+-                break;
+-            case FENCE_BROKER_RECORD:
+-                clusterControl.replay((FenceBrokerRecord) message);
+-                break;
+-            case UNFENCE_BROKER_RECORD:
+-                clusterControl.replay((UnfenceBrokerRecord) message);
+-                break;
+-            case REMOVE_TOPIC_RECORD:
+-                replicationControl.replay((RemoveTopicRecord) message);
+-                break;
+-            case FEATURE_LEVEL_RECORD:
+-                featureControl.replay((FeatureLevelRecord) message);
+-                break;
+-            case CLIENT_QUOTA_RECORD:
+-                clientQuotaControlManager.replay((ClientQuotaRecord) message);
+-                break;
+-            case PRODUCER_IDS_RECORD:
+-                producerIdControlManager.replay((ProducerIdsRecord) message);
+-                break;
+-            case BROKER_REGISTRATION_CHANGE_RECORD:
+-                clusterControl.replay((BrokerRegistrationChangeRecord) message);
+-                break;
+-            case ACCESS_CONTROL_ENTRY_RECORD:
+-                aclControlManager.replay((AccessControlEntryRecord) message);
+-                break;
+-            case REMOVE_ACCESS_CONTROL_ENTRY_RECORD:
+-                aclControlManager.replay((RemoveAccessControlEntryRecord) message);
+-                break;
+-            case USER_SCRAM_CREDENTIAL_RECORD:
+-                scramControlManager.replay((UserScramCredentialRecord) message);
+-                break;
+-            case REMOVE_USER_SCRAM_CREDENTIAL_RECORD:
+-                scramControlManager.replay((RemoveUserScramCredentialRecord) message);
+-                break;
+-            case DELEGATION_TOKEN_RECORD:
+-                delegationTokenControlManager.replay((DelegationTokenRecord) message);
+-                break;
+-            case REMOVE_DELEGATION_TOKEN_RECORD:
+-                delegationTokenControlManager.replay((RemoveDelegationTokenRecord) message);
+-                break;
+-            case NO_OP_RECORD:
+-                // NoOpRecord is an empty record and doesn't need to be replayed
+-                break;
+-            case ZK_MIGRATION_STATE_RECORD:
+-                // In 4.0, although migration is no longer supported and ZK has been removed from Kafka,
+-                // users might migrate from ZK to KRaft in version 3.x and then perform a rolling upgrade to 4.0.
+-                // Therefore, this case needs to be retained but will be a no-op.
+-                break;
+-            case BEGIN_TRANSACTION_RECORD:
+-                offsetControl.replay((BeginTransactionRecord) message, offset);
+-                break;
+-            case END_TRANSACTION_RECORD:
+-                offsetControl.replay((EndTransactionRecord) message, offset);
+-                break;
+-            case ABORT_TRANSACTION_RECORD:
+-                offsetControl.replay((AbortTransactionRecord) message, offset);
+-                break;
+-            case REGISTER_CONTROLLER_RECORD:
+-                clusterControl.replay((RegisterControllerRecord) message);
+-                break;
+-            case UNREGISTER_CONTROLLER_RECORD:
+-                clusterControl.replay((UnregisterControllerRecord) message);
+-                break;
+-            case CLEAR_ELR_RECORD:
+-                replicationControl.replay((ClearElrRecord) message);
+-                break;
+-            default:
+-                throw new RuntimeException("Unhandled record type " + type);
++            case REGISTER_BROKER_RECORD -> clusterControl.replay((RegisterBrokerRecord) message, offset);
++            case UNREGISTER_BROKER_RECORD -> clusterControl.replay((UnregisterBrokerRecord) message);
++            case TOPIC_RECORD -> replicationControl.replay((TopicRecord) message);
++            case PARTITION_RECORD -> replicationControl.replay((PartitionRecord) message);
++            case CONFIG_RECORD -> configurationControl.replay((ConfigRecord) message);
++            case PARTITION_CHANGE_RECORD -> replicationControl.replay((PartitionChangeRecord) message);
++            case FENCE_BROKER_RECORD -> clusterControl.replay((FenceBrokerRecord) message);
++            case UNFENCE_BROKER_RECORD -> clusterControl.replay((UnfenceBrokerRecord) message);
++            case REMOVE_TOPIC_RECORD -> replicationControl.replay((RemoveTopicRecord) message);
++            case FEATURE_LEVEL_RECORD -> featureControl.replay((FeatureLevelRecord) message);
++            case CLIENT_QUOTA_RECORD -> clientQuotaControlManager.replay((ClientQuotaRecord) message);
++            case PRODUCER_IDS_RECORD -> producerIdControlManager.replay((ProducerIdsRecord) message);
++            case BROKER_REGISTRATION_CHANGE_RECORD -> clusterControl.replay((BrokerRegistrationChangeRecord) message);
++            case ACCESS_CONTROL_ENTRY_RECORD -> aclControlManager.replay((AccessControlEntryRecord) message);
++            case REMOVE_ACCESS_CONTROL_ENTRY_RECORD -> aclControlManager.replay((RemoveAccessControlEntryRecord) message);
++            case USER_SCRAM_CREDENTIAL_RECORD -> scramControlManager.replay((UserScramCredentialRecord) message);
++            case REMOVE_USER_SCRAM_CREDENTIAL_RECORD -> scramControlManager.replay((RemoveUserScramCredentialRecord) message);
++            case DELEGATION_TOKEN_RECORD -> delegationTokenControlManager.replay((DelegationTokenRecord) message);
++            case REMOVE_DELEGATION_TOKEN_RECORD -> delegationTokenControlManager.replay((RemoveDelegationTokenRecord) message);
++            // NoOpRecord doesn't need to be replayed.
++            case NO_OP_RECORD -> { }
++            // ZK migration no longer supported in 4.0, but records may still exist in logs from 3.x clusters.
++            case ZK_MIGRATION_STATE_RECORD -> { }
++            case BEGIN_TRANSACTION_RECORD -> offsetControl.replay((BeginTransactionRecord) message, offset);
++            case END_TRANSACTION_RECORD -> offsetControl.replay((EndTransactionRecord) message, offset);
++            case ABORT_TRANSACTION_RECORD -> offsetControl.replay((AbortTransactionRecord) message, offset);
++            case REGISTER_CONTROLLER_RECORD -> clusterControl.replay((RegisterControllerRecord) message);
++            case UNREGISTER_CONTROLLER_RECORD -> clusterControl.replay((UnregisterControllerRecord) message);
++            case CLEAR_ELR_RECORD -> replicationControl.replay((ClearElrRecord) message);
++            default -> throw new RuntimeException("Unhandled record type " + type);
+         }
+     }
+ 
+diff --git a/metadata/src/main/java/org/apache/kafka/image/AclsDelta.java b/metadata/src/main/java/org/apache/kafka/image/AclsDelta.java
+index 7d6143950..9a7c4aa82 100644
+--- a/metadata/src/main/java/org/apache/kafka/image/AclsDelta.java
++++ b/metadata/src/main/java/org/apache/kafka/image/AclsDelta.java
+@@ -55,9 +55,7 @@ public final class AclsDelta {
+ 
+     void finishSnapshot() {
+         for (Entry<Uuid, StandardAcl> entry : image.acls().entrySet()) {
+-            if (!changes.containsKey(entry.getKey())) {
+-                changes.put(entry.getKey(), Optional.empty());
+-            }
++            changes.putIfAbsent(entry.getKey(), Optional.empty());
+         }
+     }
+ 
+diff --git a/metadata/src/main/java/org/apache/kafka/image/ClusterDelta.java b/metadata/src/main/java/org/apache/kafka/image/ClusterDelta.java
+index a8803853b..d85326d0a 100644
+--- a/metadata/src/main/java/org/apache/kafka/image/ClusterDelta.java
++++ b/metadata/src/main/java/org/apache/kafka/image/ClusterDelta.java
+@@ -68,14 +68,10 @@ public final class ClusterDelta {
+ 
+     public void finishSnapshot() {
+         for (Integer brokerId : image.brokers().keySet()) {
+-            if (!changedBrokers.containsKey(brokerId)) {
+-                changedBrokers.put(brokerId, Optional.empty());
+-            }
++            changedBrokers.putIfAbsent(brokerId, Optional.empty());
+         }
+         for (Integer controllerId : image.controllers().keySet()) {
+-            if (!changedControllers.containsKey(controllerId)) {
+-                changedControllers.put(controllerId, Optional.empty());
+-            }
++            changedControllers.putIfAbsent(controllerId, Optional.empty());
+         }
+     }
+ 
+diff --git a/metadata/src/main/java/org/apache/kafka/image/ConfigurationDelta.java b/metadata/src/main/java/org/apache/kafka/image/ConfigurationDelta.java
+index 63e6c2b27..08961a1ea 100644
+--- a/metadata/src/main/java/org/apache/kafka/image/ConfigurationDelta.java
++++ b/metadata/src/main/java/org/apache/kafka/image/ConfigurationDelta.java
+@@ -43,9 +43,7 @@ public final class ConfigurationDelta {
+ 
+     public void finishSnapshot() {
+         for (String key : image.data().keySet()) {
+-            if (!changes.containsKey(key)) {
+-                changes.put(key, Optional.empty());
+-            }
++            changes.putIfAbsent(key, Optional.empty());
+         }
+     }
+ 
+diff --git a/metadata/src/main/java/org/apache/kafka/image/DelegationTokenDelta.java b/metadata/src/main/java/org/apache/kafka/image/DelegationTokenDelta.java
+index 3743501fb..d246de478 100644
+--- a/metadata/src/main/java/org/apache/kafka/image/DelegationTokenDelta.java
++++ b/metadata/src/main/java/org/apache/kafka/image/DelegationTokenDelta.java
+@@ -43,11 +43,8 @@ public final class DelegationTokenDelta {
+ 
+     public void finishSnapshot() {
+         for (String tokenId : image.tokens().keySet()) {
+-            if (!changes.containsKey(tokenId)) {
+-                // If the tokenId from the image did not appear in the snapshot, mark it as removed
+-                changes.put(tokenId, Optional.empty());
+-
+-            }
++            // If the tokenId from the image did not appear in the snapshot, mark it as removed
++            changes.putIfAbsent(tokenId, Optional.empty());
+         }
+     }
+ 
+diff --git a/metadata/src/main/java/org/apache/kafka/image/FeaturesDelta.java b/metadata/src/main/java/org/apache/kafka/image/FeaturesDelta.java
+index 8812bd2bb..f9f05f0e4 100644
+--- a/metadata/src/main/java/org/apache/kafka/image/FeaturesDelta.java
++++ b/metadata/src/main/java/org/apache/kafka/image/FeaturesDelta.java
+@@ -51,9 +51,7 @@ public final class FeaturesDelta {
+ 
+     public void finishSnapshot() {
+         for (String featureName : image.finalizedVersions().keySet()) {
+-            if (!changes.containsKey(featureName)) {
+-                changes.put(featureName, Optional.empty());
+-            }
++            changes.putIfAbsent(featureName, Optional.empty());
+         }
+     }
+ 
+diff --git a/metadata/src/main/java/org/apache/kafka/image/MetadataDelta.java b/metadata/src/main/java/org/apache/kafka/image/MetadataDelta.java
+index 50cc6c089..65fa077b8 100644
+--- a/metadata/src/main/java/org/apache/kafka/image/MetadataDelta.java
++++ b/metadata/src/main/java/org/apache/kafka/image/MetadataDelta.java
+@@ -195,84 +195,33 @@ public final class MetadataDelta {
+     public void replay(ApiMessage record) {
+         MetadataRecordType type = MetadataRecordType.fromId(record.apiKey());
+         switch (type) {
+-            case REGISTER_BROKER_RECORD:
+-                replay((RegisterBrokerRecord) record);
+-                break;
+-            case UNREGISTER_BROKER_RECORD:
+-                replay((UnregisterBrokerRecord) record);
+-                break;
+-            case TOPIC_RECORD:
+-                replay((TopicRecord) record);
+-                break;
+-            case PARTITION_RECORD:
+-                replay((PartitionRecord) record);
+-                break;
+-            case CONFIG_RECORD:
+-                replay((ConfigRecord) record);
+-                break;
+-            case PARTITION_CHANGE_RECORD:
+-                replay((PartitionChangeRecord) record);
+-                break;
+-            case FENCE_BROKER_RECORD:
+-                replay((FenceBrokerRecord) record);
+-                break;
+-            case UNFENCE_BROKER_RECORD:
+-                replay((UnfenceBrokerRecord) record);
+-                break;
+-            case REMOVE_TOPIC_RECORD:
+-                replay((RemoveTopicRecord) record);
+-                break;
+-            case DELEGATION_TOKEN_RECORD:
+-                replay((DelegationTokenRecord) record);
+-                break;
+-            case USER_SCRAM_CREDENTIAL_RECORD:
+-                replay((UserScramCredentialRecord) record);
+-                break;
+-            case FEATURE_LEVEL_RECORD:
+-                replay((FeatureLevelRecord) record);
+-                break;
+-            case CLIENT_QUOTA_RECORD:
+-                replay((ClientQuotaRecord) record);
+-                break;
+-            case PRODUCER_IDS_RECORD:
+-                replay((ProducerIdsRecord) record);
+-                break;
+-            case BROKER_REGISTRATION_CHANGE_RECORD:
+-                replay((BrokerRegistrationChangeRecord) record);
+-                break;
+-            case ACCESS_CONTROL_ENTRY_RECORD:
+-                replay((AccessControlEntryRecord) record);
+-                break;
+-            case CLEAR_ELR_RECORD:
+-                replay((ClearElrRecord) record);
+-                break;
+-            case REMOVE_ACCESS_CONTROL_ENTRY_RECORD:
+-                replay((RemoveAccessControlEntryRecord) record);
+-                break;
+-            case REMOVE_USER_SCRAM_CREDENTIAL_RECORD:
+-                replay((RemoveUserScramCredentialRecord) record);
+-                break;
+-            case REMOVE_DELEGATION_TOKEN_RECORD:
+-                replay((RemoveDelegationTokenRecord) record);
+-                break;
+-            case NO_OP_RECORD:
+-                /* NoOpRecord is an empty record and doesn't need to be replayed beyond
+-                 * updating the highest offset and epoch.
+-                 */
+-                break;
+-            case ZK_MIGRATION_STATE_RECORD:
+-                // In 4.0, although migration is no longer supported and ZK has been removed from Kafka,
+-                // users might migrate from ZK to KRaft in version 3.x and then perform a rolling upgrade to 4.0.
+-                // Therefore, this case needs to be retained but will be a no-op.
+-                break;
+-            case REGISTER_CONTROLLER_RECORD:
+-                replay((RegisterControllerRecord) record);
+-                break;
+-            case UNREGISTER_CONTROLLER_RECORD:
+-                replay((UnregisterControllerRecord) record);
+-                break;
+-            default:
+-                throw new RuntimeException("Unknown metadata record type " + type);
++            case REGISTER_BROKER_RECORD -> replay((RegisterBrokerRecord) record);
++            case UNREGISTER_BROKER_RECORD -> replay((UnregisterBrokerRecord) record);
++            case TOPIC_RECORD -> replay((TopicRecord) record);
++            case PARTITION_RECORD -> replay((PartitionRecord) record);
++            case CONFIG_RECORD -> replay((ConfigRecord) record);
++            case PARTITION_CHANGE_RECORD -> replay((PartitionChangeRecord) record);
++            case FENCE_BROKER_RECORD -> replay((FenceBrokerRecord) record);
++            case UNFENCE_BROKER_RECORD -> replay((UnfenceBrokerRecord) record);
++            case REMOVE_TOPIC_RECORD -> replay((RemoveTopicRecord) record);
++            case DELEGATION_TOKEN_RECORD -> replay((DelegationTokenRecord) record);
++            case USER_SCRAM_CREDENTIAL_RECORD -> replay((UserScramCredentialRecord) record);
++            case FEATURE_LEVEL_RECORD -> replay((FeatureLevelRecord) record);
++            case CLIENT_QUOTA_RECORD -> replay((ClientQuotaRecord) record);
++            case PRODUCER_IDS_RECORD -> replay((ProducerIdsRecord) record);
++            case BROKER_REGISTRATION_CHANGE_RECORD -> replay((BrokerRegistrationChangeRecord) record);
++            case ACCESS_CONTROL_ENTRY_RECORD -> replay((AccessControlEntryRecord) record);
++            case CLEAR_ELR_RECORD -> replay((ClearElrRecord) record);
++            case REMOVE_ACCESS_CONTROL_ENTRY_RECORD -> replay((RemoveAccessControlEntryRecord) record);
++            case REMOVE_USER_SCRAM_CREDENTIAL_RECORD -> replay((RemoveUserScramCredentialRecord) record);
++            case REMOVE_DELEGATION_TOKEN_RECORD -> replay((RemoveDelegationTokenRecord) record);
++            // NoOpRecord doesn't need to be replayed beyond updating the highest offset and epoch.
++            case NO_OP_RECORD -> { }
++            // ZK migration no longer supported in 4.0, but records may still exist in logs from 3.x clusters.
++            case ZK_MIGRATION_STATE_RECORD -> { }
++            case REGISTER_CONTROLLER_RECORD -> replay((RegisterControllerRecord) record);
++            case UNREGISTER_CONTROLLER_RECORD -> replay((UnregisterControllerRecord) record);
++            default -> throw new RuntimeException("Unknown metadata record type " + type);
+         }
+     }
+ 
+diff --git a/metadata/src/main/java/org/apache/kafka/image/ScramDelta.java b/metadata/src/main/java/org/apache/kafka/image/ScramDelta.java
+index 706dc728e..9f6b24e3d 100644
+--- a/metadata/src/main/java/org/apache/kafka/image/ScramDelta.java
++++ b/metadata/src/main/java/org/apache/kafka/image/ScramDelta.java
+@@ -46,9 +46,7 @@ public final class ScramDelta {
+             Map<String, Optional<ScramCredentialData>> userNameMap =
+                 changes.computeIfAbsent(mechanismEntry.getKey(), __ -> new HashMap<>());
+             for (String userName : mechanismEntry.getValue().keySet()) {
+-                if (!userNameMap.containsKey(userName)) {
+-                    userNameMap.put(userName, Optional.empty());
+-                }
++                userNameMap.putIfAbsent(userName, Optional.empty());
+             }
+         }
+     }
+diff --git a/metadata/src/main/java/org/apache/kafka/image/TopicDelta.java b/metadata/src/main/java/org/apache/kafka/image/TopicDelta.java
+index 553fc54c0..785b1548b 100644
+--- a/metadata/src/main/java/org/apache/kafka/image/TopicDelta.java
++++ b/metadata/src/main/java/org/apache/kafka/image/TopicDelta.java
+@@ -147,9 +147,7 @@ public final class TopicDelta {
+             }
+         }
+         for (Entry<Integer, PartitionRegistration> entry : partitionChanges.entrySet()) {
+-            if (!newPartitions.containsKey(entry.getKey())) {
+-                newPartitions.put(entry.getKey(), entry.getValue());
+-            }
++            newPartitions.putIfAbsent(entry.getKey(), entry.getValue());
+         }
+         return new TopicImage(image.name(), image.id(), newPartitions);
+     }
+diff --git a/metadata/src/main/java/org/apache/kafka/image/loader/MetadataBatchLoader.java b/metadata/src/main/java/org/apache/kafka/image/loader/MetadataBatchLoader.java
+index 6268bac71..677345e6b 100644
+--- a/metadata/src/main/java/org/apache/kafka/image/loader/MetadataBatchLoader.java
++++ b/metadata/src/main/java/org/apache/kafka/image/loader/MetadataBatchLoader.java
+@@ -197,12 +197,10 @@ public class MetadataBatchLoader {
+             .numBytes(numBytes)
+             .build();
+         switch (transactionState) {
+-            case STARTED_TRANSACTION:
+-            case CONTINUED_TRANSACTION:
++            case STARTED_TRANSACTION, CONTINUED_TRANSACTION ->
+                 log.debug("handleCommit: not publishing since a transaction starting at {} is still in progress. " +
+                     "{} batch(es) processed so far.", image.offset(), numBatches);
+-                break;
+-            case ABORTED_TRANSACTION:
++            case ABORTED_TRANSACTION -> {
+                 log.debug("handleCommit: publishing empty delta between {} and {} from {} batch(es) " +
+                     "since a transaction was aborted", image.offset(), manifest.provenance().lastContainedOffset(),
+                     manifest.numBatches());
+@@ -210,64 +208,56 @@ public class MetadataBatchLoader {
+                     .setImage(image)
+                     .setSupportedConfigChecker(supportedConfigChecker)
+                     .build(), manifest);
+-                break;
+-            case ENDED_TRANSACTION:
+-            case NO_TRANSACTION:
++            }
++            case ENDED_TRANSACTION, NO_TRANSACTION -> {
+                 if (log.isDebugEnabled()) {
+                     log.debug("handleCommit: Generated a metadata delta between {} and {} from {} batch(es) in {} us.",
+                         image.offset(), manifest.provenance().lastContainedOffset(),
+                         manifest.numBatches(), NANOSECONDS.toMicros(manifest.elapsedNs()));
+                 }
+                 applyDeltaAndUpdate(delta, manifest);
+-                break;
++            }
+         }
+     }
+ 
+     private void replay(ApiMessageAndVersion record) {
+         MetadataRecordType type = MetadataRecordType.fromId(record.message().apiKey());
+         switch (type) {
+-            case BEGIN_TRANSACTION_RECORD:
++            case BEGIN_TRANSACTION_RECORD -> {
+                 if (transactionState == TransactionState.STARTED_TRANSACTION ||
+                     transactionState == TransactionState.CONTINUED_TRANSACTION) {
+                     throw new RuntimeException("Encountered BeginTransactionRecord while already in a transaction");
+                 } else {
+                     transactionState = TransactionState.STARTED_TRANSACTION;
+                 }
+-                break;
+-            case END_TRANSACTION_RECORD:
++            }
++            case END_TRANSACTION_RECORD -> {
+                 if (transactionState == TransactionState.CONTINUED_TRANSACTION ||
+                     transactionState == TransactionState.STARTED_TRANSACTION) {
+                     transactionState = TransactionState.ENDED_TRANSACTION;
+                 } else {
+                     throw new RuntimeException("Encountered EndTransactionRecord without having seen a BeginTransactionRecord");
+                 }
+-                break;
+-            case ABORT_TRANSACTION_RECORD:
++            }
++            case ABORT_TRANSACTION_RECORD -> {
+                 if (transactionState == TransactionState.CONTINUED_TRANSACTION ||
+                     transactionState == TransactionState.STARTED_TRANSACTION) {
+                     transactionState = TransactionState.ABORTED_TRANSACTION;
+                 } else {
+                     throw new RuntimeException("Encountered AbortTransactionRecord without having seen a BeginTransactionRecord");
+                 }
+-                break;
+-            default:
++            }
++            default -> {
+                 switch (transactionState) {
+-                    case STARTED_TRANSACTION:
+-                        // If we see a non-transaction record after starting a transaction, transition to CONTINUED_TRANSACTION
+-                        transactionState = TransactionState.CONTINUED_TRANSACTION;
+-                        break;
+-                    case ENDED_TRANSACTION:
+-                    case ABORTED_TRANSACTION:
+-                        // If we see a non-transaction record after ending a transaction, transition back to NO_TRANSACTION
+-                        transactionState = TransactionState.NO_TRANSACTION;
+-                        break;
+-                    case CONTINUED_TRANSACTION:
+-                    case NO_TRANSACTION:
+-                    default:
+-                        break;
++                    // If we see a non-transaction record after starting a transaction, transition to CONTINUED_TRANSACTION
++                    case STARTED_TRANSACTION -> transactionState = TransactionState.CONTINUED_TRANSACTION;
++                    // If we see a non-transaction record after ending a transaction, transition back to NO_TRANSACTION
++                    case ENDED_TRANSACTION, ABORTED_TRANSACTION -> transactionState = TransactionState.NO_TRANSACTION;
++                    default -> { }
+                 }
+                 hasSeenRecord = true;
+                 delta.replay(record.message());
++            }
+         }
+     }
+ 
+diff --git a/metadata/src/main/java/org/apache/kafka/image/publisher/SnapshotGenerator.java b/metadata/src/main/java/org/apache/kafka/image/publisher/SnapshotGenerator.java
+index 9560e8d86..30e94feac 100644
+--- a/metadata/src/main/java/org/apache/kafka/image/publisher/SnapshotGenerator.java
++++ b/metadata/src/main/java/org/apache/kafka/image/publisher/SnapshotGenerator.java
+@@ -215,12 +215,8 @@ public class SnapshotGenerator implements MetadataPublisher {
+         LoaderManifest manifest
+     ) {
+         switch (manifest.type()) {
+-            case LOG_DELTA:
+-                publishLogDelta(newImage, (LogDeltaManifest) manifest);
+-                break;
+-            case SNAPSHOT:
+-                publishSnapshot(newImage);
+-                break;
++            case LOG_DELTA -> publishLogDelta(newImage, (LogDeltaManifest) manifest);
++            case SNAPSHOT -> publishSnapshot(newImage);
+         }
+     }
+ 
+diff --git a/raft/src/main/java/org/apache/kafka/raft/KafkaRaftClient.java b/raft/src/main/java/org/apache/kafka/raft/KafkaRaftClient.java
+index 51dec019e..6aa40deaa 100644
+--- a/raft/src/main/java/org/apache/kafka/raft/KafkaRaftClient.java
++++ b/raft/src/main/java/org/apache/kafka/raft/KafkaRaftClient.java
+@@ -1429,17 +1429,13 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
+                     .setLeaderId(quorum.leaderIdOrSentinel());
+ 
+                 switch (validOffsetAndEpoch.kind()) {
+-                    case DIVERGING:
+-                        partitionData.divergingEpoch()
+-                            .setEpoch(validOffsetAndEpoch.offsetAndEpoch().epoch())
+-                            .setEndOffset(validOffsetAndEpoch.offsetAndEpoch().offset());
+-                        break;
+-                    case SNAPSHOT:
+-                        partitionData.snapshotId()
+-                            .setEpoch(validOffsetAndEpoch.offsetAndEpoch().epoch())
+-                            .setEndOffset(validOffsetAndEpoch.offsetAndEpoch().offset());
+-                        break;
+-                    default:
++                    case DIVERGING -> partitionData.divergingEpoch()
++                        .setEpoch(validOffsetAndEpoch.offsetAndEpoch().epoch())
++                        .setEndOffset(validOffsetAndEpoch.offsetAndEpoch().offset());
++                    case SNAPSHOT -> partitionData.snapshotId()
++                        .setEpoch(validOffsetAndEpoch.offsetAndEpoch().epoch())
++                        .setEndOffset(validOffsetAndEpoch.offsetAndEpoch().offset());
++                    default -> { }
+                 }
+             }
+         );
+diff --git a/server-common/src/main/java/org/apache/kafka/queue/KafkaEventQueue.java b/server-common/src/main/java/org/apache/kafka/queue/KafkaEventQueue.java
+index 0a39cc51c..b99573167 100644
+--- a/server-common/src/main/java/org/apache/kafka/queue/KafkaEventQueue.java
++++ b/server-common/src/main/java/org/apache/kafka/queue/KafkaEventQueue.java
+@@ -327,24 +327,20 @@ public final class KafkaEventQueue implements EventQueue {
+                 boolean queueWasEmpty = head.isSingleton();
+                 boolean shouldSignal = false;
+                 switch (eventContext.insertionType) {
+-                    case APPEND:
++                    case APPEND -> {
+                         head.insertBefore(eventContext);
+-                        if (queueWasEmpty) {
+-                            shouldSignal = true;
+-                        }
+-                        break;
+-                    case PREPEND:
++                        if (queueWasEmpty) shouldSignal = true;
++                    }
++                    case PREPEND -> {
+                         head.insertAfter(eventContext);
+-                        if (queueWasEmpty) {
+-                            shouldSignal = true;
+-                        }
+-                        break;
+-                    case DEFERRED:
++                        if (queueWasEmpty) shouldSignal = true;
++                    }
++                    case DEFERRED -> {
+                         if (deadlineNs.isEmpty()) {
+                             return new RuntimeException(
+                                 "You must specify a deadline for deferred events.");
+                         }
+-                        break;
++                    }
+                 }
+                 if (deadlineNs.isPresent()) {
+                     long insertNs = deadlineNs.getAsLong();
+diff --git a/server-common/src/main/java/org/apache/kafka/server/common/EligibleLeaderReplicasVersion.java b/server-common/src/main/java/org/apache/kafka/server/common/EligibleLeaderReplicasVersion.java
+index 34c823a26..f4a2b250f 100644
+--- a/server-common/src/main/java/org/apache/kafka/server/common/EligibleLeaderReplicasVersion.java
++++ b/server-common/src/main/java/org/apache/kafka/server/common/EligibleLeaderReplicasVersion.java
+@@ -65,13 +65,10 @@ public enum EligibleLeaderReplicasVersion implements FeatureVersion {
+     }
+ 
+     public static EligibleLeaderReplicasVersion fromFeatureLevel(short version) {
+-        switch (version) {
+-            case 0:
+-                return ELRV_0;
+-            case 1:
+-                return ELRV_1;
+-            default:
+-                throw new RuntimeException("Unknown eligible leader replicas feature level: " + (int) version);
+-        }
++        return switch (version) {
++            case 0 -> ELRV_0;
++            case 1 -> ELRV_1;
++            default -> throw new RuntimeException("Unknown eligible leader replicas feature level: " + (int) version);
++        };
+     }
+ }
+diff --git a/server-common/src/main/java/org/apache/kafka/server/common/GroupVersion.java b/server-common/src/main/java/org/apache/kafka/server/common/GroupVersion.java
+index ba5a93b98..a6be8ee8c 100644
+--- a/server-common/src/main/java/org/apache/kafka/server/common/GroupVersion.java
++++ b/server-common/src/main/java/org/apache/kafka/server/common/GroupVersion.java
+@@ -69,13 +69,10 @@ public enum GroupVersion implements FeatureVersion {
+     }
+ 
+     public static GroupVersion fromFeatureLevel(short version) {
+-        switch (version) {
+-            case 0:
+-                return GV_0;
+-            case 1:
+-                return GV_1;
+-            default:
+-                throw new RuntimeException("Unknown group feature level: " + (int) version);
+-        }
++        return switch (version) {
++            case 0 -> GV_0;
++            case 1 -> GV_1;
++            default -> throw new RuntimeException("Unknown group feature level: " + (int) version);
++        };
+     }
+ }
+diff --git a/server-common/src/main/java/org/apache/kafka/server/common/KRaftVersion.java b/server-common/src/main/java/org/apache/kafka/server/common/KRaftVersion.java
+index d797880c7..08a82ae0f 100644
+--- a/server-common/src/main/java/org/apache/kafka/server/common/KRaftVersion.java
++++ b/server-common/src/main/java/org/apache/kafka/server/common/KRaftVersion.java
+@@ -46,14 +46,11 @@ public enum KRaftVersion implements FeatureVersion {
+     }
+ 
+     public static KRaftVersion fromFeatureLevel(short version) {
+-        switch (version) {
+-            case 0:
+-                return KRAFT_VERSION_0;
+-            case 1:
+-                return KRAFT_VERSION_1;
+-            default:
+-                throw new IllegalArgumentException("Unknown KRaft feature level: " + (int) version);
+-        }
++        return switch (version) {
++            case 0 -> KRAFT_VERSION_0;
++            case 1 -> KRAFT_VERSION_1;
++            default -> throw new IllegalArgumentException("Unknown KRaft feature level: " + (int) version);
++        };
+     }
+ 
+     public boolean isReconfigSupported() {
+@@ -84,31 +81,23 @@ public enum KRaftVersion implements FeatureVersion {
+     }
+ 
+     public short quorumStateVersion() {
+-        switch (this) {
+-            case KRAFT_VERSION_0:
+-                return (short) 0;
+-            case KRAFT_VERSION_1:
+-                return (short) 1;
+-            default:
+-                throw new IllegalStateException("Unsupported KRaft feature level: " + this);
+-        }
++        return switch (this) {
++            case KRAFT_VERSION_0 -> (short) 0;
++            case KRAFT_VERSION_1 -> (short) 1;
++        };
+     }
+ 
+     public short kraftVersionRecordVersion() {
+-        switch (this) {
+-            case KRAFT_VERSION_1:
+-                return (short) 0;
+-            default:
+-                throw new IllegalStateException("Unsupported KRaft feature level: " + this);
+-        }
++        return switch (this) {
++            case KRAFT_VERSION_1 -> (short) 0;
++            default -> throw new IllegalStateException("Unsupported KRaft feature level: " + this);
++        };
+     }
+ 
+     public short votersRecordVersion() {
+-        switch (this) {
+-            case KRAFT_VERSION_1:
+-                return (short) 0;
+-            default:
+-                throw new IllegalStateException("Unsupported KRaft feature level: " + this);
+-        }
++        return switch (this) {
++            case KRAFT_VERSION_1 -> (short) 0;
++            default -> throw new IllegalStateException("Unsupported KRaft feature level: " + this);
++        };
+     }
+ }
+diff --git a/server-common/src/main/java/org/apache/kafka/server/common/ShareVersion.java b/server-common/src/main/java/org/apache/kafka/server/common/ShareVersion.java
+index ddf9c3442..0d9e5116c 100644
+--- a/server-common/src/main/java/org/apache/kafka/server/common/ShareVersion.java
++++ b/server-common/src/main/java/org/apache/kafka/server/common/ShareVersion.java
+@@ -77,15 +77,11 @@ public enum ShareVersion implements FeatureVersion {
+     }
+ 
+     public static ShareVersion fromFeatureLevel(short version) {
+-        switch (version) {
+-            case 0:
+-                return SV_0;
+-            case 1:
+-                return SV_1;
+-            case 2:
+-                return SV_2;
+-            default:
+-                throw new RuntimeException("Unknown share feature level: " + (int) version);
+-        }
++        return switch (version) {
++            case 0 -> SV_0;
++            case 1 -> SV_1;
++            case 2 -> SV_2;
++            default -> throw new RuntimeException("Unknown share feature level: " + (int) version);
++        };
+     }
+ }
+diff --git a/server-common/src/main/java/org/apache/kafka/server/mirror/MirrorPartitionState.java b/server-common/src/main/java/org/apache/kafka/server/mirror/MirrorPartitionState.java
+index abb3f4cd0..87d707cad 100644
+--- a/server-common/src/main/java/org/apache/kafka/server/mirror/MirrorPartitionState.java
++++ b/server-common/src/main/java/org/apache/kafka/server/mirror/MirrorPartitionState.java
+@@ -95,18 +95,18 @@ public enum MirrorPartitionState {
+     }
+ 
+     public static MirrorPartitionState fromValue(byte value) {
+-        switch (value) {
+-            case 0: return LOG_ALIGNMENT;
+-            case 1: return EPOCH_FENCING;
+-            case 2: return ULE_RECOVERY;
+-            case 3: return MIRRORING;
+-            case 4: return PAUSING;
+-            case 5: return PAUSED;
+-            case 6: return STOPPING;
+-            case 7: return STOPPED;
+-            case 8: return FAILED;
+-            case -1: return UNKNOWN;
+-        }
+-        throw new IllegalArgumentException("Illegal mirror state: " + value);
++        return switch (value) {
++            case 0 -> LOG_ALIGNMENT;
++            case 1 -> EPOCH_FENCING;
++            case 2 -> ULE_RECOVERY;
++            case 3 -> MIRRORING;
++            case 4 -> PAUSING;
++            case 5 -> PAUSED;
++            case 6 -> STOPPING;
++            case 7 -> STOPPED;
++            case 8 -> FAILED;
++            case -1 -> UNKNOWN;
++            default -> throw new IllegalArgumentException("Illegal mirror state: " + value);
++        };
+     }
+ }
+diff --git a/server/src/main/java/org/apache/kafka/server/logger/RuntimeLoggerManager.java b/server/src/main/java/org/apache/kafka/server/logger/RuntimeLoggerManager.java
+index ceb611285..03849c01a 100644
+--- a/server/src/main/java/org/apache/kafka/server/logger/RuntimeLoggerManager.java
++++ b/server/src/main/java/org/apache/kafka/server/logger/RuntimeLoggerManager.java
+@@ -78,23 +78,22 @@ public class RuntimeLoggerManager {
+                     "Invalid log4j configOperation: " + op.configOperation());
+             }
+             switch (opType) {
+-                case SET:
++                case SET -> {
+                     if (LoggingController.logLevel(loggerName, logLevel)) {
+                         log.warn("Updated the log level of {} to {}", loggerName, logLevel);
+                     } else {
+                         log.error("Failed to update the log level of {} to {}", loggerName, logLevel);
+                     }
+-                    break;
+-                case DELETE:
++                }
++                case DELETE -> {
+                     if (LoggingController.unsetLogLevel(loggerName)) {
+                         log.warn("Unset the log level of {}", loggerName);
+                     } else {
+                         log.error("Failed to unset the log level of {}", loggerName);
+                     }
+-                    break;
+-                default:
+-                    throw new IllegalArgumentException(
+-                        "Invalid log4j configOperation: " + op.configOperation());
++                }
++                default -> throw new IllegalArgumentException(
++                    "Invalid log4j configOperation: " + op.configOperation());
+             }
+         });
+     }
+@@ -129,7 +128,7 @@ public class RuntimeLoggerManager {
+                     BROKER_LOGGER + " resource");
+             }
+             switch (opType) {
+-                case SET:
++                case SET -> {
+                     validateLoggerNameExists(loggerName);
+                     String logLevel = op.value();
+                     if (!LogLevelConfig.VALID_LOG_LEVELS.contains(logLevel)) {
+@@ -137,24 +136,21 @@ public class RuntimeLoggerManager {
+                             loggerName + " to " + logLevel + " as it is not a supported log level. " +
+                             "Valid log levels are " + VALID_LOG_LEVELS_STRING);
+                     }
+-                    break;
+-                case DELETE:
++                }
++                case DELETE -> {
+                     validateLoggerNameExists(loggerName);
+                     if (loggerName.equals(LoggingController.ROOT_LOGGER)) {
+                         throw new InvalidRequestException("Removing the log level of the " +
+                             LoggingController.ROOT_LOGGER + " logger is not allowed");
+                     }
+-                    break;
+-                case APPEND:
+-                    throw new InvalidRequestException(OpType.APPEND +
+-                        " operation is not allowed for the " + BROKER_LOGGER + " resource");
+-                case SUBTRACT:
+-                    throw new InvalidRequestException(OpType.SUBTRACT +
+-                        " operation is not allowed for the " + BROKER_LOGGER + " resource");
+-                default:
+-                    throw new InvalidRequestException("Unknown operation type " +
+-                        (int) op.configOperation() + " is not allowed for the " +
+-                        BROKER_LOGGER + " resource");
++                }
++                case APPEND -> throw new InvalidRequestException(OpType.APPEND +
++                    " operation is not allowed for the " + BROKER_LOGGER + " resource");
++                case SUBTRACT -> throw new InvalidRequestException(OpType.SUBTRACT +
++                    " operation is not allowed for the " + BROKER_LOGGER + " resource");
++                default -> throw new InvalidRequestException("Unknown operation type " +
++                    (int) op.configOperation() + " is not allowed for the " +
++                    BROKER_LOGGER + " resource");
+             }
+         });
+     }
+diff --git a/share-coordinator/src/main/java/org/apache/kafka/coordinator/share/ShareCoordinatorService.java b/share-coordinator/src/main/java/org/apache/kafka/coordinator/share/ShareCoordinatorService.java
+index 71356d725..5eea48378 100644
+--- a/share-coordinator/src/main/java/org/apache/kafka/coordinator/share/ShareCoordinatorService.java
++++ b/share-coordinator/src/main/java/org/apache/kafka/coordinator/share/ShareCoordinatorService.java
+@@ -385,7 +385,7 @@ public class ShareCoordinatorService implements ShareCoordinator {
+                 return;
+             }
+             if (result.isPresent()) {
+-                Long off = result.get();
++                Long off = result.orElseThrow();
+                 Long lastPrunedOffset = lastPrunedOffsets.get(tp);
+                 if (lastPrunedOffset != null && lastPrunedOffset.longValue() == off) {
+                     log.debug("{} already pruned till offset {}", tp, off);
+diff --git a/share-coordinator/src/main/java/org/apache/kafka/coordinator/share/ShareCoordinatorShard.java b/share-coordinator/src/main/java/org/apache/kafka/coordinator/share/ShareCoordinatorShard.java
+index 6b5a64be8..f1b5bca82 100644
+--- a/share-coordinator/src/main/java/org/apache/kafka/coordinator/share/ShareCoordinatorShard.java
++++ b/share-coordinator/src/main/java/org/apache/kafka/coordinator/share/ShareCoordinatorShard.java
+@@ -230,14 +230,9 @@ public class ShareCoordinatorShard implements CoordinatorShard<CoordinatorRecord
+ 
+         try {
+             switch (CoordinatorRecordType.fromId(key.apiKey())) {
+-                case SHARE_SNAPSHOT:
+-                    handleShareSnapshot((ShareSnapshotKey) key, (ShareSnapshotValue) messageOrNull(value), offset);
+-                    break;
+-                case SHARE_UPDATE:
+-                    handleShareUpdate((ShareUpdateKey) key, (ShareUpdateValue) messageOrNull(value));
+-                    break;
+-                default:
+-                    // Noop
++                case SHARE_SNAPSHOT -> handleShareSnapshot((ShareSnapshotKey) key, (ShareSnapshotValue) messageOrNull(value), offset);
++                case SHARE_UPDATE -> handleShareUpdate((ShareUpdateKey) key, (ShareUpdateValue) messageOrNull(value));
++                default -> { /* Noop */ }
+             }
+         } catch (UnsupportedVersionException ex) {
+             // Ignore
+@@ -326,7 +321,7 @@ public class ShareCoordinatorShard implements CoordinatorShard<CoordinatorRecord
+         metricsShard.record(ShareCoordinatorMetrics.SHARE_COORDINATOR_WRITE_SENSOR_NAME);
+         Optional<CoordinatorResult<WriteShareGroupStateResponseData, CoordinatorRecord>> error = maybeGetWriteStateError(request);
+         if (error.isPresent()) {
+-            return error.get();
++            return error.orElseThrow();
+         }
+ 
+         WriteShareGroupStateRequestData.WriteStateData topicData = request.topics().get(0);
+@@ -360,7 +355,7 @@ public class ShareCoordinatorShard implements CoordinatorShard<CoordinatorRecord
+         // Only one key will be there in the request by design.
+         Optional<ReadShareGroupStateResponseData> error = maybeGetReadStateError(request);
+         if (error.isPresent()) {
+-            return new CoordinatorResult<>(List.of(), error.get());
++            return new CoordinatorResult<>(List.of(), error.orElseThrow());
+         }
+ 
+         ReadShareGroupStateRequestData.ReadStateData topicData = request.topics().get(0);
+@@ -432,7 +427,7 @@ public class ShareCoordinatorShard implements CoordinatorShard<CoordinatorRecord
+         // Only one key will be there in the request by design.
+         Optional<ReadShareGroupStateSummaryResponseData> error = maybeGetReadStateSummaryError(request);
+         if (error.isPresent()) {
+-            return new CoordinatorResult<>(List.of(), error.get());
++            return new CoordinatorResult<>(List.of(), error.orElseThrow());
+         }
+ 
+         ReadShareGroupStateSummaryRequestData.ReadStateSummaryData topicData = request.topics().get(0);
+@@ -509,7 +504,7 @@ public class ShareCoordinatorShard implements CoordinatorShard<CoordinatorRecord
+         // only one key will be there in the request by design.
+         Optional<CoordinatorResult<DeleteShareGroupStateResponseData, CoordinatorRecord>> error = maybeGetDeleteStateError(request);
+         if (error.isPresent()) {
+-            return error.get();
++            return error.orElseThrow();
+         }
+ 
+         DeleteShareGroupStateRequestData.DeleteStateData topicData = request.topics().get(0);
+@@ -558,7 +553,7 @@ public class ShareCoordinatorShard implements CoordinatorShard<CoordinatorRecord
+         // Records to write (with both key and value of snapshot type), response to caller.
+         Optional<CoordinatorResult<InitializeShareGroupStateResponseData, CoordinatorRecord>> error = maybeGetInitializeStateError(groupId, topicId, partitionData);
+         if (error.isPresent()) {
+-            return error.get();
++            return error.orElseThrow();
+         }
+ 
+         SharePartitionKey key = SharePartitionKey.getInstance(groupId, topicId, partitionData.partition());
+diff --git a/shell/src/main/java/org/apache/kafka/shell/command/CatCommandHandler.java b/shell/src/main/java/org/apache/kafka/shell/command/CatCommandHandler.java
+index 57005db2f..e0ec60550 100644
+--- a/shell/src/main/java/org/apache/kafka/shell/command/CatCommandHandler.java
++++ b/shell/src/main/java/org/apache/kafka/shell/command/CatCommandHandler.java
+@@ -100,7 +100,7 @@ public final class CatCommandHandler implements Commands.Handler {
+         for (String target : targets) {
+             state.visit(new GlobVisitor(target, entryOption -> {
+                 if (entryOption.isPresent()) {
+-                    MetadataNode node = entryOption.get().node();
++                    MetadataNode node = entryOption.orElseThrow().node();
+                     if (node.isDirectory()) {
+                         writer.println("cat: " + target + ": Is a directory");
+                     } else {
+diff --git a/shell/src/main/java/org/apache/kafka/shell/command/CdCommandHandler.java b/shell/src/main/java/org/apache/kafka/shell/command/CdCommandHandler.java
+index 544320747..bcbe9eab8 100644
+--- a/shell/src/main/java/org/apache/kafka/shell/command/CdCommandHandler.java
++++ b/shell/src/main/java/org/apache/kafka/shell/command/CdCommandHandler.java
+@@ -94,10 +94,11 @@ public final class CdCommandHandler implements Commands.Handler {
+         String effectiveTarget = target.orElse("/");
+         new GlobVisitor(effectiveTarget, entryOption -> {
+             if (entryOption.isPresent()) {
+-                if (!entryOption.get().node().isDirectory()) {
++                GlobVisitor.MetadataNodeInfo entry = entryOption.orElseThrow();
++                if (!entry.node().isDirectory()) {
+                     writer.println("cd: " + effectiveTarget + ": not a directory.");
+                 } else {
+-                    state.setWorkingDirectory(entryOption.get().absolutePath());
++                    state.setWorkingDirectory(entry.absolutePath());
+                 }
+             } else {
+                 writer.println("cd: " + effectiveTarget + ": no such directory.");
+diff --git a/shell/src/main/java/org/apache/kafka/shell/command/FindCommandHandler.java b/shell/src/main/java/org/apache/kafka/shell/command/FindCommandHandler.java
+index 8179203d0..d351f9bd0 100644
+--- a/shell/src/main/java/org/apache/kafka/shell/command/FindCommandHandler.java
++++ b/shell/src/main/java/org/apache/kafka/shell/command/FindCommandHandler.java
+@@ -95,7 +95,7 @@ public final class FindCommandHandler implements Commands.Handler {
+         for (String path : CommandUtils.getEffectivePaths(paths)) {
+             new GlobVisitor(path, entryOption -> {
+                 if (entryOption.isPresent()) {
+-                    find(writer, path, entryOption.get().node());
++                    find(writer, path, entryOption.orElseThrow().node());
+                 } else {
+                     writer.println("find: " + path + ": no such file or directory.");
+                 }
+diff --git a/shell/src/main/java/org/apache/kafka/shell/command/LsCommandHandler.java b/shell/src/main/java/org/apache/kafka/shell/command/LsCommandHandler.java
+index 86ecb5fe8..2b60a514e 100644
+--- a/shell/src/main/java/org/apache/kafka/shell/command/LsCommandHandler.java
++++ b/shell/src/main/java/org/apache/kafka/shell/command/LsCommandHandler.java
+@@ -114,7 +114,7 @@ public final class LsCommandHandler implements Commands.Handler {
+         for (String target : CommandUtils.getEffectivePaths(targets)) {
+             state.visit(new GlobVisitor(target, entryOption -> {
+                 if (entryOption.isPresent()) {
+-                    MetadataNodeInfo info = entryOption.get();
++                    MetadataNodeInfo info = entryOption.orElseThrow();
+                     MetadataNode node = info.node();
+                     if (node.isDirectory()) {
+                         List<String> children = new ArrayList<>(node.childNames());
+diff --git a/shell/src/main/java/org/apache/kafka/shell/command/TreeCommandHandler.java b/shell/src/main/java/org/apache/kafka/shell/command/TreeCommandHandler.java
+index df331e8c6..2efc7ed74 100644
+--- a/shell/src/main/java/org/apache/kafka/shell/command/TreeCommandHandler.java
++++ b/shell/src/main/java/org/apache/kafka/shell/command/TreeCommandHandler.java
+@@ -100,7 +100,7 @@ public final class TreeCommandHandler implements Commands.Handler {
+         for (String target : targets) {
+             state.visit(new GlobVisitor(target, entryOption -> {
+                 if (entryOption.isPresent()) {
+-                    MetadataNode node = entryOption.get().node();
++                    MetadataNode node = entryOption.orElseThrow().node();
+                     ShellNodePrinter printer = new ShellNodePrinter(writer);
+                     node.print(printer);
+                 } else {
+diff --git a/storage/src/main/java/org/apache/kafka/server/log/remote/metadata/storage/RemoteLogMetadataCache.java b/storage/src/main/java/org/apache/kafka/server/log/remote/metadata/storage/RemoteLogMetadataCache.java
+index 65a78ad7d..4a54988b0 100644
+--- a/storage/src/main/java/org/apache/kafka/server/log/remote/metadata/storage/RemoteLogMetadataCache.java
++++ b/storage/src/main/java/org/apache/kafka/server/log/remote/metadata/storage/RemoteLogMetadataCache.java
+@@ -195,22 +195,13 @@ public class RemoteLogMetadataCache {
+         }
+ 
+         switch (targetState) {
+-            case COPY_SEGMENT_STARTED:
+-                // Callers should use addCopyInProgressSegment to add RemoteLogSegmentMetadata with state as
+-                // RemoteLogSegmentState.COPY_SEGMENT_STARTED.
+-                throw new IllegalArgumentException("metadataUpdate: " + metadataUpdate + " with state " + RemoteLogSegmentState.COPY_SEGMENT_STARTED +
++            // Callers should use addCopyInProgressSegment for COPY_SEGMENT_STARTED state.
++            case COPY_SEGMENT_STARTED -> throw new IllegalArgumentException("metadataUpdate: " + metadataUpdate + " with state " + RemoteLogSegmentState.COPY_SEGMENT_STARTED +
+                                                    " can not be updated");
+-            case COPY_SEGMENT_FINISHED:
+-                handleSegmentWithCopySegmentFinishedState(existingMetadata.createWithUpdates(metadataUpdate));
+-                break;
+-            case DELETE_SEGMENT_STARTED:
+-                handleSegmentWithDeleteSegmentStartedState(existingMetadata.createWithUpdates(metadataUpdate));
+-                break;
+-            case DELETE_SEGMENT_FINISHED:
+-                handleSegmentWithDeleteSegmentFinishedState(existingMetadata.createWithUpdates(metadataUpdate));
+-                break;
+-            default:
+-                throw new IllegalArgumentException("Metadata with the state " + targetState + " is not supported");
++            case COPY_SEGMENT_FINISHED -> handleSegmentWithCopySegmentFinishedState(existingMetadata.createWithUpdates(metadataUpdate));
++            case DELETE_SEGMENT_STARTED -> handleSegmentWithDeleteSegmentStartedState(existingMetadata.createWithUpdates(metadataUpdate));
++            case DELETE_SEGMENT_FINISHED -> handleSegmentWithDeleteSegmentFinishedState(existingMetadata.createWithUpdates(metadataUpdate));
++            default -> throw new IllegalArgumentException("Metadata with the state " + targetState + " is not supported");
+         }
+     }
+ 
+diff --git a/storage/src/main/java/org/apache/kafka/storage/internals/log/LogCleaner.java b/storage/src/main/java/org/apache/kafka/storage/internals/log/LogCleaner.java
+index 577119db1..9b8fa3f96 100644
+--- a/storage/src/main/java/org/apache/kafka/storage/internals/log/LogCleaner.java
++++ b/storage/src/main/java/org/apache/kafka/storage/internals/log/LogCleaner.java
+@@ -588,10 +588,8 @@ public class LogCleaner {
+                 Map.Entry<Long, CleanerStats> entry = cleaner.clean(cleanable);
+                 endOffset = entry.getKey();
+                 recordStats(cleaner.id(), cleanable.log().name(), startOffset, endOffset, entry.getValue());
+-            } catch (LogCleaningAbortedException ignored) {
+-                // task can be aborted, let it go.
+-            } catch (KafkaStorageException ignored) {
+-                // partition is already offline. let it go.
++            } catch (LogCleaningAbortedException | KafkaStorageException ignored) {
++                // task can be aborted or partition is already offline, let it go.
+             } catch (IOException e) {
+                 String logDirectory = cleanable.log().parentDir();
+                 String msg = String.format("Failed to clean up log for %s in dir %s due to IOException", cleanable.topicPartition(), logDirectory);
+diff --git a/streams/src/main/java/org/apache/kafka/streams/kstream/internals/InternalStreamsBuilder.java b/streams/src/main/java/org/apache/kafka/streams/kstream/internals/InternalStreamsBuilder.java
+index 1b4434a1a..217a08bfd 100644
+--- a/streams/src/main/java/org/apache/kafka/streams/kstream/internals/InternalStreamsBuilder.java
++++ b/streams/src/main/java/org/apache/kafka/streams/kstream/internals/InternalStreamsBuilder.java
+@@ -681,7 +681,7 @@ public class InternalStreamsBuilder implements InternalNameProvider {
+      */
+     private boolean isVersionedOrVersionedUpstream(final GraphNode startSeekingNode) {
+         if (startSeekingNode.isOutputVersioned().isPresent()) {
+-            return startSeekingNode.isOutputVersioned().get();
++            return startSeekingNode.isOutputVersioned().orElseThrow();
+         }
+ 
+         return isVersionedUpstream(startSeekingNode);
+diff --git a/streams/src/main/java/org/apache/kafka/streams/kstream/internals/KTableImpl.java b/streams/src/main/java/org/apache/kafka/streams/kstream/internals/KTableImpl.java
+index 1d1232bca..e172f8d95 100644
+--- a/streams/src/main/java/org/apache/kafka/streams/kstream/internals/KTableImpl.java
++++ b/streams/src/main/java/org/apache/kafka/streams/kstream/internals/KTableImpl.java
+@@ -540,7 +540,7 @@ public class KTableImpl<K, S, V> extends AbstractStream<K, V> implements KTable<
+         // the check only works if the direct parent is materialized
+         // the actual check for "version inheritance" can only be done in the build-phase later
+         // we keep this check to get a better stack trace if possible
+-        if (graphNode.isOutputVersioned().isPresent() && graphNode.isOutputVersioned().get()) {
++        if (graphNode.isOutputVersioned().orElse(false)) {
+             throw new TopologyException("suppress() is only supported for non-versioned KTables");
+         }
+ 
+diff --git a/streams/src/main/java/org/apache/kafka/streams/kstream/internals/graph/StreamSourceNode.java b/streams/src/main/java/org/apache/kafka/streams/kstream/internals/graph/StreamSourceNode.java
+index d343bdb1b..184ae1e9c 100644
+--- a/streams/src/main/java/org/apache/kafka/streams/kstream/internals/graph/StreamSourceNode.java
++++ b/streams/src/main/java/org/apache/kafka/streams/kstream/internals/graph/StreamSourceNode.java
+@@ -63,8 +63,8 @@ public class StreamSourceNode<K, V> extends SourceGraphNode<K, V> {
+     @Override
+     public String toString() {
+         return "StreamSourceNode{" +
+-               "topicNames=" + (topicNames().isPresent() ? topicNames().get() : null) +
+-               ", topicPattern=" + (topicPattern().isPresent() ? topicPattern().get() : null) +
++               "topicNames=" + topicNames().orElse(null) +
++               ", topicPattern=" + topicPattern().orElse(null) +
+                ", consumedInternal=" + consumedInternal() +
+                "} " + super.toString();
+     }
+@@ -78,14 +78,14 @@ public class StreamSourceNode<K, V> extends SourceGraphNode<K, V> {
+                                       consumedInternal().timestampExtractor(),
+                                       consumedInternal().keyDeserializer(),
+                                       consumedInternal().valueDeserializer(),
+-                                      topicPattern().get());
++                                      topicPattern().orElseThrow());
+         } else {
+             topologyBuilder.addSource(consumedInternal().offsetResetPolicy(),
+                                       nodeName(),
+                                       consumedInternal().timestampExtractor(),
+                                       consumedInternal().keyDeserializer(),
+                                       consumedInternal().valueDeserializer(),
+-                                      topicNames().get().toArray(new String[0]));
++                                      topicNames().orElseThrow().toArray(new String[0]));
+         }
+     }
+ 
+diff --git a/streams/src/main/java/org/apache/kafka/streams/processor/internals/TaskManager.java b/streams/src/main/java/org/apache/kafka/streams/processor/internals/TaskManager.java
+index adefb13de..2304723e5 100644
+--- a/streams/src/main/java/org/apache/kafka/streams/processor/internals/TaskManager.java
++++ b/streams/src/main/java/org/apache/kafka/streams/processor/internals/TaskManager.java
+@@ -711,7 +711,7 @@ public class TaskManager {
+                                    final Map<TaskId, RuntimeException> failedTasks) {
+         final Task task = removedTaskResult.task();
+         if (removedTaskResult.exception().isPresent()) {
+-            failedTasks.put(task.id(), removedTaskResult.exception().get());
++            failedTasks.put(task.id(), removedTaskResult.exception().orElseThrow());
+             tasks.addFailedTask(task);
+             return null;
+         }
+@@ -997,7 +997,7 @@ public class TaskManager {
+     private void maybeThrowFatalExceptionFromStateUpdater() {
+         final Optional<RuntimeException> fatalException = stateUpdater.fatalException();
+         if (fatalException.isPresent()) {
+-            throw new StreamsException("The state updater died and cannot update tasks anymore.", fatalException.get());
++            throw new StreamsException("The state updater died and cannot update tasks anymore.", fatalException.orElseThrow());
+         }
+     }
+ 
+diff --git a/tools/src/main/java/org/apache/kafka/tools/ClusterTool.java b/tools/src/main/java/org/apache/kafka/tools/ClusterTool.java
+index 701ef8135..de1fa48a0 100644
+--- a/tools/src/main/java/org/apache/kafka/tools/ClusterTool.java
++++ b/tools/src/main/java/org/apache/kafka/tools/ClusterTool.java
+@@ -134,25 +134,22 @@ public class ClusterTool {
+                 Optional.ofNullable(namespace.getString("bootstrap_controller")));
+ 
+         switch (command) {
+-            case "cluster-id": {
++            case "cluster-id" -> {
+                 try (Admin adminClient = Admin.create(properties)) {
+                     clusterIdCommand(System.out, adminClient);
+                 }
+-                break;
+             }
+-            case "unregister": {
++            case "unregister" -> {
+                 try (Admin adminClient = Admin.create(properties)) {
+                     unregisterCommand(System.out, adminClient, namespace.getInt("id"));
+                 }
+-                break;
+             }
+-            case "unregister-controller": {
++            case "unregister-controller" -> {
+                 try (Admin adminClient = Admin.create(properties)) {
+                     unregisterControllerCommand(System.out, adminClient, namespace.getInt("id"));
+                 }
+-                break;
+             }
+-            case "list-endpoints": {
++            case "list-endpoints" -> {
+                 try (Admin adminClient = Admin.create(properties)) {
+                     boolean includeFencedBrokers = Optional.of(namespace.getBoolean("include_fenced_brokers")).orElse(false);
+                     boolean listControllerEndpoints = namespace.getString("bootstrap_controller") != null;
+@@ -161,16 +158,13 @@ public class ClusterTool {
+                     }
+                     listEndpoints(System.out, adminClient, listControllerEndpoints, includeFencedBrokers);
+                 }
+-                break;
+             }
+-            case "api-versions": {
++            case "api-versions" -> {
+                 try (Admin adminClient = Admin.create(properties)) {
+                     apiVersionsCommand(System.out, adminClient);
+                 }
+-                break;
+             }
+-            default:
+-                throw new RuntimeException("Unknown command " + command);
++            default -> throw new RuntimeException("Unknown command " + command);
+         }
+     }
+ 
+diff --git a/tools/src/main/java/org/apache/kafka/tools/DumpLogSegments.java b/tools/src/main/java/org/apache/kafka/tools/DumpLogSegments.java
+index 77a202513..f95a121f9 100644
+--- a/tools/src/main/java/org/apache/kafka/tools/DumpLogSegments.java
++++ b/tools/src/main/java/org/apache/kafka/tools/DumpLogSegments.java
+@@ -458,40 +458,37 @@ public class DumpLogSegments {
+         ControlRecordType controlType = ControlRecordType.fromTypeId(controlTypeId);
+ 
+         switch (controlType) {
+-            case ABORT:
+-            case COMMIT:
++            case ABORT, COMMIT -> {
+                 EndTransactionMarker endTxnMarker = EndTransactionMarker.deserialize(record);
+                 System.out.print(" endTxnMarker: " + endTxnMarker.controlType() +
+                     " coordinatorEpoch: " + endTxnMarker.coordinatorEpoch());
+-                break;
+-            case LEADER_CHANGE:
++            }
++            case LEADER_CHANGE -> {
+                 LeaderChangeMessage leaderChangeMessage = ControlRecordUtils.deserializeLeaderChangeMessage(record);
+                 System.out.print(" LeaderChange: " +
+                     LeaderChangeMessageJsonConverter.write(leaderChangeMessage, leaderChangeMessage.version()));
+-                break;
+-            case SNAPSHOT_HEADER:
++            }
++            case SNAPSHOT_HEADER -> {
+                 SnapshotHeaderRecord header = ControlRecordUtils.deserializeSnapshotHeaderRecord(record);
+                 System.out.print(" SnapshotHeader " +
+                     SnapshotHeaderRecordJsonConverter.write(header, header.version()));
+-                break;
+-            case SNAPSHOT_FOOTER:
++            }
++            case SNAPSHOT_FOOTER -> {
+                 SnapshotFooterRecord footer = ControlRecordUtils.deserializeSnapshotFooterRecord(record);
+                 System.out.print(" SnapshotFooter " +
+                     SnapshotFooterRecordJsonConverter.write(footer, footer.version()));
+-                break;
+-            case KRAFT_VERSION:
++            }
++            case KRAFT_VERSION -> {
+                 KRaftVersionRecord kraftVersion = ControlRecordUtils.deserializeKRaftVersionRecord(record);
+                 System.out.print(" KRaftVersion " +
+                     KRaftVersionRecordJsonConverter.write(kraftVersion, kraftVersion.version()));
+-                break;
+-            case KRAFT_VOTERS:
++            }
++            case KRAFT_VOTERS -> {
+                 VotersRecord voters = ControlRecordUtils.deserializeVotersRecord(record);
+                 System.out.print(" KRaftVoters " +
+                     VotersRecordJsonConverter.write(voters, voters.version()));
+-                break;
+-            default:
+-                System.out.print(" controlType: " + controlType + "(" + controlTypeId + ")");
+-                break;
++            }
++            default -> System.out.print(" controlType: " + controlType + "(" + controlTypeId + ")");
+         }
+     }
+ 
+diff --git a/tools/src/main/java/org/apache/kafka/tools/FeatureCommand.java b/tools/src/main/java/org/apache/kafka/tools/FeatureCommand.java
+index ef3a8e42f..3e6ce8351 100644
+--- a/tools/src/main/java/org/apache/kafka/tools/FeatureCommand.java
++++ b/tools/src/main/java/org/apache/kafka/tools/FeatureCommand.java
+@@ -118,20 +118,11 @@ public class FeatureCommand {
+ 
+         try (Admin adminClient = Admin.create(properties)) {
+             switch (command) {
+-                case "describe":
+-                    handleDescribe(namespace, adminClient);
+-                    break;
+-                case "upgrade":
+-                    handleUpgrade(namespace, adminClient);
+-                    break;
+-                case "downgrade":
+-                    handleDowngrade(namespace, adminClient);
+-                    break;
+-                case "disable":
+-                    handleDisable(namespace, adminClient);
+-                    break;
+-                default:
+-                    throw new TerseException("Unknown command " + command);
++                case "describe" -> handleDescribe(namespace, adminClient);
++                case "upgrade" -> handleUpgrade(namespace, adminClient);
++                case "downgrade" -> handleDowngrade(namespace, adminClient);
++                case "disable" -> handleDisable(namespace, adminClient);
++                default -> throw new TerseException("Unknown command " + command);
+             }
+         }
+     }
+diff --git a/tools/src/main/java/org/apache/kafka/tools/consumer/group/ConsumerGroupCommand.java b/tools/src/main/java/org/apache/kafka/tools/consumer/group/ConsumerGroupCommand.java
+index a6c9ca985..68e51457b 100644
+--- a/tools/src/main/java/org/apache/kafka/tools/consumer/group/ConsumerGroupCommand.java
++++ b/tools/src/main/java/org/apache/kafka/tools/consumer/group/ConsumerGroupCommand.java
+@@ -299,21 +299,12 @@ public class ConsumerGroupCommand {
+ 
+             GroupState state0 = state.orElse(GroupState.UNKNOWN);
+             switch (state0) {
+-                case DEAD:
+-                    printError("Consumer group '" + group + "' does not exist.", Optional.empty());
+-                    break;
+-                case EMPTY:
+-                    System.err.println("\nConsumer group '" + group + "' has no active members.");
+-                    break;
+-                case PREPARING_REBALANCE:
+-                case COMPLETING_REBALANCE:
+-                case ASSIGNING:
+-                case RECONCILING:
++                case DEAD -> printError("Consumer group '" + group + "' does not exist.", Optional.empty());
++                case EMPTY -> System.err.println("\nConsumer group '" + group + "' has no active members.");
++                case PREPARING_REBALANCE, COMPLETING_REBALANCE, ASSIGNING, RECONCILING ->
+                     System.err.println("\nWarning: Consumer group '" + group + "' is rebalancing.");
+-                    break;
+-                case STABLE:
+-                    break;
+-                default:
++                case STABLE -> { }
++                default ->
+                     // the control should never reach here
+                     throw new KafkaException("Expected a valid consumer group state, but found '" + state0 + "'.");
+             }
+@@ -644,13 +635,11 @@ public class ConsumerGroupCommand {
+                 try {
+                     String state = groupDescription.get().groupState().toString();
+                     switch (state) {
+-                        case "Empty":
+-                        case "Dead":
+-                            result.put(groupId, resetOffsetsForInactiveGroup(groupId));
+-                            break;
+-                        default:
++                        case "Empty", "Dead" -> result.put(groupId, resetOffsetsForInactiveGroup(groupId));
++                        default -> {
+                             printError("Assignments can only be reset if the group '" + groupId + "' is inactive, but the current state is " + state + ".", Optional.empty());
+                             result.put(groupId, Map.of());
++                        }
+                     }
+                 } catch (InterruptedException ie) {
+                     throw new RuntimeException(ie);
+@@ -764,22 +753,13 @@ public class ConsumerGroupCommand {
+             Map<TopicPartition, Throwable> partitionLevelResult = res.getValue();
+ 
+             switch (topLevelResult) {
+-                case NONE:
++                case NONE ->
+                     System.out.println("Request succeeded for deleting offsets from group " + groupId + ".");
+-                    break;
+-                case INVALID_GROUP_ID:
+-                case GROUP_ID_NOT_FOUND:
+-                case GROUP_AUTHORIZATION_FAILED:
+-                case NON_EMPTY_GROUP:
++                case INVALID_GROUP_ID, GROUP_ID_NOT_FOUND, GROUP_AUTHORIZATION_FAILED, NON_EMPTY_GROUP ->
+                     printError(topLevelResult.message(), Optional.empty());
+-                    break;
+-                case GROUP_SUBSCRIBED_TO_TOPIC:
+-                case TOPIC_AUTHORIZATION_FAILED:
+-                case UNKNOWN_TOPIC_OR_PARTITION:
++                case GROUP_SUBSCRIBED_TO_TOPIC, TOPIC_AUTHORIZATION_FAILED, UNKNOWN_TOPIC_OR_PARTITION ->
+                     printError("Encountered some partition-level error, see the follow-up details.", Optional.empty());
+-                    break;
+-                default:
+-                    printError("Encountered some unknown error: " + topLevelResult, Optional.empty());
++                default -> printError("Encountered some unknown error: " + topLevelResult, Optional.empty());
+             }
+ 
+             int maxTopicLen = 15;
+diff --git a/tools/src/main/java/org/apache/kafka/tools/consumer/group/ShareGroupCommand.java b/tools/src/main/java/org/apache/kafka/tools/consumer/group/ShareGroupCommand.java
+index 1e2b531d9..9518f8e5c 100644
+--- a/tools/src/main/java/org/apache/kafka/tools/consumer/group/ShareGroupCommand.java
++++ b/tools/src/main/java/org/apache/kafka/tools/consumer/group/ShareGroupCommand.java
+@@ -360,18 +360,12 @@ public class ShareGroupCommand {
+             if (topLevelResult != null) {
+                 Errors topLevelError = Errors.forException(topLevelResult);
+                 switch (topLevelError) {
+-                    case INVALID_GROUP_ID:
+-                    case GROUP_ID_NOT_FOUND:
+-                    case GROUP_AUTHORIZATION_FAILED:
+-                    case NON_EMPTY_GROUP:
++                    case INVALID_GROUP_ID, GROUP_ID_NOT_FOUND, GROUP_AUTHORIZATION_FAILED, NON_EMPTY_GROUP ->
+                         printError(topLevelResult.getMessage(), Optional.empty());
+-                        break;
+-                    case TOPIC_AUTHORIZATION_FAILED:
+-                    case UNKNOWN_TOPIC_OR_PARTITION:
++                    case TOPIC_AUTHORIZATION_FAILED, UNKNOWN_TOPIC_OR_PARTITION -> {
+                         // These are expected topic-level errors which will be reported in the topic-level results
+-                        break;
+-                    default:
+-                        printError("Encounter some unknown error: " + topLevelResult, Optional.empty());
++                    }
++                    default -> printError("Encounter some unknown error: " + topLevelResult, Optional.empty());
+                 }
+             }
+ 
+diff --git a/tools/src/main/java/org/apache/kafka/tools/streams/StreamsGroupCommand.java b/tools/src/main/java/org/apache/kafka/tools/streams/StreamsGroupCommand.java
+index b07a5dd57..5857f85db 100644
+--- a/tools/src/main/java/org/apache/kafka/tools/streams/StreamsGroupCommand.java
++++ b/tools/src/main/java/org/apache/kafka/tools/streams/StreamsGroupCommand.java
+@@ -307,20 +307,24 @@ public class StreamsGroupCommand {
+          */
+         private boolean printTopology(StreamsGroupDescription description) {
+             switch (description.topologyDescriptionStatus()) {
+-                case AVAILABLE:
++                case AVAILABLE -> {
+                     System.out.println(TopologyDescriptionFormatter.format(description.topologyDescription().orElseThrow()));
+                     return true;
+-                case NOT_STORED:
++                }
++                case NOT_STORED -> {
+                     printError("No topology description is stored for streams group '" + description.groupId() + "'.", Optional.empty());
+                     return false;
+-                case ERROR:
++                }
++                case ERROR -> {
+                     printError("The broker failed to fetch the topology description for streams group '" + description.groupId()
+                         + "'. See the broker logs for details.", Optional.empty());
+                     return false;
+-                default:
++                }
++                default -> {
+                     printError("No topology description is available for streams group '" + description.groupId()
+                         + "' (status: " + description.topologyDescriptionStatus() + ").", Optional.empty());
+                     return false;
++                }
+             }
+         }
+ 
+@@ -714,22 +718,13 @@ public class StreamsGroupCommand {
+             Map<TopicPartition, Throwable> partitionLevelResult = res.getValue();
+ 
+             switch (topLevelResult) {
+-                case NONE:
++                case NONE ->
+                     System.out.println("Request succeeded for deleting offsets from group " + groupId + ".");
+-                    break;
+-                case INVALID_GROUP_ID:
+-                case GROUP_ID_NOT_FOUND:
+-                case GROUP_AUTHORIZATION_FAILED:
+-                case NON_EMPTY_GROUP:
++                case INVALID_GROUP_ID, GROUP_ID_NOT_FOUND, GROUP_AUTHORIZATION_FAILED, NON_EMPTY_GROUP ->
+                     printError(topLevelResult.message(), Optional.empty());
+-                    break;
+-                case GROUP_SUBSCRIBED_TO_TOPIC:
+-                case TOPIC_AUTHORIZATION_FAILED:
+-                case UNKNOWN_TOPIC_OR_PARTITION:
++                case GROUP_SUBSCRIBED_TO_TOPIC, TOPIC_AUTHORIZATION_FAILED, UNKNOWN_TOPIC_OR_PARTITION ->
+                     printError("Encountered some partition-level error, see the follow-up details.", Optional.empty());
+-                    break;
+-                default:
+-                    printError("Encountered some unknown error: " + topLevelResult, Optional.empty());
++                default -> printError("Encountered some unknown error: " + topLevelResult, Optional.empty());
+             }
+ 
+             int maxTopicLen = 15;
+diff --git a/transaction-coordinator/src/main/java/org/apache/kafka/coordinator/transaction/RPCProducerIdManager.java b/transaction-coordinator/src/main/java/org/apache/kafka/coordinator/transaction/RPCProducerIdManager.java
+index 59ec7aff7..4c7eaf185 100644
+--- a/transaction-coordinator/src/main/java/org/apache/kafka/coordinator/transaction/RPCProducerIdManager.java
++++ b/transaction-coordinator/src/main/java/org/apache/kafka/coordinator/transaction/RPCProducerIdManager.java
+@@ -82,7 +82,7 @@ public class RPCProducerIdManager implements ProducerIdManager {
+         while (iteration <= ITERATION_LIMIT) {
+             var claimNextId = currentProducerIdBlock.get().claimNextId();
+             if (claimNextId.isPresent()) {
+-                long nextProducerId = claimNextId.get();
++                long nextProducerId = claimNextId.orElseThrow();
+                 // Check if we need to prefetch the next block
+                 var prefetchTarget = currentProducerIdBlock.get().firstProducerId() +
+                         (long) (currentProducerIdBlock.get().size() * PID_PREFETCH_THRESHOLD);
+@@ -180,18 +180,13 @@ public class RPCProducerIdManager implements ProducerIdManager {
+         var successfulResponse = false;
+         var errors = Errors.forCode(data.errorCode());
+         switch (errors) {
+-            case NONE:
++            case NONE -> {
+                 log.debug("{} Got next producer ID block from controller {}", logPrefix, data);
+                 successfulResponse = sanityCheckResponse(data);
+-                break;
+-            case STALE_BROKER_EPOCH:
+-                log.warn("{} Our broker currentBlockCount was stale, trying again.", logPrefix);
+-                break;
+-            case BROKER_ID_NOT_REGISTERED:
+-                log.warn("{} Our broker ID is not yet known by the controller, trying again.", logPrefix);
+-                break;
+-            default :
+-                log.error("{} Received error code {} from the controller.", logPrefix, errors);
++            }
++            case STALE_BROKER_EPOCH -> log.warn("{} Our broker currentBlockCount was stale, trying again.", logPrefix);
++            case BROKER_ID_NOT_REGISTERED -> log.warn("{} Our broker ID is not yet known by the controller, trying again.", logPrefix);
++            default -> log.error("{} Received error code {} from the controller.", logPrefix, errors);
+         }
+         if (!successfulResponse) {
+             handleUnsuccessfulResponse();
+diff --git a/transaction-coordinator/src/main/java/org/apache/kafka/coordinator/transaction/TransactionMetadata.java b/transaction-coordinator/src/main/java/org/apache/kafka/coordinator/transaction/TransactionMetadata.java
+index dcf5cef90..6908439fd 100644
+--- a/transaction-coordinator/src/main/java/org/apache/kafka/coordinator/transaction/TransactionMetadata.java
++++ b/transaction-coordinator/src/main/java/org/apache/kafka/coordinator/transaction/TransactionMetadata.java
+@@ -165,13 +165,13 @@ public class TransactionMetadata {
+             // In the case of a new producer, producerEpoch will be -1 and bumpedEpoch will be 0
+             data.producerEpoch = bumpedEpoch;
+             data.lastProducerEpoch = RecordBatch.NO_PRODUCER_EPOCH;
+-        } else if (producerEpoch == RecordBatch.NO_PRODUCER_EPOCH || expectedProducerEpoch.get() == producerEpoch) {
++        } else if (producerEpoch == RecordBatch.NO_PRODUCER_EPOCH || expectedProducerEpoch.orElseThrow() == producerEpoch) {
+             // If the expected epoch matches the current epoch, or if there is no current epoch, the producer is attempting
+             // to continue after an error and no other producer has been initialized. Bump the current and last epochs.
+             // The no current epoch case means this is a new producer; producerEpoch will be -1 and bumpedEpoch will be 0
+             data.producerEpoch = bumpedEpoch;
+             data.lastProducerEpoch = producerEpoch;
+-        } else if (expectedProducerEpoch.get() == lastProducerEpoch) {
++        } else if (expectedProducerEpoch.orElseThrow() == lastProducerEpoch) {
+             // If the expected epoch matches the previous epoch, it is a retry of a successful call, so just return the
+             // current epoch without bumping. There is no danger of this producer being fenced, because a new producer
+             // calling InitProducerId would have caused the last epoch to be set to -1.
+@@ -182,7 +182,7 @@ public class TransactionMetadata {
+         } else {
+             // Otherwise, the producer has a fenced epoch and should receive an PRODUCER_FENCED error
+             LOGGER.info("Expected producer epoch {} does not match current producer epoch {} or previous producer epoch {}",
+-                expectedProducerEpoch.get(), producerEpoch, lastProducerEpoch);
++                expectedProducerEpoch.orElseThrow(), producerEpoch, lastProducerEpoch);
+             throw Errors.PRODUCER_FENCED.exception();
+         }
+ 

@@ -1,0 +1,38 @@
+diff --git a/codec-classes-quic/src/main/java/io/netty/handler/codec/quic/QuicClientSessionCache.java b/codec-classes-quic/src/main/java/io/netty/handler/codec/quic/QuicClientSessionCache.java
+index 07d7347c6..ed05a162e 100644
+--- a/codec-classes-quic/src/main/java/io/netty/handler/codec/quic/QuicClientSessionCache.java
++++ b/codec-classes-quic/src/main/java/io/netty/handler/codec/quic/QuicClientSessionCache.java
+@@ -117,8 +117,9 @@ final class QuicClientSessionCache {
+     void setSessionTimeout(int seconds) {
+         int oldTimeout = sessionTimeout.getAndSet(seconds);
+         if (oldTimeout > seconds) {
+-            // Drain the whole cache as this way we can use the ordering of the LinkedHashMap to detect early
+-            // if there are any other sessions left that are invalid.
++            // Drain the whole cache to evict sessions whose server-provided lifetime now
++            // exceeds the new global maximum. Sessions have heterogeneous per-session
++            // timeouts so a simple prefix scan cannot identify all newly-expired entries.
+             clear();
+         }
+     }
+diff --git a/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java b/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
+index 115e1d12e..cdd7c78e4 100644
+--- a/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
++++ b/resolver-dns/src/main/java/io/netty/resolver/dns/Cache.java
+@@ -236,8 +236,15 @@ abstract class Cache<E> {
+                     }
+                 }
+             } else {
+-                set(singletonList(e));
+-                return scheduleCacheExpirationIfNeeded(ttl, loop);
++                List<E> newList = singletonList(e);
++                set(newList);
++                if (scheduleCacheExpirationIfNeeded(ttl, loop)) {
++                    return true;
++                }
++                // CANCELLED detected: undo the write so zombie data is not briefly visible to
++                // readers via get() during the window before resolveCache.remove() fires.
++                compareAndSet(newList, Collections.<E>emptyList());
++                return false;
+             }
+         }
+ 
